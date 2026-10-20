@@ -1,0 +1,106 @@
+{
+  "characters": [
+    {
+      "id": "mara",
+      "name": "Mara",
+      "aliases": [],
+      "description": "First-person narrator and character.",
+      "evidence": [
+        {
+          "block_id": "b000002",
+          "quote": "My name is Mara."
+        }
+      ],
+      "voice_id": "voice_mara"
+    },
+    {
+      "id": "lena",
+      "name": "Lena",
+      "aliases": [],
+      "description": "Mara's companion at the harbor.",
+      "evidence": [
+        {
+          "block_id": "b000004",
+          "quote": "Lena answered"
+        }
+      ],
+      "voice_id": "voice_lena"
+    }
+  ],
+  "roles": [
+    {
+      "id": "narrator_main",
+      "kind": "narration",
+      "character_id": "mara",
+      "voice_id": "voice_mara",
+      "description": "Mara narrates in first person."
+    },
+    {
+      "id": "mara_dialogue",
+      "kind": "dialogue",
+      "character_id": "mara",
+      "voice_id": "voice_mara",
+      "description": "Mara speaking."
+    },
+    {
+      "id": "lena_dialogue",
+      "kind": "dialogue",
+      "character_id": "lena",
+      "voice_id": "voice_lena",
+      "description": "Lena speaking."
+    }
+  ],
+  "voices": [
+    {
+      "id": "voice_mara",
+      "description": "Low-pitched, rough-textured voice. Measured pacing is a proposed casting choice.",
+      "traits": [
+        {
+          "name": "pitch",
+          "value": "low",
+          "basis": "text",
+          "evidence": [
+            {
+              "block_id": "b000002",
+              "quote": "low and rough"
+            }
+          ]
+        },
+        {
+          "name": "texture",
+          "value": "rough",
+          "basis": "text",
+          "evidence": [
+            {
+              "block_id": "b000002",
+              "quote": "low and rough"
+            }
+          ]
+        },
+        {
+          "name": "pace",
+          "value": "measured",
+          "basis": "casting",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "id": "voice_lena",
+      "description": "Bright, clear voice; keep it audibly distinct from Mara.",
+      "traits": [
+        {
+          "name": "tone",
+          "value": "bright and clear",
+          "basis": "text",
+          "evidence": [
+            {
+              "block_id": "b000004",
+              "quote": "bright, clear voice"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epub-audiobook"
+version = "0.1.0"
+description = "Analyze EPUB books into a provider-independent multi-voice audiobook script"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+epub-audiobook = "epub_audiobook.cli:main"
+audiobook-render = "audiobook_renderer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["epub_audiobook*", "audiobook_renderer*"]

@@ -1,0 +1,133 @@
+{
+  "description": "Semantic regression cases for current prompts. Live evaluation is required; fixtures alone do not establish model accuracy.",
+  "role_conventions": {
+    "narrator_main": "Eli narrative frame",
+    "eli": "Eli dialogue",
+    "mara": "Mara dialogue",
+    "chorus": "established collective voice"
+  },
+  "cases": [
+    {
+      "id": "written_sender",
+      "text": "Mara wrote, “Leave now.”",
+      "expected": [
+        {
+          "text": "Mara wrote, ",
+          "role_id": "narrator_main"
+        },
+        {
+          "text": "“Leave now.”",
+          "role_id": "mara"
+        }
+      ]
+    },
+    {
+      "id": "mental_sender",
+      "text": "“Wait,” Mara sent into my mind.",
+      "expected": [
+        {
+          "text": "“Wait,”",
+          "role_id": "mara"
+        },
+        {
+          "text": " Mara sent into my mind.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "direct_thought",
+      "text": "I must leave, I thought.",
+      "expected": [
+        {
+          "text": "I must leave,",
+          "role_id": "eli"
+        },
+        {
+          "text": " I thought.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "retrospective_frame",
+      "text": "I would later understand why I had stayed.",
+      "expected": [
+        {
+          "text": "I would later understand why I had stayed.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "opening_quote_and_tag",
+      "text": "“Go,” Mara said. She opened the door.",
+      "expected": [
+        {
+          "text": "“Go,”",
+          "role_id": "mara"
+        },
+        {
+          "text": " Mara said. She opened the door.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "ambiguous_solo",
+      "text": "“Go,” one of the hidden singers said.",
+      "expected": [
+        {
+          "text": "“Go,”",
+          "role_id": null,
+          "basis": "unresolved",
+          "review_required": true
+        },
+        {
+          "text": " one of the hidden singers said.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "actual_unison",
+      "text": "“Go,” the singers said in unison.",
+      "expected": [
+        {
+          "text": "“Go,”",
+          "role_id": "chorus"
+        },
+        {
+          "text": " the singers said in unison.",
+          "role_id": "narrator_main"
+        }
+      ]
+    },
+    {
+      "id": "silent_reaction_keeps_speaker",
+      "text": "Mara explained, “I can heal, but I cannot make fire.” Eli looked at her in surprise. “My power only repairs injuries.”",
+      "expected": [
+        {
+          "text": "Mara explained, ",
+          "role_id": "narrator_main"
+        },
+        {
+          "text": "“I can heal, but I cannot make fire.”",
+          "role_id": "mara"
+        },
+        {
+          "text": " Eli looked at her in surprise. ",
+          "role_id": "narrator_main"
+        },
+        {
+          "text": "“My power only repairs injuries.”",
+          "role_id": "mara"
+        }
+      ]
+    }
+  ],
+  "discovery_case": {
+    "text": "My name is Eli, and this is my account.",
+    "expected": "The first-person narration role links character_id to Eli, with source evidence; vocal identity may be shared or separate."
+  }
+}

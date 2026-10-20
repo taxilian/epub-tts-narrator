@@ -1,0 +1,135 @@
+{
+  "id": "same_name_distinct_people",
+  "description": "A deliberately conflated cast record must become two people with the exact same full name.",
+  "source": {
+    "book": {
+      "id": "two-signatures",
+      "title": "The Two Signatures",
+      "authors": [
+        "Synthetic regression fixture"
+      ],
+      "language": "en"
+    },
+    "chapters": [
+      {
+        "id": "ch1",
+        "title": "The Harbor Office",
+        "source_href": "text/ch1.xhtml",
+        "block_ids": [
+          "b1",
+          "b2"
+        ]
+      },
+      {
+        "id": "ch2",
+        "title": "Separate Errands",
+        "source_href": "text/ch2.xhtml",
+        "block_ids": [
+          "b3"
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "b1",
+        "chapter_id": "ch1",
+        "text": "Two strangers named Eli Vale stood together at the harbor counter. One Eli Vale was a harbor pilot. The other Eli Vale was a clockmaker. They were different people, born in different towns, and they had never met before that morning.",
+        "source": {
+          "href": "text/ch1.xhtml",
+          "element_id": "b1",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b2",
+        "chapter_id": "ch1",
+        "text": "Eli Vale the pilot signed the shipping register with his left hand. Beside him, Eli Vale the clockmaker signed a separate repair receipt with his right hand. Each man held his own distinct document.",
+        "source": {
+          "href": "text/ch1.xhtml",
+          "element_id": "b2",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b3",
+        "chapter_id": "ch2",
+        "text": "The harbor pilot Eli Vale took his boat out while the clockmaker Eli Vale stayed at the counter to mend a wall clock. The pilot could not have been the clockmaker: both men had stood face to face at the same time.",
+        "source": {
+          "href": "text/ch2.xhtml",
+          "element_id": "b3",
+          "tag": "p"
+        }
+      }
+    ],
+    "exclusions": [],
+    "warnings": [],
+    "extraction_policy": "Original synthetic narrative paragraphs in chapter order."
+  },
+  "cast": {
+    "characters": [
+      {
+        "id": "c_eli",
+        "name": "Eli Vale",
+        "aliases": [],
+        "description": "A harbor pilot who also works as a clockmaker.",
+        "evidence": [
+          {
+            "block_id": "b1",
+            "quote": "One Eli Vale was a harbor pilot."
+          },
+          {
+            "block_id": "b1",
+            "quote": "The other Eli Vale was a clockmaker."
+          }
+        ],
+        "voice_id": "voice_c_eli"
+      }
+    ],
+    "roles": [
+      {
+        "id": "narrator_main",
+        "kind": "narration",
+        "character_id": null,
+        "voice_id": "voice_narrator_main",
+        "description": "Independent third-person narrator."
+      },
+      {
+        "id": "role_c_eli",
+        "kind": "dialogue",
+        "character_id": "c_eli",
+        "voice_id": "voice_c_eli",
+        "description": "Eli Vale speaking."
+      }
+    ],
+    "voices": [
+      {
+        "id": "voice_narrator_main",
+        "description": "Clear, measured narrative delivery.",
+        "traits": []
+      },
+      {
+        "id": "voice_c_eli",
+        "description": "A distinct, natural speaking voice.",
+        "traits": []
+      }
+    ]
+  },
+  "expected": {
+    "character_count": 2,
+    "identity_groups": [
+      [
+        "Eli Vale",
+        "pilot"
+      ],
+      [
+        "Eli Vale",
+        "clockmaker"
+      ]
+    ],
+    "ready": true,
+    "decision": {
+      "kind": "split",
+      "status": "applied"
+    }
+  }
+}

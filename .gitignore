@@ -1,0 +1,71 @@
+# Local configuration and credentials. Commit the *.example.toml templates.
+epub-audiobook.toml
+*.local.toml
+.env
+.env.*
+!.env.example
+
+# Python environments, packaging, and tool caches.
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Model downloads and weights (never needed in the source repository).
+models/
+.cache/
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+
+# Private book inputs and generated analysis, voices, audio, and model responses.
+/epubs/
+/runs/
+/old-runs/
+/dist-runs/
+/output/
+/outputs/
+*.audiobook/
+.epub-audiobook-cache/
+voices/
+render-work/
+audiobook/
+audiobooks/
+*.epub
+*.wav
+*.mp3
+*.m4a
+*.m4b
+*.aac
+*.flac
+*.ogg
+*.zip
+
+# This tiny original-fiction EPUB is an intentional, reproducible test fixture.
+!/examples/last-lantern/the-last-lantern.epub
+
+# Historical local experiments tied to private Soulship casts and recordings.
+/scripts/validate_drama_scene_casting.py
+/scripts/report_drama_design_probe.py
+
+# Operating-system metadata and editor temporary files.
+.DS_Store
+._*
+Thumbs.db
+*.swp
+*.swo
+*~

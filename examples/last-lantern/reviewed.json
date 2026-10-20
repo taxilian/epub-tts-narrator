@@ -1,0 +1,420 @@
+{
+  "format": "epub-audiobook-analysis",
+  "version": 1,
+  "source": {
+    "book": {
+      "id": "e31b45e4ccb49d8c640695ac366fd5122b11d43fab146eb696e80f4891dc0fdf",
+      "title": "The Last Lantern",
+      "authors": [
+        "Fictional demonstration"
+      ],
+      "language": "en"
+    },
+    "chapters": [
+      {
+        "id": "ch0001",
+        "title": "The Last Lantern",
+        "source_href": "chapter.xhtml",
+        "block_ids": [
+          "b000001",
+          "b000002",
+          "b000003",
+          "b000004",
+          "b000005",
+          "b000006"
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "b000001",
+        "chapter_id": "ch0001",
+        "text": "The Last Lantern",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": null,
+          "tag": "h1"
+        }
+      },
+      {
+        "id": "b000002",
+        "chapter_id": "ch0001",
+        "text": "My name is Mara. My voice is low and rough.",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": "p1",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b000003",
+        "chapter_id": "ch0001",
+        "text": "“Wait,” I said, “the lantern is still warm.”",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": "p2",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b000004",
+        "chapter_id": "ch0001",
+        "text": "Lena answered in a bright, clear voice. “Then someone was here.”",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": "p3",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b000005",
+        "chapter_id": "ch0001",
+        "text": "Lena and I watched the harbor wake.",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": "p4",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b000006",
+        "chapter_id": "ch0001",
+        "text": "“Did you hear that?”",
+        "source": {
+          "href": "chapter.xhtml",
+          "element_id": "p5",
+          "tag": "p"
+        }
+      }
+    ],
+    "exclusions": [
+      {
+        "href": "nav.xhtml",
+        "reason": "navigation document outside spine"
+      }
+    ],
+    "warnings": [
+      "Text follows XHTML DOM order with normalized whitespace; CSS, scripts, and visual layout are not rendered."
+    ],
+    "extraction_policy": "spine-xhtml-dom-v1; whitespace=collapse; footnotes=retain; auxiliary-spine=exclude"
+  },
+  "cast": {
+    "characters": [
+      {
+        "id": "mara",
+        "name": "Mara",
+        "aliases": [],
+        "description": "First-person narrator and character.",
+        "evidence": [
+          {
+            "block_id": "b000002",
+            "quote": "My name is Mara."
+          }
+        ],
+        "voice_id": "voice_mara"
+      },
+      {
+        "id": "lena",
+        "name": "Lena",
+        "aliases": [],
+        "description": "Mara's companion at the harbor.",
+        "evidence": [
+          {
+            "block_id": "b000004",
+            "quote": "Lena answered"
+          }
+        ],
+        "voice_id": "voice_lena"
+      }
+    ],
+    "roles": [
+      {
+        "id": "narrator_main",
+        "kind": "narration",
+        "character_id": "mara",
+        "voice_id": "voice_mara",
+        "description": "Mara narrates in first person."
+      },
+      {
+        "id": "mara_dialogue",
+        "kind": "dialogue",
+        "character_id": "mara",
+        "voice_id": "voice_mara",
+        "description": "Mara speaking."
+      },
+      {
+        "id": "lena_dialogue",
+        "kind": "dialogue",
+        "character_id": "lena",
+        "voice_id": "voice_lena",
+        "description": "Lena speaking."
+      }
+    ],
+    "voices": [
+      {
+        "id": "voice_mara",
+        "description": "Low-pitched, rough-textured voice. Measured pacing is a proposed casting choice.",
+        "traits": [
+          {
+            "name": "pitch",
+            "value": "low",
+            "basis": "text",
+            "evidence": [
+              {
+                "block_id": "b000002",
+                "quote": "low and rough"
+              }
+            ]
+          },
+          {
+            "name": "texture",
+            "value": "rough",
+            "basis": "text",
+            "evidence": [
+              {
+                "block_id": "b000002",
+                "quote": "low and rough"
+              }
+            ]
+          },
+          {
+            "name": "pace",
+            "value": "measured",
+            "basis": "casting",
+            "evidence": []
+          }
+        ]
+      },
+      {
+        "id": "voice_lena",
+        "description": "Bright, clear voice; keep it audibly distinct from Mara.",
+        "traits": [
+          {
+            "name": "tone",
+            "value": "bright and clear",
+            "basis": "text",
+            "evidence": [
+              {
+                "block_id": "b000004",
+                "quote": "bright, clear voice"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "segments": [
+    {
+      "id": "b000001:0:16",
+      "block_id": "b000001",
+      "start": 0,
+      "end": 16,
+      "text": "The Last Lantern",
+      "kind": "heading",
+      "role_id": "narrator_main",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000002:0:43",
+      "block_id": "b000002",
+      "start": 0,
+      "end": 43,
+      "text": "My name is Mara. My voice is low and rough.",
+      "kind": "narration",
+      "role_id": "narrator_main",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000003:0:7",
+      "block_id": "b000003",
+      "start": 0,
+      "end": 7,
+      "text": "“Wait,”",
+      "kind": "dialogue",
+      "role_id": "mara_dialogue",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000003:7:16",
+      "block_id": "b000003",
+      "start": 7,
+      "end": 16,
+      "text": " I said, ",
+      "kind": "narration",
+      "role_id": "narrator_main",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000003:16:44",
+      "block_id": "b000003",
+      "start": 16,
+      "end": 44,
+      "text": "“the lantern is still warm.”",
+      "kind": "dialogue",
+      "role_id": "mara_dialogue",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000004:0:40",
+      "block_id": "b000004",
+      "start": 0,
+      "end": 40,
+      "text": "Lena answered in a bright, clear voice. ",
+      "kind": "narration",
+      "role_id": "narrator_main",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000004:40:64",
+      "block_id": "b000004",
+      "start": 40,
+      "end": 64,
+      "text": "“Then someone was here.”",
+      "kind": "dialogue",
+      "role_id": "lena_dialogue",
+      "voice_id": "voice_lena",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000005:0:35",
+      "block_id": "b000005",
+      "start": 0,
+      "end": 35,
+      "text": "Lena and I watched the harbor wake.",
+      "kind": "narration",
+      "role_id": "narrator_main",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "Hand-authored demonstration annotation.",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    },
+    {
+      "id": "b000006:0:20",
+      "block_id": "b000006",
+      "start": 0,
+      "end": 20,
+      "text": "“Did you hear that?”",
+      "kind": "dialogue",
+      "role_id": "mara_dialogue",
+      "voice_id": "voice_mara",
+      "delivery": {
+        "direction": "",
+        "evidence": []
+      },
+      "attribution": {
+        "basis": "user",
+        "reason": "User correction",
+        "evidence": [],
+        "candidates": [],
+        "review_required": false
+      }
+    }
+  ],
+  "issues": [],
+  "provenance": {
+    "method": "Hand-authored fictional example; no model requests or generated audio.",
+    "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+    "corrections": [
+      {
+        "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+        "cast_fingerprint": "5efa8a50b1955069ada124335be7162c4fada71e9d79d9b9df2d50f5f410bb48",
+        "assignments": [
+          {
+            "segment_id": "b000006:0:20",
+            "role_id": "mara_dialogue"
+          }
+        ]
+      }
+    ]
+  },
+  "readiness": {
+    "ready": true,
+    "errors": [],
+    "review_count": 0
+  }
+}

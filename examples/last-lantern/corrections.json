@@ -1,0 +1,10 @@
+{
+  "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+  "cast_fingerprint": "5efa8a50b1955069ada124335be7162c4fada71e9d79d9b9df2d50f5f410bb48",
+  "assignments": [
+    {
+      "segment_id": "b000006:0:20",
+      "role_id": "mara_dialogue"
+    }
+  ]
+}

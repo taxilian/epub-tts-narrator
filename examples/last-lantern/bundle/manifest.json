@@ -1,0 +1,72 @@
+{
+  "format": "epub-audiobook-bundle",
+  "version": 2,
+  "book": {
+    "id": "e31b45e4ccb49d8c640695ac366fd5122b11d43fab146eb696e80f4891dc0fdf",
+    "title": "The Last Lantern",
+    "authors": [
+      "Fictional demonstration"
+    ],
+    "language": "en"
+  },
+  "chapters": [
+    {
+      "id": "ch0001",
+      "title": "The Last Lantern",
+      "source_href": "chapter.xhtml",
+      "block_ids": [
+        "b000001",
+        "b000002",
+        "b000003",
+        "b000004",
+        "b000005",
+        "b000006"
+      ]
+    }
+  ],
+  "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+  "readiness": {
+    "ready": true,
+    "errors": [],
+    "review_count": 0
+  },
+  "offsets": "Zero-based Unicode code points within source block text; end exclusive.",
+  "files": {
+    "source": "source.json",
+    "cast": "cast.json",
+    "review": "review.json",
+    "scripts": [
+      {
+        "chapter_id": "ch0001",
+        "title": "The Last Lantern",
+        "heading_block_id": null,
+        "path": "scripts/chapter-0001.jsonl",
+        "segment_count": 9,
+        "sequence_start": 0,
+        "sequence_end": 9
+      }
+    ]
+  },
+  "sha256": {
+    "source.json": "e77e664cc0710afa8386a972617f38d9f2abdf0e0a9c5dabbf804499d764478c",
+    "cast.json": "cd09f9a31b11fd9f703d51014c08a43f8266dcde9884649c0155b61a3c062987",
+    "review.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    "scripts/chapter-0001.jsonl": "030e60bd498f862061fd29e34ab6b4c1df4871bbbf6a574db9347956e2ae52fa"
+  },
+  "provenance": {
+    "method": "Hand-authored fictional example; no model requests or generated audio.",
+    "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+    "corrections": [
+      {
+        "source_fingerprint": "532404a3e56ab3babc86dc18ce6b07aa7ff8691832e5da78c235b8c52a6e6402",
+        "cast_fingerprint": "5efa8a50b1955069ada124335be7162c4fada71e9d79d9b9df2d50f5f410bb48",
+        "assignments": [
+          {
+            "segment_id": "b000006:0:20",
+            "role_id": "mara_dialogue"
+          }
+        ]
+      }
+    ]
+  }
+}

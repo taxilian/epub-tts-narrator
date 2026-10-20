@@ -1,0 +1,135 @@
+{
+  "id": "role_and_voice_change",
+  "description": "A promotion, later return, and changed vocal delivery must not split one character.",
+  "source": {
+    "book": {
+      "id": "mira-promotion",
+      "title": "The New Captain",
+      "authors": [
+        "Synthetic regression fixture"
+      ],
+      "language": "en"
+    },
+    "chapters": [
+      {
+        "id": "ch1",
+        "title": "The Apprentice",
+        "source_href": "text/ch1.xhtml",
+        "block_ids": [
+          "b1"
+        ]
+      },
+      {
+        "id": "ch2",
+        "title": "Twenty Years Later",
+        "source_href": "text/ch2.xhtml",
+        "block_ids": [
+          "b2",
+          "b3"
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "b1",
+        "chapter_id": "ch1",
+        "text": "Mira Thorn began her service as a young apprentice. At that time her speaking voice was light, and she spoke quietly when practicing her announcements alone.",
+        "source": {
+          "href": "text/ch1.xhtml",
+          "element_id": "b1",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b2",
+        "chapter_id": "ch2",
+        "text": "Twenty years later Captain Thorn entered the same shipyard. Captain Thorn was Mira Thorn herself, the former apprentice, now promoted. The title did not belong to another person.",
+        "source": {
+          "href": "text/ch2.xhtml",
+          "element_id": "b2",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b3",
+        "chapter_id": "ch2",
+        "text": "An old throat injury had made Mira's voice rougher and lower. She practiced firm commands as captain, then tried the same words in a softer tone. Her age, rank, injury, and changing manner of speech did not turn her into a different person.",
+        "source": {
+          "href": "text/ch2.xhtml",
+          "element_id": "b3",
+          "tag": "p"
+        }
+      }
+    ],
+    "exclusions": [],
+    "warnings": [],
+    "extraction_policy": "Original synthetic narrative paragraphs in chapter order."
+  },
+  "cast": {
+    "characters": [
+      {
+        "id": "c_mira",
+        "name": "Mira Thorn",
+        "aliases": [
+          "Mira",
+          "Captain Thorn"
+        ],
+        "description": "The former apprentice, later promoted to captain; her voice changes with age and injury.",
+        "evidence": [
+          {
+            "block_id": "b2",
+            "quote": "Captain Thorn was Mira Thorn herself, the former apprentice, now promoted."
+          }
+        ],
+        "voice_id": "voice_c_mira"
+      }
+    ],
+    "roles": [
+      {
+        "id": "narrator_main",
+        "kind": "narration",
+        "character_id": null,
+        "voice_id": "voice_narrator_main",
+        "description": "Independent third-person narrator."
+      },
+      {
+        "id": "role_c_mira",
+        "kind": "dialogue",
+        "character_id": "c_mira",
+        "voice_id": "voice_c_mira",
+        "description": "Mira Thorn speaking."
+      }
+    ],
+    "voices": [
+      {
+        "id": "voice_narrator_main",
+        "description": "Clear, measured narrative delivery.",
+        "traits": []
+      },
+      {
+        "id": "voice_c_mira",
+        "description": "A distinct, natural speaking voice.",
+        "traits": []
+      }
+    ]
+  },
+  "expected": {
+    "character_count": 1,
+    "identity_groups": [
+      [
+        "Mira Thorn"
+      ]
+    ],
+    "names_or_aliases": [
+      "Mira Thorn",
+      "Captain Thorn"
+    ],
+    "preserve_character_ids": [
+      "c_mira"
+    ],
+    "preserve_voice_ids": {
+      "c_mira": "voice_c_mira"
+    },
+    "ready": true
+  }
+}

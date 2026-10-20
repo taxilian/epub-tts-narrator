@@ -1,0 +1,97 @@
+{
+  "book": {
+    "id": "e31b45e4ccb49d8c640695ac366fd5122b11d43fab146eb696e80f4891dc0fdf",
+    "title": "The Last Lantern",
+    "authors": [
+      "Fictional demonstration"
+    ],
+    "language": "en"
+  },
+  "chapters": [
+    {
+      "id": "ch0001",
+      "title": "The Last Lantern",
+      "source_href": "chapter.xhtml",
+      "block_ids": [
+        "b000001",
+        "b000002",
+        "b000003",
+        "b000004",
+        "b000005",
+        "b000006"
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "b000001",
+      "chapter_id": "ch0001",
+      "text": "The Last Lantern",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": null,
+        "tag": "h1"
+      }
+    },
+    {
+      "id": "b000002",
+      "chapter_id": "ch0001",
+      "text": "My name is Mara. My voice is low and rough.",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": "p1",
+        "tag": "p"
+      }
+    },
+    {
+      "id": "b000003",
+      "chapter_id": "ch0001",
+      "text": "“Wait,” I said, “the lantern is still warm.”",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": "p2",
+        "tag": "p"
+      }
+    },
+    {
+      "id": "b000004",
+      "chapter_id": "ch0001",
+      "text": "Lena answered in a bright, clear voice. “Then someone was here.”",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": "p3",
+        "tag": "p"
+      }
+    },
+    {
+      "id": "b000005",
+      "chapter_id": "ch0001",
+      "text": "Lena and I watched the harbor wake.",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": "p4",
+        "tag": "p"
+      }
+    },
+    {
+      "id": "b000006",
+      "chapter_id": "ch0001",
+      "text": "“Did you hear that?”",
+      "source": {
+        "href": "chapter.xhtml",
+        "element_id": "p5",
+        "tag": "p"
+      }
+    }
+  ],
+  "exclusions": [
+    {
+      "href": "nav.xhtml",
+      "reason": "navigation document outside spine"
+    }
+  ],
+  "warnings": [
+    "Text follows XHTML DOM order with normalized whitespace; CSS, scripts, and visual layout are not rendered."
+  ],
+  "extraction_policy": "spine-xhtml-dom-v1; whitespace=collapse; footnotes=retain; auxiliary-spine=exclude"
+}

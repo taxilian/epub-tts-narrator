@@ -1,0 +1,166 @@
+{
+  "id": "similar_names_separate",
+  "description": "Similar-looking names belong to two people and must not be merged.",
+  "source": {
+    "book": {
+      "id": "two-apprentices",
+      "title": "The Bell Workshop",
+      "authors": [
+        "Synthetic regression fixture"
+      ],
+      "language": "en"
+    },
+    "chapters": [
+      {
+        "id": "ch1",
+        "title": "Two Apprentices",
+        "source_href": "text/ch1.xhtml",
+        "block_ids": [
+          "b1",
+          "b2"
+        ]
+      },
+      {
+        "id": "ch2",
+        "title": "The Next Morning",
+        "source_href": "text/ch2.xhtml",
+        "block_ids": [
+          "b3"
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "b1",
+        "chapter_id": "ch1",
+        "text": "Nera Sol and Neri Sol were two apprentices sharing a workbench. Nera was the older sister; Neri was her younger brother. They were siblings, not aliases for the same person.",
+        "source": {
+          "href": "text/ch1.xhtml",
+          "element_id": "b1",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b2",
+        "chapter_id": "ch1",
+        "text": "Nera held a bell in her hands while Neri struck it with a wooden mallet. Each watched the other work. They entered two separate names in the attendance book: Nera Sol and Neri Sol.",
+        "source": {
+          "href": "text/ch1.xhtml",
+          "element_id": "b2",
+          "tag": "p"
+        }
+      },
+      {
+        "id": "b3",
+        "chapter_id": "ch2",
+        "text": "The next morning Neri Sol arrived first. Nera Sol joined her brother a few minutes later. Both apprentices were present when the workshop opened.",
+        "source": {
+          "href": "text/ch2.xhtml",
+          "element_id": "b3",
+          "tag": "p"
+        }
+      }
+    ],
+    "exclusions": [],
+    "warnings": [],
+    "extraction_policy": "Original synthetic narrative paragraphs in chapter order."
+  },
+  "cast": {
+    "characters": [
+      {
+        "id": "c_nera",
+        "name": "Nera Sol",
+        "aliases": [
+          "Nera"
+        ],
+        "description": "The older sister and one of two apprentices.",
+        "evidence": [
+          {
+            "block_id": "b1",
+            "quote": "Nera was the older sister; Neri was her younger brother."
+          }
+        ],
+        "voice_id": "voice_c_nera"
+      },
+      {
+        "id": "c_neri",
+        "name": "Neri Sol",
+        "aliases": [
+          "Neri"
+        ],
+        "description": "The younger brother and one of two apprentices.",
+        "evidence": [
+          {
+            "block_id": "b1",
+            "quote": "Nera was the older sister; Neri was her younger brother."
+          }
+        ],
+        "voice_id": "voice_c_neri"
+      }
+    ],
+    "roles": [
+      {
+        "id": "narrator_main",
+        "kind": "narration",
+        "character_id": null,
+        "voice_id": "voice_narrator_main",
+        "description": "Independent third-person narrator."
+      },
+      {
+        "id": "role_c_nera",
+        "kind": "dialogue",
+        "character_id": "c_nera",
+        "voice_id": "voice_c_nera",
+        "description": "Nera Sol speaking."
+      },
+      {
+        "id": "role_c_neri",
+        "kind": "dialogue",
+        "character_id": "c_neri",
+        "voice_id": "voice_c_neri",
+        "description": "Neri Sol speaking."
+      }
+    ],
+    "voices": [
+      {
+        "id": "voice_narrator_main",
+        "description": "Clear, measured narrative delivery.",
+        "traits": []
+      },
+      {
+        "id": "voice_c_nera",
+        "description": "A distinct, natural speaking voice.",
+        "traits": []
+      },
+      {
+        "id": "voice_c_neri",
+        "description": "A distinct, natural speaking voice.",
+        "traits": []
+      }
+    ]
+  },
+  "expected": {
+    "character_count": 2,
+    "identity_groups": [
+      [
+        "Nera Sol"
+      ],
+      [
+        "Neri Sol"
+      ]
+    ],
+    "preserve_character_ids": [
+      "c_nera",
+      "c_neri"
+    ],
+    "preserve_voice_ids": {
+      "c_nera": "voice_c_nera",
+      "c_neri": "voice_c_neri"
+    },
+    "ready": true,
+    "decision": {
+      "kind": "keep_separate",
+      "status": "confirmed_separate"
+    }
+  }
+}

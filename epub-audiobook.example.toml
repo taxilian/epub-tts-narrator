@@ -1,0 +1,70 @@
+# Copy this file to epub-audiobook.toml and set your global model and API key once.
+# Reuse it for every book and series. Choose run-specific paths on the command:
+#   analyze book.epub [-o OUTPUT_DIRECTORY] [--continue-from PREVIOUS_OUTPUT_DIRECTORY]
+# No output path or series path belongs in this configuration.
+# extract, plan, analyze, and review-attribution read that filename from the current directory.
+# To select another file, pass --config PATH to those commands.
+# Values are literal strings; external variables are not interpolated.
+
+[provider]
+# Required for model calls. Choose a model available at your configured endpoint.
+model = "YOUR_MODEL"
+base_url = "https://api.openai.com/v1"
+# Uncomment when the endpoint requires authentication. Keep your real key private.
+# api_key = "YOUR_API_KEY"
+timeout = 120.0
+json_mode = true
+# Optional output token cap; an insufficient cap causes truncation failure.
+# max_output_tokens = 16000
+token_limit_field = "max_completion_tokens"
+# Optional for models supporting this field (omitted by default).
+# reasoning_effort = "high"
+# Optional transient HTTP/transport retries inside the existing worker limit (0–10).
+# Typed temporary failures retry; TLS, invalid URL, and unknown errors stop.
+# Retry settings do not invalidate previously cached responses.
+max_retries = 0
+retry_initial_delay = 5.0
+retry_max_delay = 60.0
+
+# For a local compatible server, change model and base_url above, for example:
+# model = "YOUR_LOCAL_MODEL"
+# base_url = "http://127.0.0.1:8000/v1"
+# Set json_mode = false only when that server lacks response_format support.
+# Servers using the older token field can set token_limit_field = "max_tokens".
+# api_key may be omitted for local servers that do not require authentication.
+
+[analysis]
+chunk_chars = 12000
+max_request_chars = 200000
+repair_attempts = 1
+# Whole-book discovery requires a model context large enough for all source text.
+whole_book_discovery = false
+# Sequential cast reconciliation passes (1–3). Each sees the preceding accepted cast.
+# Each extra pass adds one baseline model request; identity review follows all passes.
+cast_reconciliation_rounds = 1
+# Scan for merged/split identities and require three independent approvals.
+# Disabling this skips the additional identity checks; merges remain reviewable.
+identity_consensus = true
+# Optional source-backed review after initial passage attribution; adds model calls.
+attribution_review = false
+# Soft source-character target per review batch, keeping whole blocks (minimum 256).
+attribution_review_chunk_chars = 60000
+# Shared concurrency ceiling for attribution, identity, and passage-review requests.
+# Identity reviewers run at most three concurrently; analysis phases do not overlap.
+attribution_workers = 1
+# Optional global cache location. Relative paths use this file's directory.
+# Otherwise the cache is .epub-audiobook-cache beside each output directory.
+# It cannot be inside the current or previous output directory.
+# cache_dir = ".epub-audiobook-cache"
+# The legacy series_registry setting is deprecated and rejected in directory mode.
+# Use --continue-from PREVIOUS_OUTPUT_DIRECTORY on the command instead.
+
+[extraction]
+include_auxiliary = false
+
+[performance_policy]
+thoughts = "Use the thinking character's dialogue role when explicit; otherwise flag for review."
+letters = "Use the letter author's role if identified; otherwise flag for review."
+nested_quotations = "Keep the currently speaking character's performed voice."
+headings_and_nonstory_text = "Use the applicable narrator role."
+bracketed_text = "Give this bracketed text a slight, audible change in delivery while keeping the surrounding sentence natural. Keep the selected speaker's voice."
