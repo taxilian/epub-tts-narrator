@@ -75,7 +75,9 @@ class SessionDouble:
         candidate = row["candidates"][-1] if row["candidates"] else self.generate(voice_id)
         return self.accept(voice_id, candidate["candidate_id"])
 
-    def regenerate(self, voice_id):
+    def regenerate(self, voice_id, *, voice_designer=None):
+        if voice_designer is not None:
+            self.events.append(("designer", voice_designer))
         self.events.append(("regenerate", voice_id))
         candidate = self.generate(voice_id)
         return self.accept(voice_id, candidate["candidate_id"])
@@ -121,7 +123,9 @@ class SharedSessionDouble(SessionDouble):
         self.events.append(("edit", voice_id, dict(values)))
         self.row(self.canonical(voice_id)).update(values)
 
-    def regenerate(self, voice_id):
+    def regenerate(self, voice_id, *, voice_designer=None):
+        if voice_designer is not None:
+            self.events.append(("designer", voice_designer))
         self.events.append(("regenerate", voice_id))
         canonical = self.canonical(voice_id)
         candidate = self.generate(canonical)
@@ -258,6 +262,50 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(self.session.row("v1")["selected"]["creation"]["requested_description"],
                          "A gentle voice.")
         self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
+
+    def test_gg_selects_gemini_inside_menu_and_edits_selects_and_plays(self):
+        self.ready()
+        original_config = deepcopy(self.session.config)
+        self.run_ui("GG 1", "A bright voice.", "A different sample.", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "gemini")])
+        self.assertEqual(self.session.row("v1")["selected"]["reference_text"], "A different sample.")
+        self.assertEqual(self.session.row("v1")["selected"]["creation"]["requested_description"],
+                         "A bright voice.")
+        self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
+        self.assertEqual(self.session.config, original_config)
+        self.assertEqual(len(self.prompts), 4)
+        self.assertTrue(any("GG [number]" in line and "Gemini" in line for line in self.output))
+
+    def test_compact_gg_then_g_choose_gemini_then_local(self):
+        self.ready()
+        self.run_ui("gg1", "", "", "G 1", "", "", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "gemini"), ("designer", "local")])
+        self.assertEqual(self.player.played, ["/fixtures/v1-2.wav", "/fixtures/v1-3.wav"])
+
+    def test_plain_gg_defaults_to_last_played_character(self):
+        self.ready()
+        self.run_ui("2", "GG", "", "", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "gemini")])
+        self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/vn-2.wav"])
+        self.assertEqual(len(self.prompts), 5)
+
+    def test_invalid_gg_numbers_do_not_edit_or_generate(self):
+        self.ready()
+        self.run_ui("GG 0", "GG 99", "GGG 1", "1", "q")
+        self.assertFalse(any(event[0] in {"edit", "regenerate", "designer"}
+                             for event in self.session.events))
+        self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
+
+    def test_failed_gg_keeps_existing_voice_and_returns_to_menu(self):
+        self.ready()
+        self.session.generation_error = RuntimeError("Gemini API request failed")
+        self.run_ui("GG 1", "", "", "1", "q")
+        self.assertTrue(any("Gemini API request failed" in line for line in self.output))
+        self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
+        self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
 
     def test_shared_role_plays_immediately_and_g_updates_only_its_character(self):
         self.session = SharedSessionDouble()

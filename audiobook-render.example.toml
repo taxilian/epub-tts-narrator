@@ -30,7 +30,7 @@ language = "en"
 # Continued books inherit the nearest saved voice in their parent-book chain.
 reference_text = "The morning light fell across the quiet room. I opened the door and listened to the wind in the trees. There was still time to decide what to do next."
 
-# Used only when cast is invoked with --voice-designer gemini.
+# Used by GG in the casting menu or cast --voice-designer gemini.
 # Keep the real key in your ignored local epub-audiobook.toml.
 [gemini]
 api_key = ""

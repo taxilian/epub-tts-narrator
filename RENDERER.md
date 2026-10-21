@@ -177,11 +177,13 @@ There is one menu. Type a number or command and press Enter:
 | Input | Action |
 | --- | --- |
 | A voice number | Play immediately. Any key stops playback and returns to the menu; no Enter is needed to stop. The menu also returns when the sample finishes. |
-| `G` | Edit and regenerate the last voice played. If none has been played, asks for a voice number. |
-| `G 5` or `G5` | Edit and regenerate voice 5 directly. |
+| `G` | Edit and regenerate the last voice played locally. If none has been played, asks for a voice number. |
+| `G 5` or `G5` | Edit and regenerate voice 5 with the local speech engine. |
+| `GG 5` or `GG5` | Edit and regenerate voice 5 with Gemini. No command-line flag is needed. |
+| `GG` | Use Gemini for the last voice played, or ask for a voice number. |
 | `Q` | Quit. |
 
-Regeneration offers two fields: the voice prompt and the spoken sample script. Press Enter to keep either value. The new voice is verified, saved, selected, and played immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive.
+Both regeneration commands offer two fields: the voice prompt and the spoken sample script. Press Enter to keep either value. The new voice is verified, saved, selected, and played immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` always chooses the local speech engine and `GG` chooses Gemini for that action; neither changes the session's startup setting or global configuration.
 
 Menu and text entry use the terminal's standard line editor: arrow keys,
 Ctrl+A/E, Ctrl+K/U, and session history follow your readline/libedit bindings.
@@ -223,8 +225,8 @@ With `[voice_design] type = "engine"`, the character description conditions Dram
 For a fresh analysis, the analyzer now supplies stable acoustic directions in both the voice description and traits, including voices added during identity reconciliation. Casting uses these automatically together with the selected book excerpt; no prompt-preparation or repair command is needed. Existing edited drafts and selected references retain precedence, so this change does not rewrite older casting work. Speech verification checks the words and audio quality, not whether vocal gender, character fit, or every requested texture sounds right.
 
 To create voices with Gemini instead, put the following in the same global
-`epub-audiobook.toml` file. Local Drama 3 remains the default; this section only
-supplies credentials and settings for the explicit casting option.
+`epub-audiobook.toml` file. Local Drama 3 remains the default; this section supplies
+credentials and settings for `GG` in the casting menu and the optional CLI override.
 
 ```toml
 [gemini]
@@ -235,7 +237,10 @@ timeout_seconds = 180.0
 ```
 
 ```sh
-# Open casting, generating missing voices with Gemini.
+# Open the normal menu; type GG 5 to regenerate voice 5 with Gemini.
+.venv-renderer/bin/audiobook-render cast runs/book-01
+
+# Optional: also generate missing startup voices with Gemini.
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer gemini
 
 # Replace all voices in this book with Gemini-created voices.

@@ -148,7 +148,7 @@ def _warn_regenerate_all(rows, *, book_local=False):
 
 
 def run_casting(session, player, *, input_fn=None, output=print, playback_fn=None):
-    """One menu: a number plays, G edits/regenerates, Q quits."""
+    """One menu: a number plays, G regenerates locally, GG uses Gemini, Q quits."""
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -206,17 +206,19 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     if shared:
                         status += " — shares " + _label(shared)
                 say(f"{index:3}. {_label(row)}{status}")
-            say("Number: play   G [number]: edit/regenerate   Q: quit")
+            say("Number: play   G [number]: regenerate locally   GG [number]: regenerate with Gemini   Q: quit")
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
                 if last:
-                    say(f"G alone regenerates {_label(last)}.")
+                    say(f"Without a number, G and GG regenerate {_label(last)}.")
             action = ask("> ").lower()
             try:
                 if action == "q":
                     return
                 if action.startswith("g"):
-                    value = action[1:].strip()
+                    gemini = action.startswith("gg")
+                    voice_designer = "gemini" if gemini else "local"
+                    value = action[2 if gemini else 1:].strip()
                     if value:
                         row = choose(rows, value)
                     elif last_voice_id is not None:
@@ -226,7 +228,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                         if not value:
                             continue
                         row = choose(rows, value)
-                    say(f"\nRegenerate {_label(row)}")
+                    say(f"\nRegenerate {_label(row)} {'with Gemini' if gemini else 'locally'}")
                     if row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]:
                         say("This role shares its character's voice. Regeneration updates every linked role.")
                     say("Voice prompt: " + row["prompt"])
@@ -246,14 +248,14 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     if edits:
                         session.update_prompt(row["voice_id"], **edits)
                     say(f"Generating and verifying {_label(row)}…")
-                    voice = session.regenerate(row["voice_id"])
+                    voice = session.regenerate(row["voice_id"], voice_designer=voice_designer)
                     last_voice_id = row["voice_id"]
                     say("New voice saved and selected.")
                     play(row, voice)
                 else:
                     row = choose(rows, action)
                     if row["selected"] is None:
-                        raise ValueError("No verified sample is available; use G followed by this voice number to retry")
+                        raise ValueError("No verified sample is available; use G or GG followed by this voice number to retry")
                     last_voice_id = row["voice_id"]
                     play(row, row["selected"])
             except (ValueError, RuntimeError, OSError) as exc:

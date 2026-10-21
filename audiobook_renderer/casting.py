@@ -474,10 +474,33 @@ class CastingSession:
             candidate = designed[-1] if designed else self._generate_locked(voice_id)
             return self._accept_locked(voice_id, candidate["candidate_id"])
 
-    def regenerate(self, voice_id):
+    @contextmanager
+    def _using_voice_designer(self, choice):
+        """Select a designer for one action, preserving the session default."""
+        if choice is None:
+            yield
+            return
+        from .config import select_voice_designer
+        settings = select_voice_designer(self.config, choice)["voice_design"]
+        original_settings = self.config["voice_design"]
+        original_designer = self._designer
+        self.config["voice_design"] = settings
+        self._designer = None
+        try:
+            yield
+        finally:
+            temporary_designer = self._designer
+            self.config["voice_design"] = original_settings
+            self._designer = original_designer
+            if temporary_designer is not original_designer and temporary_designer is not self._engine:
+                close = getattr(temporary_designer, "close", None)
+                if callable(close):
+                    close()
+
+    def regenerate(self, voice_id, *, voice_designer=None):
         """Generate and immediately select a verified replacement under one lock."""
         self._profile(voice_id)
-        with self._locked():
+        with self._locked(), self._using_voice_designer(voice_designer):
             candidate = self._generate_locked(voice_id)
             return self._accept_locked(voice_id, candidate["candidate_id"])
 
