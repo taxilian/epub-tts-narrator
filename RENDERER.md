@@ -422,6 +422,29 @@ reference_model = "./models/parakeet-tdt-0.6b-v3"
 
 This adds about 2.5 GB of model weights. The current Soulship configuration already enables it. The adapter uses MLX Audio's local Parakeet implementation. [MLX Audio Parakeet documentation](https://github.com/blaizzy/mlx-audio/blob/main/docs/models/stt/parakeet.md)
 
+### Optional JEV confirmation
+
+JEV can add a structured text check when a reusable voice reference passes the existing acoustic and bounded-discrepancy checks and the two independent recognizers agree on an alternative transcript. The complete transcripts must align under those rules locally before any model judgment is considered. Each JEV request contains only one bounded changed phrase pair and up to four surrounding source words on each side. It answers one narrow question: is the requested phrase equivalent to the independently recognized phrase, allowing harmless transcription variations? JEV receives no audio, complete scripts, or complete transcripts. Every changed span must pass its separate request; the reference's overall score is the lowest span probability. This is an additional acceptance condition, not a replacement for either recognizer. If the first recognizer matches exactly, or the independent recognizer supports the requested text exactly, no JEV request is needed.
+
+Enable it once in the global `epub-audiobook.toml`; no book or series settings are needed:
+
+```toml
+[jev]
+enabled = false
+api_key = "YOUR_JEV_API_KEY"
+model = "jev-latest"
+timeout_seconds = 30
+threshold = 0.90
+```
+
+Replace the placeholder and set `enabled = true` to use it. The key is read only from this file. Keep one `[jev]` table when combining configuration templates. `timeout_seconds` accepts 1–120; `threshold` must be greater than 0.5 and at most 1. The endpoint is fixed to the JEV service. A reference passes this added check only when every changed span's reported equivalence probability reaches the threshold. A different or uncertain judgment rejects the sample under the normal retry policy. The default 0.90 is a decision threshold for this additional check, not a measured accuracy guarantee for speech verification. Disabling JEV retains the existing independent-recognizer behavior. For repeatable results, pin the model version you evaluated rather than leaving `model = "jev-latest"`.
+
+If JEV is unavailable, including a network failure or malformed response, the run stops and retains the generated WAV for verification. Rerun the same command to retry verification of that audio without generating another sample. The sample remains unaccepted until verification succeeds.
+
+JEV cannot override the existing limits on insertions, deletions, large textual changes, silence, or other audio failures. It does not evaluate whether a recording sounds male or female, matches a character description, uses the intended accent, or preserves a vocal identity. Those judgments still require auditioning the audio. Ordinary audiobook passages never call JEV and keep their strict text and timing checks.
+
+Verification reports retain the JEV decision, probabilities, and model identity. Its enabled policy, model, and threshold participate in reference verification cache identity, so changing those settings requires the relevant reference to be checked again. API keys are excluded from reports and cache identity. Character identity, series continuity, speaker attribution, and audition-script suitability checks through JEV are possible future additions; they are not implemented by this option.
+
 To recheck a retained casting attempt without generating another voice:
 
 ```sh

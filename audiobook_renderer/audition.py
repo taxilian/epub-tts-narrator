@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+from .workflow import VerificationUnavailable
+
 
 def display(value):
     """Keep names and model metadata from becoming terminal escape sequences."""
@@ -189,6 +191,9 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 say(f"[{generated}/{missing}] Generating {_label(row)}…")
             try:
                 session.ensure_ready(row["voice_id"])
+            except VerificationUnavailable as exc:
+                say(f"Voice preparation paused: {exc}")
+                break
             except (ValueError, RuntimeError, OSError) as exc:
                 say(f"Could not prepare {_label(row)}: {exc}")
         _prepare_playback_samples(player, session.rows(), say)
@@ -373,6 +378,8 @@ def casting_command(args, bundle, config):
                 print(f"Regenerating {display(_label(row))}…")
                 try:
                     session.regenerate(row["voice_id"])
+                except VerificationUnavailable:
+                    raise
                 except (ValueError, RuntimeError, OSError) as exc:
                     failed.append(row["voice_id"])
                     print(f"Could not regenerate {display(_label(row))}: {display(exc)}")

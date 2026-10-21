@@ -101,6 +101,9 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
     }
     if purpose == "reference":
         identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
+        judge_identity = getattr(verifier, "reference_judge_identity", None)
+        if judge_identity is not None:
+            identity["reference_text_judge"] = judge_identity
     return digest(identity)
 
 
@@ -534,6 +537,134 @@ def _reference_stylization_eligibility(metrics: dict) -> dict | None:
             "performance_assessed": False}
 
 
+def _valid_judge_model(model):
+    return isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model) is not None
+
+
+def _valid_judged_differences(record, *, allow_model_change=False):
+    """Keep the changed-span audit finite, complete in shape, and model-bound."""
+    differences = record.get("differences")
+    if (record.get("method") != "jev_changed_spans"
+            or record.get("offset_unit") != "normalized_words"
+            or record.get("normalization") != "source_explicit_compounds_v1"
+            or not isinstance(differences, list) or not 1 <= len(differences) <= 32):
+        return False
+    identifiers = set()
+    for item in differences:
+        if (not isinstance(item, dict) or set(item) != {
+                "id", "expected_text", "primary_transcript", "context", "probability", "model",
+                "policy_version", "occurrences"}
+                or not isinstance(item["id"], str) or not item["id"] or item["id"] in identifiers
+                or any(not isinstance(item[field], str) for field in ("expected_text", "primary_transcript", "context"))
+                or not _finite_number(item["probability"]) or not 0 <= item["probability"] <= 1
+                or not _valid_judge_model(item["model"])
+                or (item["model"] != record["model"] and not allow_model_change)
+                or type(item["policy_version"]) is not int
+                or item["policy_version"] != record["policy_version"]
+                or not isinstance(item["occurrences"], list) or not item["occurrences"]):
+            return False
+        identifiers.add(item["id"])
+        for occurrence in item["occurrences"]:
+            if (not isinstance(occurrence, dict) or set(occurrence) != {
+                    "transcript", "operation", "expected_start", "expected_end", "actual_start", "actual_end",
+                    "expected", "actual"}
+                    or not isinstance(occurrence["transcript"], str)
+                    or occurrence["transcript"] not in {"primary", "secondary"}
+                    or not isinstance(occurrence["operation"], str)
+                    or occurrence["operation"] not in {"split", "join", "substitute", "shorten_consonant_run"}):
+                return False
+            for side in ("expected", "actual"):
+                start, end, words = occurrence[f"{side}_start"], occurrence[f"{side}_end"], occurrence[side]
+                if (type(start) is not int or type(end) is not int or not 0 <= start < end
+                        or not isinstance(words, list) or len(words) != end - start
+                        or any(not isinstance(word, str) or not word for word in words)):
+                    return False
+    return record["probabilities"]["harmless_variation"] == min(item["probability"] for item in differences)
+
+
+def _valid_unavailable_judgment(record):
+    """Retain trustworthy partial work without treating it as a full judgment."""
+    error = record.get("error_code")
+    if error is not None and (not isinstance(error, str) or error not in {
+            "unavailable", "disabled", "invalid_request", "request_too_large", "invalid_response",
+            "redirect_refused", "http_error", "transport_error", "difference_limit", "invalid_comparison",
+            "internal_error", "model_changed"}):
+        return False
+    usage = record.get("usage")
+    if usage is not None and (not isinstance(usage, dict) or set(usage) != {"input_tokens", "output_tokens"}
+                              or any(type(value) is not int or not 0 <= value <= 32 * 10**9 for value in usage.values())):
+        return False
+    probabilities, differences = record["probabilities"], record.get("differences", [])
+    if probabilities == {} and record.get("model") is None:
+        return differences == [] and error != "model_changed"
+    if (error is None or error in {"disabled", "difference_limit"}
+            or set(probabilities) != {"harmless_variation"}
+            or not _finite_number(probabilities["harmless_variation"])
+            or not 0 <= probabilities["harmless_variation"] <= 1
+            or not _valid_judge_model(record.get("model"))
+            or not _valid_judged_differences(record, allow_model_change=error == "model_changed")):
+        return False
+    if error == "model_changed":
+        return (differences[0]["model"] == record["model"]
+                and any(item["model"] != record["model"] for item in differences[1:]))
+    return True
+
+
+def _judge_reference(verifier, report, secondary_transcript):
+    """Require an enabled text judge to confirm a previously corroborated variation.
+
+    The judge sees text, never audio, and cannot establish what was spoken. It
+    is an additional semantic veto after independent ASR and hard eligibility.
+    """
+    identity = getattr(verifier, "reference_judge_identity", None)
+    if identity is None:
+        return True
+    unavailable = {"identity": identity, "decision": "unavailable", "probabilities": {},
+                   "model": None, "error_code": "invalid_judge_record"}
+    judge = getattr(verifier, "judge_reference", None)
+    if not callable(judge):
+        report["text_judge"] = dict(unavailable, error_code="judge_unavailable")
+        return False
+    try:
+        record = judge(report["expected_text"], report["transcript"], secondary_transcript)
+    except Exception:
+        # Provider exceptions can contain credentials or request text. The
+        # adapter normally returns safe diagnostics; never serialize raw errors.
+        report["text_judge"] = dict(unavailable, error_code="judge_failed")
+        return False
+    if (not isinstance(identity, dict) or not isinstance(record, dict)
+            or record.get("identity") != identity):
+        report["text_judge"] = unavailable
+        return False
+    record = {key: value for key, value in record.items() if key in {
+        "identity", "decision", "probabilities", "model", "policy_version", "threshold", "usage", "error_code",
+        "differences", "method", "offset_unit", "normalization"}}
+    decision, probabilities = record.get("decision"), record.get("probabilities")
+    threshold = record.get("threshold")
+    if (not isinstance(decision, str) or decision not in {"equivalent", "different", "uncertain", "unavailable"}
+            or not isinstance(probabilities, dict)
+            or not _finite_number(threshold) or not .5 < threshold <= 1
+            or threshold != identity.get("threshold")
+            or type(record.get("policy_version")) is not int
+            or record.get("policy_version") != identity.get("policy_version")):
+        report["text_judge"] = unavailable
+        return False
+    if decision == "unavailable":
+        # A later isolated request may fail after earlier phrases succeeded.
+        # Keep their validated audit and the safe failure cause, never approve.
+        report["text_judge"] = record if _valid_unavailable_judgment(record) else unavailable
+        return False
+    if (set(probabilities) != {"harmless_variation"}
+            or any(not _finite_number(value) or not 0 <= value <= 1 for value in probabilities.values())
+            or not isinstance(record.get("model"), str) or not record["model"].strip()
+            or not _valid_judged_differences(record)):
+        report["text_judge"] = unavailable
+        return False
+    report["text_judge"] = record
+    return (decision == "equivalent" and probabilities["harmless_variation"] >= threshold
+            and all(item["probability"] >= threshold for item in record["differences"]))
+
+
 def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
     """Resolve a small reference-script variation with an independent decoder.
 
@@ -580,6 +711,8 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
         return False
     if primary_comparison["wer"] == 0:
         corroboration["decision"] = "agreed_reference_transcript"
+        if requested_comparison["wer"] != 0 and not _judge_reference(verifier, report, transcript):
+            return False
         report["reference_text"] = report["transcript"]
         report["reference_text_adjusted"] = True
         return True

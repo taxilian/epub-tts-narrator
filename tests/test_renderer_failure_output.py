@@ -94,6 +94,49 @@ class FailureOutputTests(unittest.TestCase):
             ])
             self.assertFalse((Path(temp) / "accepted.json").exists())
 
+    def test_jev_failure_is_explained_without_echoing_remote_details(self):
+        for decision, expected in (
+            ("different", "JEV found a substantive text difference"),
+            ("uncertain", "JEV could not confirm equivalent wording"),
+            ("unavailable", "JEV text confirmation unavailable"),
+            ("equivalent", ""),
+            ("unexpected private response", ""),
+        ):
+            with self.subTest(decision=decision):
+                self.assertEqual(_verification_failure_detail({"text_judge": {
+                    "decision": decision, "error": "private remote detail",
+                }}), expected)
+
+    def test_jev_outage_retains_audio_and_same_command_retries_verification_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            generated = []
+            def generate(path, seed):
+                generated.append(path)
+                Path(path).write_bytes(b"saved audio fixture")
+                return {"seed": seed}
+            def normalize(raw, wav, **kwargs):
+                Path(wav).write_bytes(Path(raw).read_bytes())
+            unavailable = {"passed": False, "reasons": ["text_mismatch"],
+                           "text_judge": {"decision": "unavailable"}}
+            passed = {"passed": True, "reasons": [], "text_judge": {"decision": "equivalent"}}
+            config = {"quality": {}, "render": {
+                "max_attempts": 3, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
+            }}
+            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"), \
+                    patch("audiobook_renderer.workflow.normalize_clip", side_effect=normalize), \
+                    patch("audiobook_renderer.workflow.validate_audio", side_effect=[unavailable, passed]) as validate:
+                with self.assertRaisesRegex(RenderBlocked, "rerun the same command"):
+                    verified_take("A reference.", generate, temp, {"test": True}, object(),
+                                  config, purpose="reference")
+                self.assertEqual(len(generated), 1)
+                self.assertFalse((Path(temp) / "accepted.json").exists())
+                audio, record = verified_take("A reference.", generate, temp, {"test": True}, object(),
+                                              config, purpose="reference")
+            self.assertEqual(len(generated), 1)
+            self.assertEqual(validate.call_count, 2)
+            self.assertEqual(audio.read_bytes(), b"saved audio fixture")
+            self.assertTrue(record["report"]["passed"])
+
     def test_generation_errors_are_visible_for_gemini_and_local_engines(self):
         from audiobook_renderer.gemini_voice_design import GeminiVoiceError
         safe = "Gemini API request failed (HTTP 403). Check Gemini API access and project permissions."

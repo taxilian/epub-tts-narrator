@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 import unittest
 
-from epub_audiobook.contracts import validate_document
+from epub_audiobook.contracts import readiness, validate_document
 from epub_audiobook.pipeline import fingerprint
 from epub_audiobook.speaker_completion import complete_speakers, unassigned_segments
 from epub_audiobook.speaker_decisions import prompt_speaker_decisions
@@ -146,6 +146,113 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertIn("speaker_completion_1: Mara", output)
         self.assertIn("The tag names Mara", output)
         self.assertNotIn("\x1b", output)
+
+    def analyze_with_input(self, document, input_stream):
+        """Exercise analyze's actual prompt and handoff without model or disk work."""
+        from epub_audiobook.cli import main
+        config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
+                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
+                               "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
+                               "attribution_workers": 5, "identity_consensus": True, "attribution_review": True,
+                               "attribution_review_chunk_chars": 1000, "attribution_review_notes": None,
+                               "cast_review_notes": None, "cast_reconciliation_rounds": 1,
+                               "cast_reconciliation_notes": None}, "performance_policy": {}}
+        published, preparations = [], []
+
+        class Client:
+            model, base_url = "test", "https://example.invalid"
+
+            def complete(self, *args, **kwargs):
+                raise AssertionError("This CLI decision test must not call a model")
+
+        def prepare(doc, requests, **kwargs):
+            preparations.append((deepcopy(doc), requests is None))
+            self.assertEqual(kwargs["workers"], 5)
+            return deepcopy(doc)
+
+        def publish(doc, registry, output, exporter, **kwargs):
+            self.assertEqual(output, Path("fresh-book"))
+            self.assertEqual(validate_document(doc), [])
+            published.append(deepcopy(doc))
+            return readiness(doc)
+
+        with patch("epub_audiobook.cli.load_config", return_value=config), \
+                patch("epub_audiobook.cli.source_from", return_value=document["source"]), \
+                patch("epub_audiobook.cli.validate_output", side_effect=lambda path: path), \
+                patch("epub_audiobook.cli.fresh_registry", return_value={}), \
+                patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=Client()), \
+                patch("epub_audiobook.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
+                patch("epub_audiobook.audition_scripts.prepare_document_samples", side_effect=prepare), \
+                patch("epub_audiobook.cli.publish_directory", side_effect=publish), \
+                patch("sys.stdin", input_stream), \
+                patch("sys.stdout", new_callable=StringIO) as output, \
+                patch("sys.stderr", new_callable=StringIO) as diagnostics:
+            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 0)
+        self.assertEqual(len(published), 1)
+        # The refresh after user input must have no request client available.
+        self.assertEqual([no_requests for _, no_requests in preparations], [False, True])
+        return published[0], preparations, output.getvalue(), diagnostics.getvalue()
+
+    def test_cli_analyze_publishes_actual_terminal_choice_and_preserves_source_metadata(self):
+        document = missing()
+        add_lena(document)
+        selected = document["segments"][1]
+        selected["attribution"]["evidence"] = [{"block_id": "b1", "quote": "Mara"}]
+        selected["delivery"] = {"direction": "Quietly", "evidence": [{"block_id": "b1", "quote": "softly"}]}
+        before = deepcopy(document)
+
+        result, preparations, output, diagnostics = self.analyze_with_input(document, Terminal("3\n"))
+
+        self.assertEqual(document, before)
+        self.assertEqual(result["source"], before["source"])
+        self.assertEqual(result["cast"], before["cast"])
+        selected = result["segments"][1]
+        # The actual typed choice wins even though the model only suggested Mara.
+        self.assertEqual((selected["role_id"], selected["voice_id"]), ("lena", "v2"))
+        self.assertEqual(selected["attribution"]["basis"], "user")
+        self.assertEqual(selected["attribution"]["evidence"], before["segments"][1]["attribution"]["evidence"])
+        for key in ("id", "text", "block_id", "start", "end", "delivery"):
+            self.assertEqual(selected[key], before["segments"][1][key])
+        self.assertEqual(result["segments"][0], before["segments"][0])
+        self.assertEqual(result["segments"][2], before["segments"][2])
+        self.assertIsNone(preparations[0][0]["segments"][1]["role_id"])
+        self.assertEqual(preparations[1][0]["segments"][1]["role_id"], "lena")
+        self.assertEqual(result["provenance"]["speaker_decisions"]["decisions"][0]["selected_roles"], ["lena"])
+        self.assertTrue(readiness(result)["ready"])
+        self.assertIn("Speaker number(s)", diagnostics)
+        self.assertIn("Bundle is ready", output)
+        self.assertNotIn("resolve-speakers", diagnostics)
+
+    def test_cli_analyze_nonterminal_publishes_draft_without_reading_input(self):
+        class Unreadable(StringIO):
+            def readline(self, *args, **kwargs):
+                raise AssertionError("analyze must not read nonterminal input")
+
+        document = missing()
+        result, _, output, diagnostics = self.analyze_with_input(document, Unreadable("2\n"))
+
+        self.assertEqual(result, document)
+        self.assertFalse(readiness(result)["ready"])
+        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s2"])
+        self.assertIn("Saving a draft; no terminal input is available", diagnostics)
+        self.assertNotIn("Speaker number(s)", diagnostics)
+        self.assertIn("Bundle is a draft pending review", output)
+
+    def test_cli_analyze_quit_or_eof_publishes_choices_already_made(self):
+        for answers in ("2\nq\n", "2\n"):
+            with self.subTest(answers=answers):
+                document = missing((1, 2))
+                result, _, output, diagnostics = self.analyze_with_input(document, Terminal(answers))
+
+                self.assertEqual((result["segments"][1]["role_id"], result["segments"][1]["voice_id"]), ("mara", "v1"))
+                self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
+                self.assertEqual(result["segments"][2], document["segments"][2])
+                self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s3"])
+                self.assertEqual(result["provenance"]["speaker_decisions"]["remaining_unassigned_segments"], 1)
+                self.assertFalse(readiness(result)["ready"])
+                self.assertIn("Bundle is a draft pending review", output)
+                if answers == "2\n":
+                    self.assertIn("Input ended", diagnostics)
 
     def test_cli_analyze_runs_decisions_after_model_and_before_publication(self):
         from epub_audiobook.cli import main

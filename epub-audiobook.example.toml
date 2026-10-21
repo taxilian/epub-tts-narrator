@@ -33,6 +33,19 @@ retry_max_delay = 60.0
 # Servers using the older token field can set token_limit_field = "max_tokens".
 # api_key may be omitted for local servers that do not require authentication.
 
+# Optional additional text-only confirmation for reusable voice references.
+# The renderer still requires its independent local ASR and all existing guards.
+# Every bounded changed phrase must pass; the complete transcripts must align.
+# Only changed phrases and short source context are sent to JEV.
+# This never relaxes audiobook passage verification or judges voice sound.
+[jev]
+enabled = false
+# api_key = "YOUR_JEV_API_KEY"
+model = "jev-latest"
+# Pin an evaluated model version for repeatability.
+timeout_seconds = 30
+threshold = 0.90
+
 [analysis]
 chunk_chars = 12000
 max_request_chars = 200000

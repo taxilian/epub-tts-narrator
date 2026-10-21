@@ -25,9 +25,23 @@ language = "en"
 # Download the model first; book passages always use the strict speech policy.
 # reference_model = "./models/parakeet-tdt-0.6b-v3"
 
+# Optional global JEV section, already included in epub-audiobook.example.toml.
+# Keep exactly one [jev] table in the combined config; uncomment only if absent.
+# Checks every bounded changed phrase after complete alignment and independent ASR.
+# Only changed phrases and short source context are sent to JEV.
+# No audio is sent, and audiobook passage verification remains unchanged.
+# [jev]
+# enabled = false
+# api_key = "YOUR_JEV_API_KEY"
+# model = "jev-latest"
+# Pin an evaluated model version for repeatability.
+# timeout_seconds = 30
+# threshold = 0.90
+
 [voices]
-# Scripts are selected from the analyzed book; reference_text is the fallback
-# when a character has no suitable passage. Custom casting scripts take precedence.
+# Scripts use substantial source excerpts or prepared character-specific text.
+# This legacy setting is not a generic fallback in the book workflow.
+# Explicit user-edited casting scripts take precedence.
 # Voices are written beneath <book-directory>/voices.
 # Continued books inherit the nearest saved voice in their parent-book chain.
 reference_text = "The morning light fell across the quiet room. I opened the door and listened to the wind in the trees. There was still time to decide what to do next."

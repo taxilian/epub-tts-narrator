@@ -392,6 +392,16 @@ class CastingTerminalTests(unittest.TestCase):
         run_casting(self.session, self.player, input_fn=first_input, output=self.output.append,
                     playback_fn=self.playback)
 
+    def test_external_verification_outage_stops_preparing_more_voices_but_keeps_menu(self):
+        from audiobook_renderer.workflow import VerificationUnavailable
+        self.session.generation_error = VerificationUnavailable("JEV confirmation unavailable; saved audio retained.")
+        self.run_ui("q")
+        self.assertEqual([event for event in self.session.events if event[0] == "generate"],
+                         [("generate", "v1")])
+        self.assertTrue(any("Voice preparation paused" in line for line in self.output))
+        self.assertTrue(any("Voice casting" in line for line in self.output))
+        self.assertIsNone(self.session.row("vn")["selected"])
+
     def test_startup_reuses_active_voices_and_selects_saved_pending_sample_without_generation(self):
         self.session.generate("v1")
         self.session.accept("v1", "v1-take-1")

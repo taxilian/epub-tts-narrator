@@ -26,6 +26,10 @@ class RenderBlocked(ValueError):
     pass
 
 
+class VerificationUnavailable(RenderBlocked):
+    """Stop batch generation while an external verification service is unavailable."""
+
+
 def _seed(base, key, attempt):
     return (base + int(digest(key)[:8], 16) + attempt) % 2**32
 
@@ -82,6 +86,15 @@ def _verification_failure_detail(report):
     }.get(decision)
     if explanation:
         details.append(explanation)
+    judge = report.get("text_judge", {})
+    judge_decision = judge.get("decision") if isinstance(judge, dict) else None
+    judge_explanation = {
+        "different": "JEV found a substantive text difference",
+        "uncertain": "JEV could not confirm equivalent wording",
+        "unavailable": "JEV text confirmation unavailable",
+    }.get(judge_decision)
+    if judge_explanation:
+        details.append(judge_explanation)
     error = report.get("provider_error") or report.get("error")
     if error:
         details.append(safe_error_text(error))
@@ -89,12 +102,40 @@ def _verification_failure_detail(report):
 
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
-                  purpose="speech"):
+                  purpose="speech", resume_attempt=None):
     """Reuse only byte-bound, policy-bound accepted audio. Retain failed takes."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
     accepted_path = directory / "accepted.json"
+
+    def pending_confirmation(report):
+        judge = report.get("text_judge") if isinstance(report, dict) else None
+        return (purpose == "reference" and isinstance(judge, dict)
+                and judge.get("decision") == "unavailable")
+
+    def stop_for_confirmation():
+        raise VerificationUnavailable(
+            "JEV text confirmation is unavailable. Saved audio was retained; "
+            "rerun the same command to retry verification without regenerating it. "
+            f"Inspect {directory}"
+        )
+
+    if resume_attempt is not None:
+        if (purpose != "reference" or type(resume_attempt) is not int
+                or not 1 <= resume_attempt <= 10):
+            raise RenderBlocked("Invalid pending reference attempt")
+        if accepted_path.exists() or accepted_path.is_symlink():
+            raise RenderBlocked("A pending reference cannot resume an accepted candidate")
+        pending_path = directory / f"attempt-{resume_attempt:03d}.json"
+        pending_wav = directory / f"attempt-{resume_attempt:03d}.wav"
+        if any(path.is_symlink() or not path.is_file() for path in (pending_path, pending_wav)):
+            raise RenderBlocked("Pending reference verification requires the saved attempt and audio")
+        pending = read_json(pending_path)
+        if (not isinstance(pending, dict) or pending.get("request_hash") != digest(request)
+                or not pending_confirmation(pending.get("report", {}))):
+            raise RenderBlocked("Saved reference is not awaiting text confirmation")
+
     if accepted_path.exists():
         accepted = read_json(accepted_path)
         name = accepted.get("audio_file", "")
@@ -111,10 +152,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         write_json(accepted_path, accepted)
         if report["passed"]:
             return wav, accepted
+        if pending_confirmation(report):
+            stop_for_confirmation()
     attempts = config["render"]["max_attempts"]
     secrets = configured_secrets(config)
     last_report = None
-    for attempt in range(1, attempts + 1):
+    for attempt in range(resume_attempt or 1, max(attempts, resume_attempt or 1) + 1):
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
         result_path = directory / (prefix + ".json")
@@ -127,7 +170,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             previous = read_json(result_path)
             if previous.get("request_hash") != digest(request):
                 raise RenderBlocked("Attempt belongs to a different synthesis request")
-            if previous.get("validation_key") == validation_key and not previous.get("report", {}).get("passed"):
+            if (previous.get("validation_key") == validation_key
+                    and not previous.get("report", {}).get("passed")
+                    and not pending_confirmation(previous.get("report", {}))):
                 last_report = previous.get("report", {})
                 continue
             metadata = previous.get("engine_metadata", {})
@@ -167,6 +212,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         if report.get("passed") is True:
             write_json(accepted_path, record)
             return wav, record
+        if pending_confirmation(report):
+            stop_for_confirmation()
         detail = _verification_failure_detail(report)
         suffix = f" ({detail})" if detail else ""
         notify(f"  Attempt {attempt}/{attempts} rejected: {', '.join(report.get('reasons', []))}{suffix}")

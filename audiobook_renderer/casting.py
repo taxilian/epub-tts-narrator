@@ -18,10 +18,12 @@ from .common import digest, file_hash, read_json, write_json
 from .quality import validate_audio, validation_key
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import MAX_PROMPT_CHARACTERS, default_voice_prompt as _default_voice_prompt
-from .workflow import RenderBlocked, verified_take
+from .workflow import RenderBlocked, VerificationUnavailable, _seed, verified_take
 
 
 MAX_REFERENCE_CHARACTERS = 1000
+MAX_PENDING_RECORD_BYTES = 4 * 1024 * 1024
+MAX_PENDING_AUDIO_BYTES = 128 * 1024 * 1024
 
 
 def _validate_text(value, label, limit):
@@ -32,6 +34,15 @@ def _validate_text(value, label, limit):
     if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
         raise ValueError(f"{label} contains control characters")
     return value
+
+
+def _require_available_confirmation(report):
+    judge = report.get("text_judge") if isinstance(report, dict) else None
+    if isinstance(judge, dict) and judge.get("decision") == "unavailable":
+        raise VerificationUnavailable(
+            "JEV text confirmation is unavailable. The saved voice was retained; "
+            "rerun the same command to retry verification without regenerating it."
+        )
 
 
 class CastingSession:
@@ -294,7 +305,7 @@ class CastingSession:
         if self._verifier is None:
             if self._verifier_factory is None:
                 from .verification import create_verifier
-                self._verifier = create_verifier(self.config["verification"])
+                self._verifier = create_verifier(self.config["verification"], self.config.get("jev"))
             else:
                 self._verifier = self._verifier_factory(
                     self.config["verification"]["model"], language=self.config["verification"]["language"])
@@ -423,6 +434,92 @@ class CastingSession:
             pending_path.unlink()
         self.notify("Recovered the existing Gemini voice; no new remote voice will be created.")
 
+    def _pending_confirmation(self, request, root):
+        """Find one unpublished, intact take awaiting only external verification."""
+        root = Path(root).absolute()
+        if any(path.is_symlink() for path in (root, *root.parents)):
+            raise RenderBlocked("Pending casting verification cannot follow symlink directories")
+        if not root.exists():
+            return None
+        if not root.is_dir():
+            raise RenderBlocked("The casting candidate directory must be a directory")
+
+        def read_record(path):
+            if (path.is_symlink() or not path.is_file()
+                    or path.stat().st_size > MAX_PENDING_RECORD_BYTES):
+                raise ValueError("unsafe record")
+            record = read_json(path)
+            if not isinstance(record, dict):
+                raise ValueError("invalid record")
+            return record
+
+        saved = self.store.list_candidates(request["voice_id"])
+        published_ids = {item["candidate_id"] for item in saved}
+        published_hashes = {item.get("creation", {}).get("request_hash") for item in saved}
+        current = {key: value for key, value in request.items() if key != "nonce"}
+        matches = []
+        for directory in sorted(root.iterdir()):
+            if directory.is_symlink():
+                raise RenderBlocked("Pending casting verification cannot follow symlink directories")
+            if not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", directory.name):
+                continue
+            accepted = directory / "accepted.json"
+            if accepted.exists() or accepted.is_symlink() or directory.name in published_hashes:
+                continue
+            paths = sorted(directory.glob("attempt-*.json"))
+            if not paths:
+                continue
+            path = paths[-1]
+            try:
+                record = read_record(path)
+                report = record.get("report", {})
+                judge = report.get("text_judge") if isinstance(report, dict) else None
+                if (not isinstance(judge, dict) or judge.get("decision") != "unavailable"
+                        or report.get("purpose") != "reference" or report.get("passed") is not False):
+                    continue
+                previous = record.get("request")
+                if (not isinstance(previous, dict) or record.get("request_hash") != digest(previous)
+                        or digest(previous) != directory.name
+                        or not isinstance(previous.get("nonce"), str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", previous["nonce"])):
+                    raise ValueError("request checksum")
+                if previous["nonce"] in published_ids:
+                    continue
+                if {key: value for key, value in previous.items() if key != "nonce"} != current:
+                    continue
+                attempt = record.get("attempt")
+                if (type(attempt) is not int or not 1 <= attempt <= 10
+                        or path.name != f"attempt-{attempt:03d}.json"
+                        or type(record.get("seed")) is not int
+                        or record.get("seed") != _seed(previous["base_seed"], previous, attempt)
+                        or report.get("expected_text") != previous["text"]):
+                    raise ValueError("attempt identity")
+                name = f"attempt-{attempt:03d}.wav"
+                wav = directory / name
+                if (record.get("audio_file") != name or wav.is_symlink() or not wav.is_file()
+                        or not 0 < wav.stat().st_size <= MAX_PENDING_AUDIO_BYTES
+                        or not isinstance(record.get("audio_sha256"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", record["audio_sha256"])
+                        or file_hash(wav) != record["audio_sha256"]):
+                    raise ValueError("audio checksum")
+                generated = record.get("engine_metadata")
+                if (not isinstance(generated, dict) or generated.get("description_applied") is not True
+                        or generated.get("requested_description", previous["prompt"]) != previous["prompt"]
+                        or generated.get("reference_text", previous["text"]) != previous["text"]):
+                    raise ValueError("voice description")
+                durable_request = directory / "casting-request.json"
+                if (durable_request.exists() or durable_request.is_symlink()) and read_record(durable_request) != previous:
+                    raise ValueError("durable request checksum")
+                matches.append((directory, previous, attempt))
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                raise RenderBlocked(
+                    f"Cannot safely resume pending voice verification at {path}; "
+                    "inspect its request and audio before generating another voice."
+                ) from None
+        if len(matches) > 1:
+            raise RenderBlocked("Multiple matching voice samples await verification; inspect the casting candidates before choosing one")
+        return matches[0] if matches else None
+
     def _generate_locked(self, voice_id):
         profile = self._profile(voice_id)
         draft = self._draft(voice_id, self.store.load(voice_id))
@@ -439,15 +536,24 @@ class CastingSession:
             "series_id": self.store.series_id, "voice_id": voice_id, "profile": profile,
             "prompt": prompt, "text": text, "base_seed": self.config["render"]["seed"],
             "sample_source": deepcopy(draft["sample_source"]),
+            "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
         }
         directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
-        if self.config.get("voice_design", {}).get("type") == "gemini":
+        pending = self._pending_confirmation(request, directory.parent)
+        if pending is not None:
+            directory, request, resume_attempt = pending
+            nonce = request["nonce"]
+            self.notify(f"Retrying verification of the saved voice sample for {voice_id}; no new voice is being generated.")
+        else:
+            resume_attempt = None
+        if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
             self._prepare_gemini_request(request, directory)
-        self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
+        if pending is None:
+            self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
         wav, accepted = verified_take(
             text, lambda path, seed: design_voice(designer, prompt, text, path, seed=seed),
             directory,
-            request, verifier, self.config, notify=self.notify, purpose="reference",
+            request, verifier, self.config, notify=self.notify, purpose="reference", resume_attempt=resume_attempt,
         )
         if accepted.get("engine_metadata", {}).get("description_applied") is not True:
             raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
@@ -582,6 +688,7 @@ class CastingSession:
             self.notify(f"Rechecking saved voice sample for {voice_id}")
             report = validate_audio(wav, text, verifier, self.config["quality"], purpose="reference")
             if not report.get("passed"):
+                _require_available_confirmation(report)
                 raise RenderBlocked("Saved voice sample failed current verification: "
                                     + ", ".join(report.get("reasons", [])))
             reference_text = report.get("reference_text", text)
@@ -666,6 +773,7 @@ class CastingSession:
                 candidate["reference_audio"], candidate["reference_text"], verifier,
                 self.config["quality"], purpose="reference")
             if not report.get("passed"):
+                _require_available_confirmation(report)
                 raise RenderBlocked("Voice candidate failed current verification: " + ", ".join(report["reasons"]))
             if report.get("reference_text", candidate["reference_text"]) != candidate["reference_text"]:
                 raise RenderBlocked(

@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import tomllib
 
+from epub_audiobook.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
+
 
 DEFAULTS = {
     "engine": {
@@ -26,6 +28,7 @@ DEFAULTS = {
         "api_key": None, "model": "gemini-3.8-flash-tts",
         "language_code": "en-US", "timeout_seconds": 180.0,
     },
+    "jev": deepcopy(JEV_DEFAULTS),
     "voices": {
         "directory": None, "series_id": None,
         "reference_text": (
@@ -83,6 +86,7 @@ def load_config(path=None):
             if result[section][key] is None:
                 result[section][key] = default
     result["quality"] = validate_policy(result["quality"])
+    result["jev"] = validate_jev_settings(result["jev"])
     for section, keys in {
         "engine": ("type", "experts"),
         "verification": ("type", "model", "language"),

@@ -216,7 +216,7 @@ def main(argv=None):
                 from epub_audiobook.audition_scripts import ensure_bundle_scripts
                 bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
         engine = create_engine(config["engine"])
-        verifier = create_verifier(config["verification"])
+        verifier = create_verifier(config["verification"], config.get("jev"))
         if args.command == "import-voice":
             result = import_voice(bundle, args.voice_id, args.audio,
                                   args.transcript.read_text(encoding="utf-8"), config, engine, verifier)
