@@ -39,7 +39,7 @@ class VoiceStore:
     LEGACY_CANDIDATE = "legacy"
 
     def __init__(self, directory, series_id, *, aliases=None, cast=None, explicit_aliases=None,
-                 parents=(), alias_loader=None):
+                 parents=(), alias_loader=None, automatic_alias_loader=None):
         from .voice_bindings import canonical_aliases, cast_voice_owners, validate_aliases
         self.series_id = series_id
         self.directory = Path(directory) / digest(series_id)[:24]
@@ -48,7 +48,10 @@ class VoiceStore:
             raise ValueError("A book voice alias loader must be callable")
         if alias_loader is not None and explicit_aliases:
             raise ValueError("Book voice aliases must come from the book alias file")
+        if automatic_alias_loader is not None and not callable(automatic_alias_loader):
+            raise ValueError("An automatic voice alias loader must be callable")
         self._alias_loader = alias_loader
+        self._automatic_alias_loader = automatic_alias_loader
         self._explicit_aliases = validate_aliases(explicit_aliases or {})
         self._aliases = validate_aliases({
             **(aliases or {}),
@@ -56,7 +59,7 @@ class VoiceStore:
                else self._explicit_aliases),
         })
         self._owners = cast_voice_owners(cast) if cast is not None else {}
-        if cast is not None or self.parents or alias_loader is not None:
+        if cast is not None or self.parents or alias_loader is not None or automatic_alias_loader is not None:
             self._alias_state()
 
     @property
@@ -156,6 +159,12 @@ class VoiceStore:
         aliases.update(explicit)
         aliases = validate_aliases(aliases)
         explicit = validate_aliases(explicit)
+        if self._automatic_alias_loader is not None:
+            # The active book may derive backwards-compatible identity links
+            # from the whole chain. Re-evaluate after reading live explicit
+            # policy, so inference never freezes or overrides a user's choice.
+            derived = validate_aliases(self._automatic_alias_loader(dict(aliases)))
+            aliases = validate_aliases({**derived, **aliases})
         validate_alias_ownership(aliases, explicit, owners)
         return aliases, explicit, owners
 

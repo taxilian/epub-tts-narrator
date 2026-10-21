@@ -5,12 +5,16 @@ from __future__ import annotations
 from copy import deepcopy
 from contextlib import ExitStack
 from pathlib import Path
+import os
 import shlex
 import sys
+import textwrap
 
 from .contracts import has_assigned_speakers, readiness, validate_document
 from .pipeline import fingerprint
 from .speaker_completion import ATTRIBUTION_ISSUE_KINDS, unassigned_segments
+from .speaker_suggestions import rank_speakers
+from .narration_identity import author_narrator_name
 
 
 def _display(value):
@@ -18,38 +22,52 @@ def _display(value):
     return "".join(char for char in str(value) if char in "\n\t" or char.isprintable())
 
 
-def _context_text(text, limit=1000):
+def _context_text(text, limit=1000, *, tail=False):
     """Bound supporting context while leaving the actual assignment text whole."""
+    if tail and len(text) > limit:
+        return "[context truncated] … " + text[-limit:]
     return text if len(text) <= limit else text[:limit] + " … [context truncated]"
 
 
-def _role_label(role, characters):
+def _role_label(role, characters, book):
     character = characters.get(role.get("character_id"))
+    author = author_narrator_name(role, book)
+    if author is not None:
+        return f"{author} (author)"
     name = character["name"] if character else "Narrator" if role["kind"] == "narration" else role["description"]
-    return f"{name} ({role['kind']}; {role['id']})"
+    return f"{name} (narrator)" if character and role["kind"] == "narration" else name
 
 
-def _findings(document, segment, labels):
-    audit = document["provenance"].get("speaker_completion", {})
-    case = next((row for row in audit.get("cases", []) if row.get("block_id") == segment["block_id"]), None)
-    if case is None or not case.get("rounds"):
-        return []
-    rows = []
-    for vote in case["rounds"][-1].get("votes", []):
-        names = []
-        for item in vote.get("proposed_segments", []):
-            if item["start"] < segment["end"] and item["end"] > segment["start"]:
-                role_ids = ([row["role_id"] for row in item["simultaneous_speakers"]]
-                            if item.get("simultaneous_speakers") else [item.get("role_id")])
-                for role_id in role_ids:
-                    label = labels.get(role_id, "unresolved")
-                    if label not in names:
-                        names.append(label)
-        response = vote.get("raw_response")
-        response = response if isinstance(response, dict) else {}
-        reason = response.get("reason", vote.get("reason", "No valid source-bound decision."))
-        rows.append(f"{vote['reviewer_id']}: {', '.join(names) or 'no valid decision'} — {str(reason)[:280]}")
-    return rows
+def _role_labels(roles, characters, book):
+    labels = {role["id"]: _role_label(role, characters, book) for role in roles}
+    for describe in (lambda role: role.get("description", ""),
+                     lambda role: characters.get(role.get("character_id"), {}).get("description", "")):
+        groups = {}
+        for role in roles:
+            groups.setdefault(_display(labels[role["id"]]).casefold(), []).append(role)
+        for group in groups.values():
+            if len(group) > 1:
+                for role in group:
+                    description = describe(role).strip()
+                    if description:
+                        labels[role["id"]] += " — " + description
+    groups = {}
+    for role in roles:
+        groups.setdefault(_display(labels[role["id"]]).casefold(), []).append(role)
+    for group in groups.values():
+        if len(group) > 1:
+            # Distinct cast records can have completely identical human metadata.
+            for role in group:
+                labels[role["id"]] += f" [{role['id']}]"
+    return labels
+
+
+def _terminal_width(output_stream):
+    try:
+        columns = os.get_terminal_size(output_stream.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        columns = 88
+    return max(32, min(columns, 100))
 
 
 def _resume_command(book_path):
@@ -60,7 +78,8 @@ def _resume_command(book_path):
     return shlex.join(["epub-audiobook", command, str(path)])
 
 
-def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None):
+def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,
+                            jev_client=None):
     """Ask for every remaining speaker, preserving progress if input ends.
 
     This function is deliberately called only by the CLI after automatic review.
@@ -88,11 +107,17 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             else:
                 return prompt_speaker_decisions(
                     document, book_path=book_path, input_stream=terminal_input,
-                    output_stream=terminal_output)
+                    output_stream=terminal_output, jev_client=jev_client)
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stderr if output_stream is None else output_stream
     def say(message=""):
         print(_display(message), file=output_stream, flush=True)
+    width = _terminal_width(output_stream)
+    def prose(message, indent=""):
+        # Display wrapping only: saved source text and character offsets remain exact.
+        for paragraph in _display(message).splitlines() or [""]:
+            say(textwrap.fill(paragraph, width=width, initial_indent=indent,
+                              subsequent_indent=indent, replace_whitespace=False))
     if not getattr(input_stream, "isatty", lambda: False)():
         say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
         say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
@@ -100,24 +125,46 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
 
     characters = {row["id"]: row for row in result["cast"]["characters"]}
     roles = result["cast"]["roles"]
-    labels = {role["id"]: _role_label(role, characters) for role in roles}
+    roles_by_id = {role["id"]: role for role in roles}
+    labels = _role_labels(roles, characters, result["source"]["book"])
     blocks = result["source"]["blocks"]
     positions = {block["id"]: index for index, block in enumerate(blocks)}
     decisions = []
-    say(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
-    say("Choose a role number. Comma-separated numbers mean those characters speak these SAME words together.")
-    say("A speaker is required for each passage. q saves progress and exits with speaker selection incomplete.")
+    prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
+    prose("Enter accepts the best guess. O shows all voices. Q saves progress and stops.")
+    prose("Comma-separated numbers mean those characters speak these SAME words together.")
     for number, item in enumerate(pending, 1):
         position = positions[item["block_id"]]
         block = blocks[position]
-        say(f"\nPassage {number}/{len(pending)} — {result['source']['book']['title']} — {item['block_id']}:{item['start']}:{item['end']}")
-        for offset in range(max(0, position - 2), min(len(blocks), position + 3)):
-            neighbor = blocks[offset]
-            if neighbor["chapter_id"] != block["chapter_id"]:
-                continue
-            label = (f"Source block [{neighbor['id']}] (context only)" if offset == position
-                     else f"Context [{neighbor['id']}]")
-            say(f"{label}: {_context_text(neighbor['text'])}")
+        say()
+        say("─" * width)
+        prose(f"Passage {number}/{len(pending)} — {result['source']['book']['title']}")
+        chapter = next(row for row in result["source"]["chapters"] if row["id"] == block["chapter_id"])
+        prose(f"{chapter['title']} · [{item['block_id']}:{item['start']}:{item['end']}]")
+        before = [(neighbor["id"], neighbor["text"]) for neighbor in blocks[max(0, position - 2):position]
+                  if neighbor["chapter_id"] == block["chapter_id"]]
+        after = [(neighbor["id"], neighbor["text"]) for neighbor in blocks[position + 1:position + 3]
+                 if neighbor["chapter_id"] == block["chapter_id"]]
+        if block["text"][:item["start"]]:
+            before.append((block["id"], block["text"][:item["start"]]))
+        if block["text"][item["end"]:]:
+            after.insert(0, (block["id"], block["text"][item["end"]:]))
+        if before:
+            say("\nBefore (context)")
+            for block_id, text in before:
+                prose(f"[{block_id}]", indent="  ")
+                prose(_context_text(text.strip(), tail=True), indent="  ")
+                say()
+        else:
+            say()
+        prose(f"PASSAGE TO ASSIGN — {item['end'] - item['start']} characters")
+        prose(item["text"], indent="> ")
+        if after:
+            say("\nAfter (context)")
+            for block_id, text in after:
+                prose(f"[{block_id}]", indent="  ")
+                prose(_context_text(text.strip()), indent="  ")
+                say()
         assigned = [segment for segment in result["segments"]
                     if segment["block_id"] == item["block_id"] and has_assigned_speakers(segment)]
         for segment in assigned:
@@ -126,21 +173,45 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             names = "; ".join(labels[role_id] for role_id in role_ids)
             if len(role_ids) > 1:
                 names += " together"
-            say(f"Already assigned [{segment['block_id']}:{segment['start']}:{segment['end']}] "
-                f"— {names}: {_context_text(segment['text'])}")
-        say(f"Choose a voice only for [{item['block_id']}:{item['start']}:{item['end']}] below "
-            f"({item['end'] - item['start']} characters). The surrounding context keeps its assignments.")
-        say(f"Passage to assign: {item['text']}")
-        candidates = [labels[role_id] for role_id in item["attribution"]["candidates"] if role_id in labels]
-        if candidates:
-            say("Earlier candidates: " + "; ".join(candidates))
-        for finding in _findings(result, item, labels):
-            say(finding)
-        for choice, role in enumerate(roles, 1):
-            say(f"  {choice}. {labels[role['id']]}")
+            prose(f"Already assigned: {names} [{segment['block_id']}:{segment['start']}:{segment['end']}]")
+        prose("Your choice changes only the marked passage; surrounding assignments stay as shown.")
+        if jev_client is not None:
+            say("\nRanking likely speakers with JEV…")
+        ranked = rank_speakers(result, item, jev_client=jev_client)
+        suggestions = []
+        for suggestion in ranked:
+            if suggestion["role_id"] in roles_by_id and suggestion["role_id"] not in {
+                    existing["role_id"] for existing in suggestions}:
+                suggestions.append(suggestion)
+            if len(suggestions) == 3:
+                break
+        shortlist = [roles_by_id[suggestion["role_id"]] for suggestion in suggestions]
+        expanded = False
+        def show_menu():
+            say()
+            if expanded:
+                say("All voices")
+                for choice, role in enumerate(roles, 1):
+                    prose(f"{choice}. {labels[role['id']]}", indent="  ")
+                say("  B. Back to likely speakers")
+            elif shortlist:
+                say("Most likely speakers")
+                for choice, (role, suggestion) in enumerate(zip(shortlist, suggestions), 1):
+                    best = " — best guess (Enter)" if choice == 1 else ""
+                    prose(f"{choice}. {labels[role['id']]}{best}", indent="  ")
+                    if suggestion.get("reason"):
+                        prose(suggestion["reason"], indent="     ")
+            else:
+                say("No likely speaker found. Choose O to see all voices.")
+            if not expanded:
+                say(f"  O. Other — show all {len(roles)} voices")
+            say("  Q. Save and stop")
+        show_menu()
         stop = False
         while True:
-            print("Speaker number(s), q to save and stop: ", end="", file=output_stream, flush=True)
+            controls = "B = back, Q = save and stop" if expanded else (
+                "Enter = 1, O = Other, Q = save and stop" if shortlist else "O = Other, Q = save and stop")
+            print(f"Speaker number(s), {controls}: ", end="", file=output_stream, flush=True)
             try:
                 answer = input_stream.readline()
             except (EOFError, KeyboardInterrupt, OSError):
@@ -153,12 +224,25 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             if answer == "q":
                 stop = True
                 break
+            if answer in {"o", "other"}:
+                expanded = True
+                show_menu()
+                continue
+            if answer == "b" and expanded:
+                expanded = False
+                show_menu()
+                continue
+            visible_roles = roles if expanded else shortlist
+            if answer == "" and not expanded and shortlist:
+                answer = "1"
             parts = [part.strip() for part in answer.split(",")]
             if (not all(part.isdecimal() and len(part) <= 8 for part in parts)
-                    or any(not 1 <= int(part) <= len(roles) for part in parts)):
-                say("Choose a listed role number, comma-separated numbers, or q to save and stop. A blank answer does not skip the passage.")
+                    or any(not 1 <= int(part) <= len(visible_roles) for part in parts)):
+                prose("Choose a displayed number or " + ("B to return to likely speakers." if expanded else "O for other voices.")
+                      + " Q saves and stops.")
+                prose("Enter selects a voice only from the likely-speaker list.")
                 continue
-            choices = [roles[int(part) - 1] for part in parts]
+            choices = [visible_roles[int(part) - 1] for part in parts]
             if len({role["id"] for role in choices}) != len(choices):
                 say("Choose each speaker only once.")
                 continue

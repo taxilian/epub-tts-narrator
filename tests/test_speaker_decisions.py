@@ -3,6 +3,7 @@
 from copy import deepcopy
 from contextlib import nullcontext
 from io import StringIO
+import os
 from pathlib import Path
 from unittest.mock import call, patch
 import unittest
@@ -46,7 +47,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         document = missing()
         document["segments"][1]["delivery"] = {"direction": "Quietly", "evidence": [{"block_id": "b1", "quote": "softly"}]}
         before = deepcopy(document)
-        result, output = self.decide(document, "2\n")
+        result, output = self.decide(document, "1\n")
         self.assertEqual(document, before)
         self.assertEqual(result["source"], before["source"])
         self.assertEqual(result["cast"], before["cast"])
@@ -59,15 +60,16 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(audit["source_fingerprint"], fingerprint(document["source"]))
         self.assertEqual(audit["decisions"][0]["selected_voices"], ["v1"])
         self.assertEqual(audit["remaining_unassigned_segments"], 0)
-        self.assertIn("Mara (dialogue; mara)", output)
-        self.assertIn("Source block [b1]", output)
-        self.assertIn("Passage to assign: “Hello.”", output)
+        self.assertIn("1. Mara — best guess (Enter)", output)
+        self.assertNotIn("dialogue; mara", output)
+        self.assertIn("[b1:18:26]", output)
+        self.assertIn("PASSAGE TO ASSIGN — 8 characters\n> “Hello.”", output)
         self.assertTrue(result["readiness"]["ready"])
 
     def test_comma_numbers_explicitly_assign_simultaneous_characters(self):
         document = missing()
         add_lena(document)
-        result, output = self.decide(document, "2,3\n")
+        result, output = self.decide(document, "o\n2,3\n")
         selected = result["segments"][1]
         self.assertIsNone(selected["role_id"])
         self.assertIsNone(selected["voice_id"])
@@ -92,11 +94,11 @@ class SpeakerDecisionTests(unittest.TestCase):
         document["segments"] = [thought, tail, document["segments"][2]]
         before = deepcopy(document)
         result, output = self.decide(document, "q\n")
-        self.assertIn("Source block [b1] (context only): " + text, output)
-        self.assertIn(f"Already assigned [b1:{boundary}:{len(text)}] — Narrator (narration; narrator): " + text[boundary:], output)
-        self.assertIn("Choose a voice only for [b1:0:29] below (29 characters)", output)
-        self.assertIn("Passage to assign: " + text[:boundary], output)
-        self.assertNotIn("Passage to assign: " + text, output)
+        self.assertIn("After (context)\n  [b1]\n  " + text[boundary:].strip(), output)
+        self.assertIn(f"Already assigned: Narrator [b1:{boundary}:{len(text)}]", output)
+        self.assertIn("[b1:0:29]", output)
+        self.assertIn("PASSAGE TO ASSIGN — 29 characters\n> " + text[:boundary], output)
+        self.assertNotIn("> " + text, output)
         self.assertEqual(document, before)
         self.assertEqual(result["segments"], before["segments"])
 
@@ -119,18 +121,24 @@ class SpeakerDecisionTests(unittest.TestCase):
         narration.update(id="s4", block_id="b3", end=len(third["text"]), text=third["text"])
         document["segments"] = [target, later, narration]
         _, output = self.decide(document, "q\n")
-        self.assertIn("Context [b2]: “Jasper.”", output)
-        self.assertIn("Context [b3]: Two feminine voices called my name.", output)
+        self.assertIn("  [b2]\n  “Jasper.”", output)
+        self.assertIn("  [b3]\n  Two feminine voices called my name.", output)
 
     def test_context_is_bounded_but_passage_is_whole_and_display_is_sanitized(self):
         document = missing((2,))
         text = "ordinary text " * 100
+        context = document["source"]["blocks"][0]["text"] + text
+        document["source"]["blocks"][0]["text"] = context
+        document["segments"][1].update(text=context[document["segments"][1]["start"]:], end=len(context))
         document["source"]["blocks"][1]["text"] = text
         document["segments"][2].update(text=text, end=len(text))
         document["cast"]["characters"][0]["name"] = "Mara\x1b"
         _, output = self.decide(document, "q\n")
-        self.assertIn("Source block [b2] (context only): " + text[:1000] + " … [context truncated]", output)
-        self.assertIn("Passage to assign: " + text, output)
+        self.assertIn("[context truncated]", output)
+        target_lines = [line[2:] for line in output.splitlines() if line.startswith("> ")]
+        self.assertEqual(" ".join(target_lines), text.strip())
+        self.assertTrue(all(len(line) <= 88 for line in target_lines))
+        self.assertIn("\n\nPASSAGE TO ASSIGN", output)
         self.assertNotIn("\x1b", output)
 
     def test_invalid_numbers_duplicate_roles_narrators_and_duplicate_voices_reprompt(self):
@@ -139,30 +147,109 @@ class SpeakerDecisionTests(unittest.TestCase):
         duplicate = deepcopy(document["cast"]["roles"][1])
         duplicate["id"] = "mara_other"
         document["cast"]["roles"].append(duplicate)
-        result, output = self.decide(document, "0\nx\n2,2\n1,2\n2,4\n2,3\n")
+        result, output = self.decide(document, "o\n0\nx\n2,2\n1,2\n2,4\n2,3\n")
         self.assertEqual(unassigned_segments(result), [])
         self.assertIn("Choose each speaker only once", output)
         self.assertIn("narration cannot be a group member", output)
-        self.assertEqual(output.count("Speaker number(s),"), 6)
+        self.assertEqual(output.count("Speaker number(s),"), 7)
 
     def test_all_roles_are_available_even_when_not_in_candidate_list(self):
         document = missing()
         add_lena(document)
-        result, _ = self.decide(document, "3\n")
+        result, output = self.decide(document, "o\n3\n")
+        self.assertNotIn("3. Lena", output.split("All voices", 1)[0])
+        self.assertIn("3. Lena", output.split("All voices", 1)[1])
         self.assertEqual(result["segments"][1]["role_id"], "lena")
 
-    def test_blank_and_previous_skip_command_reprompt_then_quit_keeps_decisions(self):
-        document = missing((0, 1, 2))
-        result, output = self.decide(document, "\np\n1\nq\n")
-        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s2", "s3"])
-        self.assertEqual(result["segments"][0]["attribution"]["basis"], "user")
-        self.assertEqual(output.count("Speaker number(s),"), 4)
-        self.assertIn("A blank answer does not skip the passage", output)
+    def test_enter_accepts_best_guess_then_quit_keeps_decisions(self):
+        document = missing((1, 2))
+        result, output = self.decide(document, "\nq\n")
+        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s3"])
+        self.assertEqual(result["segments"][1]["role_id"], "mara")
+        self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
+        self.assertEqual(output.count("Speaker number(s),"), 2)
+        self.assertIn("Enter accepts the best guess", output)
         self.assertIn("epub-audiobook resolve-speakers 'books/A Book'", output)
         self.assertFalse(result["readiness"]["ready"])
 
+    def test_enter_in_full_cast_does_not_select_and_back_restores_shortlist_mapping(self):
+        document = missing()
+        add_lena(document)
+        result, output = self.decide(document, "o\n\nb\n1\n")
+        self.assertEqual(result["segments"][1]["role_id"], "mara")
+        self.assertIn("1. Narrator", output.split("All voices", 1)[1])
+        self.assertIn("Enter selects a voice only", output)
+        self.assertEqual(output.count("Most likely speakers"), 2)
+
+    def test_no_likely_options_requires_other_and_never_accepts_blank(self):
+        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=[]):
+            result, output = self.decide(missing(), "\n1\no\n2\n")
+        self.assertEqual(result["segments"][1]["role_id"], "mara")
+        self.assertIn("No likely speaker found", output)
+        self.assertEqual(output.count("Speaker number(s),"), 4)
+
+    def test_three_ranked_choices_use_ranking_order_not_full_cast_order(self):
+        document = missing()
+        add_lena(document)
+        ranked = [{"role_id": role, "reason": "Plausible in this scene.", "score": score}
+                  for score, role in zip((3, 2, 1), ("lena", "mara", "narrator"))]
+        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=ranked):
+            result, output = self.decide(document, "1\n")
+        self.assertEqual(result["segments"][1]["role_id"], "lena")
+        self.assertIn("1. Lena — best guess", output)
+        self.assertIn("2. Mara", output)
+        self.assertIn("3. Narrator", output)
+        self.assertNotIn("All voices", output)
+
+    def test_full_cast_distinguishes_same_named_characters_without_raw_ids(self):
+        document = missing()
+        add_lena(document)
+        document["cast"]["characters"][1]["name"] = "Mara"
+        document["cast"]["roles"][2]["description"] = "Mara the shopkeeper."
+        result, output = self.decide(document, "o\n3\n")
+        self.assertIn("2. Mara — Mara speaking.", output)
+        self.assertIn("3. Mara — Mara the shopkeeper.", output)
+        self.assertNotIn("[mara]", output)
+        self.assertNotIn("[lena]", output)
+        self.assertEqual(result["segments"][1]["role_id"], "lena")
+
+    def test_character_narration_is_distinct_from_their_dialogue_voice(self):
+        document = missing()
+        document["cast"]["roles"][0].update(character_id="c1", voice_id="v1")
+        for segment in document["segments"]:
+            if segment["role_id"] == "narrator":
+                segment["voice_id"] = "v1"
+        result, output = self.decide(document, "o\n1\n")
+        self.assertIn("1. Mara (narrator)", output)
+        self.assertIn("2. Mara\n", output)
+        self.assertEqual(result["segments"][1]["role_id"], "narrator")
+        self.assertEqual(result["segments"][1]["kind"], "narration")
+
+    def test_author_narration_is_named_from_book_metadata_in_full_cast(self):
+        document = missing()
+        document["source"]["book"]["authors"] = ["Nathan Thompson"]
+        document["cast"]["roles"][0]["description"] = "Author afterword and acknowledgments."
+        result, output = self.decide(document, "o\n1\n")
+        self.assertIn("1. Nathan Thompson (author)", output)
+        self.assertEqual(result["segments"][1]["role_id"], "narrator")
+        self.assertEqual(result["source"], document["source"])
+
+    def test_context_and_options_wrap_to_a_narrow_terminal(self):
+        document = missing()
+        document["source"]["book"]["title"] = "A long title that should still be readable in a narrow terminal window"
+        with patch("epub_audiobook.speaker_decisions.os.get_terminal_size",
+                   return_value=os.terminal_size((48, 24))):
+            # StringIO lacks fileno; supply a stream with an explicit terminal descriptor.
+            class Output(StringIO):
+                def fileno(self):
+                    return 2
+            output = Output()
+            prompt_speaker_decisions(document, input_stream=Terminal("q\n"), output_stream=output)
+        displayed = output.getvalue().split("Speaker number(s),", 1)[0].splitlines()
+        self.assertTrue(all(len(line) <= 48 for line in displayed), displayed)
+
     def test_eof_preserves_earlier_decisions_and_leaves_remaining_pending(self):
-        result, output = self.decide(missing((1, 2)), "2\n")
+        result, output = self.decide(missing((1, 2)), "1\n")
         self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s3"])
         self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
         self.assertIn("Input ended", output)
@@ -172,9 +259,11 @@ class SpeakerDecisionTests(unittest.TestCase):
             def readline(self):
                 raise AssertionError("Noninteractive input must not be read")
         document, output = missing(), StringIO()
-        with patch("epub_audiobook.speaker_decisions.open") as terminal_open:
+        with patch("epub_audiobook.speaker_decisions.open") as terminal_open, \
+                patch("epub_audiobook.speaker_decisions.rank_speakers") as rank:
             result = prompt_speaker_decisions(document, book_path="book-01", input_stream=Unreadable("2\n"), output_stream=output)
         terminal_open.assert_not_called()
+        rank.assert_not_called()
         self.assertEqual(result, document)
         self.assertIn("Speaker selection incomplete", output.getvalue())
         self.assertIn("epub-audiobook resolve-speakers book-01", output.getvalue())
@@ -183,7 +272,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         class Unreadable(StringIO):
             def readline(self):
                 raise AssertionError("The redirected input must not be consumed")
-        terminal_input, terminal_output = Terminal("2\n"), StringIO()
+        terminal_input, terminal_output = Terminal("1\n"), StringIO()
         redirected_output = StringIO()
         with patch("sys.stdin", Unreadable()), patch("sys.stderr", redirected_output), \
                 patch("epub_audiobook.speaker_decisions.open", side_effect=[
@@ -196,7 +285,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(redirected_output.getvalue(), "")
 
     def test_controlling_terminal_uses_explicit_output_and_preserves_decisions_at_eof(self):
-        terminal_input, output = Terminal("2\n"), StringIO()
+        terminal_input, output = Terminal("1\n"), StringIO()
         with patch("sys.stdin", StringIO()), \
                 patch("epub_audiobook.speaker_decisions.open", return_value=nullcontext(terminal_input)) as terminal_open:
             result = prompt_speaker_decisions(missing((1, 2)), book_path="book-01", output_stream=output)
@@ -219,7 +308,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertNotIn("Speaker number(s)", output.getvalue())
 
     def test_terminal_output_open_failure_closes_input_and_leaves_passage_unassigned(self):
-        terminal_input, output = Terminal("2\n"), StringIO()
+        terminal_input, output = Terminal("1\n"), StringIO()
         document = missing()
         with patch("sys.stdin", StringIO()), patch("sys.stderr", output), \
                 patch("epub_audiobook.speaker_decisions.open", side_effect=[terminal_input, OSError("Output unavailable")]):
@@ -235,7 +324,7 @@ class SpeakerDecisionTests(unittest.TestCase):
             {"id": "b", "kind": "attribution_consensus", "target": "b1", "reason": "Unknown.", "resolved": False},
             {"id": "c", "kind": "casting", "target": "b1", "reason": "Review voice.", "resolved": False},
         ]
-        result, _ = self.decide(document, "2\n")
+        result, _ = self.decide(document, "1\n")
         self.assertEqual([issue["resolved"] for issue in result["issues"]], [True, True, False])
         class NoRequests:
             def run(self, *args, **kwargs):
@@ -244,7 +333,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(retried["segments"], result["segments"])
         self.assertEqual(retried["provenance"]["speaker_decisions"], result["provenance"]["speaker_decisions"])
 
-    def test_final_jury_findings_are_displayed_without_terminal_control_sequences(self):
+    def test_compact_reasons_replace_raw_jury_reports_and_strip_terminal_controls(self):
         document = missing()
         proposal = deepcopy(document["segments"][1])
         proposal.update(role_id="mara", voice_id="v1")
@@ -252,10 +341,24 @@ class SpeakerDecisionTests(unittest.TestCase):
             {"reviewer_id": "speaker_completion_1", "proposed_segments": [proposal],
              "raw_response": {"reason": "The tag names Mara.\x1b[31m"}},
         ]}]}]}
-        _, output = self.decide(document, "p\n")
-        self.assertIn("speaker_completion_1: Mara", output)
+        ranked = [{"role_id": "mara", "score": 1, "reason": "The tag names Mara.\x1b[31m"}]
+        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=ranked):
+            result, output = self.decide(document, "q\n")
+        self.assertEqual(result["segments"], document["segments"])
+        self.assertNotIn("speaker_completion_1", output)
         self.assertIn("The tag names Mara", output)
         self.assertNotIn("\x1b", output)
+
+    def test_jev_client_reaches_lazy_ranker_through_controlling_terminal(self):
+        client = object()
+        terminal_input, output = Terminal("q\n"), StringIO()
+        with patch("sys.stdin", StringIO()), \
+                patch("epub_audiobook.speaker_decisions.open", return_value=nullcontext(terminal_input)), \
+                patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=[]) as rank:
+            result = prompt_speaker_decisions(missing(), jev_client=client, output_stream=output)
+        self.assertIs(rank.call_args.kwargs["jev_client"], client)
+        self.assertIn("Ranking likely speakers with JEV", output.getvalue())
+        self.assertEqual(len(unassigned_segments(result)), 1)
 
     def analyze_with_input(self, document, input_stream, expected_status=0):
         """Exercise analyze's actual prompt and handoff without model or disk work."""
@@ -312,7 +415,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         selected["delivery"] = {"direction": "Quietly", "evidence": [{"block_id": "b1", "quote": "softly"}]}
         before = deepcopy(document)
 
-        result, preparations, output, diagnostics = self.analyze_with_input(document, Terminal("3\n"))
+        result, preparations, output, diagnostics = self.analyze_with_input(document, Terminal("o\n3\n"))
 
         self.assertEqual(document, before)
         self.assertEqual(result["source"], before["source"])
@@ -353,7 +456,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertNotIn("draft", output)
 
     def test_cli_analyze_quit_or_eof_publishes_choices_already_made(self):
-        for answers in ("2\nq\n", "2\n"):
+        for answers in ("1\nq\n", "1\n"):
             with self.subTest(answers=answers):
                 document = missing((1, 2))
                 result, _, output, diagnostics = self.analyze_with_input(document, Terminal(answers), expected_status=2)
@@ -367,7 +470,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 self.assertIn("Bundle created", output)
                 self.assertIn("Speaker selection incomplete", diagnostics)
                 self.assertNotIn("draft", output)
-                if answers == "2\n":
+                if answers == "1\n":
                     self.assertIn("Input ended", diagnostics)
 
     def test_cli_analyze_runs_decisions_after_model_and_before_publication(self):

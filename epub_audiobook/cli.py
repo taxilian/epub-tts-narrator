@@ -20,6 +20,7 @@ from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerp
                        make_units, seed_cast, write_json)
 from .attribution_review import audit_attribution, count_review_batches
 from .speaker_decisions import prompt_speaker_decisions
+from .jev import JevClient
 from .provider import OpenAICompatibleClient, ProviderError
 from .series import link_analysis, load_registry, save_registry, series_context
 from .analysis_directory import (
@@ -46,6 +47,15 @@ def _speaker_completion_status(document):
         return 2
     print("All spoken passages have assigned voices. No review step is required.")
     return 0
+
+
+def _speaker_judge(config):
+    """Reuse optional global JEV settings; constructing a client sends no text."""
+    settings = config.get("jev", {})
+    if not settings.get("enabled", False):
+        return None
+    return JevClient(settings["api_key"], model=settings["model"],
+                     timeout_seconds=settings["timeout_seconds"])
 
 
 def read_analysis(path):
@@ -350,7 +360,7 @@ def main(argv=None):
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
                                         target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
-        revised = prompt_speaker_decisions(revised, book_path=directory)
+        revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config))
         if revised != original:
             # Prepared books already have creative scripts. Newly assigned
             # dialogue can improve their auditions without another model call.
@@ -399,8 +409,10 @@ def main(argv=None):
                     documents[directory], requests, workers=min(5, settings["attribution_workers"]),
                     target_block_ids=targets, retry_unresolved=True,
                     progress=lambda message: print(message, file=sys.stderr))
+            judge = _speaker_judge(config)
             for directory in revised:
-                revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory)
+                revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory,
+                                                             jev_client=judge)
             changed = {path: document for path, document in revised.items() if document != documents[path]}
             if changed:
                 result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes)
@@ -558,7 +570,7 @@ def main(argv=None):
             document = prepare_document_samples(document, sample_requests,
                 workers=min(5, settings["attribution_workers"]),
                 progress=lambda message: print(message, file=sys.stderr))
-            document = prompt_speaker_decisions(document, book_path=args.output)
+            document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config))
             # Human choices may make additional real dialogue available. All
             # creative scripts already exist, so this refresh makes no calls.
             document = prepare_document_samples(document, None,

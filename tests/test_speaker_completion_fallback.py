@@ -87,16 +87,16 @@ class AutomaticCompletionTargetsTests(unittest.TestCase):
                 self.assertIn("b1", automatic_completion_targets(document))
 
     def test_partial_manual_decisions_elsewhere_do_not_restart_remaining_cases(self):
-        document = prompt_speaker_decisions(self.blocked, input_stream=Terminal("1\nq\n"), output_stream=StringIO())
+        document = prompt_speaker_decisions(self.blocked, input_stream=Terminal("o\n1\nq\n"), output_stream=StringIO())
         self.assertEqual(len(unassigned_segments(document)), 2)
         self.assertEqual(automatic_completion_targets(document), [])
 
     def test_partial_manual_decisions_in_same_block_use_audited_fingerprint_chain(self):
         blocked = complete_speakers(paired_document(), PairedRequests(uncertain))
-        first = prompt_speaker_decisions(blocked, input_stream=Terminal("2\nq\n"), output_stream=StringIO())
+        first = prompt_speaker_decisions(blocked, input_stream=Terminal("o\n2\nq\n"), output_stream=StringIO())
         self.assertEqual(len(unassigned_segments(first)), 2)
         self.assertEqual(automatic_completion_targets(first), [])
-        second = prompt_speaker_decisions(first, input_stream=Terminal("1\nq\n"), output_stream=StringIO())
+        second = prompt_speaker_decisions(first, input_stream=Terminal("o\n1\nq\n"), output_stream=StringIO())
         self.assertEqual(len(unassigned_segments(second)), 1)
         self.assertEqual(automatic_completion_targets(second), [])
         broken = deepcopy(second)

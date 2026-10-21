@@ -92,6 +92,18 @@ class VoicePromptRefreshTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in payload["roles"]}, {"narrator", "mara"})
         self.assertEqual(payload["current_prompt"], "A warm voice.")
 
+    def test_author_name_and_narration_scope_reach_refresh_with_inference_guidance(self):
+        data, requests = bundle(), Requests()
+        data["source"]["book"]["authors"] = ["Nathan Thompson"]
+        role = next(row for row in data["cast"]["roles"] if row["kind"] == "narration")
+        role.update(character_id=None, description="Author narration for the afterword.")
+        refresh_voice_descriptions(data, requests, voice_ids=[role["voice_id"]])
+        system, payload = requests.calls[0]
+        self.assertEqual(payload["book"]["authors"], ["Nathan Thompson"])
+        self.assertIn(role, payload["roles"])
+        self.assertIn("tentative name-based casting inference", system)
+        self.assertIn("Preserve a deliberately chosen existing", system)
+
     def test_inherited_canonical_id_absent_from_current_cast_still_gets_one_prompt(self):
         data, requests = bundle(), Requests()
         result = refresh_voice_descriptions(

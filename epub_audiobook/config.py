@@ -13,6 +13,7 @@ import tomllib
 from typing import Any
 
 from .pipeline import DEFAULT_POLICY
+from .jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
 
 DEFAULT_FILENAME = "epub-audiobook.toml"
@@ -48,6 +49,7 @@ DEFAULTS = {
     },
     "extraction": {"include_auxiliary": False},
     "performance_policy": dict(DEFAULT_POLICY),
+    "jev": deepcopy(JEV_DEFAULTS),
 }
 
 
@@ -151,6 +153,11 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     for section, settings in supplied.items():
         if not isinstance(settings, dict):
             raise ValueError(f"Configuration {section} must be a table.")
+        if section == "jev":
+            # This optional evaluator serves both speech verification and the
+            # analyzer's interactive speaker shortlist from the same file.
+            result[section] = validate_jev_settings(settings)
+            continue
         if section in RENDERER_DEFAULTS:
             if section == "voices" and "aliases" in settings:
                 raise ValueError("voices.aliases is book-specific and cannot be in global configuration; "

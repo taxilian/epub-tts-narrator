@@ -300,6 +300,7 @@ class CastingSession:
             return {"voices": list(groups), "history": str(history)}
 
     def rows(self):
+        from epub_audiobook.narration_identity import author_narrator_name
         from .samples import MissingSampleScript
         self._validate_paths()
         cast = self.bundle["cast"]
@@ -328,10 +329,15 @@ class CastingSession:
                 narrators = list(dict.fromkeys(
                     character_names[role["character_id"]] for role in roles
                     if role.get("kind") == "narration" and role.get("character_id") in character_names))
+                authors = list(dict.fromkeys(
+                    name for role in roles
+                    if (name := author_narrator_name(role, self.bundle["source"]["book"])) is not None))
                 prefix, colon, _ = profile["description"].partition(":")
                 prefix = prefix.strip()
                 if narrators:
                     label = ", ".join(narrators) + " (narration)"
+                elif authors:
+                    label = ", ".join(authors) + " (author)"
                 elif colon and 0 < len(prefix) <= 60:
                     label = prefix.removesuffix(" voice")
                 else:

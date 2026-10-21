@@ -16,6 +16,7 @@ from epub_audiobook.analysis_directory import (
 from epub_audiobook.audition_scripts import prepare_document_samples
 from epub_audiobook.analysis_revision import related_directories
 from epub_audiobook.cli import export_bundle, main, source_from
+from epub_audiobook.jev import JevError
 from epub_audiobook.pipeline import CachedRequests, analyze, fingerprint, write_json
 from epub_audiobook.provider import ProviderError
 from epub_audiobook.series import link_analysis
@@ -79,6 +80,20 @@ class TruncatedCompletionClient(CompletionClient):
         return super().complete(system, payload)
 
 
+class SpeakerJudge:
+    """Record the separate suggestion request without using a remote service."""
+
+    def __init__(self, *, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def evaluate(self, state, questions):
+        self.calls.append((deepcopy(state), deepcopy(questions)))
+        if self.fail:
+            raise JevError("Fixture suggestion service unavailable")
+        return {"answers": {name: {"type": "noul", "noul": .8} for name in questions}}
+
+
 class AnalyzeResumeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -128,6 +143,77 @@ class AnalyzeResumeTests(unittest.TestCase):
     def snapshot(self, path):
         return {str(item.relative_to(path)): item.read_bytes() for item in path.rglob("*") if item.is_file()}
 
+    def enable_jev(self):
+        with self.config.open("a") as stream:
+            stream.write('[jev]\nenabled=true\napi_key="fixture-suggestion-key"\n'
+                         'model="jev-fixture"\ntimeout_seconds=17\n')
+
+    def test_global_jev_settings_reach_unresolved_menu_for_both_commands(self):
+        self.enable_jev()
+        for number, command in enumerate(("analyze", "resolve-speakers"), 1):
+            with self.subTest(command=command):
+                _, path, original = self.seed(number)
+                judge = SpeakerJudge()
+                with patch("epub_audiobook.cli.JevClient", return_value=judge) as factory:
+                    status, _, error, _ = self.run_cli(
+                        path, answers="\n", client=CompletionClient(uncertain=True), command=command)
+                self.assertEqual(status, 0, error)
+                factory.assert_called_once_with("fixture-suggestion-key", model="jev-fixture", timeout_seconds=17.0)
+                self.assertEqual(len(judge.calls), 1)
+                state, questions = judge.calls[0]
+                pending = unassigned_segments(original)[0]
+                self.assertEqual(state["target"], {key: pending[key] for key in ("block_id", "start", "end", "text")})
+                self.assertTrue(questions)
+                self.assertTrue(state["surrounding_source"])
+                self.assertIn("JEV", error)
+                updated = _completed_directory(path)[0]
+                self.assertFalse(unassigned_segments(updated))
+                chosen = next(row for row in updated["segments"] if row["attribution"]["basis"] == "user")
+                self.assertIn(chosen["role_id"], {candidate["role_id"] for candidate in state["candidates"]})
+                self.assertEqual(updated["source"], original["source"])
+                self.assertEqual(updated["cast"], original["cast"])
+
+    def test_disabled_jev_does_not_construct_client_for_manual_menu(self):
+        for number, command in enumerate(("analyze", "resolve-speakers"), 1):
+            with self.subTest(command=command):
+                _, path, _ = self.seed(number)
+                with patch("epub_audiobook.cli.JevClient") as factory:
+                    status, _, error, _ = self.run_cli(
+                        path, answers="o\n2\n", client=CompletionClient(uncertain=True), command=command)
+                self.assertEqual(status, 0, error)
+                factory.assert_not_called()
+                self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
+
+    def test_fully_resolved_books_do_not_call_jev_even_when_enabled(self):
+        self.enable_jev()
+        for number, command in enumerate(("analyze", "resolve-speakers"), 1):
+            with self.subTest(command=command):
+                _, path, _ = self.seed(number, missing=False)
+                before = self.snapshot(path)
+                judge = SpeakerJudge()
+                with patch("epub_audiobook.cli.JevClient", return_value=judge):
+                    status, _, error, provider = self.run_cli(path, command=command)
+                self.assertEqual(status, 0, error)
+                provider.assert_not_called()
+                self.assertFalse(judge.calls)
+                self.assertEqual(self.snapshot(path), before)
+
+    def test_jev_failure_keeps_manual_menu_usable_for_both_commands(self):
+        self.enable_jev()
+        for number, command in enumerate(("analyze", "resolve-speakers"), 1):
+            with self.subTest(command=command):
+                _, path, original = self.seed(number)
+                judge = SpeakerJudge(fail=True)
+                with patch("epub_audiobook.cli.JevClient", return_value=judge):
+                    status, _, error, _ = self.run_cli(
+                        path, answers="o\n2\n", client=CompletionClient(uncertain=True), command=command)
+                self.assertEqual(status, 0, error)
+                self.assertEqual(len(judge.calls), 1)
+                updated = _completed_directory(path)[0]
+                self.assertFalse(unassigned_segments(updated))
+                chosen = next(row for row in updated["segments"] if row["attribution"]["basis"] == "user")
+                self.assertEqual(chosen["role_id"], original["cast"]["roles"][1]["id"])
+
     def test_same_epub_and_output_resume_only_missing_speakers_with_original_cast(self):
         epub, path, original = self.seed()
         client = CompletionClient()
@@ -148,7 +234,7 @@ class AnalyzeResumeTests(unittest.TestCase):
                 _, path, _ = self.seed(2 if explicit else 1)
                 args = [path, "-o", path] if explicit else [path]
                 client = CompletionClient(uncertain=True)
-                status, _, error, _ = self.run_cli(*args, answers="2\n", client=client)
+                status, _, error, _ = self.run_cli(*args, answers="o\n2\n", client=client)
                 self.assertEqual(status, 0, error)
                 result = _completed_directory(path)[0]
                 self.assertFalse(unassigned_segments(result))
@@ -213,7 +299,7 @@ class AnalyzeResumeTests(unittest.TestCase):
     def test_existing_prepared_auditions_refresh_locally_after_human_selection(self):
         _, path, _ = self.seed(prepared=True)
         with patch("epub_audiobook.audition_scripts.prepare_document_samples", wraps=prepare_document_samples) as prepare:
-            status, _, error, _ = self.run_cli(path, answers="2\n", client=CompletionClient(uncertain=True))
+            status, _, error, _ = self.run_cli(path, answers="o\n2\n", client=CompletionClient(uncertain=True))
         self.assertEqual(status, 0, error)
         prepare.assert_called_once()
         self.assertIsNone(prepare.call_args.args[1])
@@ -257,7 +343,7 @@ class AnalyzeResumeTests(unittest.TestCase):
     def test_resolve_speakers_retries_completed_jury_then_prompts_if_still_unresolved(self):
         _, path, _ = self.seed(completed_jury=True)
         client = CompletionClient(uncertain=True)
-        status, _, error, provider = self.run_cli(path, answers="2\n", client=client, command="resolve-speakers")
+        status, _, error, provider = self.run_cli(path, answers="o\n2\n", client=client, command="resolve-speakers")
         self.assertEqual(status, 0, error)
         provider.assert_called_once()
         self.assertEqual(len(client.calls), 9)
@@ -268,7 +354,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         _, path, original = self.seed(missing_all=True, completed_jury=True)
         self.assertGreater(len(unassigned_segments(original)), 2)
         first = CompletionClient(uncertain=True)
-        status, _, error, provider = self.run_cli(path, answers="1\n1\nq\n", client=first)
+        status, _, error, provider = self.run_cli(path, answers="o\n1\no\n1\nq\n", client=first)
         self.assertEqual(status, 2, error)
         provider.assert_called_once()
         self.assertGreater(len(first.calls), 0)
@@ -278,7 +364,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertTrue({row["block_id"] for row in choices.values()} &
                         {row["block_id"] for row in unassigned_segments(intermediate)},
                         "A saved choice and a remaining passage must share one source block")
-        answers = "1\n" * len(unassigned_segments(intermediate))
+        answers = "o\n1\n" * len(unassigned_segments(intermediate))
         second = CompletionClient(uncertain=True)
         status, _, error, provider = self.run_cli(path, answers=answers, client=second)
         self.assertEqual(status, 0, error)
@@ -294,7 +380,7 @@ class AnalyzeResumeTests(unittest.TestCase):
     def test_exhausted_truncation_reaches_manual_prompt_without_accepting_two_votes(self):
         _, path, original = self.seed()
         client = TruncatedCompletionClient()
-        status, _, error, _ = self.run_cli(path, answers="1\n", client=client)
+        status, _, error, _ = self.run_cli(path, answers="o\n1\n", client=client)
         self.assertEqual(status, 0, error)
         self.assertIn("truncated", error)
         self.assertIn("Speaker number(s)", error)

@@ -438,10 +438,13 @@ class JevConfigTests(unittest.TestCase):
             self.assertEqual(renderer["jev"]["timeout_seconds"], 15)
             self.assertEqual(renderer["jev"]["threshold"], .97)
             self.assertEqual(analyzer["provider"]["model"], "fixture")
-            self.assertNotIn("jev", analyzer)
+            self.assertEqual(analyzer["jev"], renderer["jev"])
             path.write_text(path.read_text().replace("threshold=0.97", "threshold=true"), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "jev.threshold") as raised:
                 renderer_config(path)
+            self.assertNotIn(SECRET, str(raised.exception))
+            with self.assertRaisesRegex(ValueError, "jev.threshold") as raised:
+                analyzer_config(path)
             self.assertNotIn(SECRET, str(raised.exception))
 
 

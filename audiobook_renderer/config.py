@@ -70,7 +70,7 @@ def load_config(path=None):
         if section == "voices" and isinstance(values, dict) and "aliases" in values:
             raise ValueError("voices.aliases is book-specific and cannot be in global configuration; "
                              "use audiobook-render voice-aliases BOOK --set SOURCE TARGET")
-        if section in ANALYZER_DEFAULTS:
+        if section in ANALYZER_DEFAULTS and section not in DEFAULTS:
             if not isinstance(values, dict) or set(values) - set(ANALYZER_DEFAULTS[section]):
                 raise ValueError("Invalid analyzer configuration section or keys")
             continue

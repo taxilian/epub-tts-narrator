@@ -12,6 +12,7 @@ import unicodedata
 import uuid
 
 from .contracts import validate_document
+from .narration_identity import author_name_key, author_narrator_name
 
 
 SERIES_GUIDANCE = """
@@ -36,6 +37,15 @@ narrator_main is the main narrative frame. Give author afterwords and other
 distinct narration scopes separate roles. An unidentified main narrative frame
 may retain the series' established default narration voice as a casting choice;
 this never establishes a fictional character identity.
+author_narrator_voices identifies separate nonstory author narration casting,
+such as From the Author, author notes, afterwords, and acknowledgments. Use the
+book metadata's author name in the role description and distinguish that role
+from fictional characters, the main story narrator, guests, and editors. An
+unambiguous matching author may reuse the nearest earlier author's casting
+voice; the supplied book and source fingerprint identify that prior profile.
+This is continuity of a chosen audiobook performance, not evidence of the
+author's real voice or fictional character identity. Different or ambiguous
+authors must not be merged; existing current-source evidence rules still apply.
 """
 
 
@@ -153,6 +163,29 @@ def _history(registry, source):
     return books, characters, voices, narrators
 
 
+def _author_narration_history(books, *, exclude_source=None):
+    """Nearest prior author scope wins; ambiguous recent casting stays ambiguous."""
+    result = {}
+    for book in books:
+        if book["source_fingerprint"] == exclude_source:
+            continue
+        authors = {}
+        protected_voices = {character["voice_id"] for character in book["cast"]["characters"]}
+        protected_voices.update(role["voice_id"] for role in book["cast"]["roles"] if role["id"] == "narrator_main")
+        for role in book["cast"]["roles"]:
+            name = author_narrator_name(role, book["book"])
+            if name is not None:
+                record = authors.setdefault(author_name_key(name), {"author_name": name, "voice_ids": set(), "role_ids": []})
+                record["role_ids"].append(role["id"])
+                if role["voice_id"] not in protected_voices:
+                    record["voice_ids"].add(role["voice_id"])
+        for key, record in authors.items():
+            result[key] = {**record, "voice_ids": sorted(record["voice_ids"]),
+                           "source_fingerprint": book["source_fingerprint"], "book": book["book"],
+                           "cast": book["cast"]}
+    return result
+
+
 def series_context(registry, source):
     books, characters, voices, narrators = _history(registry, source)
     resolved = _resolved_review_origins(registry)
@@ -168,7 +201,10 @@ def series_context(registry, source):
                         "traits": [{"name": trait["name"], "value": trait["value"], "basis_in_prior_book": trait["basis"]}
                                    for trait in record["voice"]["traits"]],
                         "source_fingerprint": record["source_fingerprint"]} for identity, record in voices.items()],
-            "narrator_voices": [{"character_id": identity, "voice_ids": sorted(values)} for identity, values in narrators.items()]}
+            "narrator_voices": [{"character_id": identity, "voice_ids": sorted(values)} for identity, values in narrators.items()],
+            "author_narrator_voices": [{key: deepcopy(record[key]) for key in
+                                        ("author_name", "voice_ids", "role_ids", "source_fingerprint", "book")}
+                                       for record in _author_narration_history(books, exclude_source=_hash(source)).values()]}
 
 
 def validate_series_proposals(source, cast, registry):
@@ -374,8 +410,32 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
         if character["id"] in matches:
             voice_ids[character["voice_id"]] = prior[matches[character["id"]]]["voice_id"]
 
+    author_origins, author_voice_records = {}, {}
+    author_history = _author_narration_history(books, exclude_source=source_hash)
+    protected_voices = {character["voice_id"] for character in cast["characters"]}
+    protected_voices.update(role["voice_id"] for role in cast["roles"] if role["id"] == "narrator_main")
+    for role in cast["roles"]:
+        name = author_narrator_name(role, source["book"])
+        record = author_history.get(author_name_key(name)) if name is not None else None
+        if record is None or len(record["voice_ids"]) != 1 or role["voice_id"] in protected_voices:
+            continue
+        identity = record["voice_ids"][0]
+        # Remap the local voice once, preserving any explicit author/editor
+        # sharing instead of separating the roles during continuity linking.
+        voice_ids[role["voice_id"]] = identity
+        author_voice_records[identity] = {
+            "voice": next(voice for voice in record["cast"]["voices"] if voice["id"] == identity),
+            "source_fingerprint": record["source_fingerprint"], "book": record["book"],
+        }
+        origin = {"series_id": registry["series_id"], "basis": "author_narration_casting_continuity",
+                  "author_name": name, "source_fingerprint": record["source_fingerprint"],
+                  "book": deepcopy(record["book"])}
+        for shared in cast["roles"]:
+            if shared["voice_id"] == role["voice_id"]:
+                author_origins[shared["id"]] = origin
+
     def inherited_voice(identity):
-        record = prior_voices[identity]
+        record = author_voice_records.get(identity, prior_voices[identity])
         voice = deepcopy(record["voice"])
         origin = {"kind": "series_casting_reuse", "series_id": registry["series_id"],
                   "source_fingerprint": record["source_fingerprint"], "voice_id": identity}
@@ -424,6 +484,8 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
         shares_character_voice = any(character["voice_id"] == role["voice_id"] for character in cast["characters"])
         role["character_id"] = character_ids.get(local_character)
         role["voice_id"] = voice_ids[role["voice_id"]]
+        if role["id"] in author_origins:
+            role["series_origin"] = deepcopy(author_origins[role["id"]])
         if role["kind"] == "narration" and local_character in matches:
             choices = prior_narrators.get(matches[local_character], set())
             if len(choices) == 1:

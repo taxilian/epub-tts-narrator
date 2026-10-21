@@ -240,6 +240,48 @@ class CastingTests(unittest.TestCase):
         self.assertEqual(self.engine_factories, [])
         self.assertEqual(self.verifier_factories, [])
 
+    def test_author_narration_labels_use_book_author_without_description_colon(self):
+        descriptions = [
+            "Author afterword and acknowledgments (ch0014) and front/back matter; nonstory text distinct from the main narrative frame.",
+            "Author afterword narration by Nathan Thompson: the post-story address, acknowledgments, and promotional links; a distinct narration scope from the story frame.",
+            "Author afterword and acknowledgments by Nathan Thompson; a distinct narration scope separate from the story frame.",
+            "Author back-matter narration: the afterword, acknowledgments, and the Advancement stages appendix, read in the author's own voice rather than the story narrator's.",
+            "Author narration for the copyright page, dedication, the Advancement Stages and Substages appendix, and the afterword; nonstory text outside Jasper's narrative frame.",
+            "Author afterword narration scope for the book's closing chapter; covers the author's direct address, acknowledgments, and promotional notes. Distinct from Jasper's first-person narrative frame, which remains narrator_main.",
+        ]
+        for number, description in enumerate(descriptions, 1):
+            with self.subTest(book=number):
+                bundle = deepcopy(self.bundle)
+                bundle["source"]["book"]["authors"] = ["Nathan Thompson"]
+                bundle["cast"]["voices"].append({"id": "author_voice", "description":
+                    "A warm, friendly authorial voice with a natural mid register and relaxed resonance.", "traits": []})
+                bundle["cast"]["roles"].append({"id": "afterword", "kind": "narration", "voice_id": "author_voice",
+                                                 "character_id": None, "description": description})
+                if number == 5:
+                    bundle["cast"]["roles"].append({"id": "editor_notes", "kind": "narration", "voice_id": "author_voice",
+                        "character_id": None, "description": "Editorial margin-note commentary ([1]-[23]) accompanying the text; nonstory author/editor asides distinct from the narrative frame and from the formal afterword."})
+                session = self.new_session(bundle=bundle)
+                self.addCleanup(session.close)
+                labels = {row["voice_id"]: row["label"] for row in session.rows()}
+                self.assertEqual(labels["author_voice"], "Nathan Thompson (author)")
+                self.assertEqual(labels[self.voice_id], "Mara")
+        self.assertEqual(self.engine_factories, [])
+        self.assertEqual(self.verifier_factories, [])
+
+    def test_author_label_is_metadata_driven_and_retains_voice_alias_identity(self):
+        bundle = deepcopy(self.bundle)
+        bundle["source"]["book"]["authors"] = ["C. Mantis"]
+        bundle["cast"]["voices"].append({"id": "author_voice", "description": "Author voice: Warm and friendly.", "traits": []})
+        bundle["cast"]["roles"].append({"id": "afterword", "kind": "narration", "voice_id": "author_voice",
+                                         "character_id": None, "description": "Author afterword and acknowledgments."})
+        session = self.new_session(bundle=bundle)
+        self.addCleanup(session.close)
+        with patch.object(session.store, "canonical_id", side_effect=lambda voice_id: self.voice_id if voice_id == "author_voice" else voice_id):
+            row = next(row for row in session.rows() if row["voice_id"] == "author_voice")
+        self.assertEqual(row["label"], "C. Mantis (author)")
+        self.assertEqual(row["canonical_voice_id"], self.voice_id)
+        self.assertEqual(row["roles"], ["afterword"])
+
     def test_draft_corruption_and_wrong_voice_are_rejected(self):
         self.session.update_prompt(self.voice_id, "New voice.")
         path = self.session._draft_path(self.voice_id)

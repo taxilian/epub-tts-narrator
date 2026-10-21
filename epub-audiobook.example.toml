@@ -36,6 +36,8 @@ retry_max_delay = 60.0
 # Optional rough-spoken-similarity confirmation for samples and chapter clips.
 # JEV receives the complete requested passage and recognized transcript, no audio.
 # Every nonexact transcript reaches JEV; acoustic failures still reject directly.
+# Also ranks likely speakers in the analyzer's interactive unresolved-passage menu,
+# using the passage, nearby source context, and relevant cast details.
 [jev]
 enabled = false
 # api_key = "YOUR_JEV_API_KEY"

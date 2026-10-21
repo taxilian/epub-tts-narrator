@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_audiobook.config import load_config
+from epub_audiobook.jev import DEFAULTS as JEV_DEFAULTS
 from epub_audiobook.pipeline import DEFAULT_POLICY
 
 
@@ -39,6 +40,7 @@ class ConfigTests(unittest.TestCase):
                          "attribution_workers": 1, "cast_review_notes": "", "series_registry": None},
             "extraction": {"include_auxiliary": False},
             "performance_policy": DEFAULT_POLICY,
+            "jev": JEV_DEFAULTS,
         })
 
     def test_default_file_is_loaded_from_current_directory(self):

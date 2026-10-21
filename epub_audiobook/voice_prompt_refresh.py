@@ -28,6 +28,11 @@ world-specific terms, and lore into concrete audible traits; the description mus
 work without the engine recognizing the character or consulting other context.
 Do not surround the description with quotation marks, use markup or synthesis
 tags, or include the audition words the performer should say.
+For an identified author narration role, use book.authors under the author-name
+casting guidance when the current prompt leaves vocal presentation unspecified.
+If proposing presentation from the author's name, say in reason that it is a
+tentative name-based casting inference. Preserve a deliberately chosen existing
+presentation and do not claim to reproduce the author's actual voice.
 For this refresh task, return exactly
 {"description":"complete voice-creation direction","reason":"brief summary of the refinement"}.
 Do not return voice IDs, traits, evidence, cast changes, or other fields. Existing

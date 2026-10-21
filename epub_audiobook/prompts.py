@@ -17,7 +17,7 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v3
+VOICE PROFILE CONTRACT v4
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
@@ -74,6 +74,20 @@ state the intended presentation. Choose pitch, resonance, texture, and accent
 independently; do not infer those dimensions from gender. When identity is
 unspecified or does not imply one of these choices, do not invent a binary
 presentation. Explicit source evidence of the actual voice takes precedence.
+For an author's own afterword, acknowledgments, or 'From the Author' narration,
+use the author's name from book metadata as context for a practical casting
+choice. If no presentation was deliberately established and the author's given
+name suggests a conventional male or female reading, choose that corresponding
+masculine or feminine vocal presentation as a tentative casting inference.
+Record vocal_presentation with basis=casting and evidence=[]; never present the
+name-based guess as a fact about the author's gender or actual speaking voice.
+Initials, ambiguous names, conflicting attribution, or multiple possible authors
+may leave presentation unspecified. Explicit source clues and deliberate user
+casting override this guess. Do not infer accent, age, or pitch from the name.
+Keep the actual voice direction concrete and self-contained: an author's name
+alone is not a direction to imitate their real voice, and the engine is not
+expected to recognize it. This author casting rule does not merge fictional
+characters or recast an already established voice in a continuing series.
 Persistent descriptions and traits must not list changing emotions, temporary
 injuries, scene actions, or instructions to alternate between performances.
 Keep fear, anger, shouting, crying, and a particular whispered line in the
@@ -163,7 +177,14 @@ that frame. Write role scopes consistent with performance_policy, including for
 the narrator-character's own direct thoughts and mental communications. Refine a
 contradictory role description without changing its ID, character, or voice.
 Add distinct narration roles for changing narrators, with their scope
-in the description. A dialogue role must use its character's voice. Never delete records. Propose merges only
+in the description. Give an author's own afterword, acknowledgments, or 'From
+the Author' section a distinct narration role whose description explicitly says
+'Author narration' and identifies the author from book metadata when known.
+Keep character_id=null for this nonstory author role. Do not label it merely
+'narration', fold it into the fictional POV narrator, or confuse a guest foreword
+writer/editor with the book's author. Reuse that author's established series
+casting when supplied, even if local role IDs or section titles differ.
+A dialogue role must use its character's voice. Never delete records. Propose merges only
 with nonempty exact textual evidence of the same identity; same names alone are
 insufficient. Merges are reviewed by the user. Each merge removes the source
 character and redirects its roles to the target character. Do not merge voices

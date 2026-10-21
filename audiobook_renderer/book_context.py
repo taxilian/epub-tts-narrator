@@ -89,9 +89,15 @@ def voice_store(bundle, config, *, local_aliases=None):
     from .book_aliases import read_book_aliases
     from .voice_bindings import validate_aliases
     from .voices import VoiceStore
+    from epub_audiobook.narration_identity import author_name_key, author_narrator_name
     from functools import partial
     books = [bundle, *[load_bundle(path) for path in config.get("_voice_parents", [])]]
-    stores, allowed_ids = [], set()
+    entries, allowed_ids = [], set()
+    # Author narration is a separate scope, never an implicit alias for the
+    # main narrator or any fictional character, even when a cast shares IDs.
+    protected_ids = {character["voice_id"] for book in books for character in book["cast"]["characters"]}
+    protected_ids.update(role["voice_id"] for book in books for role in book["cast"]["roles"]
+                         if role.get("character_id") is not None or role["id"] == "narrator_main")
     for index in range(len(books) - 1, -1, -1):
         book = books[index]
         allowed_ids.update(voice["id"] for voice in book["cast"]["voices"])
@@ -104,7 +110,64 @@ def voice_store(bundle, config, *, local_aliases=None):
             loader = lambda: dict(overrides)
         directory = config["voices"]["directory"] if index == 0 else Path(book["directory"]) / "voices"
         store = VoiceStore(directory, config["voices"]["series_id"], cast=book["cast"],
-                           alias_loader=loader, parents=list(reversed(stores)) if index == 0 else ())
+                           alias_loader=loader)
+        scopes = {}
+        for role in book["cast"]["roles"]:
+            name = author_narrator_name(role, book["source"]["book"])
+            if name is not None:
+                scopes.setdefault(author_name_key(name), set()).add(role["voice_id"])
+        for identities in scopes.values():
+            identities.difference_update(protected_ids)
+        entries.append((index, book, directory, loader, store, scopes))
+
+    # Old analyses used different IDs for the same author's afterword. Derive
+    # aliases at lookup time so these saved books can inherit without rewriting
+    # analyses or immutable audio. Local selections (including failed/pending
+    # recasts) remain overrides. The active store runs this resolver once after
+    # reading the chain's live explicit policy; no derived edges are persisted.
+    author_ids = {voice_id for *_, scopes in entries for identities in scopes.values() for voice_id in identities}
+    def author_aliases(existing):
+        occupied = set()
+        # Inspect every identity in every store: a local override may use an
+        # ancestor ID through explicit policy rather than this book's cast ID.
+        for _, _, _, _, local_store, _ in entries:
+            for voice_id in author_ids:
+                if local_store._read_selection(voice_id) is not None:
+                    occupied.add(voice_id)
+                    continue
+                folder = local_store.folder(voice_id)
+                local_store._check_directory(folder)
+                if folder.exists():
+                    occupied.add(voice_id)
+        derived, nearest_author = {}, {}
+        for *_, scopes in entries:
+            for author, identities in scopes.items():
+                if len(identities) != 1:
+                    # Do not skip an ambiguous scope and select an older voice.
+                    nearest_author.pop(author, None)
+                    continue
+                voice_id = next(iter(identities))
+                previous = nearest_author.get(author)
+                if (previous is not None and previous != voice_id and voice_id not in occupied
+                        and voice_id not in existing and voice_id not in derived):
+                    candidate = {**derived, voice_id: previous, **existing}
+                    try:
+                        validate_aliases(candidate)
+                    except ValueError:
+                        # An explicit reverse link (old -> current replacement)
+                        # takes precedence over inferring current -> old.
+                        pass
+                    else:
+                        derived[voice_id] = previous
+                nearest_author[author] = voice_id
+        return derived
+
+    stores = []
+    for index, book, directory, loader, store, _ in entries:
+        if index == 0:
+            store = VoiceStore(directory, config["voices"]["series_id"], cast=book["cast"],
+                               alias_loader=loader, parents=list(reversed(stores)),
+                               automatic_alias_loader=author_aliases if author_ids else None)
         stores.append(store)
     store.book_voice_ids = set(allowed_ids)
     return store
