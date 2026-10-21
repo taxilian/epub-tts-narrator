@@ -488,6 +488,30 @@ By default, completed chapters receive two-pass loudness normalization to -20 LU
 
 `render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Speech generation is sequential to keep one shared model instance and bounded GPU memory use. Drama 3 synthesis and Whisper verification run locally; configured remote text or voice-design providers receive only their corresponding requests.
 
+## Audio storage and cleanup
+
+By default, `[render] keep_intermediate_audio = false` removes redundant raw speech WAVs after the normalized take is accepted and its checksum is verified. The accepted WAV and verification records remain available for resume, changing pauses, and rebuilding chapters without synthesizing speech again. Raw files from unsuccessful or pending requests remain available for recovery. Set the option to `true` to keep raw engine output for debugging. This setting does not affect voice creation or any voice samples.
+
+For files created by earlier runs, preview and then run cleanup for one book:
+
+```sh
+.venv-renderer/bin/audiobook-render cleanup runs/book-01 --dry-run
+.venv-renderer/bin/audiobook-render cleanup runs/book-01
+```
+
+The default cleanup removes redundant raw speech files and complete chapter cache versions that are no longer referenced by any saved chapter checkpoint. It preserves accepted speech, normalized rejected takes, current chapter checkpoints, and finished audiobook outputs. Cleanup loads no TTS or transcription model and refuses to run alongside a render or assembly for the same book or work directory. Use the same `--work-dir` as the render if you overrode it. Dry runs list the files and bytes eligible for removal.
+
+To remove the generated speech and chapter caches as well, use the explicit discard option:
+
+```sh
+.venv-renderer/bin/audiobook-render cleanup runs/book-01 --discard-render-cache --dry-run
+.venv-renderer/bin/audiobook-render cleanup runs/book-01 --discard-render-cache
+```
+
+This deletes the managed `clips`, `mixes`, `chapters`, and `completed-chapters` stores under that book's render work directory, including the playable checkpoint files created by `--chapters-only`. **Speech resumability is lost:** rendering again will generate new speech using the saved voices. Published M4A/MP3 chapters and the M4B in the output directory remain intact.
+
+Both modes always preserve voice samples, cloning references, casting candidates (including failed attempts), audition previews, and ancestor books. They do not traverse or delete the voice stores. Remaining accepted speech and current lossless chapter WAVs are intentional: they avoid lossy re-encoding and retain exact synchronization when reassembling. Voice-sample compression is not performed; their existing identity includes the original WAV bytes, so converting them in place would invalidate voice identities and speech caches.
+
 ## Verification and recovery
 
 Each chunk is normalized to mono PCM16 at 44.1 kHz. Before acceptance, the renderer checks duration, overall level, excessive silence, long internal silence, and clipping. Local Whisper then transcribes the audio independently: it receives no expected transcript as a prompt. The comparison records added, missing, and substituted words, with conservative punctuation and number normalization.

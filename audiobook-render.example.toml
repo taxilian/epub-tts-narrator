@@ -101,6 +101,10 @@ bracket_pause_ms = 120   # On entering or leaving bracketed text
 # Zero disables that added pause; it does not remove protected speech edges.
 # normalize_pauses = false keeps original clip padding, disables sentence/clause
 # targets, and adds paragraph/blank/bracket pauses on top of the existing padding.
+# Remove redundant raw speech WAVs after a normalized take is accepted.
+# Accepted clips stay reusable; voice samples and pending/failed requests stay intact.
+# Set true only to retain raw engine output for debugging.
+keep_intermediate_audio = false
 allow_review = false
 # Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
 chapter_numbers = [] # all manifest script entries

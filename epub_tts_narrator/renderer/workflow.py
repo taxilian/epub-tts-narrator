@@ -152,6 +152,18 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
 
+    def finish(wav, record):
+        # Acceptance remains attached to the normalized bytes. Raw synthesis
+        # output is redundant only after acceptance; reference samples stay intact.
+        if purpose == "speech" and not config["render"].get("keep_intermediate_audio", False):
+            from .cleanup import clean_take_intermediates
+            try:
+                clean_take_intermediates(directory)
+            except (ValueError, OSError) as exc:
+                notify("  Intermediate audio cleanup skipped; accepted speech is retained: "
+                       + safe_error_text(exc, secrets=configured_secrets(config)))
+        return wav, record
+
     def pending_confirmation(report):
         judge = report.get("text_judge") if isinstance(report, dict) else None
         return isinstance(judge, dict) and judge.get("decision") == "unavailable"
@@ -209,7 +221,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             if checksum != accepted.get("audio_sha256"):
                 raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
             if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
-                return wav, accepted
+                return finish(wav, accepted)
     validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
     if accepted is not None:
         # Older versions could leave a failed revalidation in accepted.json.
@@ -218,7 +230,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         accepted.update(validation_key=validation_key, report=report)
         write_json(accepted_path, accepted)
         if report["passed"]:
-            return wav, accepted
+            return finish(wav, accepted)
         if pending_confirmation(report):
             stop_for_confirmation()
     attempts = config["render"]["max_attempts"]
@@ -320,7 +332,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             judgment = report.get("text_judge", {})
             if judgment.get("decision") == "equivalent":
                 notify("  JEV confirmed the transcript differences.")
-            return wav, record
+            return finish(wav, record)
         if pending_confirmation(report):
             stop_for_confirmation()
         if report.get("retryable") is False:
@@ -802,6 +814,34 @@ def _start_run(work, plan, mode):
         lock.rmdir()
         raise
     return lock
+
+
+def cleanup_render_work(bundle, config, *, dry_run=False, discard_render_cache=False):
+    """Clean only this book's speech caches while excluding concurrent renders."""
+    from .book_context import resolve_book_config
+    from .cleanup import cleanup_work
+    config = resolve_book_config(bundle, config)
+    work = Path(config["render"]["work_dir"])
+    if any(path.is_symlink() for path in (work, *work.parents)):
+        raise RenderBlocked("Cleanup work directory must not use symlinks")
+    if not work.exists():
+        return cleanup_work(work, dry_run=dry_run, discard_render_cache=discard_render_cache)
+    if not work.is_dir():
+        raise RenderBlocked("Cleanup work directory must be a directory")
+    lock = work / ".render.lock"
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise RenderBlocked("Another render, assembly, or cleanup may be running; "
+                            f"retry after it finishes: {lock}") from exc
+    book_lock = None
+    try:
+        book_lock = _lock_book_audio(bundle)
+        return cleanup_work(work, dry_run=dry_run, discard_render_cache=discard_render_cache)
+    finally:
+        if book_lock is not None:
+            book_lock.rmdir()
+        lock.rmdir()
 
 
 def _failed_run(work, exc, notify):

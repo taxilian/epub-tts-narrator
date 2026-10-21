@@ -52,6 +52,7 @@ DEFAULTS = {
         "seed": 1729, "sample_rate": 44100, "paragraph_pause_ms": 250,
         "blank_pause_ms": 500, "bracket_pause_ms": 120, "allow_review": False, "chapter_numbers": [],
         "normalize_pauses": True, "sentence_pause_ms": 220, "clause_pause_ms": 100,
+        "keep_intermediate_audio": False,
         "normalize_loudness": True, "target_lufs": -20.0, "true_peak_db": -1.5,
         "aac_bitrate": "128k", "mp3_bitrate": "128k",
         "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "epub": None,
@@ -131,6 +132,8 @@ def load_config(path=None):
         raise ValueError("render.normalize_loudness must be boolean")
     if type(render["normalize_pauses"]) is not bool:
         raise ValueError("render.normalize_pauses must be boolean")
+    if type(render["keep_intermediate_audio"]) is not bool:
+        raise ValueError("render.keep_intermediate_audio must be boolean")
     for key, low, high in (("target_lufs", -40, -10), ("true_peak_db", -9, 0)):
         value = render[key]
         if (type(value) not in (int, float) or not math.isfinite(value)

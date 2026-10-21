@@ -20,7 +20,7 @@ from .book_context import resolve_book_config, voice_store
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "render", "assemble", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
+    for name in ("plan", "render", "assemble", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -37,6 +37,11 @@ def parser():
         if name == "render":
             command.add_argument("--chapters-only", action="store_true",
                                  help="Generate and save chapter audio; assemble the M4B later")
+        if name == "cleanup":
+            command.add_argument("--dry-run", action="store_true",
+                                 help="List removable files and space savings without deleting anything")
+            command.add_argument("--discard-render-cache", action="store_true",
+                                 help="Also delete accepted speech and chapter caches; future rendering regenerates speech. Never deletes voice samples or finished audiobooks")
         if name == "voice-aliases":
             command.add_argument("--set", dest="alias_assignments", nargs=2, action="append", default=[],
                                  metavar=("SOURCE", "TARGET"), help="Share TARGET's voice for SOURCE in this book and descendants")
@@ -156,6 +161,21 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command == "cleanup":
+            from .workflow import cleanup_render_work
+            result = cleanup_render_work(bundle, config, dry_run=args.dry_run,
+                                         discard_render_cache=args.discard_render_cache)
+            if args.dry_run:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            action = "Would remove" if args.dry_run else "Removed"
+            print(f"{action} {result['files_removed']} file(s), "
+                  f"{result['bytes_removed'] / (1024 * 1024):.1f} MiB.")
+            print("Voice samples, casting candidates, and published audiobooks are preserved.")
+            if args.discard_render_cache:
+                print("Discarding the render cache removes speech resumability; future rendering will generate speech again.")
+            else:
+                print("Accepted speech and current chapter checkpoints are retained for resume.")
+            return 0
         if getattr(args, "chapters", None) is not None:
             config["render"]["chapter_numbers"] = chapter_numbers(args.chapters, len(bundle["chapters"]))
         if getattr(args, "allow_review", None) is not None:
