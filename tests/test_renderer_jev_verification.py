@@ -310,7 +310,7 @@ class JevVerifierFactoryTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(verifier.reference_judge_identity))
         self.assertNotIn("api_key", json.dumps(verifier.reference_judge_identity))
         self.assertEqual(verifier.reference_judge_identity["model"], "jev-latest")
-        self.assertEqual(verifier.reference_judge_identity["policy_version"], 3)
+        self.assertEqual(verifier.reference_judge_identity["policy_version"], 4)
         self.assertEqual(verifier.reference_judge_identity["threshold"], .9)
         self.assertEqual(validation_key(SCRIPT, verifier, purpose="reference"),
                          validation_key(SCRIPT, rotated, purpose="reference"))
