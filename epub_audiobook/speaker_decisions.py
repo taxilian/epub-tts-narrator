@@ -6,6 +6,7 @@ from copy import deepcopy
 from contextlib import ExitStack
 from pathlib import Path
 import os
+import re
 import shlex
 import sys
 import textwrap
@@ -19,14 +20,49 @@ from .narration_identity import author_narrator_name
 
 def _display(value):
     # Book text and model explanations are display data, never terminal controls.
-    return "".join(char for char in str(value) if char in "\n\t" or char.isprintable())
+    text = re.sub(r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)", "", str(value))
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
+    return "".join(char for char in text if char in "\n\t" or char.isprintable())
 
 
-def _context_text(text, limit=1000, *, tail=False):
-    """Bound supporting context while leaving the actual assignment text whole."""
-    if tail and len(text) > limit:
-        return "[context truncated] … " + text[-limit:]
-    return text if len(text) <= limit else text[:limit] + " … [context truncated]"
+def _context_runs(block, segments, labels, start, end, *, tail=False, limit=1000):
+    """Clip context in source coordinates, then label each contiguous voice run."""
+    text = block["text"]
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    truncated = end - start > limit
+    if truncated:
+        if tail:
+            start = end - limit
+        else:
+            end = start + limit
+    runs = []
+    for segment in segments:
+        left, right = max(start, segment["start"]), min(end, segment["end"])
+        if right <= left:
+            continue
+        role_ids = (tuple(speaker["role_id"] for speaker in segment["simultaneous_speakers"])
+                    if segment.get("simultaneous_speakers") else
+                    (segment["role_id"],) if has_assigned_speakers(segment) else ())
+        if runs and runs[-1][0] == role_ids:
+            runs[-1][1] += text[left:right]
+        else:
+            runs.append([role_ids, text[left:right]])
+    visible = []
+    for role_ids, excerpt in runs:
+        if excerpt.strip():
+            name = "; ".join(labels[role_id] for role_id in role_ids) if role_ids else "Unassigned"
+            if len(role_ids) > 1:
+                name += " together"
+            visible.append([name, excerpt.strip()])
+    if truncated and visible:
+        if tail:
+            visible[0][1] = "[context truncated] … " + visible[0][1]
+        else:
+            visible[-1][1] += " … [context truncated]"
+    return visible
 
 
 def _role_label(role, characters, book):
@@ -110,14 +146,23 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                     output_stream=terminal_output, jev_client=jev_client)
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stderr if output_stream is None else output_stream
-    def say(message=""):
-        print(_display(message), file=output_stream, flush=True)
+    color = (getattr(output_stream, "isatty", lambda: False)()
+             and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ)
+    styles = {"context": "\x1b[36m", "target": "\x1b[1;33m"}
+    def say(message="", *, style=None):
+        rendered = _display(message)
+        # Add only our own terminal controls, after sanitizing untrusted content.
+        if color and style and rendered:
+            rendered = styles[style] + rendered + "\x1b[0m"
+        print(rendered, file=output_stream, flush=True)
     width = _terminal_width(output_stream)
-    def prose(message, indent=""):
+    def prose(message, indent="", *, style=None):
         # Display wrapping only: saved source text and character offsets remain exact.
         for paragraph in _display(message).splitlines() or [""]:
-            say(textwrap.fill(paragraph, width=width, initial_indent=indent,
-                              subsequent_indent=indent, replace_whitespace=False))
+            wrapped = textwrap.fill(paragraph, width=width, initial_indent=indent,
+                                    subsequent_indent=indent, replace_whitespace=False)
+            for line in wrapped.splitlines() or [""]:
+                say(line, style=style)
     if not getattr(input_stream, "isatty", lambda: False)():
         say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
         say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
@@ -129,6 +174,16 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     labels = _role_labels(roles, characters, result["source"]["book"])
     blocks = result["source"]["blocks"]
     positions = {block["id"]: index for index, block in enumerate(blocks)}
+    segments_by_block = {}
+    for segment in result["segments"]:
+        segments_by_block.setdefault(segment["block_id"], []).append(segment)
+    def context(entries, *, tail=False):
+        for neighbor, start, end in entries:
+            for name, excerpt in _context_runs(neighbor, segments_by_block[neighbor["id"]],
+                                              labels, start, end, tail=tail):
+                prose(name, indent="  ", style="context")
+                prose(excerpt, indent="  ", style="context")
+                say()
     decisions = []
     prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
     prose("Enter accepts the best guess. O shows all voices. Q saves progress and stops.")
@@ -140,40 +195,21 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         say("─" * width)
         prose(f"Passage {number}/{len(pending)} — {result['source']['book']['title']}")
         chapter = next(row for row in result["source"]["chapters"] if row["id"] == block["chapter_id"])
-        prose(f"{chapter['title']} · [{item['block_id']}:{item['start']}:{item['end']}]")
-        before = [(neighbor["id"], neighbor["text"]) for neighbor in blocks[max(0, position - 2):position]
+        prose(chapter["title"])
+        before = [(neighbor, 0, len(neighbor["text"])) for neighbor in blocks[max(0, position - 2):position]
                   if neighbor["chapter_id"] == block["chapter_id"]]
-        after = [(neighbor["id"], neighbor["text"]) for neighbor in blocks[position + 1:position + 3]
+        after = [(neighbor, 0, len(neighbor["text"])) for neighbor in blocks[position + 1:position + 3]
                  if neighbor["chapter_id"] == block["chapter_id"]]
         if block["text"][:item["start"]]:
-            before.append((block["id"], block["text"][:item["start"]]))
+            before.append((block, 0, item["start"]))
         if block["text"][item["end"]:]:
-            after.insert(0, (block["id"], block["text"][item["end"]:]))
-        if before:
-            say("\nBefore (context)")
-            for block_id, text in before:
-                prose(f"[{block_id}]", indent="  ")
-                prose(_context_text(text.strip(), tail=True), indent="  ")
-                say()
-        else:
-            say()
-        prose(f"PASSAGE TO ASSIGN — {item['end'] - item['start']} characters")
-        prose(item["text"], indent="> ")
-        if after:
-            say("\nAfter (context)")
-            for block_id, text in after:
-                prose(f"[{block_id}]", indent="  ")
-                prose(_context_text(text.strip()), indent="  ")
-                say()
-        assigned = [segment for segment in result["segments"]
-                    if segment["block_id"] == item["block_id"] and has_assigned_speakers(segment)]
-        for segment in assigned:
-            role_ids = ([speaker["role_id"] for speaker in segment["simultaneous_speakers"]]
-                        if segment.get("simultaneous_speakers") else [segment["role_id"]])
-            names = "; ".join(labels[role_id] for role_id in role_ids)
-            if len(role_ids) > 1:
-                names += " together"
-            prose(f"Already assigned: {names} [{segment['block_id']}:{segment['start']}:{segment['end']}]")
+            after.insert(0, (block, item["end"], len(block["text"])))
+        say()
+        context(before, tail=True)
+        prose(f"PASSAGE TO ASSIGN — {item['end'] - item['start']} characters", style="target")
+        prose(item["text"], indent="> ", style="target")
+        say()
+        context(after)
         prose("Your choice changes only the marked passage; surrounding assignments stay as shown.")
         if jev_client is not None:
             say("\nRanking likely speakers with JEV…")

@@ -4,6 +4,7 @@ from copy import deepcopy
 from contextlib import nullcontext
 from io import StringIO
 import os
+import re
 from pathlib import Path
 from unittest.mock import call, patch
 import unittest
@@ -62,7 +63,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(audit["remaining_unassigned_segments"], 0)
         self.assertIn("1. Mara — best guess (Enter)", output)
         self.assertNotIn("dialogue; mara", output)
-        self.assertIn("[b1:18:26]", output)
+        self.assertNotIn("[b1", output)
         self.assertIn("PASSAGE TO ASSIGN — 8 characters\n> “Hello.”", output)
         self.assertTrue(result["readiness"]["ready"])
 
@@ -94,9 +95,10 @@ class SpeakerDecisionTests(unittest.TestCase):
         document["segments"] = [thought, tail, document["segments"][2]]
         before = deepcopy(document)
         result, output = self.decide(document, "q\n")
-        self.assertIn("After (context)\n  [b1]\n  " + text[boundary:].strip(), output)
-        self.assertIn(f"Already assigned: Narrator [b1:{boundary}:{len(text)}]", output)
-        self.assertIn("[b1:0:29]", output)
+        self.assertIn("  Narrator\n  " + text[boundary:].strip(), output)
+        self.assertNotIn("Already assigned:", output)
+        self.assertNotIn("[b1", output)
+        self.assertNotIn("After (context)", output)
         self.assertIn("PASSAGE TO ASSIGN — 29 characters\n> " + text[:boundary], output)
         self.assertNotIn("> " + text, output)
         self.assertEqual(document, before)
@@ -121,8 +123,10 @@ class SpeakerDecisionTests(unittest.TestCase):
         narration.update(id="s4", block_id="b3", end=len(third["text"]), text=third["text"])
         document["segments"] = [target, later, narration]
         _, output = self.decide(document, "q\n")
-        self.assertIn("  [b2]\n  “Jasper.”", output)
-        self.assertIn("  [b3]\n  Two feminine voices called my name.", output)
+        self.assertIn("  Narrator\n  “Jasper.”", output)
+        self.assertIn("  Narrator\n  Two feminine voices called my name.", output)
+        self.assertNotIn("[b2]", output)
+        self.assertNotIn("[b3]", output)
 
     def test_context_is_bounded_but_passage_is_whole_and_display_is_sanitized(self):
         document = missing((2,))
@@ -140,6 +144,143 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertTrue(all(len(line) <= 88 for line in target_lines))
         self.assertIn("\n\nPASSAGE TO ASSIGN", output)
         self.assertNotIn("\x1b", output)
+
+    def test_mixed_neighbor_names_each_assigned_voice_beside_its_text(self):
+        document = missing((2,))
+        before = deepcopy(document)
+        result, output = self.decide(document, "q\n")
+        context = output.split("PASSAGE TO ASSIGN", 1)[0]
+        self.assertIn("  Narrator\n  Mara said softly,", context)
+        self.assertIn("  Mara\n  “Hello.”", context)
+        self.assertLess(context.index("  Narrator\n"), context.index("  Mara\n"))
+        self.assertNotIn("[b1]", output)
+        self.assertNotIn("Before (context)", output)
+        self.assertNotIn("After (context)", output)
+        self.assertEqual(document, before)
+        self.assertEqual(result["segments"], before["segments"])
+        self.assertEqual(result["source"], before["source"])
+
+    def test_unresolved_neighbor_is_labeled_unassigned_not_its_candidate(self):
+        _, output = self.decide(missing((1, 2)), "q\n")
+        self.assertIn("  Unassigned\n  They left.", output)
+        self.assertNotIn("  Mara\n  They left.", output)
+
+    def test_simultaneous_context_lists_the_voices_and_marks_them_together(self):
+        document = missing((2,))
+        add_lena(document)
+        document["segments"][1].update(
+            role_id=None, voice_id=None,
+            simultaneous_speakers=[{"role_id": "mara", "voice_id": "v1"},
+                                   {"role_id": "lena", "voice_id": "v2"}])
+        document["segments"][1]["attribution"].update(basis="user", evidence=[])
+        _, output = self.decide(document, "q\n")
+        self.assertIn("  Mara; Lena together\n  “Hello.”", output)
+        self.assertNotIn("  Unassigned\n  “Hello.”", output)
+
+    def test_next_passage_context_reflects_the_choice_just_made(self):
+        document = missing((1, 2))
+        before = deepcopy(document)
+        result, output = self.decide(document, "1\nq\n")
+        second = output.split("Passage 2/2", 1)[1]
+        self.assertIn("  Mara\n  “Hello.”", second)
+        self.assertNotIn("  Unassigned\n  “Hello.”", second)
+        self.assertEqual(result["segments"][1]["role_id"], "mara")
+        self.assertEqual(document, before)
+
+    def test_same_block_clipped_context_keeps_voice_labels_and_exact_target(self):
+        document = missing()
+        prefix, passage, suffix = "Earlier narration. " * 100, "“Choose me.”", " Later speech." * 100
+        text = prefix + passage + suffix
+        document["source"]["blocks"][0]["text"] = text
+        document["cast"]["characters"][0]["evidence"] = []
+        document["cast"]["voices"][1]["traits"] = []
+        lead, target = deepcopy(document["segments"][0]), deepcopy(document["segments"][1])
+        tail = deepcopy(document["segments"][1])
+        lead.update(start=0, end=len(prefix), text=prefix)
+        target.update(start=len(prefix), end=len(prefix + passage), text=passage)
+        tail.update(id="tail", start=len(prefix + passage), end=len(text), text=suffix,
+                    role_id="mara", voice_id="v1")
+        tail["attribution"].update(basis="explicit", candidates=[], review_required=False)
+        document["segments"] = [lead, target, tail, document["segments"][2]]
+        before = deepcopy(document)
+        result, output = self.decide(document, "q\n")
+        prior, following = output.split("PASSAGE TO ASSIGN", 1)
+        self.assertIn("  Narrator\n", prior)
+        self.assertIn("[context truncated]", prior)
+        self.assertIn("  Mara\n", following)
+        self.assertIn("[context truncated]", " ".join(following.split()))
+        self.assertIn("> " + passage, output)
+        self.assertEqual(output.count("> " + passage), 1)
+        self.assertNotIn(prefix, output)
+        self.assertNotIn(suffix, output)
+        self.assertEqual(document, before)
+        self.assertEqual(result["segments"], before["segments"])
+
+    def test_terminal_context_uses_one_color_and_target_uses_a_different_color(self):
+        output = Terminal()
+        with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+            result = prompt_speaker_decisions(missing(), input_stream=Terminal("q\n"),
+                                             output_stream=output)
+        rendered = output.getvalue()
+        sgr = re.compile(r"\x1b\[([0-9;]*)m")
+
+        def active_style_at(text):
+            style = None
+            for match in sgr.finditer(rendered[:rendered.index(text)]):
+                style = None if match.group(1) in ("", "0") else match.group(1)
+            return style
+
+        preceding = active_style_at("Mara said softly,")
+        following = active_style_at("They left.")
+        target = active_style_at("“Hello.”")
+        self.assertIsNotNone(preceding)
+        self.assertEqual(preceding, following)
+        self.assertIsNotNone(target)
+        self.assertNotEqual(preceding, target)
+        self.assertIsNone(active_style_at("Most likely speakers"))
+        plain = sgr.sub("", rendered)
+        self.assertIn("  Narrator\n  Mara said softly,", plain)
+        self.assertIn("PASSAGE TO ASSIGN — 8 characters\n> “Hello.”", plain)
+        self.assertNotIn("Before (context)", plain)
+        self.assertNotIn("After (context)", plain)
+        self.assertEqual(validate_document(result), [])
+
+    def test_non_color_outputs_keep_readable_target_without_ansi(self):
+        cases = [(StringIO, {"TERM": "xterm-256color"}),
+                 (Terminal, {"TERM": "dumb"}),
+                 (Terminal, {"TERM": "xterm-256color", "NO_COLOR": ""})]
+        for output_type, environment in cases:
+            with self.subTest(output=output_type.__name__, environment=environment):
+                output = output_type()
+                with patch.dict(os.environ, environment, clear=True):
+                    prompt_speaker_decisions(missing(), input_stream=Terminal("q\n"),
+                                             output_stream=output)
+                rendered = output.getvalue()
+                self.assertNotIn("\x1b", rendered)
+                self.assertIn("  Narrator\n  Mara said softly,", rendered)
+                self.assertIn("PASSAGE TO ASSIGN — 8 characters\n> “Hello.”", rendered)
+
+    def test_source_terminal_controls_cannot_clear_screen_or_change_terminal_title(self):
+        document = missing((2,))
+        text = "\x1b[2J\x1b]0;untrusted title\x07They left.\x9b31m"
+        document["source"]["blocks"][1]["text"] = text
+        document["segments"][2].update(text=text, end=len(text))
+        before = deepcopy(document)
+        for output_type in (StringIO, Terminal):
+            with self.subTest(output=output_type.__name__):
+                output = output_type()
+                with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+                    result = prompt_speaker_decisions(document, input_stream=Terminal("q\n"),
+                                                     output_stream=output)
+                rendered = output.getvalue()
+                self.assertNotIn("[2J", rendered)
+                self.assertNotIn("untrusted title", rendered)
+                self.assertNotIn("\x07", rendered)
+                self.assertNotIn("\x9b", rendered)
+                self.assertIn("> They left.", rendered)
+                self.assertEqual(result["source"], before["source"])
+                self.assertEqual(result["segments"], before["segments"])
+        self.assertEqual(document, before)
 
     def test_invalid_numbers_duplicate_roles_narrators_and_duplicate_voices_reprompt(self):
         document = missing()
