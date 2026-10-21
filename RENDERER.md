@@ -6,6 +6,8 @@ Fish Audio Drama 3 creates character reference voices and renders the book local
 
 **Validation status:** automated tests cover real FFmpeg encoding, synchronization, quality gates, adapters, interactive casting, and voice replacement across books. A live local Drama 3 / MLX Whisper pilot produced a 17.38-second chapter and M4B with two persisted voices and nine verified speech clips; every accepted clip had zero normalized word errors. During voice creation, the acoustic checks rejected one real attempt for excessive silence and a long internal stall, and a subsequent attempt passed. A separate live Whisper check rejected an extra spoken sentence. The pilot outputs are in `audiobooks/last-lantern-demo/`, with accepted transcripts in `verification.json` and retained attempts in `render-work/last-lantern-demo/`.
 
+The staged workflow was also exercised with nine newly generated Drama 3 passages using copies of the two saved demonstration voices. All nine passed strict Whisper verification on their first attempts. After closing the models, separate assembly produced a 16.27-second M4B with chapter metadata, an embedded PNG test cover, source-linked synchronization, and a normalized M4A chapter. Its chapter measured -19.81 LUFS against the -20 LUFS target; original reference files were unchanged. Evidence and playable outputs are in `output/staged-render-pilot-20261021/`. Automated integration tests separately cover multi-chapter assembly, chapters generated in separate runs, interruption recovery, recasting, and corrupted checkpoints. This small pilot is not a full-book or perceptual-quality validation.
+
 A live interactive casting session also generated two verified alternatives after editing the description and sample text, accepted a replacement, restored the first sample, and retained the edits after reopening. Native `afplay` start/stop was exercised with volume zero. Its results are in `render-work/casting-pilot/live-validation.json`. Full-book rendering and human audition remain untested.
 
 Earlier automatic-startup testing with the first Soulship book produced 26 samples with zero normalized word errors, but used unconditioned Drama 3 voices. Those results verified the spoken words and reuse behavior, **not the requested character voice**. In particular, the description was not applied during voice creation. The historical record in `render-work/soulship-01/startup-validation.json` must not be treated as evidence that those voices were cast correctly.
@@ -77,6 +79,11 @@ language = "en"
 
 [render]
 chapter_format = "m4a"
+aac_bitrate = "128k"
+mp3_bitrate = "128k"
+normalize_loudness = true
+target_lufs = -20.0
+true_peak_db = -1.5
 chapter_numbers = []
 max_chunk_chars = 320
 max_attempts = 3
@@ -119,9 +126,9 @@ Additional deliberate sharing belongs to a book, using exact voice IDs. Inspect 
 
 Aliases follow the same continuation chain as recordings. A mapping in book 1 is available to later books even when added after their analyses. A manual override in book 2 applies to book 2 and its descendants; book 1 and sibling branches keep their mappings. Earlier mappings are read from their original book instead of copied into each child. Invalid IDs and cycles are rejected. Global `[voices.aliases]` settings are rejected: move their mappings into the relevant book with this command. Aliases affect rendering and do not merge the analyzer's character records.
 
-`chapter_numbers` uses the **one-based order of script entries in the bundle manifest**, including front matter. `[]` selects all entries; `[3]` selects only entry 3. Use `plan` to see the corresponding titles. A selected subset produces a partial audiobook and records `partial_book: true`.
+Choose chapters per book with `--chapters 3` or `--chapters 3-5,7` on `plan`, `render`, or `assemble`. Numbers use the **one-based order of script entries in the bundle manifest**, including front matter. Ranges are inclusive, duplicate numbers are ignored, and chapters always stay in source order. Omit the option to use all entries. `plan` lists the corresponding titles. The legacy global `chapter_numbers` setting remains supported, but book-specific selections belong on the command line. A selected subset produces a partial audiobook and records `partial_book: true`.
 
-The current Soulship bundles remain drafts with review flags and some unassigned voices. `allow_review = true` permits acknowledged review issues; it **does not permit spoken text with a null voice**. Correct those attributions in the analyzer and re-export, or select a pilot chapter without missing voices. There is no implicit narrator substitution.
+The current Soulship bundles remain drafts with review flags and some unassigned voices. `--allow-review` permits acknowledged review issues for that command; it **does not permit spoken text with a null voice**. Correct those attributions in the analyzer and re-export, or select a pilot chapter without missing voices. There is no implicit narrator substitution. The global `allow_review` setting remains supported, but no configuration edit is needed to acknowledge review items for one book.
 
 ## Inspect, cast, and render
 
@@ -274,7 +281,7 @@ To start with a chosen reference recording instead, import it before that voice 
 
 References are normalized and independently transcribed before publication. Each saved asset contains its reference WAV, exact transcript, cast profile, model identity, verification report, and content hash. The nearest selected voice in the continuation chain is reused until the current book introduces an override or that selection is changed. Importing an inherited voice creates a current-book override without changing the ancestor. An existing local asset is never silently replaced.
 
-Render the selected chapters:
+Generate all chapters and assemble the complete book:
 
 ```sh
 .venv-renderer/bin/audiobook-render render \
@@ -283,6 +290,30 @@ Render the selected chapters:
 ```
 
 To choose separate work and publication directories for one run, add `--work-dir /path/to/work -o /path/to/audiobook`. Omit `--epub` when no original EPUB cover is needed.
+
+M4A chapters with AAC audio at 128 kb/s are the default. They are directly playable and use the same codec as the final M4B. `--chapter-format mp3` on `render` or `assemble` produces MP3 chapter copies when needed; the final book remains AAC in an M4B container. Bitrates are global settings in `[render]`.
+
+To generate and listen to one chapter before committing to the whole book, inspect the chapter list and save a chapter checkpoint:
+
+```sh
+.venv-renderer/bin/audiobook-render plan runs/book-01
+.venv-renderer/bin/audiobook-render render runs/book-01 \
+  --chapters 3 --chapters-only
+```
+
+For a draft with review items, add `--allow-review` after inspecting them. Unassigned spoken passages still block the selected chapter. `--chapters-only` saves lossless chapter audio, its encoded playback copy, timing, and provenance beneath `<book-directory>/render-work/chapters/`; it does not publish a final audiobook directory. The CLI prints each playable file's path. `render-work/completed-chapters/chapter-NNNN.json` records the current checkpoint for each manifest chapter, pointing to its files under `render-work/chapters/<cache-key>/`. A completed chapter remains available if a later chapter fails.
+
+To generate the remaining chapters and package later:
+
+```sh
+.venv-renderer/bin/audiobook-render render runs/book-01 --chapters-only
+.venv-renderer/bin/audiobook-render assemble runs/book-01 \
+  --epub /path/to/book-one.epub
+```
+
+`assemble` uses the verified chapter checkpoints and loads neither TTS nor transcription models. Missing, changed, or incompatible checkpoints stop assembly with an explanation; use `render` to prepare them. Changing only chapter format or bitrate can re-encode from saved lossless PCM during assembly. Changes to text, voices, verification, pauses, or loudness require `render` again; unchanged accepted speech is reused where possible. Use the same `--work-dir` if it was overridden. To package a subset, pass the same `--chapters` selection to `assemble` and choose a separate `-o` directory, preserving the final output location for the full book. Existing finished audiobooks are never overwritten.
+
+By default, completed chapters receive two-pass loudness normalization to -20 LUFS with a -1.5 dB true-peak ceiling. Normalization preserves the PCM frame count and timing data, and operates on the assembled chapter rather than flattening every short utterance to the same level. Voice references and verified speech clips remain unchanged. These controls are separate from casting playback: use `[render] normalize_loudness`, `target_lufs`, and `true_peak_db` for the audiobook. Empty chapters and chapters shorter than the loudness measurement window are explicitly recorded as skipped for normalization.
 
 `render` also creates missing voices if no casting edits or audition candidates exist. Use `cast` first to choose your voices before a long run. Generation is sequential to keep one shared model instance and bounded GPU memory use. Book text and generated audio are processed locally.
 
@@ -336,13 +367,13 @@ Each failed chunk gets at most `max_attempts` attempts with distinct determinist
 
 Rejection output includes a short `expected → heard` summary and the reason a secondary recognition check could not resolve it. Full transcripts and alignment details remain in the attempt JSON.
 
-Run the same command again to resume. Accepted audio is reused only when its bytes, synthesis request, verifier identity, and quality policy still match. A changed verifier or quality policy triggers revalidation. Completed rejected attempts remain recorded rather than being retried indefinitely. Increasing `max_attempts` permits additional numbered attempts.
+Run the same command again to resume. Accepted audio is reused only when its bytes, synthesis request, verifier identity, and quality policy still match. A changed verifier or quality policy triggers revalidation. Completed chapter checkpoints are also retained and reused when their inputs and assembly settings match. Progress output identifies reused clips and completed chapters; failure output identifies the work directory containing recovery data. Completed rejected attempts remain recorded rather than being retried indefinitely. Increasing `max_attempts` permits additional numbered attempts.
 
 A normal interruption retains the cache and releases locks. After a hard kill or system crash:
 
 1. Confirm the renderer process has stopped before touching locks.
-2. Remove only the empty `.render.lock` directory inside that book's work directory and, if present, the empty `.lock` inside its series voice directory. `rmdir` is appropriate because it refuses nonempty directories. Retain the rest of the cache and voice store.
-3. If publication was interrupted, the output directory may exist without `render.json`. Move that incomplete output aside or configure a fresh output directory. Existing output is never overwritten automatically.
+2. Remove only the empty `.render.lock` directory inside that book's work directory and, if present, the empty `.lock` inside its series voice directory. A kill during final publication can also leave `.<output-directory-name>.publish.lock` beside the output directory; remove that empty lock after confirming publication has stopped. `rmdir` is appropriate because it refuses nonempty directories. Retain the rest of the cache and voice store.
+3. Current runs publish the completed output directory atomically after validation; a failure retains the work cache. If an older renderer left an incomplete output directory without `render.json`, move that older output aside or choose a fresh `-o` directory. Existing output is never overwritten automatically.
 4. Rerun the command. An incomplete voice asset or repeatedly interrupted raw attempt may require inspection; the renderer stops rather than silently replacing an established voice.
 
 Voice, work, and output directories are separate children of the analyzed book by default. The renderer checks unsafe overlaps, including overrides that could write into a parent book or model files.
@@ -353,7 +384,7 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 
 | File | Purpose |
 | --- | --- |
-| `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio in manifest order; empty entries are marked skipped. |
+| `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio using original manifest numbers, including when a subset is selected; empty entries are marked skipped. |
 | `book.m4b` | AAC audiobook with chapter titles and timing. |
 | `artwork/cover.jpg` or `.png` | Original declared EPUB cover, when available. |
 | `sync.json` | Exact PCM frame ranges linking audio chunks to source text. |
@@ -364,7 +395,7 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 
 The EPUB's byte hash must match the analyzed book before its cover is extracted. Declared JPEG and PNG covers are copied without changing the artwork and embedded in the M4B. Missing or unsupported cover formats produce no artwork; an unsafe or mismatched EPUB stops the run. All seven current Soulship EPUBs have supported JPEG covers.
 
-Chapters and the final M4B are encoded independently from the same assembled lossless PCM. The final book is never built by re-encoding the lossy chapter files. FFprobe checks the resulting duration, chapter tags, and embedded cover. Temporary assembled chapter PCM is removed after packaging; accepted chunk PCM and failed attempts remain in the work cache for recovery.
+Chapters and the final M4B are encoded independently from the same assembled lossless PCM. The final book is never built by re-encoding the lossy chapter files. FFprobe checks the resulting duration, chapter tags, and embedded cover. Completed chapter PCM, encoded chapter copies, accepted chunk PCM, and failed attempts remain in the work cache for recovery; the published audiobook does not duplicate the PCM files.
 
 `sync.json` records chapter-relative and book-relative integer frame offsets, chunk IDs, segment and block IDs, and exact source ranges. Frame ranges exclude inserted pauses and have exclusive ends. Bracket delimiters stay in the source text but are omitted from spoken text; mappings retain that distinction. A configurable pause at the outer edges of a bracketed passage separates its delivery while preserving the character voice. Paragraph and blank-line pauses use the larger overlapping cue.
 

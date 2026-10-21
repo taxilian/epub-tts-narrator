@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -38,6 +39,8 @@ DEFAULTS = {
         "chapter_format": "m4a", "max_chunk_chars": 320, "max_attempts": 3,
         "seed": 1729, "sample_rate": 44100, "paragraph_pause_ms": 250,
         "blank_pause_ms": 500, "bracket_pause_ms": 120, "allow_review": False, "chapter_numbers": [],
+        "normalize_loudness": True, "target_lufs": -20.0, "true_peak_db": -1.5,
+        "aac_bitrate": "128k", "mp3_bitrate": "128k",
         "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "epub": None,
     },
     "quality": {},
@@ -104,6 +107,16 @@ def load_config(path=None):
             raise ValueError(f"Invalid render.{key}")
     if type(render["allow_review"]) is not bool:
         raise ValueError("render.allow_review must be boolean")
+    if type(render["normalize_loudness"]) is not bool:
+        raise ValueError("render.normalize_loudness must be boolean")
+    for key, low, high in (("target_lufs", -40, -10), ("true_peak_db", -9, 0)):
+        value = render[key]
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or not low <= value <= high):
+            raise ValueError(f"render.{key} must be a finite number from {low} to {high}")
+    for key in ("aac_bitrate", "mp3_bitrate"):
+        if not isinstance(render[key], str) or not re.fullmatch(r"[1-9][0-9]{0,2}k", render[key]):
+            raise ValueError(f"render.{key} must be a positive bitrate such as 128k")
     numbers = render["chapter_numbers"]
     if not isinstance(numbers, list) or any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):
         raise ValueError("render.chapter_numbers must contain distinct positive integers")

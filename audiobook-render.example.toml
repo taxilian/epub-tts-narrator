@@ -43,6 +43,13 @@ sample_true_peak_db = -1.5
 # Defaults: <book-directory>/render-work and <book-directory>/audiobook.
 # Override per run with --work-dir and -o/--output.
 chapter_format = "m4a" # or "mp3"; final book is AAC in an .m4b container
+aac_bitrate = "128k"
+mp3_bitrate = "128k"
+# Match completed chapters' loudness while preserving their speech dynamics.
+# Original voice references and verified speech clips remain unchanged.
+normalize_loudness = true
+target_lufs = -20.0
+true_peak_db = -1.5
 max_chunk_chars = 320
 max_attempts = 3
 seed = 1729
@@ -51,7 +58,8 @@ paragraph_pause_ms = 250
 blank_pause_ms = 500
 bracket_pause_ms = 120
 allow_review = false
-chapter_numbers = [] # all manifest script entries; [3] selects a pilot chapter
+# Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
+chapter_numbers = [] # all manifest script entries
 ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
 # Pass --epub /path/to/book.epub to render to extract its original cover.

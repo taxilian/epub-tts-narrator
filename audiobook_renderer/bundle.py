@@ -148,7 +148,7 @@ def make_plan(bundle, config):
         errors.append("Configured voices.series_id differs from the analyzer series ID; reuse the exact series ID")
     state = bundle["manifest"].get("readiness", {})
     if (state.get("ready") is not True or bundle["reviews"] or bundle.get("implied_reviews")) and not settings["allow_review"]:
-        errors.append("Bundle has outstanding review items; resolve them or explicitly configure render.allow_review")
+        errors.append("Bundle has outstanding review items; resolve them or pass --allow-review for this run")
     for number, item in enumerate(bundle["chapters"], 1):
         if number not in selected:
             continue

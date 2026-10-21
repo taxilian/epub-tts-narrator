@@ -6,6 +6,7 @@ import argparse
 from importlib import metadata
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -17,13 +18,23 @@ from .book_context import resolve_book_config, voice_store
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "render", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
+    for name in ("plan", "render", "assemble", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
         command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
         command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
         command.add_argument("--epub", type=Path, help="Original EPUB for audiobook cover extraction")
+        if name in {"plan", "render", "assemble"}:
+            command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
+            command.add_argument("--allow-review", action="store_true", default=None,
+                                 help="Permit outstanding review items; unassigned speech still blocks rendering")
+        if name in {"render", "assemble"}:
+            command.add_argument("--chapter-format", choices=("m4a", "mp3"),
+                                 help="Individual chapter format (default: configured format, normally m4a)")
+        if name == "render":
+            command.add_argument("--chapters-only", action="store_true",
+                                 help="Generate and save chapter audio; assemble the M4B later")
         if name == "voice-aliases":
             command.add_argument("--set", dest="alias_assignments", nargs=2, action="append", default=[],
                                  metavar=("SOURCE", "TARGET"), help="Share TARGET's voice for SOURCE in this book and descendants")
@@ -49,6 +60,21 @@ def parser():
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
     return root
+
+
+def chapter_numbers(value, maximum):
+    """Expand bounded manifest ranges in source order, ignoring duplicate entries."""
+    selected = set()
+    for part in value.split(","):
+        match = re.fullmatch(r"([0-9]+)(?:\s*-\s*([0-9]+))?", part.strip())
+        if match is None:
+            raise ValueError("--chapters must contain chapter numbers or ranges, such as 1-3,5")
+        start = int(match[1])
+        end = int(match[2]) if match[2] else start
+        if not 1 <= start <= end <= maximum:
+            raise ValueError(f"--chapters entries must be ascending ranges within 1-{maximum}")
+        selected.update(range(start, end + 1))
+    return sorted(selected)
 
 
 def doctor(config):
@@ -112,7 +138,7 @@ def doctor(config):
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    engine = None
+    engine = verifier = None
     try:
         config = load_config(args.config)
         if args.command == "doctor":
@@ -122,6 +148,12 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if getattr(args, "chapters", None) is not None:
+            config["render"]["chapter_numbers"] = chapter_numbers(args.chapters, len(bundle["chapters"]))
+        if getattr(args, "allow_review", None) is not None:
+            config["render"]["allow_review"] = args.allow_review
+        if getattr(args, "chapter_format", None) is not None:
+            config["render"]["chapter_format"] = args.chapter_format
         if args.command == "voice-aliases":
             from .book_aliases import edit_book_aliases
             result = edit_book_aliases(bundle, config, assignments=args.alias_assignments,
@@ -150,6 +182,13 @@ def main(argv=None):
         expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
         if expected_series and expected_series != config["voices"]["series_id"]:
             raise ValueError("Configured voices.series_id must match the analyzer's series ID")
+        if args.command in {"render", "assemble"} and plan["errors"]:
+            raise ValueError("\n".join(plan["errors"]))
+        if args.command == "assemble":
+            from .workflow import assemble
+            assemble(bundle, config)
+            print(f"Completed audiobook: {config['render']['output_dir']}")
+            return 0
         store = voice_store(bundle, config)
         if args.command == "voices":
             output = []
@@ -163,8 +202,6 @@ def main(argv=None):
                                "description_applied": saved.get("description_applied") if saved else None})
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 0
-        if args.command == "render" and plan["errors"]:
-            raise ValueError("\n".join(plan["errors"]))
         from .engines import create_engine
         from .verification import create_verifier
         from .workflow import ensure_voice, import_voice, render
@@ -187,8 +224,15 @@ def main(argv=None):
                 lock.rmdir()
             print("Persistent voices are saved. Audition their reference WAVs with the voices command.")
         else:
-            render(bundle, config, engine, verifier)
-            print(f"Completed audiobook: {config['render']['output_dir']}")
+            result = render(bundle, config, engine, verifier, chapters_only=args.chapters_only)
+            if args.chapters_only:
+                print(f"Completed chapter audio: {Path(config['render']['work_dir']) / 'chapters'}")
+                if isinstance(result, dict):
+                    for chapter in result.get("chapters", []):
+                        location = chapter.get("audio_file") or "empty chapter (no speech)"
+                        print(f"  Chapter {chapter['number']}: {location}")
+            else:
+                print(f"Completed audiobook: {config['render']['output_dir']}")
         return 0
     except (ValueError, RuntimeError, OSError, KeyError) as exc:
         print(f"Renderer stopped: {exc}", file=sys.stderr)
@@ -197,8 +241,13 @@ def main(argv=None):
         print("Interrupted; verified clips are retained for resume.", file=sys.stderr)
         return 130
     finally:
-        if engine is not None and hasattr(engine, "close"):
-            engine.close()
+        for component in (verifier, engine):
+            close = getattr(component, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except (ValueError, RuntimeError, OSError) as exc:
+                    print(f"Renderer cleanup warning: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import Sequence
@@ -324,11 +325,51 @@ def _check_encoded(path: Path, frames: int, sample_rate: int, *, ffprobe: str,
     return inspection
 
 
+def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
+                   ordinal: int, total_chapters: int, chapter_format: str = "m4a",
+                   aac_bitrate: str = "128k", mp3_bitrate: str = "128k",
+                   ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe") -> dict:
+    """Encode and inspect one lossless chapter, without changing its timeline."""
+    if chapter_format not in {"m4a", "mp3"}:
+        raise ValueError("chapter_format must be m4a or mp3")
+    for bitrate in (aac_bitrate, mp3_bitrate):
+        if not isinstance(bitrate, str) or not re.fullmatch(r"[1-9][0-9]{0,2}k", bitrate):
+            raise ValueError("Audio bitrate must be a positive value such as 128k")
+    if (type(ordinal) is not int or type(total_chapters) is not int
+            or not 1 <= ordinal <= total_chapters):
+        raise ValueError("Chapter track numbers must be positive and within the book")
+    target = Path(output_path)
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"Audio chapter output already exists: {target}")
+    rate = _rate(chapter["sample_rate"])
+    info = _wave_info(Path(chapter["wav_path"]), rate)
+    if info["frames"] != chapter["frames"] or not info["frames"]:
+        raise ValueError("Chapter PCM is empty or differs from its synchronization data")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    codec = (["-c:a", "aac", "-b:a", aac_bitrate, "-movflags", "+faststart"]
+             if chapter_format == "m4a"
+             else ["-c:a", "libmp3lame", "-b:a", mp3_bitrate])
+    with tempfile.TemporaryDirectory(prefix=".chapter-", dir=target.parent) as temporary:
+        staged = Path(temporary) / f"chapter.{chapter_format}"
+        _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+              "-i", str(Path(chapter["wav_path"]).resolve()), "-map", "0:a:0"]
+             + codec + ["-metadata", f"title={chapter['title']}",
+                        "-metadata", f"album={book.get('title', 'Audiobook')}",
+                        "-metadata", f"artist={'; '.join(book.get('authors', []))}",
+                        "-metadata", f"track={ordinal}/{total_chapters}", str(staged)])
+        inspection = _check_encoded(staged, info["frames"], rate, ffprobe=ffprobe)
+        target.hardlink_to(staged)
+    return {"path": str(target), "sha256": _hash(target), **info,
+            "duration_seconds": float(next(stream for stream in inspection["streams"]
+                                             if stream["codec_type"] == "audio")["duration"])}
+
+
 def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                   book: dict, cover_path: str | Path | None = None,
                   chapter_format: str = "m4a", aac_bitrate: str = "128k",
                   mp3_bitrate: str = "128k", ffmpeg: str = "ffmpeg",
-                  ffprobe: str = "ffprobe", source_fingerprint: str | None = None) -> dict:
+                  ffprobe: str = "ffprobe", source_fingerprint: str | None = None,
+                  notify=lambda message: None) -> dict:
     """Encode chapter files and a single AAC M4B from the same lossless WAVs.
 
     The caller owns the staging directory and publishes it only after success.
@@ -348,18 +389,29 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
         raise ValueError("Audiobook has no chapters")
     sample_rate = _rate(chapters[0]["sample_rate"])
     records, audio_chapters, timings, cursor = [], [], [], 0
+    chapter_numbers = set()
     for ordinal, chapter in enumerate(chapters, 1):
         info = _wave_info(Path(chapter["wav_path"]), sample_rate)
         if info["frames"] != chapter["frames"] or chapter["sample_rate"] != sample_rate:
             raise ValueError("Chapter PCM no longer matches its synchronization data")
+        number = chapter.get("number", ordinal)
+        if type(number) is not int or number < 1 or number in chapter_numbers:
+            raise ValueError("Chapter source numbers must be distinct positive integers")
+        chapter_numbers.add(number)
         record = {
             "id": chapter["id"], "title": chapter["title"],
             "script_path": chapter.get("script_path"),
-            "ordinal": ordinal, "start_frame": cursor,
+            "ordinal": ordinal, "number": number, "start_frame": cursor,
             "end_frame": cursor + info["frames"], "frames": info["frames"],
             "skipped": info["frames"] == 0,
-            "path": f"chapters/chapter-{ordinal:04d}.{chapter_format}" if info["frames"] else None,
+            "path": f"chapters/chapter-{number:04d}.{chapter_format}" if info["frames"] else None,
         }
+        if "normalization" in chapter:
+            record["normalization"] = deepcopy(chapter["normalization"])
+        if "pcm_sha256" in chapter:
+            if _hash(Path(chapter["wav_path"])) != chapter["pcm_sha256"]:
+                raise ValueError("Chapter PCM failed integrity checks before packaging")
+            record["pcm_sha256"] = chapter["pcm_sha256"]
         records.append(record)
         for segment in chapter["segments"]:
             start, end = segment["chapter_start_frame"], segment["chapter_end_frame"]
@@ -381,16 +433,29 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
     authors = "; ".join(book.get("authors", []))
     base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
     for chapter, record in audio_chapters:
-        codec = (["-c:a", "aac", "-b:a", aac_bitrate, "-movflags", "+faststart"]
-                 if chapter_format == "m4a"
-                 else ["-c:a", "libmp3lame", "-b:a", mp3_bitrate])
         output = target / record["path"]
-        _run(base + ["-i", str(Path(chapter["wav_path"]).resolve()), "-map", "0:a:0"]
-             + codec + ["-metadata", f"title={record['title']}",
-                        "-metadata", f"album={title}", "-metadata", f"artist={authors}",
-                        "-metadata", f"track={record['ordinal']}/{len(records)}", str(output)])
-        _check_encoded(output, record["frames"], sample_rate, ffprobe=ffprobe)
+        if chapter.get("encoded_path") is not None:
+            cached = Path(chapter["encoded_path"])
+            if (cached.is_symlink() or not cached.is_file()
+                    or cached.suffix != f".{chapter_format}"
+                    or _hash(cached) != chapter.get("encoded_sha256")):
+                raise ValueError("Cached encoded chapter failed integrity checks")
+            _check_encoded(cached, record["frames"], sample_rate, ffprobe=ffprobe)
+            notify(f"Reusing chapter audio: {record['number']}: {record['title']}")
+            with output.open("xb") as destination, cached.open("rb") as source:
+                shutil.copyfileobj(source, destination)
+            if _hash(output) != chapter["encoded_sha256"]:
+                raise ValueError("Cached encoded chapter changed during packaging")
+        else:
+            notify(f"Encoding chapter {record['number']}: {record['title']}")
+            encode_chapter(chapter, output, book=book,
+                           ordinal=chapter.get("track_number", record["ordinal"]),
+                           total_chapters=chapter.get("total_chapters", len(records)),
+                           chapter_format=chapter_format,
+                           aac_bitrate=aac_bitrate, mp3_bitrate=mp3_bitrate,
+                           ffmpeg=ffmpeg, ffprobe=ffprobe)
         record["sha256"] = _hash(output)
+    notify(f"Combining {len(audio_chapters)} chapters into book.m4b")
     with tempfile.TemporaryDirectory(prefix=".encode-", dir=target) as temporary:
         scratch = Path(temporary)
         concat = scratch / "chapters.ffconcat"

@@ -6,13 +6,14 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 import unicodedata
+from types import SimpleNamespace
 
-from .assembly import compose_chapter, extract_cover, normalize_clip, package_audio
+from .assembly import extract_cover, normalize_clip, package_audio
+from .chapter_cache import chapter_settings, load_chapter, prepare_chapter
 from .bundle import make_plan
-from .common import digest, file_hash, read_json, write_json
+from .common import digest, file_hash, read_json, regular_file, write_json
 from .quality import validation_key as make_validation_key, validate_audio
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
@@ -261,19 +262,24 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
 
 
 def _publish(stage, destination):
+    """Publish the complete directory in one rename, keeping partial books hidden."""
     destination = Path(destination)
-    destination.mkdir()  # Exclusive reservation: never overwrite an existing book.
-    for source in sorted(stage.rglob("*")):
-        if source.is_dir():
-            (destination / source.relative_to(stage)).mkdir()
-    # render.json is the completion marker. Ignore incomplete output without it.
-    files = [p for p in stage.rglob("*") if p.is_file()]
-    files.sort(key=lambda p: (p.name == "render.json", str(p)))
-    for source in files:
-        os.link(source, destination / source.relative_to(stage))
+    reservation = destination.parent / ("." + destination.name + ".publish.lock")
+    try:
+        reservation.mkdir()
+    except FileExistsError as exc:
+        raise RenderBlocked(
+            f"Another process may be publishing this output. If it was forcibly terminated, "
+            f"confirm it has stopped before removing the stale lock: {reservation}") from exc
+    try:
+        if destination.exists() or destination.is_symlink():
+            raise RenderBlocked("Output already exists; choose a new output directory")
+        os.rename(stage, destination)
+    finally:
+        reservation.rmdir()
 
 
-def render(bundle, config, engine, verifier, *, notify=print):
+def _preflight(bundle, config, *, chapters_only=False):
     from .book_context import resolve_book_config, voice_store
     try:
         config = resolve_book_config(bundle, config)
@@ -282,24 +288,184 @@ def render(bundle, config, engine, verifier, *, notify=print):
     plan = make_plan(bundle, config)
     if plan["errors"]:
         raise RenderBlocked("\n".join(plan["errors"]))
-    work = Path(config["render"]["work_dir"])
     output = Path(config["render"]["output_dir"])
-    if output.exists():
+    if not chapters_only and (output.exists() or output.is_symlink()):
         raise RenderBlocked("Output already exists; choose a new output directory")
     epub = config["render"]["epub"]
     if epub and file_hash(epub) != bundle["source"]["book"]["id"]:
         raise RenderBlocked("Configured EPUB does not match the analyzed book")
-    store = voice_store(bundle, config)
+    return config, plan, voice_store(bundle, config)
+
+
+def _speech_request(chunk, voice, engine_identity, config):
+    return {
+        "kind": "speech", "engine": engine_identity, "voice_asset_hash": voice["asset_hash"],
+        "chunk": chunk, "base_seed": config["render"]["seed"],
+        "sample_rate": config["render"]["sample_rate"],
+    }
+
+
+def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity):
+    from .quality import QUALITY_VERSION
+    used = {chunk["segment"]["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]}
+    return {
+        "version": 1, "bundle_hash": bundle["bundle_hash"],
+        "source_fingerprint": bundle["manifest"]["source_fingerprint"],
+        "chapter_hash": digest(chapter), "total_chapters": len(bundle["chapters"]),
+        "voice_assets": {key: voices[key]["asset_hash"] for key in sorted(used)},
+        "engine": engine_identity, "verifier": verifier_identity,
+        "engine_config_hash": digest(config["engine"]),
+        "verification_config_hash": digest(config["verification"]),
+        "quality": config["quality"], "quality_version": QUALITY_VERSION,
+        "base_seed": config["render"]["seed"], "settings": chapter_settings(config["render"]),
+    }
+
+
+def _checkpoint_path(work, chapter):
+    return Path(work) / "completed-chapters" / (chapter["id"] + ".json")
+
+
+def _read_checkpoint(work, chapter):
+    path = _checkpoint_path(work, chapter)
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        record = read_json(regular_file(path))
+        if not isinstance(record, dict):
+            raise ValueError("Checkpoint must be a JSON object")
+        checksum = record.pop("record_sha256")
+        if (checksum != digest(record) or record.get("format") != "audiobook-chapter-checkpoint"
+                or record.get("version") != 1
+                or not isinstance(record.get("context"), dict)
+                or not isinstance(record.get("cache_key"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["cache_key"])):
+            raise ValueError("Checkpoint integrity check failed")
+        return record
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise RenderBlocked(f"Invalid chapter checkpoint; inspect {path}: {exc}") from exc
+
+
+def _restore_chapter(work, chapter, record, context, voices, config):
+    if record["context"] != context:
+        raise RenderBlocked(
+            f"Completed {chapter['id']} is stale: source, selected voices, model, quality, or "
+            "render settings changed. Run render --chapters-only for this chapter again.")
+    try:
+        composed = load_chapter(Path(work) / "chapters" / record["cache_key"],
+                                ffprobe=config["render"]["ffprobe"])
+        if composed["context"] != context or composed["settings"] != context["settings"]:
+            raise ValueError("Chapter cache and checkpoint disagree")
+        # A checkpoint binds every spoken chunk to a successful verification,
+        # including exact expected words and the voice selected for that chunk.
+        expected = [chunk for chunk in chapter["chunks"] if not chunk["silent_control"]]
+        acceptance = record["acceptance"]
+        if not isinstance(acceptance, list) or len(acceptance) != len(expected):
+            raise ValueError("Incomplete chapter verification records")
+        cache_record = read_json(Path(composed["cache_directory"]) / "chapter.json")
+        clip_hashes = {clip["chunk_id"]: clip["audio_sha256"]
+                       for clip in cache_record["identity"]["clips"]}
+        verifier = SimpleNamespace(identity=context["verifier"])
+        for chunk, accepted in zip(expected, acceptance):
+            if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
+                raise ValueError("Invalid chapter verification record")
+            request = _speech_request(chunk, voices[chunk["segment"]["voice_id"]],
+                                      context["engine"], config)
+            if (accepted["chunk_id"] != chunk["chunk_id"]
+                    or accepted["request_hash"] != digest(request)
+                    or accepted["validation_key"] != make_validation_key(
+                        chunk["spoken_text"], verifier, config["quality"])
+                    or accepted["report"].get("passed") is not True
+                    or accepted["audio_sha256"] != clip_hashes[chunk["chunk_id"]]):
+                raise ValueError("Chapter verification does not match the current plan")
+        if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
+            raise ValueError("Chapter timing map does not cover the complete plan")
+        return composed, acceptance
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise RenderBlocked(f"Invalid saved chapter {chapter['id']}: {exc}") from exc
+
+
+def _save_checkpoint(work, chapter, composed, context, acceptance):
+    record = {
+        "format": "audiobook-chapter-checkpoint", "version": 1,
+        "chapter_number": chapter["number"], "title": chapter["title"],
+        "cache_key": composed["cache_key"], "context": context, "acceptance": acceptance,
+        "audio_file": composed["encoded_path"],
+    }
+    write_json(_checkpoint_path(work, chapter), dict(record, record_sha256=digest(record)))
+
+
+def _package(bundle, config, plan, store, voices, rendered, acceptance,
+             engine_identity, verifier_identity, *, notify):
+    output = Path(config["render"]["output_dir"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "ready"
+        stage.mkdir()
+        cover = None
+        if config["render"]["epub"]:
+            cover = extract_cover(config["render"]["epub"], stage / "artwork",
+                                  expected_book_id=bundle["source"]["book"]["id"])
+            if cover is None:
+                notify("The supplied EPUB has no supported JPEG/PNG cover; assembling without artwork.")
+        else:
+            notify("No EPUB supplied: assembling without cover artwork (use --epub to include it).")
+        audio = package_audio(
+            rendered, stage, book=bundle["source"]["book"], cover_path=cover,
+            chapter_format=config["render"]["chapter_format"],
+            aac_bitrate=config["render"].get("aac_bitrate", "128k"),
+            mp3_bitrate=config["render"].get("mp3_bitrate", "128k"),
+            ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
+            source_fingerprint=bundle["manifest"]["source_fingerprint"], notify=notify)
+        write_json(stage / "source.json", bundle["source"])
+        write_json(stage / "cast.json", bundle["cast"])
+        write_json(stage / "verification.json", acceptance)
+        result = {
+            "format": "audiobook-render", "version": 1, "status": "complete",
+            "bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
+            "partial_book": plan["partial_book"], "series_id": store.series_id,
+            "voice_assets": {key: value["asset_hash"] for key, value in voices.items()},
+            "engine": engine_identity, "verifier": verifier_identity, "quality": config["quality"],
+            "review_items": plan["review_items"], "allow_review": config["render"]["allow_review"],
+            "audio": audio, "files_sha256": {
+                p.relative_to(stage).as_posix(): file_hash(p) for p in sorted(stage.rglob("*")) if p.is_file()
+            },
+        }
+        write_json(stage / "render.json", result)
+        _publish(stage, output)
+    notify(f"Audiobook ready: {output / 'book.m4b'}")
+    return result
+
+
+def _start_run(work, plan, mode):
     work.mkdir(parents=True, exist_ok=True)
     lock = work / ".render.lock"
-    lock.mkdir()
-    voice_lock = None
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise RenderBlocked(
+            f"Another render/assembly may be running. If it was forcibly terminated, confirm it has "
+            f"stopped before removing the stale lock: {lock}") from exc
     try:
         plan_hash = digest(plan)
-        run = work / "runs" / plan_hash
-        run.mkdir(parents=True, exist_ok=True)
-        write_json(run / "plan.json", plan)
-        write_json(work / "status.json", {"status": "running", "plan_hash": plan_hash})
+        write_json(work / "runs" / plan_hash / "plan.json", plan)
+        write_json(work / "status.json", {"status": "running", "mode": mode, "plan_hash": plan_hash})
+    except BaseException:
+        lock.rmdir()
+        raise
+    return lock
+
+
+def _failed_run(work, exc, notify):
+    write_json(work / "status.json", {"status": "blocked", "error": str(exc), "error_type": type(exc).__name__})
+    notify(f"Verified clips and completed chapters are retained in {work}. Rerun the same command to resume.")
+
+
+def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
+    config, plan, store = _preflight(bundle, config, chapters_only=chapters_only)
+    work = Path(config["render"]["work_dir"])
+    lock = _start_run(work, plan, "chapters" if chapters_only else "render")
+    voice_lock = None
+    try:
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
         voice_lock = store.lock()
         store.persist_aliases()
@@ -323,76 +489,120 @@ def render(bundle, config, engine, verifier, *, notify=print):
         voice_lock.rmdir()
         voice_lock = None
         rendered, acceptance = [], []
-        # A new staging directory lets a rerun assemble from accepted clips safely.
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
-            stage = Path(temporary)
-            pcm = stage / "pcm"
-            pcm.mkdir()
-            for chapter in plan["chapters"]:
+        engine_identity, verifier_identity = engine.identity, verifier.identity
+        for chapter in plan["chapters"]:
+            context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
+            saved = _read_checkpoint(work, chapter)
+            if saved is not None and saved["context"] == context:
+                composed, chapter_acceptance = _restore_chapter(work, chapter, saved, context, voices, config)
+                notify(f"Reusing completed {chapter['id']}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
+            else:
                 notify(f"Rendering {chapter['id']}: {chapter['title']} ({len(chapter['chunks'])} chunks)")
-                clips = []
-                for chunk in chapter["chunks"]:
+                clips, chapter_acceptance = [], []
+                for number, chunk in enumerate(chapter["chunks"], 1):
                     if chunk["silent_control"]:
                         clips.append(dict(chunk, wav_path=None))
                         continue
                     voice = voices[chunk["segment"]["voice_id"]]
                     direction = chunk["segment"].get("delivery", {}).get("direction", "")
-                    request = {
-                        "kind": "speech", "engine": engine.identity, "voice_asset_hash": voice["asset_hash"],
-                        "chunk": chunk, "base_seed": config["render"]["seed"],
-                        "sample_rate": config["render"]["sample_rate"],
-                    }
+                    request = _speech_request(chunk, voice, engine_identity, config)
+                    directory = work / "clips" / digest(request)
+                    cached = (directory / "accepted.json").is_file()
+                    notify(f"  Chunk {number}/{len(chapter['chunks'])}: "
+                           f"{'checking saved take' if cached else 'generating speech'} "
+                           f"({chunk['segment']['voice_id']})")
                     wav, accepted = verified_take(
                         chunk["spoken_text"],
                         lambda path, seed, c=chunk, v=voice, d=direction:
                             engine.synthesize(c["spoken_text"], v, path, seed=seed, direction=d),
-                        work / "clips" / digest(request), request, verifier, config, notify=notify)
-                    acceptance.append({"chunk_id": chunk["chunk_id"], "audio_sha256": accepted["audio_sha256"],
-                                       "request_hash": accepted["request_hash"],
-                                       "validation_key": accepted["validation_key"], "report": accepted["report"]})
+                        directory, request, verifier, config, notify=notify)
+                    chapter_acceptance.append({
+                        "chunk_id": chunk["chunk_id"], "audio_sha256": accepted["audio_sha256"],
+                        "request_hash": accepted["request_hash"],
+                        "validation_key": accepted["validation_key"], "report": accepted["report"]})
                     clips.append(dict(chunk, wav_path=str(wav)))
-                composed = compose_chapter(clips, pcm / (chapter["id"] + ".wav"),
-                                           sample_rate=config["render"]["sample_rate"],
-                                           paragraph_pause_ms=config["render"]["paragraph_pause_ms"],
-                                           blank_pause_ms=config["render"]["blank_pause_ms"],
-                                           bracket_pause_ms=config["render"].get("bracket_pause_ms", 120))
-                composed.update({key: chapter[key] for key in ("id", "title", "script_path")})
-                rendered.append(composed)
-            cover = None
-            if config["render"]["epub"]:
-                cover = extract_cover(config["render"]["epub"], stage / "artwork",
-                                      expected_book_id=bundle["source"]["book"]["id"])
-            audio = package_audio(
-                rendered, stage, book=bundle["source"]["book"], cover_path=cover,
-                chapter_format=config["render"]["chapter_format"],
-                ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
-                source_fingerprint=bundle["manifest"]["source_fingerprint"])
-            # Accepted clips stay in the work cache. Package portable source and
-            # timing, without duplicating full-book PCM in the published output.
-            shutil.rmtree(pcm)
-            write_json(stage / "source.json", bundle["source"])
-            write_json(stage / "cast.json", bundle["cast"])
-            write_json(stage / "verification.json", acceptance)
+                composed = prepare_chapter(
+                    dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+                    clips, work / "chapters", book=bundle["source"]["book"],
+                    render_settings=config["render"], context=context, notify=notify)
+                _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+            rendered.append(composed)
+            acceptance.extend(chapter_acceptance)
+        if chapters_only:
             result = {
-                "format": "audiobook-render", "version": 1, "status": "complete",
-                "bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
-                "partial_book": plan["partial_book"], "series_id": store.series_id,
-                "voice_assets": {key: value["asset_hash"] for key, value in voices.items()},
-                "engine": engine.identity, "verifier": verifier.identity, "quality": config["quality"],
-                "review_items": plan["review_items"], "allow_review": config["render"]["allow_review"],
-                "audio": audio, "files_sha256": {
-                    p.relative_to(stage).as_posix(): file_hash(p) for p in sorted(stage.rglob("*")) if p.is_file()
-                },
+                "format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
+                "partial_book": plan["partial_book"], "chapter_count": len(rendered),
+                "chapters": [{"number": c["number"], "title": c["title"], "audio_file": c["encoded_path"],
+                              "cache_directory": c["cache_directory"]} for c in rendered],
             }
-            write_json(stage / "render.json", result)
-            _publish(stage, output)
-        write_json(work / "status.json", {"status": "complete", "plan_hash": plan_hash, "output": str(output)})
+            notify(f"Saved {len(rendered)} chapter checkpoint(s) in {work / 'completed-chapters'}. "
+                   "Use assemble to create the M4B.")
+        else:
+            result = _package(bundle, config, plan, store, voices, rendered, acceptance,
+                              engine_identity, verifier_identity, notify=notify)
+        write_json(work / "status.json", {
+            "status": result["status"], "plan_hash": digest(plan),
+            "output": None if chapters_only else config["render"]["output_dir"],
+            "chapters": [c["number"] for c in rendered]})
         return result
     except BaseException as exc:
-        write_json(work / "status.json", {"status": "blocked", "error": str(exc), "error_type": type(exc).__name__})
+        _failed_run(work, exc, notify)
         raise
     finally:
         if voice_lock is not None:
             voice_lock.rmdir()
+        lock.rmdir()
+
+
+def assemble(bundle, config, *, notify=print):
+    """Package complete verified chapter checkpoints without importing any model."""
+    config, plan, store = _preflight(bundle, config)
+    work = Path(config["render"]["work_dir"])
+    lock = _start_run(work, plan, "assemble")
+    try:
+        voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}
+        missing = [key for key, value in voices.items() if value is None]
+        if missing:
+            raise RenderBlocked("Selected voices are missing: " + ", ".join(missing))
+        records = [_read_checkpoint(work, chapter) for chapter in plan["chapters"]]
+        missing = [chapter["number"] for chapter, record in zip(plan["chapters"], records) if record is None]
+        if missing:
+            raise RenderBlocked("Chapters have not finished rendering: " + ", ".join(map(str, missing))
+                                + ". Run render --chapters-only first.")
+        rendered, acceptance = [], []
+        identities = None
+        for chapter, record in zip(plan["chapters"], records):
+            saved = record["context"]
+            current = (saved["engine"], saved["verifier"])
+            if identities is not None and current != identities:
+                raise RenderBlocked("Completed chapters used different models or verifiers; rerun render "
+                                    "--chapters-only with consistent settings before assembly.")
+            identities = current
+            context = _chapter_context(bundle, chapter, config, voices, *identities)
+            # Encoding is independent of verified speech and its PCM timeline.
+            # Allow repackaging as MP3 or at a different bitrate without models;
+            # gain, pauses, source, voice and verification changes still block.
+            encoding_keys = {"chapter_format", "aac_bitrate", "mp3_bitrate", "ffmpeg", "ffprobe"}
+            restore_context = deepcopy(context)
+            for key in encoding_keys:
+                restore_context["settings"][key] = saved["settings"][key]
+            composed, chapter_acceptance = _restore_chapter(
+                work, chapter, record, restore_context, voices, config)
+            if any(context["settings"][key] != saved["settings"][key]
+                   for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
+                composed["encoded_path"] = None
+                composed["encoded_sha256"] = None
+            rendered.append(composed)
+            acceptance.extend(chapter_acceptance)
+            notify(f"Verified saved {chapter['id']}: {chapter['title']}")
+        if identities is None:
+            raise RenderBlocked("No chapters selected for assembly")
+        result = _package(bundle, config, plan, store, voices, rendered, acceptance, *identities, notify=notify)
+        write_json(work / "status.json", {"status": "complete", "plan_hash": digest(plan),
+                                          "output": config["render"]["output_dir"]})
+        return result
+    except BaseException as exc:
+        _failed_run(work, exc, notify)
+        raise
+    finally:
         lock.rmdir()
