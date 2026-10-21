@@ -521,6 +521,8 @@ Drama 3 renders new paragraphs as continuous performances by default. Dialogue a
 
 Accepted older clips keep their original boundaries and remain reusable, including when paragraph mode is enabled midway through a chapter. Saved paragraph performances also retain their boundaries on resume. Verification checks the complete paragraph; synchronization records its exact audio interval plus all original text ranges and voice assignments in `source_segments`. These entries have `precision = "paragraph"`; exact speaker-change or word timestamps are not inferred. To compare paragraph rendering for a previously completed chapter, use a separate `--work-dir` and output directory: that creates new speech without deleting the previous recordings.
 
+If a paragraph exhausts its generation attempts because of missing speech, silence, or another audio quality failure, rendering automatically retries its original shorter passages individually, using the same assigned voices and verification rules. The recovery decision is saved in `render-work/paragraph-fallbacks` before any individual passage is generated, so interruptions and later invocations keep the smaller boundaries. Previously verified clips and completed chapters are reused; failed paragraph takes remain available for inspection. Each recovered passage has its own source mapping and audio interval. An API or verifier outage does not trigger splitting, and a shorter passage that still fails its own bounded attempts stops the run normally.
+
 To generate and listen to one chapter before committing to the whole book, inspect the chapter list and save a chapter checkpoint:
 
 ```sh

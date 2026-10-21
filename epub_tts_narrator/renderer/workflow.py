@@ -33,6 +33,15 @@ class VerificationUnavailable(RenderBlocked):
     """Stop batch generation while an external verification service is unavailable."""
 
 
+class SpeechVerificationFailed(RenderBlocked):
+    """A bounded set of generated takes failed audio or transcript checks."""
+
+    def __init__(self, message, *, request, report):
+        super().__init__(message)
+        self.request = request
+        self.report = report
+
+
 def _seed(base, key, attempt):
     return (base + int(digest(key)[:8], 16) + attempt) % 2**32
 
@@ -359,7 +368,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     error = (last_report or {}).get("provider_error") or (last_report or {}).get("error")
     if error:
         failure += "\nLast error: " + safe_error_text(error, secrets=secrets)
-    raise RenderBlocked(failure)
+    raise SpeechVerificationFailed(failure, request=request, report=last_report or {})
 
 
 def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, notify=print,
@@ -498,6 +507,12 @@ def make_render_plan(bundle, config, *, multi_speaker=True):
     preserved, preserved_groups = set(), []
     work = config["render"].get("work_dir")
     if work:
+        from .paragraph_recovery import load_paragraph_fallbacks
+        try:
+            fallback_members = load_paragraph_fallbacks(work)
+            preserved.update(fallback_members)
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Invalid saved paragraph recovery: {exc}") from exc
         for path in (Path(work) / "clips").glob("*/accepted.json"):
             # A deleted WAV still preserves its request boundary: only that
             # deliberately removed clip should need regeneration on resume.
@@ -514,7 +529,12 @@ def make_render_plan(bundle, config, *, multi_speaker=True):
                 turns = chunk.get("paragraph_turns", []) if isinstance(chunk, dict) else []
                 if isinstance(turns, list) and len(turns) >= 2 and all(isinstance(turn, dict)
                         and isinstance(turn.get("chunk_id"), str) for turn in turns):
-                    preserved_groups.append([turn["chunk_id"] for turn in turns])
+                    members = [turn["chunk_id"] for turn in turns]
+                    # An older accepted performance can exist under a previous
+                    # voice/model. It must not re-form a group that failed with
+                    # the currently selected voices.
+                    if not fallback_members.intersection(members):
+                        preserved_groups.append(members)
     return group_paragraphs(plan, max_chars=config["render"].get("max_paragraph_chars", 1000),
                            preserved_chunk_ids=preserved, preserved_groups=preserved_groups)
 
@@ -981,6 +1001,49 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
         return [result[0] for result in results], [result[1] for result in results if result[1] is not None]
 
 
+def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
+                                verifier, config, work, *, notify):
+    """Split only exhausted paragraph performances, retaining verified work."""
+    from .paragraph_recovery import record_paragraph_fallback
+
+    recoverable = {"text_mismatch", "audio_too_short", "audio_too_long", "silent_audio",
+                   "audio_too_quiet", "excessive_silence", "internal_silence_stall",
+                   "excessive_clipping"}
+    while True:
+        try:
+            clips, acceptance = _render_chapter_chunks(
+                chapter, voices, engine, engine_identity, verifier, config, work,
+                notify=notify, total_chapters=len(bundle["chapters"]))
+            return chapter, clips, acceptance
+        except SpeechVerificationFailed as exc:
+            request, report = exc.request, exc.report
+            reasons = report.get("reasons", [])
+            chunk = request.get("chunk", {})
+            if (request.get("kind") != "paragraph_speech"
+                    or not isinstance(reasons, list) or not reasons
+                    or any(reason not in recoverable for reason in reasons)
+                    or report.get("text_judge", {}).get("decision") == "unavailable"
+                    or not any(item == chunk for item in chapter["chunks"])):
+                raise
+            # Record before any child generation so an interruption cannot
+            # re-form the failed group on the next invocation. This changes
+            # synthesis boundaries, never the script, voices, or quality gates.
+            try:
+                record_paragraph_fallback(work, request)
+            except (ValueError, OSError) as error:
+                raise RenderBlocked(f"Could not save paragraph recovery: {error}") from error
+            new_plan = make_render_plan(bundle, config, multi_speaker=True)
+            replacement = next(item for item in new_plan["chapters"] if item["id"] == chapter["id"])
+            if (new_plan["errors"] or any(item["chunk_id"] == chunk["chunk_id"]
+                                         for item in replacement["chunks"])
+                    or "".join(item["spoken_text"] for item in chapter["chunks"])
+                       != "".join(item["spoken_text"] for item in replacement["chunks"])):
+                raise RenderBlocked("Paragraph recovery did not preserve the complete speech plan") from exc
+            notify(f"  Paragraph failed verification; retrying its {len(chunk['paragraph_turns'])} "
+                   "passages separately with their assigned voices. Verified clips are retained.")
+            chapter = replacement
+
+
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
     run_started = monotonic()
     wrap_verifier = getattr(engine, "wrap_verifier", None)
@@ -1019,7 +1082,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         voice_lock = None
         rendered, acceptance = [], []
         engine_identity, verifier_identity = engine.identity, verifier.identity
-        for chapter in plan["chapters"]:
+        for chapter_index, chapter in enumerate(plan["chapters"]):
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
@@ -1030,9 +1093,13 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                 notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             else:
                 notify(f"Rendering {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
-                clips, chapter_acceptance = _render_chapter_chunks(
-                    chapter, voices, engine, engine_identity, verifier, config, work,
-                    notify=notify, total_chapters=len(bundle["chapters"]))
+                chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
+                    bundle, chapter, voices, engine, engine_identity, verifier, config, work,
+                    notify=notify)
+                if chapter != plan["chapters"][chapter_index]:
+                    plan["chapters"][chapter_index] = chapter
+                    write_json(work / "runs" / digest(plan) / "plan.json", plan)
+                context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
                 composed = prepare_chapter(
                     dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                     clips, work / "chapters", book=bundle["source"]["book"],
