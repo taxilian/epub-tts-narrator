@@ -17,7 +17,8 @@ from audiobook_renderer.voice_prompts import default_voice_prompt
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
 EXCERPT = (
     "I remember the road that brought us here. "
-    "There is still time to bring our friends safely home before nightfall."
+    "There is still time to bring our friends safely home before nightfall. "
+    "We know the way across the river, and we can travel together."
 )
 
 
@@ -263,6 +264,43 @@ class SampleDraftTests(unittest.TestCase):
         self.assertEqual(session.store.load(self.voice_id), saved)
         voice_calls = [call for call in self.selector.call_args_list if call.args[1] == self.voice_id]
         self.assertEqual(voice_calls, [])
+        self.assert_no_models()
+
+    def test_old_short_automatic_excerpt_upgrades_without_changing_saved_reference(self):
+        short = "Then someone was here."
+        source = {"kind": "book_excerpt", "segment_ids": ["old-short-quote"]}
+        saved = self.saved_voice(text=short, source=source)
+        before = Path(saved["reference_audio"]).read_bytes()
+        row = self.session.rows()[0]
+        self.assertEqual(row["reference_text"], EXCERPT)
+        self.assertEqual(row["sample_source"]["replaces_reference_text"], short)
+        self.session.prepare_samples()
+        self.assertEqual(self.session.store.load(self.voice_id)["reference_text"], short)
+        self.assertEqual(Path(saved["reference_audio"]).read_bytes(), before)
+        self.assert_no_models()
+
+    def test_joined_and_creative_scripts_remain_stable_in_persisted_drafts(self):
+        for kind in ("book_excerpts", "casting_script"):
+            self.sample["source"]["kind"] = kind
+            self.session._samples.clear()
+            self.session.prepare_samples()
+            original = read_json(self.session._draft_path(self.voice_id))
+            self.assertEqual(original["sample_source"]["kind"], kind)
+            later = self.new_session()
+            with patch.object(later, "_sample_default", side_effect=AssertionError("Existing script replaced")):
+                self.assertEqual(later.rows()[0]["reference_text"], EXCERPT)
+            self.session._draft_path(self.voice_id).unlink()
+            # The other character's draft is deliberately retained.
+        self.assert_no_models()
+
+    def test_unprepared_listing_does_not_fall_back_to_generic_generation(self):
+        from audiobook_renderer.samples import MissingSampleScript
+        self.selector.side_effect = MissingSampleScript(self.voice_id)
+        rows = self.session.rows()
+        self.assertEqual(rows[0]["reference_text"], "")
+        self.assertEqual(rows[0]["sample_source"]["kind"], "unprepared")
+        with self.assertRaises(MissingSampleScript):
+            self.session.generate(self.voice_id)
         self.assert_no_models()
 
     def test_fallback_can_acquire_an_excerpt_when_a_later_book_has_suitable_dialogue(self):

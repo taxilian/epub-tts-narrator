@@ -295,6 +295,14 @@ def casting_command(args, bundle, config):
     enabled = settings.get("normalize_samples", True)
     if action == "normalize-samples" and not enabled:
         raise ValueError("Sample normalization is disabled; set casting.normalize_samples = true")
+    if args.voice_id and args.voice_id not in {voice["id"] for voice in bundle["cast"]["voices"]}:
+        raise ValueError("Voice ID is not in the bundle cast")
+    if action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "generate"} and not args.text_file:
+        from epub_audiobook.audition_scripts import ensure_bundle_scripts
+        from .book_context import voice_store
+        store = voice_store(bundle, config)
+        bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
+                                       voice_ids=[args.voice_id] if args.voice_id else None)
     normalizer = None
     if enabled and action in {"interactive", "play", "normalize-samples"}:
         from .loudness import SampleNormalizer

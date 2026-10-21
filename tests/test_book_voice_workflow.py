@@ -30,6 +30,7 @@ from test_renderer_voice_design_integration import (
     FFMPEG, FFPROBE, ReferenceDesigner, TranscriptVerifier,
 )
 from test_series import fixture, propose
+from audition_fixtures import prepare_bundle
 
 
 class BookFixture(unittest.TestCase):
@@ -76,7 +77,7 @@ class BookFixture(unittest.TestCase):
         def forbidden(*args, **kwargs):
             self.fail("Inherited voices must be reused without initializing a model")
         return CastingSession(
-            bundle, self.config,
+            prepare_bundle(bundle), self.config,
             engine_factory=(lambda _: self.engine) if models else forbidden,
             verifier_factory=(lambda *args, **kwargs: self.verifier) if models else forbidden,
             designer_factory=forbidden, notify=lambda _: None,

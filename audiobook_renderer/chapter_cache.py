@@ -11,7 +11,7 @@ import re
 import subprocess
 import tempfile
 
-from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter
+from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_speakers
 from .common import digest, file_hash, read_json, regular_file, write_json
 
 
@@ -121,7 +121,100 @@ def _timings(chapter):
         if (type(start) is not int or type(end) is not int
                 or not previous <= start <= end <= chapter["frames"]):
             raise ValueError("Cached chapter synchronization frame range is invalid")
+        if "speaker_lanes" in segment:
+            lanes = segment["speaker_lanes"]
+            if (not isinstance(lanes, list) or len(lanes) < 2
+                    or any(not isinstance(lane, dict)
+                           or lane.get("start_frame") != 0
+                           or type(lane.get("end_frame")) is not int
+                           or not 0 < lane["end_frame"] <= end - start
+                           or lane.get("chapter_start_frame") != start
+                           or lane.get("chapter_end_frame") != start + lane["end_frame"] for lane in lanes)
+                    or max(lane["chapter_end_frame"] for lane in lanes) != end):
+                raise ValueError("Cached simultaneous speaker timing is invalid")
         previous = end
+
+
+LANE_FIELDS = ("role_id", "voice_id", "audio_sha256", "request_hash", "validation_key",
+               "start_frame", "end_frame")
+
+
+def mixture_identity(lanes, sample_rate):
+    """Bind the fixed mixing recipe to each independently verified performer."""
+    return {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
+            "speaker_lanes": [{key: lane[key] for key in LANE_FIELDS} for lane in lanes]}
+
+
+def mixture_validation_key(lanes):
+    return digest({"method": "independently_verified_simultaneous_lanes", "version": 1,
+                   "lanes": [{key: lane[key] for key in ("role_id", "voice_id", "audio_sha256", "validation_key")}
+                             for lane in lanes]})
+
+
+def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print):
+    """Cache a mix only after every lane has passed independent verification."""
+    if not isinstance(lanes, list) or len(lanes) < 2:
+        raise ValueError("Simultaneous speech requires at least two verified lanes")
+    prepared = []
+    for lane in lanes:
+        if (not isinstance(lane, dict) or not isinstance(lane.get("report"), dict)
+                or lane["report"].get("passed") is not True):
+            raise ValueError("Every simultaneous speaker must pass verification before mixing")
+        path = regular_file(lane["wav_path"])
+        info = _wave_info(path, sample_rate)
+        if not info["frames"] or file_hash(path) != lane["audio_sha256"]:
+            raise ValueError("Verified simultaneous speaker audio changed or is empty")
+        prepared.append(dict(lane, start_frame=0, end_frame=info["frames"]))
+    if (len({lane["role_id"] for lane in prepared}) != len(prepared)
+            or len({lane["voice_id"] for lane in prepared}) != len(prepared)):
+        raise ValueError("Simultaneous speaker roles and voices must be distinct")
+    identity = mixture_identity(prepared, sample_rate)
+    key, frames = digest(identity), max(lane["end_frame"] for lane in prepared)
+    directory = Path(directory)
+    for parent in (directory, directory.parent):
+        if parent.is_symlink():
+            raise ValueError("Simultaneous mixture cache directories must not be symlinks")
+    folder = directory / key
+
+    def load():
+        if folder.is_symlink() or not folder.is_dir():
+            raise ValueError("Simultaneous mixture cache must be a regular directory")
+        record = read_json(regular_file(folder / "mix.json"))
+        if not isinstance(record, dict):
+            raise ValueError("Simultaneous mixture metadata must be an object")
+        checksum = record.pop("record_sha256", None)
+        wav = regular_file(folder / "mix.wav")
+        if (checksum != digest(record) or record.get("identity") != identity
+                or record.get("format") != "audiobook-renderer-mix" or record.get("version") != 1
+                or record.get("audio_sha256") != file_hash(wav)
+                or _wave_info(wav, sample_rate)["frames"] != frames
+                or record.get("frames") != frames):
+            raise ValueError("Simultaneous mixture cache failed integrity checks")
+        mix = {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
+               "frames": frames, "cache_key": key, "audio_sha256": record["audio_sha256"],
+               "weight": 1 / len(prepared), "peak_amplitude": record["peak_amplitude"]}
+        return {"wav_path": str(wav.resolve()), "mix": mix,
+                "speaker_lanes": [{key: value for key, value in lane.items() if key != "wav_path"}
+                                  for lane in prepared]}
+
+    if folder.exists() or folder.is_symlink():
+        return load()
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".mix-", dir=directory) as temporary:
+        stage = Path(temporary) / "ready"
+        stage.mkdir()
+        notify(f"Mixing {len(prepared)} independently verified simultaneous speakers")
+        mixed = mix_speakers(prepared, stage / "mix.wav", sample_rate=sample_rate)
+        record = {"format": "audiobook-renderer-mix", "version": 1, "identity": identity,
+                  "frames": frames, "audio_sha256": mixed["audio_sha256"],
+                  "peak_amplitude": mixed["peak_amplitude"]}
+        write_json(stage / "mix.json", dict(record, record_sha256=digest(record)))
+        try:
+            os.rename(stage, folder)
+        except OSError:
+            if not folder.exists():
+                raise
+    return load()
 
 
 def load_chapter(directory, *, ffprobe="ffprobe"):

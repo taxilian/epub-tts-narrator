@@ -41,6 +41,11 @@ models/
 /outputs/
 *.audiobook/
 .epub-audiobook-cache/
+.analysis-revisions/
+.analysis-update.lock/
+.audio-render.lock/
+.audition-scripts.lock/
+audition-scripts.json
 voices/
 render-work/
 audiobook/

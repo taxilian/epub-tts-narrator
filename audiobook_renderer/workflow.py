@@ -11,8 +11,9 @@ import unicodedata
 from types import SimpleNamespace
 
 from .assembly import extract_cover, normalize_clip, package_audio
-from .chapter_cache import chapter_settings, load_chapter, prepare_chapter
-from .bundle import make_plan
+from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
+                            mixture_identity, mixture_validation_key, prepare_mixture)
+from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .quality import validation_key as make_validation_key, validate_audio
 from .voice_bindings import design_voice, designer_identity, require_designer
@@ -286,6 +287,7 @@ def _publish(stage, destination):
 
 def _preflight(bundle, config, *, chapters_only=False):
     from .book_context import resolve_book_config, voice_store
+    _check_analysis_update(bundle)
     try:
         config = resolve_book_config(bundle, config)
     except ValueError as exc:
@@ -302,17 +304,48 @@ def _preflight(bundle, config, *, chapters_only=False):
     return config, plan, voice_store(bundle, config)
 
 
-def _speech_request(chunk, voice, engine_identity, config):
-    return {
+def _check_analysis_update(bundle):
+    lock = Path(bundle["directory"]) / ".analysis-update.lock"
+    if lock.exists() or lock.is_symlink():
+        raise RenderBlocked(f"This book's analysis is being updated; retry when it finishes: {lock}")
+
+
+def _lock_book_audio(bundle):
+    """Coordinate analysis revisions even when render work is outside the book."""
+    lock = Path(bundle["directory"]) / ".audio-render.lock"
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise RenderBlocked(
+            f"Another process may be rendering or assembling this book. If it was forcibly terminated, "
+            f"confirm it has stopped before removing the stale lock: {lock}") from exc
+    try:
+        # Revision takes its own lock before checking ours; neither may proceed
+        # if both processes acquired their locks at almost the same time.
+        _check_analysis_update(bundle)
+        if digest(read_json(regular_file(Path(bundle["directory"]) / "manifest.json"))) != bundle["bundle_hash"]:
+            raise RenderBlocked("This book's analysis changed after it was loaded; rerun the command")
+    except BaseException:
+        lock.rmdir()
+        raise
+    return lock
+
+
+def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
+    request = {
         "kind": "speech", "engine": engine_identity, "voice_asset_hash": voice["asset_hash"],
         "chunk": chunk, "base_seed": config["render"]["seed"],
         "sample_rate": config["render"]["sample_rate"],
     }
+    if performer is not None:
+        request["performer"] = dict(performer)
+    return request
 
 
 def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity):
     from .quality import QUALITY_VERSION
-    used = {chunk["segment"]["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]}
+    used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
+            for speaker in chunk_speakers(chunk)}
     return {
         "version": 1, "bundle_hash": bundle["bundle_hash"],
         "source_fingerprint": bundle["manifest"]["source_fingerprint"],
@@ -367,21 +400,56 @@ def _restore_chapter(work, chapter, record, context, voices, config):
         if not isinstance(acceptance, list) or len(acceptance) != len(expected):
             raise ValueError("Incomplete chapter verification records")
         cache_record = read_json(Path(composed["cache_directory"]) / "chapter.json")
-        clip_hashes = {clip["chunk_id"]: clip["audio_sha256"]
-                       for clip in cache_record["identity"]["clips"]}
+        cached_clips = {clip["chunk_id"]: clip for clip in cache_record["identity"]["clips"]}
+        timings = {item["chunk_id"]: item for item in composed["segments"]}
         verifier = SimpleNamespace(identity=context["verifier"])
         for chunk, accepted in zip(expected, acceptance):
             if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
                 raise ValueError("Invalid chapter verification record")
-            request = _speech_request(chunk, voices[chunk["segment"]["voice_id"]],
-                                      context["engine"], config)
-            if (accepted["chunk_id"] != chunk["chunk_id"]
-                    or accepted["request_hash"] != digest(request)
-                    or accepted["validation_key"] != make_validation_key(
-                        chunk["spoken_text"], verifier, config["quality"])
-                    or accepted["report"].get("passed") is not True
-                    or accepted["audio_sha256"] != clip_hashes[chunk["chunk_id"]]):
+            cached = cached_clips[chunk["chunk_id"]]
+            if (accepted["chunk_id"] != chunk["chunk_id"] or accepted["report"].get("passed") is not True
+                    or accepted["audio_sha256"] != cached["audio_sha256"]):
                 raise ValueError("Chapter verification does not match the current plan")
+            speakers = chunk_speakers(chunk)
+            if len(speakers) > 1:
+                lanes, mix = accepted.get("speaker_lanes"), accepted.get("mix")
+                if (not isinstance(lanes, list) or len(lanes) != len(speakers)
+                        or not isinstance(mix, dict)
+                        or any(not isinstance(lane, dict) or not isinstance(lane.get("report"), dict)
+                               or lane.get("start_frame") != 0 or type(lane.get("end_frame")) is not int
+                               or lane["end_frame"] <= 0 for lane in lanes)):
+                    raise ValueError("Incomplete simultaneous speaker verification")
+                lane_metadata = [{key: lane[key] for key in LANE_FIELDS} for lane in lanes]
+                if (cached.get("speaker_lanes") != lane_metadata or cached.get("mix") != mix
+                        or mix.get("cache_key") != digest(mixture_identity(lanes, config["render"]["sample_rate"]))
+                        or mix.get("method") != "aligned_fixed_average" or mix.get("version") != 1
+                        or mix.get("sample_rate") != config["render"]["sample_rate"]
+                        or mix.get("frames") != max(lane["end_frame"] for lane in lanes)
+                        or mix.get("weight") != 1 / len(lanes)
+                        or mix.get("audio_sha256") != accepted["audio_sha256"]
+                        or accepted["request_hash"] != mix["cache_key"]
+                        or accepted["validation_key"] != mixture_validation_key(lanes)
+                        or accepted["report"].get("method") != "independently_verified_simultaneous_lanes"):
+                    raise ValueError("Simultaneous mixture does not match its verified speaker lanes")
+                timing = timings[chunk["chunk_id"]]
+                if ([{key: lane[key] for key in LANE_FIELDS} for lane in timing.get("speaker_lanes", [])]
+                        != lane_metadata or timing.get("mix") != mix
+                        or timing["chapter_end_frame"] - timing["chapter_start_frame"] != mix["frames"]):
+                    raise ValueError("Simultaneous synchronization differs from its verified lanes")
+                for speaker, lane in zip(speakers, lanes):
+                    request = _speech_request(chunk, voices[speaker["voice_id"]], context["engine"],
+                                              config, performer=speaker)
+                    if (lane["role_id"] != speaker["role_id"] or lane["voice_id"] != speaker["voice_id"]
+                            or lane["request_hash"] != digest(request) or lane["report"].get("passed") is not True
+                            or lane["validation_key"] != make_validation_key(
+                                chunk["spoken_text"], verifier, config["quality"])):
+                        raise ValueError("A simultaneous speaker lacks matching verification")
+            else:
+                request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
+                if (accepted["request_hash"] != digest(request)
+                        or accepted["validation_key"] != make_validation_key(
+                            chunk["spoken_text"], verifier, config["quality"])):
+                    raise ValueError("Chapter verification does not match the current plan")
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
         return composed, acceptance
@@ -469,8 +537,10 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
     config, plan, store = _preflight(bundle, config, chapters_only=chapters_only)
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
+    book_lock = None
     voice_lock = None
     try:
+        book_lock = _lock_book_audio(bundle)
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
         voice_lock = store.lock()
         store.persist_aliases()
@@ -508,24 +578,40 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     if chunk["silent_control"]:
                         clips.append(dict(chunk, wav_path=None))
                         continue
-                    voice = voices[chunk["segment"]["voice_id"]]
                     direction = chunk["segment"].get("delivery", {}).get("direction", "")
-                    request = _speech_request(chunk, voice, engine_identity, config)
-                    directory = work / "clips" / digest(request)
-                    cached = (directory / "accepted.json").is_file()
-                    notify(f"  Chunk {number}/{len(chapter['chunks'])}: "
-                           f"{'checking saved take' if cached else 'generating speech'} "
-                           f"({chunk['segment']['voice_id']})")
-                    wav, accepted = verified_take(
-                        chunk["spoken_text"],
-                        lambda path, seed, c=chunk, v=voice, d=direction:
-                            engine.synthesize(c["spoken_text"], v, path, seed=seed, direction=d),
-                        directory, request, verifier, config, notify=notify)
-                    chapter_acceptance.append({
-                        "chunk_id": chunk["chunk_id"], "audio_sha256": accepted["audio_sha256"],
-                        "request_hash": accepted["request_hash"],
-                        "validation_key": accepted["validation_key"], "report": accepted["report"]})
-                    clips.append(dict(chunk, wav_path=str(wav)))
+                    speakers = chunk_speakers(chunk)
+                    lanes = []
+                    for lane_number, speaker in enumerate(speakers, 1):
+                        voice = voices[speaker["voice_id"]]
+                        request = _speech_request(chunk, voice, engine_identity, config,
+                                                  performer=speaker if len(speakers) > 1 else None)
+                        directory = work / "clips" / digest(request)
+                        cached = (directory / "accepted.json").is_file()
+                        lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
+                        notify(f"  Chunk {number}/{len(chapter['chunks'])}{lane_label}: "
+                               f"{'checking saved take' if cached else 'generating speech'} ({speaker['voice_id']})")
+                        wav, accepted = verified_take(
+                            chunk["spoken_text"],
+                            lambda path, seed, c=chunk, v=voice, d=direction:
+                                engine.synthesize(c["spoken_text"], v, path, seed=seed, direction=d),
+                            directory, request, verifier, config, notify=notify)
+                        lanes.append(dict(speaker, wav_path=str(wav),
+                            **{key: accepted[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
+                    if len(lanes) > 1:
+                        mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=notify)
+                        mix, speaker_lanes = mixed["mix"], mixed["speaker_lanes"]
+                        chapter_acceptance.append({
+                            "chunk_id": chunk["chunk_id"], "audio_sha256": mix["audio_sha256"],
+                            "request_hash": mix["cache_key"], "validation_key": mixture_validation_key(speaker_lanes),
+                            "report": {"passed": True, "method": "independently_verified_simultaneous_lanes"},
+                            "speaker_lanes": speaker_lanes, "mix": mix})
+                        clips.append(dict(chunk, wav_path=mixed["wav_path"], mix=mix,
+                            speaker_lanes=[{key: lane[key] for key in LANE_FIELDS} for lane in speaker_lanes]))
+                    else:
+                        lane = lanes[0]
+                        chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
+                            **{key: lane[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
+                        clips.append(dict(chunk, wav_path=lane["wav_path"]))
                 composed = prepare_chapter(
                     dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                     clips, work / "chapters", book=bundle["source"]["book"],
@@ -556,6 +642,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
     finally:
         if voice_lock is not None:
             voice_lock.rmdir()
+        if book_lock is not None:
+            book_lock.rmdir()
         lock.rmdir()
 
 
@@ -564,7 +652,9 @@ def assemble(bundle, config, *, notify=print):
     config, plan, store = _preflight(bundle, config)
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "assemble")
+    book_lock = None
     try:
+        book_lock = _lock_book_audio(bundle)
         voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}
         missing = [key for key, value in voices.items() if value is None]
         if missing:
@@ -610,4 +700,6 @@ def assemble(bundle, config, *, notify=print):
         _failed_run(work, exc, notify)
         raise
     finally:
+        if book_lock is not None:
+            book_lock.rmdir()
         lock.rmdir()

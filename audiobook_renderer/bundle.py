@@ -134,6 +134,26 @@ def ranges(indices):
     return result
 
 
+def chunk_speakers(chunk):
+    """Return actual performers; simultaneous entries are never alternatives."""
+    row = chunk["segment"]
+    if "simultaneous_speakers" in row:
+        speakers = row["simultaneous_speakers"]
+        if (not isinstance(speakers, list) or len(speakers) < 2
+                or row.get("role_id") is not None or row.get("voice_id") is not None
+                or any(not isinstance(speaker, dict)
+                       or set(speaker) != {"role_id", "voice_id"}
+                       or not all(isinstance(speaker[key], str) and speaker[key]
+                                  for key in ("role_id", "voice_id")) for speaker in speakers)
+                or len({speaker["role_id"] for speaker in speakers}) != len(speakers)
+                or len({speaker["voice_id"] for speaker in speakers}) != len(speakers)):
+            raise ValueError(f"Invalid simultaneous speakers for segment {row['id']}")
+        return [dict(speaker) for speaker in speakers]
+    if row.get("role_id") is None or row.get("voice_id") is None:
+        return []
+    return [{"role_id": row["role_id"], "voice_id": row["voice_id"]}]
+
+
 def make_plan(bundle, config):
     from .book_context import resolve_book_config
     config = resolve_book_config(bundle, config)
@@ -155,7 +175,8 @@ def make_plan(bundle, config):
         chunks = []
         for row in item["rows"]:
             spoken, mapping = spoken_mapping(row)
-            if normalize_words(spoken) and row.get("voice_id") is None:
+            speakers = chunk_speakers({"segment": row})
+            if normalize_words(spoken) and not speakers:
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
             spans = list(split_text(spoken, settings["max_chunk_chars"])) or [(0, 0)]
             for start, end in spans:
@@ -168,8 +189,8 @@ def make_plan(bundle, config):
                 chunk["chunk_id"] = digest({"source": bundle["manifest"]["source_fingerprint"],
                                             "segment": row["id"], "start": start, "end": end,
                                             "spoken_text": speech})[:32]
-                if not chunk["silent_control"] and row.get("voice_id"):
-                    used.add(row["voice_id"])
+                if not chunk["silent_control"]:
+                    used.update(speaker["voice_id"] for speaker in speakers)
                 chunks.append(chunk)
         chapters.append({"number": number, "id": f"chapter-{number:04d}", "title": item["entry"]["title"],
                          "script_path": item["entry"]["path"], "chunks": chunks})

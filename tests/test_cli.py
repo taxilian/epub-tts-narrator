@@ -14,6 +14,7 @@ from epub_audiobook.pipeline import fingerprint, write_json
 from epub_audiobook.provider import ProviderError
 from epub_audiobook.series import link_analysis, load_registry, save_registry
 from test_contracts import valid_document
+from audition_fixtures import script_response
 
 
 class NarrativeClient:
@@ -25,6 +26,8 @@ class NarrativeClient:
 
     def complete(self, system, payload):
         type(self).calls += 1
+        if payload.get("mode") == "audition_script":
+            return script_response()
         if payload.get("mode") == "attribution_review_scan":
             return {"corrections": []}
         if payload.get("mode") == "identity_scan":
@@ -79,10 +82,10 @@ class CLITests(unittest.TestCase):
         with patch("epub_audiobook.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", source, "-o", output, "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 4)
+            self.assertEqual(NarrativeClient.calls, 5)
             status, _, stderr = self.run_cli("analyze", source, "-o", self.root / "second.json", "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 4)
+            self.assertEqual(NarrativeClient.calls, 5)
         self.assertEqual(self.run_cli("validate", output, "--ready")[0], 0)
         bundle = self.root / "bundle"
         self.assertEqual(self.run_cli("export", output, "-o", bundle)[0], 0)
@@ -136,7 +139,7 @@ class CLITests(unittest.TestCase):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config,
                                            "-o", self.root / "without-consensus.json")
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 3)
+        self.assertEqual(NarrativeClient.calls, 4)
 
     def test_plan_counts_configured_cumulative_reconciliation_rounds(self):
         source_path = self.root / "long-source.json"
@@ -174,7 +177,7 @@ class CLITests(unittest.TestCase):
         with patch("epub_audiobook.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config, "-o", output)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 5)
+        self.assertEqual(NarrativeClient.calls, 6)
         self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_rounds"], 2)
         self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_notes"], ["", "Check source context."])
 

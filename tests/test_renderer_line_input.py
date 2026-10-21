@@ -60,8 +60,9 @@ class Session:
         self.edits.append(values)
         self.row.update(values)
 
-    def regenerate(self, voice_id):
+    def regenerate(self, voice_id, *, voice_designer=None):
         assert voice_id == "v1"
+        assert voice_designer == "local"
         return self.voice
 
 class Player:

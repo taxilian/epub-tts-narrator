@@ -19,6 +19,7 @@ from .epub import extract_epub
 from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerprint,
                        make_units, seed_cast, write_json)
 from .attribution_review import audit_attribution, count_review_batches
+from .speaker_decisions import prompt_speaker_decisions
 from .provider import OpenAICompatibleClient, ProviderError
 from .series import link_analysis, load_registry, save_registry, series_context
 from .analysis_directory import (
@@ -232,6 +233,9 @@ def parser():
     run.add_argument("--edits", type=Path, help="Reapply source-bound human corrections after analysis")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
+    speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
+    speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
+    speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -278,6 +282,38 @@ def main(argv=None):
                   "incomplete requests will be retried.", file=sys.stderr)
 
     try:
+        if args.command == "resolve-speakers":
+            from .analysis_directory import _completed_directory
+            from .analysis_revision import related_directories, revise_directories
+            from .speaker_completion import complete_speakers, unassigned_segments
+            config = load_config(args.config)
+            settings = config["analysis"]
+            selected = {path.resolve() for path in args.directories}
+            directories = related_directories(selected)
+            hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                      for path in directories}
+            documents = {path: _completed_directory(path)[0] for path in selected}
+            model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
+            client = OpenAICompatibleClient(**config["provider"])
+            print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
+            requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                      max_request_chars=settings["max_request_chars"],
+                                      progress=lambda message: print(message, file=sys.stderr))
+            revised = {}
+            for directory in directories:
+                if directory not in selected:
+                    continue
+                print(f"Resolving unassigned passages: {directory}", file=sys.stderr)
+                revised[directory] = complete_speakers(
+                    documents[directory], requests, workers=min(5, settings["attribution_workers"]),
+                    progress=lambda message: print(message, file=sys.stderr))
+            for directory in revised:
+                revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory)
+            result = revise_directories(revised, directories=directories, expected_manifest_hashes=hashes)
+            print(f"Original analysis files and revision journal: {result['backup_directory']}")
+            remaining = sum(len(unassigned_segments(document)) for document in revised.values())
+            print(f"Speaker completion finished: {remaining} unassigned spoken passage(s) remain.")
+            return 2 if remaining else 0
         directory_mode = (args.command == "analyze" and
                           (args.output is None or args.output.suffix.lower() != ".json"))
         if args.command == "analyze" and directory_mode:
@@ -410,6 +446,18 @@ def main(argv=None):
                 policy=config["performance_policy"], progress=lambda message: print(message, file=sys.stderr))
             if args.edits:
                 document = apply_edits(document, read_json(args.edits))
+            from .audition_scripts import prepare_document_samples
+            sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                             max_request_chars=settings["max_request_chars"],
+                                             progress=lambda message: print(message, file=sys.stderr))
+            document = prepare_document_samples(document, sample_requests,
+                workers=min(5, settings["attribution_workers"]),
+                progress=lambda message: print(message, file=sys.stderr))
+            document = prompt_speaker_decisions(document, book_path=args.output)
+            # Human choices may make additional real dialogue available. All
+            # creative scripts already exist, so this refresh makes no calls.
+            document = prepare_document_samples(document, None,
+                workers=min(5, settings["attribution_workers"]))
             if directory_mode:
                 state = publish_directory(document, registry, args.output, export_bundle,
                                           continue_from=args.continue_from)

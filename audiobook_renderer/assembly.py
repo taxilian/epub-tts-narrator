@@ -7,6 +7,8 @@ the lossy chapter files as the input to the final audiobook.
 from __future__ import annotations
 
 from copy import deepcopy
+from array import array
+from contextlib import ExitStack
 import hashlib
 import json
 import math
@@ -14,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Sequence
 import wave
@@ -98,6 +101,67 @@ def normalize_clip(input_path: str | Path, output_path: str | Path, *,
         except OSError as exc:
             raise ValueError(f"Unable to publish normalized audio {target}: {exc}") from exc
     return dict(info, wav_path=str(target))
+
+
+def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=44100) -> dict:
+    """Align verified mono lanes at frame zero and average with constant headroom.
+
+    Every lane keeps its original timing. Shorter lanes are padded with zeros;
+    no time stretching, automatic gain changes, or mixture ASR is performed.
+    """
+    _rate(sample_rate)
+    if not isinstance(lanes, (list, tuple)) or len(lanes) < 2:
+        raise ValueError("A simultaneous mix requires at least two speaker lanes")
+    target = Path(output_wav)
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"Output already exists: {target}")
+    info = [_wave_info(Path(lane["wav_path"]), sample_rate) for lane in lanes]
+    if any(item["frames"] <= 0 for item in info):
+        raise ValueError("A simultaneous speaker lane cannot be empty")
+    hashes = [_hash(Path(lane["wav_path"])) for lane in lanes]
+    if any(lane.get("audio_sha256") != checksum for lane, checksum in zip(lanes, hashes)):
+        raise ValueError("Verified simultaneous speaker audio changed before mixing")
+    frames = max(item["frames"] for item in info)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    peak = 0
+    with tempfile.TemporaryDirectory(prefix=".mix-", dir=target.parent) as temporary:
+        staged = Path(temporary) / "mix.wav"
+        with ExitStack() as handles:
+            inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
+            destination = handles.enter_context(wave.open(str(staged), "wb"))
+            destination.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
+            cursor = 0
+            while cursor < frames:
+                count = min(32768, frames - cursor)
+                totals = [0] * count
+                for source, item in zip(inputs, info):
+                    expected = max(0, min(count, item["frames"] - cursor))
+                    data = source.readframes(expected)
+                    if len(data) != expected * 2:
+                        raise ValueError("Truncated simultaneous speaker PCM")
+                    samples = array("h")
+                    samples.frombytes(data)
+                    if sys.byteorder != "little":
+                        samples.byteswap()
+                    for index, value in enumerate(samples):
+                        totals[index] += value
+                mixed = array("h", (round(value / len(lanes)) for value in totals))
+                peak = max(peak, max((abs(value) for value in mixed), default=0))
+                if sys.byteorder != "little":
+                    mixed.byteswap()
+                destination.writeframesraw(mixed.tobytes())
+                cursor += count
+        for lane, expected in zip(lanes, hashes):
+            if _hash(Path(lane["wav_path"])) != expected:
+                raise ValueError("Speaker lane changed during mixing")
+        if peak == 0:
+            raise ValueError("Simultaneous mixture is silent; speaker lanes cancelled each other")
+        if _wave_info(staged, sample_rate)["frames"] != frames:
+            raise ValueError("Simultaneous mixture has an invalid PCM timeline")
+        target.hardlink_to(staged)
+    return {"wav_path": str(target), "sample_rate": sample_rate, "channels": 1,
+            "frames": frames, "method": "aligned_fixed_average", "weight": 1 / len(lanes),
+            "peak_amplitude": peak, "audio_sha256": _hash(target)}
 
 
 def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
@@ -188,6 +252,23 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 }
                 if performance:
                     timing["performance"] = deepcopy(performance)
+                if row.get("simultaneous_speakers"):
+                    timing["simultaneous_speakers"] = deepcopy(row["simultaneous_speakers"])
+                if "speaker_lanes" in clip:
+                    lanes = clip["speaker_lanes"]
+                    if (not isinstance(lanes, list) or len(lanes) < 2
+                            or any(not isinstance(lane, dict) for lane in lanes)
+                            or [{"role_id": lane.get("role_id"), "voice_id": lane.get("voice_id")}
+                                for lane in lanes] != row.get("simultaneous_speakers")
+                            or any(type(lane.get("start_frame")) is not int or lane["start_frame"] != 0
+                                   or type(lane.get("end_frame")) is not int
+                                   or not 0 < lane["end_frame"] <= cursor - first_frame for lane in lanes)
+                            or max(lane["end_frame"] for lane in lanes) != cursor - first_frame):
+                        raise ValueError("Invalid simultaneous speaker timing")
+                    timing["speaker_lanes"] = [dict(deepcopy(lane),
+                        chapter_start_frame=first_frame + lane["start_frame"],
+                        chapter_end_frame=first_frame + lane["end_frame"]) for lane in lanes]
+                    timing["mix"] = deepcopy(clip["mix"])
                 timings.append(timing)
                 if end == len(spoken) and row.get("break_after") == "paragraph":
                     pending_pause = max(pending_pause, paragraph_frames)
@@ -418,9 +499,13 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
             if (type(start) is not int or type(end) is not int
                     or not 0 <= start <= end <= info["frames"]):
                 raise ValueError("Chapter synchronization frame range is invalid")
-            timings.append(dict(deepcopy(segment), chapter_ordinal=ordinal,
-                                chapter_id=chapter["id"],
-                                book_start_frame=cursor + start, book_end_frame=cursor + end))
+            timing = dict(deepcopy(segment), chapter_ordinal=ordinal,
+                          chapter_id=chapter["id"],
+                          book_start_frame=cursor + start, book_end_frame=cursor + end)
+            for lane in timing.get("speaker_lanes", []):
+                lane["book_start_frame"] = cursor + lane["chapter_start_frame"]
+                lane["book_end_frame"] = cursor + lane["chapter_end_frame"]
+            timings.append(timing)
         if info["frames"]:
             audio_chapters.append((chapter, record))
         cursor += info["frames"]

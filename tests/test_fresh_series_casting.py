@@ -32,7 +32,8 @@ DESCRIPTION = (
 EVIDENCE_QUOTE = "her voice always had a rough edge"
 SCRIPT = (
     "“We should take the lantern with us before we leave, because the narrow path "
-    "along the water will be difficult to see after sunset.”"
+    "along the water will be difficult to see after sunset. Stay close, and keep "
+    "your hand on the rail until we reach the bridge.”"
 )
 
 

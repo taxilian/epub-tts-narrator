@@ -462,7 +462,7 @@ def align_units(source, cast, units, response, *, allow_user=False):
                     f"received {_diagnostic_identifier(role_id)}; {problem}. "
                     f"Allowed role IDs from the supplied cast.roles[].id ({len(roles)} total): "
                     f"{allowed}{omitted}. Use a role ID, not a character or voice ID; "
-                    "null is only for unresolved attribution."
+                    "null is for unresolved attribution or explicit simultaneous_role_ids."
                 )
             required = ("kind", "basis", "reason", "evidence", "candidates", "review_required", "delivery")
             if any(k not in piece for k in required):
@@ -473,6 +473,21 @@ def align_units(source, cast, units, response, *, allow_user=False):
                 raise ValueError(f"{location} ({context}): Evidence and candidates must be arrays")
             if type(piece["review_required"]) is not bool:
                 raise ValueError("review_required must be a boolean")
+            simultaneous = None
+            if "simultaneous_role_ids" in piece:
+                ids = piece["simultaneous_role_ids"]
+                if (not isinstance(ids, list) or len(ids) < 2
+                        or any(not isinstance(rid, str) or rid not in roles for rid in ids)
+                        or len(set(ids)) != len(ids)):
+                    raise ValueError(f"{location}.simultaneous_role_ids must contain at least two distinct existing dialogue role IDs")
+                if any(roles[rid]["kind"] != "dialogue" for rid in ids):
+                    raise ValueError(f"{location}.simultaneous_role_ids may contain only dialogue roles, never a narrator role")
+                if len({roles[rid]["voice_id"] for rid in ids}) != len(ids):
+                    raise ValueError(f"{location}.simultaneous_role_ids must select distinct character voices")
+                if (role_id is not None or piece["basis"] == "unresolved"
+                        or piece["review_required"] or piece["candidates"]):
+                    raise ValueError(f"{location}: simultaneous performers require role_id=null, resolved basis, review_required=false, and candidates=[]")
+                simultaneous = [{"role_id": rid, "voice_id": roles[rid]["voice_id"]} for rid in ids]
             delivery = piece["delivery"] if allow_user else complete_empty_delivery(piece["delivery"])
             if not isinstance(delivery, dict) or not isinstance(delivery.get("direction"), str) or not isinstance(delivery.get("evidence"), list):
                 raise ValueError(f"{location}.delivery ({context}): Delivery must have direction string and evidence array")
@@ -485,6 +500,8 @@ def align_units(source, cast, units, response, *, allow_user=False):
                                   reason=piece["reason"], evidence=piece["evidence"],
                                   candidates=piece["candidates"], review_required=piece["review_required"],
                                   delivery=delivery))
+            if simultaneous is not None:
+                output[-1]["simultaneous_speakers"] = simultaneous
             locations[id(output[-1])] = (location, context, piece)
             cursor += len(text)
         if cursor != len(unit["text"]):
@@ -839,12 +856,35 @@ class CachedRequests:
                 # The optional hint may parse yet be too deeply nested to copy,
                 # validate, or serialize safely. Ignore it, never accept it.
                 current = payload
+        # A single-block completion cannot be subdivided without changing the
+        # jury's assignment contract. Allow one fresh generation after explicit
+        # truncation, keeping the request, provider settings, and cache key exact.
+        # Other stages retain their existing subdivision/failure behavior.
+        completion_retry_available = (
+            payload.get("mode") == "speaker_completion"
+            and isinstance(payload.get("target_units"), list)
+            and len(payload["target_units"]) == 1
+        )
         for attempt in range(self.repair_attempts + 1):
             if cancelled is not None and cancelled.is_set():
                 raise CancelledError("Analysis was cancelled")
             if len(system) + len(json.dumps(current, ensure_ascii=False)) > self.max_request_chars:
                 raise ValueError("Analysis request exceeds analysis.max_request_chars; reduce analysis.chunk_chars or choose a larger context budget")
-            result = self.client.complete(system, current)
+            while True:
+                try:
+                    result = self.client.complete(system, current)
+                    break
+                except ProviderError as error:
+                    if not completion_retry_available or str(error) != (
+                        "The model output was truncated. Increase the output token limit or reduce the input."
+                    ):
+                        raise
+                    completion_retry_available = False
+                    with self.progress_lock:
+                        self.progress("Speaker completion output was truncated; retrying the identical request once. "
+                                      "Completed, validated responses remain cached.")
+                    if cancelled is not None and cancelled.is_set():
+                        raise CancelledError("Analysis was cancelled") from None
             try:
                 accepted = validate(result)
             except (ValueError, TypeError, KeyError, IndexError) as exc:
@@ -1207,6 +1247,8 @@ approve a merge, split, or series match.
                                      review_chunk_chars=attribution_review_chunk_chars,
                                      review_notes=attribution_review_notes or cast_review_notes,
                                      progress=progress)
+    from .speaker_completion import complete_speakers
+    document = complete_speakers(document, requests, workers=min(5, attribution_workers), progress=progress)
     state = readiness(document)
     if state["errors"]:
         raise ValueError("; ".join(state["errors"][:12]))
@@ -1241,6 +1283,7 @@ def apply_edits(document, edits):
         if assignment.get("segment_id") not in by_segment or assignment.get("role_id") not in roles:
             raise ValueError("Correction references an unknown segment or role")
         item = by_segment[assignment["segment_id"]]
+        item.pop("simultaneous_speakers", None)
         item["role_id"] = assignment["role_id"]
         if "kind" in assignment:
             item["kind"] = assignment["kind"]
@@ -1260,6 +1303,8 @@ def apply_edits(document, edits):
             pieces.append({"text": piece["text"], "role_id": piece["role_id"], "kind": piece["kind"],
                            "basis": "user", "reason": "User correction", "evidence": [], "candidates": [],
                            "review_required": False, "delivery": piece.get("delivery", {"direction": "", "evidence": []})})
+            if "simultaneous_role_ids" in piece:
+                pieces[-1]["simultaneous_role_ids"] = copy.deepcopy(piece["simultaneous_role_ids"])
         replacement_segments = align_units(result["source"], result["cast"], [unit],
                                            {"units": [{"unit_id": block["id"], "segments": pieces}]}, allow_user=True)
         first = next(i for i, s in enumerate(result["segments"]) if s["block_id"] == block["id"])
@@ -1267,6 +1312,10 @@ def apply_edits(document, edits):
         result["segments"][first:first] = replacement_segments
     # Casting changes update all voice references, without touching source text.
     for item in result["segments"]:
+        for performer in item.get("simultaneous_speakers", []):
+            if performer["role_id"] not in roles:
+                raise ValueError("A casting edit removed a simultaneous speaker role still used by the script")
+            performer["voice_id"] = roles[performer["role_id"]]["voice_id"]
         if item["role_id"] is not None:
             if item["role_id"] not in roles:
                 raise ValueError("A casting edit removed a role still used by the script")

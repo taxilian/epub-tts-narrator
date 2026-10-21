@@ -100,7 +100,7 @@ ffprobe = "ffprobe"
 max_wer = 0.0
 ```
 
-The example file includes the remaining quality thresholds and the fallback reference passage used to create voices. Start with those defaults.
+The example file includes the remaining quality thresholds. Character auditions use prepared source excerpts or character-specific creative scripts; the legacy `voices.reference_text` setting is not used as a generic fallback by the book workflow.
 
 For a directory produced by `epub-audiobook analyze`, the renderer obtains the series ID and continuation link from the book itself. Voices are stored in `<book-directory>/voices/<series-hash>/`; work files default to `<book-directory>/render-work/`, and the finished audiobook defaults to `<book-directory>/audiobook/`. Use `--work-dir PATH`, `-o PATH` (or `--output PATH`), and `--epub PATH` for per-run overrides.
 
@@ -189,15 +189,17 @@ Menu and text entry use the terminal's standard line editor: arrow keys,
 Ctrl+A/E, Ctrl+K/U, and session history follow your readline/libedit bindings.
 While a sample is playing, any key stops playback and returns to the menu.
 
-Sample scripts now default to each character's actual words from the analyzed book. Casting selects a clearly attributed, contiguous passage, prefers ordinary dialogue of roughly 20–60 words, and records its chapter, segment and exact source offsets. Narrators use narration where no character dialogue is available. Shared roles such as Jasper's narration and dialogue use one sample script and one saved voice.
+Sample scripts contain 25–60 words and at most 650 characters, normally aiming for 35–50 words. Casting prefers clearly attributed ordinary speech and can join several actual statements by the same canonical voice to provide a useful audition. Every excerpt keeps its own chapter, segment, exact source ranges, and position in the joined script; a montage is not represented as one contiguous quotation. Narrators can use narration, and identified participants in simultaneous dialogue can each audition those words alone. Shared roles use one script and one saved reference voice.
 
 For a new voice, the default prompt includes both its description and structured voice traits, such as pitch, timbre, and delivery. Book quotations used as evidence are excluded. Existing edited prompts and established voice prompts are preserved. This applies to both the casting menu and automatic voice creation during rendering. Speech verification checks the recording and transcript; listening determines whether the performance suits the character.
 
-Opening the casting tool updates legacy generic script drafts automatically, preserving your edited voice descriptions and custom scripts. It does not regenerate saved audio: the new script appears under **G** and is used when you regenerate. Number playback continues to play the current saved recording. A later series book keeps an established excerpt or custom script; a fallback may acquire a suitable passage when one becomes available.
+Fresh CLI analysis prepares the audition text automatically. If a character has too little suitable speech, the configured analysis model writes an original audition fitting the character, setting, and speech style. Generated text is explicitly marked as a casting script, never a source quotation or audiobook content. The book's `provenance.voice_samples` retains the prepared scripts and selection provenance.
 
-Only verified source mappings are used. Ambiguous or review-required attribution, extreme delivery, control syntax, and very short cries are excluded. The fallback is `voices.reference_text`; the menu explains when it is used. In Soulship book 1, 20 of 24 distinct voices receive book excerpts, while the chorus and three Whisperers retain the fallback because their available lines are too short or unsuitable. Nestor and Hallway Eaterling Three have shorter usable excerpts, flagged in the provenance.
+Opening casting for an older book automatically prepares missing scripts using the same global configuration. Creative scripts are saved in `audition-scripts.json`, bound to the book's source and cast fingerprints, without editing its analysis, chapter scripts, character identities, or continuation history. Preparation happens before loading speech models. Source selections require no API calls; missing creative scripts use the configured text model and its cached responses. Prepared scripts are reused on later runs. Ambiguous or review-required attribution, extreme delivery, control syntax, and repeated short cries are excluded from source selection. A missing prepared script blocks voice generation instead of silently substituting generic prose.
 
-No new analysis or API calls are needed. To prepare the drafts and print their scripts and provenance without loading speech models:
+Legacy generic and short automatic drafts are upgraded while edited voice descriptions, explicit user scripts, and useful established auditions are retained. Saved recordings and their cloning transcripts remain unchanged. The revised draft appears under **G** and is used when you regenerate; numbered playback continues to play the current recording. Listing voices, playing existing samples, and normalizing their loudness require no new script or text-model call.
+
+To prepare drafts and print their scripts and provenance without loading speech models (the configured text model is called only for missing creative scripts):
 
 ```sh
 .venv-renderer/bin/audiobook-render cast runs/book-01 \
@@ -365,7 +367,7 @@ To generate the remaining chapters and package later:
 
 By default, completed chapters receive two-pass loudness normalization to -20 LUFS with a -1.5 dB true-peak ceiling. Normalization preserves the PCM frame count and timing data, and operates on the assembled chapter rather than flattening every short utterance to the same level. Voice references and verified speech clips remain unchanged. These controls are separate from casting playback: use `[render] normalize_loudness`, `target_lufs`, and `true_peak_db` for the audiobook. Empty chapters and chapters shorter than the loudness measurement window are explicitly recorded as skipped for normalization.
 
-`render` also creates missing voices if no casting edits or audition candidates exist. Use `cast` first to choose your voices before a long run. Generation is sequential to keep one shared model instance and bounded GPU memory use. Book text and generated audio are processed locally.
+`render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Speech generation is sequential to keep one shared model instance and bounded GPU memory use. Drama 3 synthesis and Whisper verification run locally; configured remote text or voice-design providers receive only their corresponding requests.
 
 ## Verification and recovery
 
@@ -375,7 +377,7 @@ The default `max_wer = 0.0` requires the normalized words to match. Unknown name
 
 Reusable voice references have a separate check: they need intelligible audio and a matching reference transcript, but do not need word timestamps. Casting therefore disables Whisper's word alignment, whose timing failures can otherwise reject a useful recording.
 
-An optional local Parakeet recognizer can recheck a reference when Whisper reports up to four small variations, with at most 10% word error. These may be substitutions or a single alphabetic word split into two or three words (or the reverse), with exactly the same letters and at least two letters per component. For example, `Sourcepalace` transcribed as `Source Palace` can reach this independent check. Each split or join counts toward the four-variation limit; number words, contractions, genuine added or omitted words, and larger discrepancies do not qualify through this rule. A potential word boundary is not treated as proof that the pronunciations or meanings match.
+An optional local Parakeet recognizer can recheck a reference when Whisper reports up to four small variations. Substitutions, including mixtures of substitutions and word-boundary changes, retain a maximum of 10% word error. Boundary-only changes can exceed that raw percentage when every normalized letter remains identical and in the same order: one split otherwise counts as both a substitution and an insertion. Each boundary change must join or split one alphabetic word into two or three words, with at least two letters per component, and the four-change limit still applies. For example, `bloodbeast` → `blood beast` and `sourcevow` → `source vow` can both reach the independent check in one sample. Number words, contractions, genuine added or omitted words, and larger changes do not qualify through this rule. A potential word boundary is not treated as proof that the pronunciations or meanings match; the complete independent transcript must still agree with the requested words or the first recognizer's words.
 
 Explicit alphabetic compounds in the requested script, such as `pack-mate`, can also be compared with joined or spaced transcriptions such as `packmate` or `pack mate`. Only source-written hyphens authorize this equivalence; inferred splits do not change the final comparison between recognizers. Original word-error metrics remain in the report alongside the reference comparison and the bounded-variation alignment.
 

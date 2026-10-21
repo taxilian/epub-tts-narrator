@@ -208,6 +208,11 @@ def main(argv=None):
         from .engines import create_engine
         from .verification import create_verifier
         from .workflow import ensure_voice, import_voice, render
+        if args.command in {"render", "create-voices"}:
+            missing = [voice for voice in plan["voice_ids"] if store.load(voice) is None]
+            if missing:
+                from epub_audiobook.audition_scripts import ensure_bundle_scripts
+                bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
         engine = create_engine(config["engine"])
         verifier = create_verifier(config["verification"])
         if args.command == "import-voice":

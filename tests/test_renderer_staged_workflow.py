@@ -17,6 +17,7 @@ from audiobook_renderer.workflow import RenderBlocked, assemble, render
 from epub_audiobook.cli import export_bundle
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
+from audition_fixtures import prepare_bundle
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -32,7 +33,7 @@ class StagedWorkflowTests(unittest.TestCase):
             ("At dawn the boat returned safely to shore.", "narration", "p"),
         ])
         export_bundle(document, self.root / "bundle")
-        self.bundle = load_bundle(self.root / "bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "bundle"))
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
         self.config["verification"]["model"] = str(self.root / "unused-asr")

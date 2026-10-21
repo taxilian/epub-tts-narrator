@@ -121,7 +121,10 @@ Every distinct character, including unnamed and mentioned characters, needs a
 distinct voice and a dialogue role, even if they do not speak in this excerpt.
 Give recurring unnamed characters stable descriptions; do not collapse unrelated
 people into an 'unknown' character. Distinguishable solo speakers each need a
-character and dialogue role; a collective/unison role may exist in addition.
+character and dialogue role. When known individual characters speak together,
+their existing dialogue roles will perform the same text simultaneously; do not
+invent a new character, group voice, or duet role for their joint lines. A true
+anonymous collective may have its own role when the source establishes it.
 Uncertainty about a solo speaker does not make that speaker a chorus.
 Mentioned noncharacters are not cast members.
 Preserve and refine aliases across chapters. Different people with the same name
@@ -157,6 +160,16 @@ Return {"units":[{"unit_id":"existing target ID", "segments":[{
  "candidates":["existing role ID"], "review_required":false,
  "delivery":{"direction":"", "evidence":[]}
 }]}]}.
+For the SAME words explicitly spoken together by two or more known characters,
+add "simultaneous_role_ids":["existing dialogue role ID","another dialogue role ID"]
+to that segment, set role_id=null, basis=explicit or context, candidates=[], and
+review_required=false. Include exact evidence for joint delivery and every
+performer's identity. List distinct dialogue roles with distinct cast voices;
+never use a narrator role. Do not create a new character or voice for the group.
+This array names actual simultaneous performers, NEVER alternative guesses.
+For example, '"Run," Mara and Lena said together.' has one dialogue segment
+with both existing dialogue roles, followed by a separate narration segment.
+Omit simultaneous_role_ids for single speakers and genuinely uncertain voices.
 The delivery object above is the valid default. A nonempty delivery.direction
 MUST have a nonempty evidence array with exact quotations supporting that local
 direction. If there is no such support, keep direction="" and evidence=[].
@@ -200,7 +213,9 @@ set role_id=null, basis=unresolved, review_required=true, and list candidates.
 For an ambiguous SOLO voice, leave role_id=null with unresolved basis and review
 required; do not assign a chorus/group role as a substitute for identifying an
 individual. Use a chorus role only when source evidence establishes collective
-or unison speech. Never silently send unidentified dialogue to the narrator.
+speech by that established anonymous group; known people speaking in unison use
+simultaneous_role_ids with their existing voices. Never silently send
+unidentified dialogue to the narrator.
 Contextual attribution
 may be assigned, but set review_required=true when evidence is weak or conflicting.
 Do not invent a role absent from the final cast: leave it unresolved for review.

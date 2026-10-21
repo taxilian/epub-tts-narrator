@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_wer": 0.0,
 }
 QUALITY_VERSION = 4
-REFERENCE_VARIATION_VERSION = 3
+REFERENCE_VARIATION_VERSION = 4
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -421,15 +421,18 @@ def _reference_variation_eligibility(metrics: dict) -> dict | None:
 
     A closed word and 2–3 adjacent alphabetic words with exactly the same
     letters may qualify for another recognizer. Each boundary change consumes
-    one of the four allowed variations, and the original 10% WER ceiling still
-    applies. Actual insertions/deletions have no permitted alignment edge.
+    one of the four allowed variations. Boundary-only changes preserve every
+    letter in order and do not use raw WER, which counts one split as multiple
+    errors. Any actual substitution retains the original 10% WER ceiling.
+    Actual insertions/deletions have no permitted alignment edge.
     The final consensus comparisons never use these candidate boundary rules.
     """
-    if metrics["wer"] > .10:
-        return None
     expected = [word for edit in metrics["alignment"] for word in edit["expected"]]
     actual = [word for edit in metrics["alignment"] for word in edit["actual"]]
-    limit = min(4, len(expected) // 10)
+    boundary_only = metrics["wer"] > .10
+    if boundary_only and "".join(expected) != "".join(actual):
+        return None
+    limit = 4 if boundary_only else min(4, len(expected) // 10)
 
     def boundary(one, parts):
         return (one.isalpha() and "".join(parts) == one
@@ -451,7 +454,10 @@ def _reference_variation_eligibility(metrics: dict) -> dict | None:
         for j in range(max(0, i - 2 * limit), min(len(actual), i + 2 * limit) + 1):
             if (i, j) not in states or i == len(expected) or j == len(actual):
                 continue
-            add(i, j, i + 1, j + 1, "equal" if expected[i] == actual[j] else "substitute")
+            if expected[i] == actual[j]:
+                add(i, j, i + 1, j + 1, "equal")
+            elif not boundary_only:
+                add(i, j, i + 1, j + 1, "substitute")
             for size in (2, 3):
                 if j + size <= len(actual) and boundary(expected[i], actual[j:j + size]):
                     add(i, j, i + 1, j + size, "split")

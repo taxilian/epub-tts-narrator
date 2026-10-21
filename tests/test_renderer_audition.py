@@ -16,6 +16,7 @@ from audiobook_renderer.config import load_config
 from audiobook_renderer.voices import VoiceStore
 from epub_audiobook.cli import export_bundle
 from test_contracts import valid_document
+from audition_fixtures import prepare_document
 
 
 class SessionDouble:
@@ -452,7 +453,7 @@ class CastingCLITests(unittest.TestCase):
         )
         self.config_path.write_text(self.base_config)
         self.bundle = self.root / "bundle"
-        export_bundle(valid_document(), self.bundle)
+        export_bundle(prepare_document(valid_document()), self.bundle)
 
     def run_cli(self, *args):
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -654,7 +655,9 @@ class CastingCLITests(unittest.TestCase):
             (["--action", "regenerate-all", "--prompt-file", "missing.txt"], "--prompt-file"),
         ]
         for args, message in cases:
-            with self.subTest(args=args), patch("audiobook_renderer.casting.CastingSession") as session:
+            with self.subTest(args=args), patch("audiobook_renderer.casting.CastingSession") as session, \
+                    patch("epub_audiobook.audition_scripts.ensure_bundle_scripts",
+                          side_effect=AssertionError("Invalid arguments must not prepare audition scripts")):
                 code, _, error = self.run_cli(*args)
                 self.assertEqual(code, 2)
                 self.assertIn(message, error)

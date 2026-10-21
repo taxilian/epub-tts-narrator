@@ -606,6 +606,10 @@ def link_analysis(document, registry):
     roles = {role["id"]: role for role in cast["roles"]}
     for item in result["segments"]:
         item["voice_id"] = roles[item["role_id"]]["voice_id"] if item["role_id"] else None
+        if "simultaneous_speakers" in item:
+            item["simultaneous_speakers"] = [
+                {"role_id": speaker["role_id"], "voice_id": roles[speaker["role_id"]]["voice_id"]}
+                for speaker in item["simultaneous_speakers"]]
     add_series_issues(result["issues"], issues, provenance)
     _refresh_import_reviews(result, registry, provenance)
     provenance["operation"] = "register_existing_analysis_without_model_calls"

@@ -60,8 +60,9 @@ def validate_book_paths(bundle, config):
     if any(overlaps(a, b) for i, a in enumerate(stores) for b in stores[i + 1:]):
         raise ValueError("Voice, work, and output directories must not overlap")
     protected = [directory / name for name in
-                 ("manifest.json", "analysis.json", "series-cast.json", "source.json",
-                  "cast.json", "review.json", "scripts", "voice-aliases.json", ".voice-aliases.lock")]
+                 ("manifest.json", "analysis.json", "series-cast.json", "source.json", "audition-scripts.json", ".audition-scripts.lock",
+                  "cast.json", "review.json", "scripts", "voice-aliases.json", ".voice-aliases.lock",
+                  ".audio-render.lock", ".analysis-update.lock")]
     if not config.get("_book_local_voices"):
         # Existing shared-store workflows retain their original input isolation.
         protected.append(directory)

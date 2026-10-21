@@ -13,14 +13,14 @@ import json
 from pathlib import Path
 from threading import Event, Lock
 
-from .contracts import readiness, validate_document
+from .contracts import has_assigned_speakers, readiness, validate_document
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
 from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE, PROMPT_VERSION
 from .provider import ProviderError
 
 
-REVIEW_VERSION = "1"
+REVIEW_VERSION = "2"
 CONTEXT_CHARS = 12000
 MAX_SCAN_SPLIT_DEPTH = 2
 _TRUNCATED_OUTPUT = "The model output was truncated. Increase the output token limit or reduce the input."
@@ -42,9 +42,15 @@ from explicit tags and context; do not mechanically alternate voices. Nested
 quotations normally retain the current speaker, as performance_policy directs.
 Distinguish narrative reflection from directly rendered thought. Narrative
 descriptions of sending/receiving are separate from the communicated message.
-Uncertain solo speech is not collective/unison speech. Use a group role only
-when the source supports collective delivery. If the final cast lacks the actual
-speaker or the evidence is ambiguous, use role_id=null, basis=unresolved,
+Uncertain solo speech is not collective/unison speech. For the SAME words spoken
+together by known characters, use simultaneous_role_ids containing their existing
+dialogue roles, role_id=null, basis=explicit or context, candidates=[], and
+review_required=false. Ground the joint delivery and every member in exact source
+evidence. This is resolved speech, not an ambiguity requiring a new chorus role.
+List at least two distinct dialogue roles with distinct voices; never a narrator.
+Use an existing anonymous group role only when the source supports that group.
+If the final cast lacks the actual speaker or the evidence is ambiguous,
+use role_id=null without simultaneous_role_ids, basis=unresolved,
 review_required=true, and any plausible existing role IDs in candidates.
 Do not change the cast, identities, roles, voices, source, or performance_policy.
 Only existing role IDs may be selected. Never change an explicit user correction
@@ -55,6 +61,10 @@ Cast descriptions, existing assignments, and suggestions are fallible context.
 Do not reject a source-supported, policy-correct role assignment merely because
 a conflicting cast or role description assigns those words elsewhere. Apply
 the policy using existing roles; do not edit the conflicting description here.
+Canonical proposed_segments encode resolved groups as simultaneous_speakers,
+an array of {role_id, voice_id} records derived from simultaneous_role_ids.
+These are the same actual joint performers; null primary IDs do not mean that
+such a group is unresolved. Check each member against the source and cast.
 """
 
 SCAN = COMMON + "\nAttribution semantic review scanner, version " + REVIEW_VERSION + ".\n" + RUBRIC + """
@@ -72,6 +82,10 @@ Return exactly {"corrections":[{"block_id":"target block ID",
    "reason":"brief attribution explanation", "evidence":[],
    "candidates":[], "review_required":false,
    "delivery":{"direction":"", "evidence":[]}}]}]}.
+Only for explicitly simultaneous known speakers, a segment may also contain
+"simultaneous_role_ids":["existing dialogue role ID","another dialogue role ID"].
+Omit this optional array otherwise. It lists actual performers of the same text,
+not alternatives. Existing compact original_segments use this same field.
 Each correction must replace the COMPLETE target block. Its segment texts must
 concatenate to the block exactly, in order, including whitespace and punctuation.
 Separate narration from character speech even within one paragraph. Include a
@@ -308,14 +322,17 @@ def _compact_segments(segments):
              "basis": item["attribution"]["basis"],
              "review_required": item["attribution"]["review_required"],
              "candidates": item["attribution"]["candidates"],
-             "delivery": item["delivery"]} for item in segments]
+             "delivery": item["delivery"],
+             **({"simultaneous_role_ids": [p["role_id"] for p in item["simultaneous_speakers"]]}
+                if "simultaneous_speakers" in item else {})} for item in segments]
 
 
 def _assignment_signature(segments):
     # Cosmetic splitting or new explanatory prose alone is not a correction.
     signature = []
     for item in segments:
-        key = (item["role_id"], item["kind"], item["attribution"]["review_required"])
+        performers = tuple(sorted((p["role_id"], p["voice_id"]) for p in item.get("simultaneous_speakers", [])))
+        key = (item["role_id"], performers, item["kind"], item["attribution"]["review_required"])
         if signature and signature[-1][0] == key:
             signature[-1] = (key, signature[-1][1] + item["text"])
         else:
@@ -351,7 +368,8 @@ def _accept_scan(response, document, batch, originals):
             raise ValueError("A correction needs a complete nonempty segments array")
         for piece_index, piece in enumerate(correction["segments"]):
             piece_path = f"{path}.segments[{piece_index}]"
-            _object(piece, piece_keys, piece_path)
+            keys = (*piece_keys, "simultaneous_role_ids") if isinstance(piece, dict) and "simultaneous_role_ids" in piece else piece_keys
+            _object(piece, keys, piece_path)
             _evidence(piece["evidence"], visible, label=piece_path + ".evidence")
             delivery = complete_empty_delivery(piece["delivery"])
             _object(delivery, ("direction", "evidence"), piece_path + ".delivery")
@@ -417,7 +435,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
     pool. Thus all API calls, including validation repairs, share the worker cap.
     CachedRequests supplies cache identity and bounded repairs. Fatal transport
     errors abort the audit; exhausted jury schema repairs become nonpositive
-    error votes. Existing unresolved reviews are never automatically resolved.
+    error votes. Existing single-speaker review flags are retained. A new explicit
+    simultaneous group resolves its prior speaker uncertainty only with all
+    three approvals of the complete replacement and its member list.
     Explicitly truncated scans may split into whole-block halves at most twice,
     with children processed sequentially inside the same worker.
     Optional target_block_ids limits writable blocks while retaining the other
@@ -589,10 +609,13 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                 for item in replacement:
                     prior_reviews = [old for old in originals[block_id] if old["start"] < item["end"] and old["end"] > item["start"]
                                      and (old["attribution"]["review_required"] or old["attribution"]["basis"] == "unresolved"
-                                          or old["role_id"] is None or old["voice_id"] is None)]
+                                          or not has_assigned_speakers(old))]
                     if prior_reviews:
-                        item["attribution"]["review_required"] = True
-                        item["attribution"]["reason"] += " Previous unresolved review retained: " + "; ".join(dict.fromkeys(old["attribution"]["reason"] for old in prior_reviews))
+                        simultaneous = "simultaneous_speakers" in item
+                        item["attribution"]["review_required"] = not simultaneous
+                        prefix = (" Previous uncertainty resolved by three approvals of the simultaneous performers: "
+                                  if simultaneous else " Previous unresolved review retained: ")
+                        item["attribution"]["reason"] += prefix + "; ".join(dict.fromkeys(old["attribution"]["reason"] for old in prior_reviews))
                 replacements[block_id] = replacement
             else:
                 # Keeping original assignments does not silently bless them.
@@ -624,6 +647,10 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
         if change["status"] == "applied":
             change["applied_segments"] = [deepcopy(item) for item in result["segments"] if item["block_id"] == change["block_id"]]
     provenance = result["provenance"]
+    missing = [item for item in result["segments"]
+               if any(character.isalnum() for character in item.get("spoken_text", item["text"]))
+               and not has_assigned_speakers(item)]
+    missing_blocks = list(dict.fromkeys(item["block_id"] for item in missing))
     if "attribution_review" in provenance:
         provenance.setdefault("attribution_review_history", []).append(deepcopy(provenance["attribution_review"]))
     provenance["attribution_review"] = {
@@ -640,10 +667,16 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
         "scans": [{key: value for key, value in row.items() if key != "corrections"} | {"proposed_count": len(row["corrections"])} for row in scans],
         "changes": changes, "proposed_blocks": len(changes), "applied_blocks": len(replacements),
         "unresolved_blocks": len(changes) - len(replacements),
+        "rejected_correction_blocks": len(changes) - len(replacements),
+        "remaining_unassigned_segments": len(missing),
+        "remaining_unassigned_block_count": len(missing_blocks),
+        "remaining_unassigned_block_ids": missing_blocks,
     }
     state = readiness(result)
     if state["errors"]:
         raise ValueError("Invalid reviewed analysis: " + "; ".join(state["errors"][:12]))
     result["readiness"] = state
-    report(f"Attribution semantic review complete: {len(replacements)} applied, {len(changes) - len(replacements)} unresolved block correction(s)")
+    report(f"Attribution semantic review complete: {len(replacements)} applied, "
+           f"{len(changes) - len(replacements)} rejected or uncertain block correction(s); "
+           f"{len(missing)} spoken segment(s) in {len(missing_blocks)} block(s) still need a speaker")
     return result

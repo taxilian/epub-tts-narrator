@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from audiobook_renderer.bundle import load_bundle
+from audition_fixtures import prepare_bundle
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.common import read_json
 from audiobook_renderer.config import DEFAULTS
@@ -42,7 +43,7 @@ class CastingDesignerSwitchTests(unittest.TestCase):
             if segment["role_id"] == "narrator_main":
                 segment["voice_id"] = "voice_mara_narration"
         export_bundle(document, self.root / "book")
-        self.bundle = load_bundle(self.root / "book")
+        self.bundle = prepare_bundle(load_bundle(self.root / "book"))
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "drama-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")

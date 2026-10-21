@@ -11,6 +11,7 @@ import unittest
 import wave
 
 from audiobook_renderer.bundle import load_bundle
+from audition_fixtures import prepare_bundle
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.common import digest, read_json, write_json
 from audiobook_renderer.config import DEFAULTS
@@ -114,7 +115,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.bundle = load_bundle(EXAMPLE / "bundle")
+        self.bundle = prepare_bundle(load_bundle(EXAMPLE / "bundle"))
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "drama-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")
@@ -139,7 +140,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
             self.factory_calls.append(deepcopy(settings))
             return self.designer
         session = CastingSession(
-            bundle or self.bundle, config or self.config,
+            prepare_bundle(bundle or self.bundle), config or self.config,
             engine_factory=lambda _: self.engine,
             verifier_factory=lambda *args, **kwargs: self.verifier,
             designer_factory=designer_factory or make_designer, notify=lambda _: None,
@@ -163,7 +164,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
                 segment["voice_id"] = self.alias_id
         destination = self.root / "narration-bundle"
         export_bundle(document, destination)
-        return load_bundle(destination)
+        return prepare_bundle(load_bundle(destination))
 
     def test_configured_designer_receives_prompt_and_playback_engine_never_samples(self):
         session = self.new_session()
@@ -393,7 +394,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
                 segment["voice_id"] = self.alias_id
         destination = self.root / "conflicting-later-bundle"
         export_bundle(document, destination)
-        return load_bundle(destination)
+        return prepare_bundle(load_bundle(destination))
 
     def test_persisted_alias_cannot_merge_distinct_current_characters(self):
         original = self.new_session(bundle=self.narration_bundle())
@@ -462,7 +463,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         destination = self.root / "alias-book"
         if not destination.exists():
             shutil.copytree(self.bundle["directory"], destination)
-            self.bundle = load_bundle(destination)
+            self.bundle = prepare_bundle(load_bundle(destination))
         write_json(destination / "voice-aliases.json", {
             "format": "audiobook-book-voice-aliases", "version": 1,
             "series_id": self.config["voices"]["series_id"],

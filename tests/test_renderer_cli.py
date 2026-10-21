@@ -10,6 +10,7 @@ from audiobook_renderer.cli import chapter_numbers, doctor, main
 from audiobook_renderer.config import load_config
 from epub_audiobook.cli import export_bundle
 from test_contracts import valid_document
+from audition_fixtures import prepare_document
 
 
 class RendererCLITests(unittest.TestCase):
@@ -24,7 +25,7 @@ class RendererCLITests(unittest.TestCase):
             '[voices]\nseries_id="test-series"\n'
         )
         self.bundle = self.root / "bundle"
-        export_bundle(valid_document(), self.bundle)
+        export_bundle(prepare_document(valid_document()), self.bundle)
 
     def run_cli(self, *args):
         stdout, stderr = io.StringIO(), io.StringIO()

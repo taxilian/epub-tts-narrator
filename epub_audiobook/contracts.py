@@ -290,7 +290,43 @@ class _Validator:
             if "voice_id" not in segment:
                 self.error(f"{path}.voice_id", "is required (string or null)")
             role_id, voice_id = segment.get("role_id"), segment.get("voice_id")
-            if role_id is None:
+            if "simultaneous_speakers" in segment:
+                performers = segment["simultaneous_speakers"]
+                if role_id is not None or voice_id is not None:
+                    self.error(path, "simultaneous speakers require null primary role_id and voice_id")
+                if segment.get("kind") not in {"dialogue", "thought", "letter"}:
+                    self.error(f"{path}.kind", "simultaneous speakers require dialogue, thought, or letter text")
+                if attribution.get("basis") not in {"explicit", "context", "user"}:
+                    self.error(f"{path}.attribution.basis", "simultaneous speakers must be resolved, not alternative candidates")
+                if attribution.get("review_required") is not False or candidates:
+                    self.error(f"{path}.attribution", "simultaneous speakers require review_required=false and no alternative candidates")
+                if attribution.get("basis") != "user" and not attribution.get("evidence"):
+                    self.error(f"{path}.attribution.evidence", "simultaneous speakers require source evidence of joint delivery")
+                if not isinstance(performers, list) or len(performers) < 2:
+                    self.error(f"{path}.simultaneous_speakers", "must contain at least two distinct speakers")
+                    performers = []
+                used_roles, used_voices = set(), set()
+                for j, performer in enumerate(performers):
+                    at = f"{path}.simultaneous_speakers[{j}]"
+                    if not isinstance(performer, dict) or set(performer) != {"role_id", "voice_id"}:
+                        self.error(at, "must contain exactly role_id and voice_id")
+                        continue
+                    rid, vid = performer["role_id"], performer["voice_id"]
+                    valid_role = self.reference(rid, roles, f"{at}.role_id")
+                    valid_voice = self.reference(vid, self.voice_index, f"{at}.voice_id")
+                    if valid_role:
+                        if roles[rid].get("kind") != "dialogue":
+                            self.error(f"{at}.role_id", "must be an existing dialogue role")
+                        if vid != roles[rid].get("voice_id"):
+                            self.error(f"{at}.voice_id", "must match the selected role voice")
+                        if rid in used_roles:
+                            self.error(f"{at}.role_id", "simultaneous speaker roles must be distinct")
+                        used_roles.add(rid)
+                    if valid_voice:
+                        if vid in used_voices:
+                            self.error(f"{at}.voice_id", "simultaneous speaker voices must be distinct")
+                        used_voices.add(vid)
+            elif role_id is None:
                 if voice_id is not None:
                     self.error(f"{path}.voice_id", "must be null when role_id is null")
                 if attribution.get("basis") != "unresolved":
@@ -357,6 +393,29 @@ def validate_document(document: Any) -> list[str]:
     return _Validator().validate(document)
 
 
+def has_assigned_speakers(segment: Any) -> bool:
+    """Recognize a single assignment or the shape of a resolved simultaneous group.
+
+    Full document validation additionally binds every role and voice to the cast.
+    This helper does not turn malformed group metadata into a usable assignment.
+    """
+    if not isinstance(segment, dict):
+        return False
+    if "simultaneous_speakers" not in segment:
+        return all(isinstance(segment.get(key), str) and segment[key]
+                   for key in ("role_id", "voice_id"))
+    performers = segment["simultaneous_speakers"]
+    if (segment.get("role_id") is not None or segment.get("voice_id") is not None
+            or not isinstance(performers, list) or len(performers) < 2):
+        return False
+    if any(not isinstance(item, dict) or set(item) != {"role_id", "voice_id"}
+           or any(not isinstance(item[key], str) or not item[key] for key in ("role_id", "voice_id"))
+           for item in performers):
+        return False
+    return all(len({item[key] for item in performers}) == len(performers)
+               for key in ("role_id", "voice_id"))
+
+
 def review_items(document: Any) -> list[dict[str, Any]]:
     """Return unresolved issues and segments that still require a voice decision."""
     if not isinstance(document, dict):
@@ -378,8 +437,7 @@ def review_items(document: Any) -> list[dict[str, Any]]:
             if (
                 attribution.get("review_required") is not False
                 or attribution.get("basis") == "unresolved"
-                or segment.get("role_id") is None
-                or segment.get("voice_id") is None
+                or not has_assigned_speakers(segment)
             ):
                 result.append({
                     "type": "segment",

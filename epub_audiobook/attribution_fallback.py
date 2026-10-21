@@ -106,10 +106,13 @@ def _validate_combined(source, cast, units, segments):
                 break
             if item["start"] != cursor or item["end"] > end:
                 raise ValueError("Subdivided attribution did not preserve exact target-unit boundaries")
-            pieces.append({
+            piece = {
                 "text": item["text"], "kind": item["kind"], "role_id": item["role_id"],
                 "delivery": item["delivery"], **item["attribution"],
-            })
+            }
+            if "simultaneous_speakers" in item:
+                piece["simultaneous_role_ids"] = [speaker["role_id"] for speaker in item["simultaneous_speakers"]]
+            pieces.append(piece)
             cursor = item["end"]
             index += 1
         response["units"].append({"unit_id": unit["unit_id"], "segments": pieces})

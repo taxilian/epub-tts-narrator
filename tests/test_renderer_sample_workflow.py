@@ -109,6 +109,7 @@ class SampleWorkflowTests(unittest.TestCase):
     def test_create_voices_cli_supplies_bundle_for_each_new_voice(self):
         with (patch("audiobook_renderer.cli.load_config", return_value=self.config),
               patch("audiobook_renderer.cli.load_bundle", return_value=self.bundle),
+              patch("epub_audiobook.audition_scripts.ensure_bundle_scripts", return_value=self.bundle),
               patch("audiobook_renderer.engines.create_engine", return_value=self.engine),
               patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier),
               patch("audiobook_renderer.workflow.ensure_voice") as ensure,

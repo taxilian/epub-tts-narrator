@@ -137,16 +137,77 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
                 self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_original_word_error_limit_still_applies_to_boundary_changes(self):
+    def test_raw_word_error_does_not_double_count_a_boundary_only_change(self):
         for word_count in (20, 19):
             with self.subTest(word_count=word_count):
                 expected = " ".join(["steady"] * (word_count - 1) + ["Sourcepalace"])
                 actual = expected.replace("Sourcepalace", "Source Palace")
                 verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
                 report = self.check(verifier, expected=expected)
-                self.assertEqual(report["passed"], word_count == 20, report)
+                self.assertTrue(report["passed"], report)
                 self.assertEqual(report["metrics"]["wer"], 2 / word_count)
-                self.assertEqual(len(verifier.calls), 2 if word_count == 20 else 1)
+                self.assertEqual(len(verifier.calls), 2)
+
+    def test_two_compound_splits_above_ten_percent_require_full_independent_agreement(self):
+        expected = (
+            "The bloodbeast waited quietly just outside the station while the captain checked every locked "
+            "door and window. A sourcevow bound the traveler to remain nearby until the night train "
+            "arrived with fresh supplies for the village."
+        )
+        actual = expected.replace("bloodbeast", "blood beast").replace("sourcevow", "source vow")
+        for secondary, accepted in ((actual, True), (expected, True),
+                                    (actual.replace("quietly", "quickly"), False)):
+            with self.subTest(secondary=secondary):
+                verifier = consensus.IndependentVerifier(primary=actual, secondary=secondary)
+                report = self.check(verifier, expected=expected)
+                self.assertEqual(report["passed"], accepted, report)
+                self.assertEqual(report["metrics"]["expected_word_count"], 36)
+                self.assertEqual(report["metrics"]["wer"], 4 / 36)
+                self.assertEqual(report["corroboration"]["eligibility"]["boundary_changes"], 2)
+                self.assertEqual(report["corroboration"]["eligibility"]["substitutions"], 0)
+                self.assertEqual(verifier.calls, [("reference", self.audio), ("corroboration", self.audio)])
+                if not accepted:
+                    self.assertNotIn("reference_text", report)
+        primary_only = consensus.PrimaryVerifier(actual)
+        report = self.check(primary_only, expected=expected)
+        self.assertFalse(report["passed"], report)
+        self.assertEqual(report["corroboration"]["decision"], "unavailable")
+
+    def test_short_direct_substrings_and_unrelated_thank_you_never_gain_boundary_eligibility(self):
+        for expected, actual in (
+            ("The bloodbeast waits.", "The bloodbeast"),
+            ("A bloodbeast waits.", "bloodbeast waits."),
+            ("The sourcevow remains binding.", "The sourcevow remains"),
+            ("The bloodbeast waits.", "The blood beast"),
+            ("The only fellow who could hear the sourcevow was the bloodbeast.", "Thank you."),
+            ("The only fellow who could hear the sourcevow was the bloodbeast.",
+             "Thank you who could hear the source vow was the blood beast."),
+        ):
+            with self.subTest(expected=expected, actual=actual):
+                verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
+                report = self.check(verifier, expected=expected)
+                self.assertFalse(report["passed"], report)
+                self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
+                self.assertEqual(verifier.calls, [("reference", self.audio)])
+
+    def test_boundary_only_exception_never_relaxes_book_speech(self):
+        expected = "The bloodbeast heard the sourcevow."
+        actual = "The blood beast heard the source vow."
+        verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
+        report = self.check(verifier, expected=expected, purpose="speech")
+        self.assertFalse(report["passed"], report)
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(verifier.calls, [("speech", self.audio)])
+
+    def test_high_wer_boundary_only_changes_still_obey_four_change_limit(self):
+        for count in (4, 5):
+            with self.subTest(count=count):
+                expected = " ".join(["Sourcepalace"] * count)
+                actual = expected.replace("Sourcepalace", "Source Palace")
+                verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
+                report = self.check(verifier, expected=expected)
+                self.assertEqual(report["passed"], count == 4, report)
+                self.assertEqual(len(verifier.calls), 2 if count == 4 else 1)
 
     def test_four_boundary_changes_can_be_corroborated_but_five_cannot(self):
         for count in (4, 5):

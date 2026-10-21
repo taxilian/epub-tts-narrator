@@ -1,6 +1,7 @@
 """Choose an audition script from a character's already-attributed book text.
 
-Selection never writes the analyzer bundle or combines separated utterances.
+Selection never writes the analyzer bundle. Joined statements retain separate
+source ranges; creative casting text is explicitly marked as non-source material.
 Offsets use Python/Unicode code points, matching the analyzer and render plan.
 """
 
@@ -13,9 +14,13 @@ import unicodedata
 from .bundle import ranges, spoken_mapping
 
 
-SELECTION_VERSION = 2
-_MAX_CHARS = 400
-_MIN_WORDS = 12
+SELECTION_VERSION = 3
+_MAX_CHARS = 650
+_MIN_WORDS = 25
+_TARGET_MIN_WORDS = 35
+_TARGET_WORDS = 45
+_MAX_WORDS = 60
+_MIN_EXCERPT_WORDS = 4
 _WORDS = re.compile(r"[^\W_]+(?:[’'][^\W_]+)*", re.UNICODE)
 _SENTENCE_END = re.compile(r"""[.!?]+[”’"']*(?=\s|$)""")
 _EXTREME = re.compile(
@@ -28,6 +33,17 @@ _ABBREVIATIONS = {
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
     "e.g", "i.e",
 }
+
+
+class MissingSampleScript(ValueError):
+    def __init__(self, voice_id):
+        self.voice_id = voice_id
+        super().__init__(f"Voice {voice_id} needs a character-specific audition script: no suitable source "
+                         f"selection reaches {_MIN_WORDS} words. Prepare sample scripts for this book before casting.")
+
+
+def sample_word_count(text):
+    return len(_WORDS.findall(text))
 
 
 def _trim(text, start, end):
@@ -87,14 +103,29 @@ def _role_priority(row, role):
     return None
 
 
-def select_sample(bundle, voice_id, *, canonical_id, fallback_text):
-    """Return ``reference_text`` and an auditable ``source`` description.
+def _eligible_performers(row):
+    if row.get("simultaneous_speakers"):
+        return row["simultaneous_speakers"]
+    return [{"voice_id": row.get("voice_id"), "role_id": row.get("role_id")}]
 
-    ``bundle`` is a validated ``load_bundle`` result. ``canonical_id`` is the
-    voice store's resolver; names are deliberately never used for matching.
-    All aliases of a saved voice select the same passage. A caller can persist
-    this result in a series draft to keep it unchanged in later books.
-    """
+
+def _safe_text(text):
+    if any(char in text for char in "[]<>"):
+        return False
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"}
+           and char not in "\n\r\t" for char in text):
+        return False
+    if "://" in text or re.search(r"\S+@\S+", text):
+        return False
+    letters = [char for char in text if char.isalpha()]
+    if letters and sum(char.isupper() for char in letters) / len(letters) > .55:
+        return False
+    if re.search(r"([A-Za-z])\1{2,}", text):
+        return False
+    return not text.rstrip("”’\"'").endswith(("—", "–", "-"))
+
+
+def _candidate_data(bundle, voice_id, canonical_id):
     book = bundle["source"]["book"]
     voice_ids = {voice["id"] for voice in bundle["cast"]["voices"]}
     if voice_id not in voice_ids:
@@ -105,29 +136,30 @@ def select_sample(bundle, voice_id, *, canonical_id, fallback_text):
         "selection_version": SELECTION_VERSION,
         "canonical_voice_id": target,
         "source_fingerprint": bundle["manifest"]["source_fingerprint"],
-        "book_id": book["id"],
-        "book_title": book.get("title", ""),
+        "book_id": book["id"], "book_title": book.get("title", ""),
     }
     roles = {role["id"]: role for role in bundle["cast"]["roles"]}
-    rejected = Counter()
-    candidates = []
+    rejected, candidates = Counter(), []
     for chapter_number, chapter in enumerate(bundle["chapters"], 1):
         for row_number, row in enumerate(chapter["rows"]):
-            original_voice = row.get("voice_id")
-            if canonical.get(original_voice) != target:
+            # An explicit unison passage is also something each member actually
+            # says. Use it as a solo audition without changing its attribution.
+            performers = [performer for performer in _eligible_performers(row)
+                          if canonical.get(performer.get("voice_id")) == target]
+            if not performers:
                 continue
-            role = roles.get(row.get("role_id"), {})
+            performer = min(performers, key=lambda item: (item["voice_id"] != target, item["role_id"]))
+            original_voice, role_id = performer["voice_id"], performer["role_id"]
+            role = roles.get(role_id, {})
             priority = _role_priority(row, role)
             if priority is None or role.get("voice_id") != original_voice:
                 rejected["non_speech_role"] += 1
                 continue
             attribution = row.get("attribution", {})
             alternatives = attribution.get("candidates", [])
-            if (
-                attribution.get("review_required") is not False
-                or attribution.get("basis") not in {"explicit", "context", "user"}
-                or any(item != row["role_id"] for item in alternatives)
-            ):
+            if (attribution.get("review_required") is not False
+                    or attribution.get("basis") not in {"explicit", "context", "user"}
+                    or any(item != role_id for item in alternatives)):
                 rejected["uncertain_attribution"] += 1
                 continue
             if _EXTREME.search(row.get("delivery", {}).get("direction", "")):
@@ -142,73 +174,141 @@ def select_sample(bundle, voice_id, *, canonical_id, fallback_text):
             for start, end in _spans(spoken):
                 text = spoken[start:end]
                 words = _WORDS.findall(text)
-                if len(words) < _MIN_WORDS:
+                if not _MIN_EXCERPT_WORDS <= len(words) <= _MAX_WORDS or not _safe_text(text):
                     continue
-                # The engine interprets square/angle brackets as control syntax.
-                # Only analyzer-provided bracket removal is accepted, above.
-                if any(char in text for char in "[]<>"):
-                    continue
-                # Hidden format/control characters cannot safely be passed to
-                # speech engines as literal text. Reject this span instead of
-                # deleting characters and losing its exact source mapping.
-                if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"}
-                       and char not in "\n\r\t" for char in text):
-                    continue
-                if "://" in text or re.search(r"\S+@\S+", text):
-                    continue
-                letters = [char for char in text if char.isalpha()]
-                if letters and sum(char.isupper() for char in letters) / len(letters) > .55:
-                    continue
-                if re.search(r"([A-Za-z])\1{2,}", text):
-                    continue
-                if text.rstrip("”’\"'").endswith(("—", "–", "-")):
-                    continue
-                # Prefer finished sentences; short source rows can still be an
-                # exact complete spoken clause interrupted by a narration tag.
-                fit = 0 if 20 <= len(words) <= 60 else 1
-                score = (
-                    priority, original_voice != target, fit,
-                    not _complete(text),
-                    attribution["basis"] == "context",
-                    abs(len(words) - 35),
-                    chapter_number, row.get("sequence", row_number), start, end,
-                )
+                score = (priority, original_voice != target, not _complete(text),
+                         attribution["basis"] == "context", abs(len(words) - _TARGET_WORDS),
+                         chapter_number, row.get("sequence", row_number), start, end)
                 source = {
-                    **source_base,
-                    "kind": "book_excerpt",
+                    **source_base, "kind": "book_excerpt",
                     "chapter_id": row["chapter_id"],
                     "chapter_title": chapter["entry"].get("title", ""),
                     "chapter_number": chapter_number,
                     "script_path": chapter["entry"].get("path"),
-                    "segment_id": row["id"],
-                    "segment_ids": [row["id"]],
-                    "voice_id": original_voice,
-                    "role_id": row["role_id"],
-                    "segment_kind": row["kind"],
-                    "block_id": row["block_id"],
+                    "segment_id": row["id"], "segment_ids": [row["id"]],
+                    "voice_id": original_voice, "role_id": role_id,
+                    "segment_kind": row["kind"], "block_id": row["block_id"],
                     "source_ranges": ranges(mapping[start:end]),
-                    "spoken_start": start,
-                    "spoken_end": end,
-                    "word_count": len(words),
-                    "short_sample": len(words) < 20,
+                    "spoken_start": start, "spoken_end": end,
+                    "word_count": len(words), "short_sample": len(words) < _TARGET_MIN_WORDS,
                     "attribution_basis": attribution["basis"],
                 }
-                candidates.append((score, {"reference_text": text, "source": source}))
+                if row.get("simultaneous_speakers"):
+                    source["simultaneous_speakers"] = [dict(item) for item in row["simultaneous_speakers"]]
+                candidates.append({"score": score, "reference_text": text, "source": source,
+                                   "order": (chapter_number, row.get("sequence", row_number), start)})
                 found = True
             if not found:
                 rejected["insufficient_suitable_text"] += 1
-    if candidates:
-        return min(candidates, key=lambda item: item[0])[1]
-    return {
-        "reference_text": fallback_text,
-        "source": {
-            **source_base,
-            "kind": "fallback",
-            "reason": "insufficient_character_dialogue",
-            "detail": (
-                "No clearly attributed, suitably delivered contiguous passage "
-                f"of at least {_MIN_WORDS} spoken words fits within {_MAX_CHARS} characters."
-            ),
+    return source_base, rejected, candidates, canonical
+
+
+def _joined_sample(candidates, source_base):
+    ordered = sorted(candidates, key=lambda candidate: candidate["order"])
+    if len(ordered) == 1:
+        return {key: ordered[0][key] for key in ("reference_text", "source")}
+    excerpts, texts, cursor = [], [], 0
+    for candidate in ordered:
+        text = candidate["reference_text"]
+        excerpts.append(dict(candidate["source"], text=text, sample_start=cursor, sample_end=cursor + len(text)))
+        texts.append(text)
+        cursor += len(text) + 1
+    text = " ".join(texts)
+    words = len(_WORDS.findall(text))
+    return {"reference_text": text, "source": {
+        **source_base, "kind": "book_excerpts", "separator": " ",
+        "excerpts": excerpts,
+        "segment_ids": [item["segment_id"] for item in excerpts],
+        "word_count": words, "short_sample": words < _TARGET_MIN_WORDS,
+        "detail": "Separate source statements joined for an audition; not one contiguous book passage.",
+    }}
+
+
+def _choose(candidates, source_base):
+    # Preserve one best span per segment and avoid repeating the same statement
+    # from different scenes merely to make the audition longer.
+    pool, seen_segments, seen_words = [], set(), set()
+    for candidate in sorted(candidates, key=lambda item: item["score"]):
+        segment_id = candidate["source"]["segment_id"]
+        words = tuple(word.casefold() for word in _WORDS.findall(candidate["reference_text"]))
+        if segment_id in seen_segments or words in seen_words:
+            continue
+        seen_segments.add(segment_id)
+        seen_words.add(words)
+        pool.append(candidate)
+    selections = []
+    for seed in pool[:32]:
+        chosen = [seed]
+        words = seed["source"]["word_count"]
+        chars = len(seed["reference_text"])
+        while words < _TARGET_MIN_WORDS:
+            available = [candidate for candidate in pool if candidate not in chosen
+                         and words + candidate["source"]["word_count"] <= _MAX_WORDS
+                         and chars + 1 + len(candidate["reference_text"]) <= _MAX_CHARS]
+            if not available:
+                break
+            addition = min(available, key=lambda item: (
+                item["score"][0], abs(words + item["source"]["word_count"] - _TARGET_WORDS),
+                item["score"][1:]))
+            chosen.append(addition)
+            words += addition["source"]["word_count"]
+            chars += 1 + len(addition["reference_text"])
+        if words < _MIN_WORDS:
+            continue
+        quality = (words < _TARGET_MIN_WORDS, max(item["score"][0] for item in chosen),
+                   sum(item["score"][1] for item in chosen), abs(words - _TARGET_WORDS),
+                   len(chosen), tuple(item["order"] for item in chosen))
+        selections.append((quality, chosen))
+    if not selections:
+        return None
+    return _joined_sample(min(selections, key=lambda item: item[0])[1], source_base)
+
+
+def select_book_sample(bundle, voice_id, *, canonical_id):
+    """Return a substantial source audition, or None if creative text is needed."""
+    source_base, _, candidates, _ = _candidate_data(bundle, voice_id, canonical_id)
+    return _choose(candidates, source_base)
+
+
+def validate_casting_script(script):
+    """Use the same audition safety limits during model validation and selection."""
+    if (not isinstance(script, dict) or script.get("basis") != "casting"
+            or not isinstance(script.get("text"), str)
+            or not isinstance(script.get("reason"), str) or not script["reason"].strip()
+            or not _MIN_WORDS <= sample_word_count(script["text"]) <= _MAX_WORDS
+            or len(script["text"]) > _MAX_CHARS or not _safe_text(script["text"])):
+        raise ValueError("Invalid prepared casting sample: use 25–60 clean spoken words within 650 characters")
+    return script
+
+
+def select_sample(bundle, voice_id, *, canonical_id, fallback_text=None):
+    """Choose 25–60 words of clean book speech or a prepared creative audition.
+
+    Shared voice aliases choose the same text. Every joined statement has its own
+    source mapping. ``fallback_text`` remains an accepted legacy argument but is
+    never substituted for a missing character-specific casting script.
+    """
+    source_base, rejected, candidates, canonical = _candidate_data(bundle, voice_id, canonical_id)
+    selected = _choose(candidates, source_base)
+    if selected is not None:
+        return selected
+    target = source_base["canonical_voice_id"]
+    profiles = sorted((voice for voice in bundle["cast"]["voices"] if canonical[voice["id"]] == target),
+                      key=lambda voice: (voice["id"] != target, voice["id"]))
+    script_sets = [bundle.get("audition_scripts", {}),
+                   bundle["manifest"].get("provenance", {}).get("voice_samples", {}).get("scripts", {}),
+                   {profile["id"]: profile.get("sample_script") for profile in profiles}]
+    keys = list(dict.fromkeys([target, *[profile["id"] for profile in profiles]]))
+    prepared = [(key, scripts[key]) for scripts in script_sets for key in keys if key in scripts]
+    for script_voice_id, script in prepared:
+        if script is None:
+            continue
+        validate_casting_script(script)
+        text = script["text"]
+        return {"reference_text": text, "source": {
+            **source_base, "kind": "casting_script", "basis": "casting", "voice_id": script_voice_id,
+            "reason": script["reason"], "word_count": len(_WORDS.findall(text)),
+            "detail": "Original character-specific audition text; not a quotation from the book.",
             "excluded_segments": dict(sorted(rejected.items())),
-        },
-    }
+        }}
+    raise MissingSampleScript(voice_id)

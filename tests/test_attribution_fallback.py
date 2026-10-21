@@ -21,6 +21,7 @@ from epub_audiobook.prompts import ATTRIBUTE, PROMPT_VERSION
 from epub_audiobook.provider import ProviderError
 from test_contracts import valid_document
 from test_pipeline import FakeClient
+from test_simultaneous_attribution import group_correction, simultaneous_fixture
 
 
 def fixture(count=6, *, text=None):
@@ -137,6 +138,37 @@ class AttributionFallbackTests(unittest.TestCase):
         self.assertTrue(record["truncation_observation"]["replayed_hint"])
         self.assertEqual(self.run_request(source, cast, split, client), (segments, record))
         self.assertEqual(len(client.calls), 5)
+
+    def test_simultaneous_performers_survive_subdivision_combination_and_cache_replay(self):
+        document = simultaneous_fixture()
+        source, cast = document["source"], document["cast"]
+        units = [unit for batch in make_units(source) for unit in batch]
+        payload = {"final_cast": cast, "performance_policy": deepcopy(DEFAULT_POLICY),
+                   "target_units": units, "context_units": [], "prior_segments": [],
+                   "scene_summary": {"summary": "Mara and Lena speak together."}}
+        before = deepcopy((source, cast, payload))
+
+        def modify(result, current):
+            for row, unit in zip(result["units"], current["target_units"]):
+                if unit["block_id"] == "b1":
+                    row["segments"] = group_correction(document)["segments"]
+            return result
+
+        client = Client(maximum=1, modify=modify)
+        segments, record = self.run_request(source, cast, payload, client, sequential_prior=True)
+        self.assertEqual([len(row["target_units"]) for row in client.calls], [2, 1, 1])
+        expected = [{"role_id": "mara", "voice_id": "v1"}, {"role_id": "lena", "voice_id": "v2"}]
+        self.assertEqual(segments[0]["simultaneous_speakers"], expected)
+        self.assertIsNone(segments[0]["role_id"])
+        self.assertIsNone(segments[0]["voice_id"])
+        self.assertEqual(client.calls[-1]["prior_segments"][0]["simultaneous_speakers"], expected)
+        self.assertEqual(validate_document(base_document(source, cast, segments)), [])
+        self.assertEqual((source, cast, payload), before)
+        self.assertEqual(record["status"], "subdivided")
+        self.assertEqual(record["segment_count"], len(segments))
+        self.assertTrue(all(child["status"] == "validated" for child in record["children"]))
+        self.assertEqual(self.run_request(source, cast, payload, client, sequential_prior=True)[0], segments)
+        self.assertEqual(len(client.calls), 3)
 
     def test_depth_and_singleton_failures_are_bounded(self):
         for count, maximum, expected_calls in [(8, 1, 3), (1, 0, 1)]:

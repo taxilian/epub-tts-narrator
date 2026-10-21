@@ -19,6 +19,7 @@ from audiobook_renderer.quality import validate_policy
 from audiobook_renderer.voices import VoiceStore
 from audiobook_renderer.workflow import RenderBlocked, render, verified_take
 from epub_audiobook.cli import export_bundle
+from audition_fixtures import prepare_bundle
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern"
@@ -118,7 +119,7 @@ class RendererWorkflowTests(unittest.TestCase):
         self.fixtures = {}
         self.engine = FixtureEngine(self.fixtures)
         self.verifier = FixtureVerifier(self.fixtures)
-        self.bundle = load_bundle(EXAMPLE / "bundle")
+        self.bundle = prepare_bundle(load_bundle(EXAMPLE / "bundle"))
 
     def take(self, *, verifier=None, directory=None, request=None, text="Hello there."):
         request = request or {"kind": "fixture", "text": text, "engine": self.engine.identity}

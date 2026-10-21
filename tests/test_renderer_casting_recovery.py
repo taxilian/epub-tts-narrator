@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 import wave
 
 from audiobook_renderer.bundle import load_bundle
+from audition_fixtures import prepare_bundle
 from audiobook_renderer.audition import casting_command
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.cli import parser
@@ -64,7 +65,7 @@ class CastingRecoveryTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.bundle = load_bundle(EXAMPLE)
+        self.bundle = prepare_bundle(load_bundle(EXAMPLE))
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "tts-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")
@@ -359,7 +360,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         with (patch("audiobook_renderer.casting.CastingSession", return_value=session),
               patch("audiobook_renderer.audition.AudioPlayer") as player,
               redirect_stdout(output)):
-            result = casting_command(args, {}, {"casting": {"player": ["afplay"]}})
+            result = casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},
+                                     {"casting": {"player": ["afplay"]}})
         self.assertEqual(result, 0)
         session.recover_attempt.assert_called_once_with(
             "voice-1", Path("/tmp/attempt-001.json"), select=True)
@@ -380,7 +382,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         with (patch("audiobook_renderer.casting.CastingSession", return_value=session),
               patch("audiobook_renderer.audition.AudioPlayer"),
               redirect_stdout(output)):
-            self.assertEqual(casting_command(args, {}, {"casting": {"player": ["afplay"]}}), 0)
+            self.assertEqual(casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},
+                                             {"casting": {"player": ["afplay"]}}), 0)
         session.recover_attempt.assert_called_once_with(
             "voice-1", Path("/tmp/attempt-001.json"), select=False)
         self.assertIn("without changing the active voice", output.getvalue())
@@ -414,7 +417,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
               patch("audiobook_renderer.audition.AudioPlayer") as player,
               redirect_stdout(output)):
             with self.assertRaisesRegex(RenderBlocked, "text_mismatch"):
-                casting_command(args, {}, {"casting": {"player": ["afplay"]}})
+                casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},
+                                {"casting": {"player": ["afplay"]}})
         self.assertNotIn("Recovered voice", output.getvalue())
         session.close.assert_called_once()
         player.return_value.stop.assert_called_once()

@@ -14,6 +14,7 @@ from epub_audiobook.pipeline import (
 from epub_audiobook.prompts import DISCOVER
 from epub_audiobook.provider import ProviderError
 from test_contracts import valid_document
+from audition_fixtures import script_response
 
 
 class FakeClient:
@@ -30,10 +31,27 @@ class FakeClient:
 
     def complete(self, system, payload):
         self.calls.append((system, deepcopy(payload)))
+        if payload.get("mode") == "audition_script":
+            return script_response()
         if payload.get("mode") == "discover":
             return self.discover(payload)
         if payload.get("mode") == "reconcile":
             return self.reconcile(payload)
+        if payload.get("mode") == "speaker_completion":
+            # Keep this fixture's deliberate uncertainty through the mandatory
+            # jury, rather than accidentally treating a new response as ordinary
+            # unit attribution. Dedicated integration tests exercise resolution.
+            fields = ("text", "kind", "role_id", "basis", "reason", "evidence",
+                      "candidates", "review_required", "delivery")
+            unit = payload["target_units"][0]
+            evidence = [{"block_id": unit["block_id"], "quote": unit["text"]}]
+            pieces = [{key: deepcopy(item[key]) for key in fields}
+                      for item in payload["original_segments"]]
+            for item in pieces:
+                if item["basis"] != "unresolved" and not item["evidence"]:
+                    item["evidence"] = deepcopy(evidence)
+            return {"block_id": unit["block_id"], "reason": "Fixture preserves uncertain speaker.",
+                    "evidence": evidence, "segments": pieces}
         response = self.attribute(payload)
         if self.mutation:
             self.mutation(response["units"][0]["segments"][0])

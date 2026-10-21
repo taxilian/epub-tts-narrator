@@ -18,6 +18,7 @@ from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
 from audiobook_renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_audiobook.cli import export_bundle
+from audition_fixtures import prepare_bundle
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -91,7 +92,7 @@ class CastingTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.bundle = load_bundle(EXAMPLE)
+        self.bundle = prepare_bundle(load_bundle(EXAMPLE))
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "tts-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")

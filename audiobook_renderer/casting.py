@@ -130,10 +130,13 @@ class CastingSession:
         }
 
     def _sample_draft(self, prompt, text, source, voice_id):
+        from .samples import sample_word_count
         # A user-entered script or an established book excerpt survives later
-        # books. Only legacy defaults (and unfulfilled automatic fallbacks)
-        # acquire a new selection. This never edits a saved audio transcript.
-        if source is not None and source.get("kind") in {"user", "book_excerpt"}:
+        # books. Legacy defaults and short automatic scripts acquire a fuller
+        # audition. This never edits a saved audio transcript or cloning audio.
+        if source is not None and (source.get("kind") == "user" or
+                (source.get("kind") in {"book_excerpt", "book_excerpts", "casting_script"}
+                 and sample_word_count(text) >= 25)):
             return {"prompt": prompt, "reference_text": text, "sample_source": deepcopy(source)}
         if source is None and not self._is_generic_script(text):
             return {"prompt": prompt, "reference_text": text, "sample_source": {"kind": "user"}}
@@ -174,7 +177,8 @@ class CastingSession:
         _validate_text(record["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         source = record.get("sample_source")
         if record["version"] == 2 and (
-                not isinstance(source, dict) or source.get("kind") not in {"user", "book_excerpt", "fallback"}):
+                not isinstance(source, dict) or source.get("kind") not in {
+                    "user", "book_excerpt", "book_excerpts", "casting_script", "fallback"}):
             raise ValueError("Invalid casting sample source")
         return self._sample_draft(record["prompt"], record["reference_text"], source, voice_id)
 
@@ -206,13 +210,25 @@ class CastingSession:
         return prepared
 
     def rows(self):
+        from .samples import MissingSampleScript
         self._validate_paths()
         cast = self.bundle["cast"]
         character_names = {character["id"]: character["name"] for character in cast["characters"]}
         rows = []
         for voice_id, profile in self._profiles.items():
             selected = self.store.load(voice_id)
-            draft = self._draft(voice_id, selected)
+            try:
+                draft = self._draft(voice_id, selected)
+            except MissingSampleScript as exc:
+                # Listing, playback, and loudness normalization need no model
+                # call or new script. Generation still uses _draft directly
+                # and cannot synthesize an unprepared placeholder.
+                creation = selected.get("creation", {}) if selected else {}
+                draft = {
+                    "prompt": creation.get("requested_description", _default_voice_prompt(self._profile(voice_id))),
+                    "reference_text": selected["reference_text"] if selected else "",
+                    "sample_source": {"kind": "unprepared", "reason": str(exc)},
+                }
             characters = [character["name"] for character in cast["characters"]
                           if character.get("voice_id") == voice_id]
             roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
@@ -407,9 +423,9 @@ class CastingSession:
 
     def _generate_locked(self, voice_id):
         profile = self._profile(voice_id)
+        draft = self._draft(voice_id, self.store.load(voice_id))
         engine, designer = self._get_engine(), self._get_designer()
         verifier = self._get_verifier()
-        draft = self._draft(voice_id, self.store.load(voice_id))
         self._save_draft(voice_id, draft)
         voice_id = self.store.canonical_id(voice_id)
         prompt = _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)

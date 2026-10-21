@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from audiobook_renderer.book_context import resolve_book_config
 from audiobook_renderer.bundle import load_bundle
+from audition_fixtures import prepare_bundle, prepare_document
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.cli import main, parser
 from audiobook_renderer.common import read_json, write_json
@@ -39,7 +40,7 @@ class GeminiSelectionTests(unittest.TestCase):
                             '[verification]\nmodel="./asr-model"\n')
         self.config_path.write_text(self.base_config)
         self.bundle = self.root / "bundle"
-        export_bundle(valid_document(), self.bundle)
+        export_bundle(prepare_document(valid_document()), self.bundle)
 
     def add_gemini(self, fields=None):
         self.config_path.write_text(self.base_config + "[gemini]\n" + (
@@ -196,14 +197,14 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
     def make_bundle(self, name):
         destination = self.root / name
         export_bundle(read_json(EXAMPLE / "reviewed.json"), destination)
-        return load_bundle(destination)
+        return prepare_bundle(load_bundle(destination))
 
     def session(self, bundle=None, config=None, designer_factory=None):
         def factory(settings):
             self.factory_calls.append(deepcopy(settings))
             return self.designer
         session = CastingSession(
-            bundle or self.bundle, config or self.config,
+            prepare_bundle(bundle or self.bundle), config or self.config,
             engine_factory=lambda _: self.engine,
             verifier_factory=lambda *_args, **_kwargs: self.verifier,
             designer_factory=designer_factory or factory, notify=self.notices.append,
