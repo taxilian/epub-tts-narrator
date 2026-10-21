@@ -75,7 +75,20 @@ DEFAULTS = {
     "extraction": {"include_auxiliary": False},
     "performance_policy": dict(DEFAULT_POLICY),
     "jev": deepcopy(JEV_DEFAULTS),
+    "huggingface": {"api_key": ""},
 }
+
+
+def validate_huggingface_settings(settings: dict[str, Any]) -> dict[str, str]:
+    """Validate the file-only download credential without echoing its value."""
+    if not isinstance(settings, dict) or set(settings) - {"api_key"}:
+        raise ValueError("Unknown key in configuration huggingface section.")
+    api_key = settings.get("api_key", "")
+    if not isinstance(api_key, str) or any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in api_key):
+        raise ValueError("Configuration huggingface.api_key must be a string without whitespace or control characters.")
+    return {"api_key": api_key}
 
 
 def _nonempty_string(value: Any, section: str, key: str) -> None:
@@ -181,6 +194,9 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
             # This optional evaluator serves both speech verification and the
             # analyzer's interactive speaker shortlist from the same file.
             result[section] = validate_jev_settings(settings)
+            continue
+        if section == "huggingface":
+            result[section] = validate_huggingface_settings(settings)
             continue
         if section in RENDERER_DEFAULTS:
             if section == "voices" and "aliases" in settings:

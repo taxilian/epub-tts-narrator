@@ -5,6 +5,8 @@
 # extract, plan, analyze, and review-attribution read that filename from the current directory.
 # To select another file, pass --config PATH to those commands.
 # Values are literal strings; external variables are not interpolated.
+# Renderer model-download credentials use [huggingface] api_key in the same file.
+# That optional table is included in audiobook-render.example.toml; add it only once.
 
 [provider]
 # Required for model calls. Choose a model available at your configured endpoint.

@@ -31,7 +31,18 @@ uv pip install --python .venv-renderer/bin/python -e .
 
 FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
 
-The requirements pin the Drama 3 port to commit `3b76bf84714d3766d7872f3409639a438e296cc8` and MLX Whisper to version `0.4.3`. Download the corresponding local model files:
+The requirements pin the Drama 3 port to commit `3b76bf84714d3766d7872f3409639a438e296cc8` and MLX Whisper to version `0.4.3`. When casting or rendering first needs a missing supported model, it shows the model and destination and asks before downloading the pinned files. Complete local models are reused. `doctor`, `plan`, listing voices, playback, and assembly do not download models. If a download is interrupted, rerun the same command to reuse its saved download progress.
+
+To authenticate model downloads, add this optional table to your existing global configuration file, or edit it if already present:
+
+```toml
+[huggingface]
+api_key = "hf_YOUR_TOKEN"
+```
+
+Keep the real token in your ignored local config. An omitted or empty key downloads anonymously; the tool does not pick up environment tokens or a saved Hugging Face login. Model access restrictions still apply to the configured account. The key is masked in download errors.
+
+You can also download the local model files manually:
 
 ```sh
 .venv-renderer/bin/hf download fishaudio/drama-3 \
@@ -43,7 +54,7 @@ The requirements pin the Drama 3 port to commit `3b76bf84714d3766d7872f3409639a4
   --local-dir "./models/whisper-large-v3-turbo"
 ```
 
-The renderer uses local paths and does not download missing models during inference. If those exact files already exist elsewhere, point the configuration at their existing directories instead of making duplicate downloads. `hf download` stores download metadata in the chosen directory. [Hugging Face download documentation](https://huggingface.co/docs/huggingface_hub/guides/cli#hf-download)
+If those exact files already exist elsewhere, point the configuration at their existing directories instead of making duplicate downloads. Downloads use the configured paths, resolved relative to your config file, so remove paths copied from the old computer. `hf download` stores download metadata in the chosen directory. The standalone `hf` command uses its own authentication settings, not the application's TOML file. [Hugging Face download documentation](https://huggingface.co/docs/huggingface_hub/guides/cli#hf-download)
 
 ## Configure once
 

@@ -33,6 +33,7 @@ DEFAULTS = {
         "guidance_scale": 5.0, "loudness": 0.0,
     },
     "jev": deepcopy(JEV_DEFAULTS),
+    "huggingface": {"api_key": ""},
     "voices": {
         "directory": None, "series_id": None,
         "reference_text": (
@@ -63,7 +64,9 @@ DEFAULTS = {
 
 def load_config(path=None):
     from .quality import validate_policy
-    from epub_tts_narrator.config import DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path
+    from epub_tts_narrator.config import (
+        DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path, validate_huggingface_settings,
+    )
     path = resolve_config_path(path).resolve()
     try:
         with path.open("rb") as stream:
@@ -94,6 +97,7 @@ def load_config(path=None):
                 result[section][key] = default
     result["quality"] = validate_policy(result["quality"])
     result["jev"] = validate_jev_settings(result["jev"])
+    result["huggingface"] = validate_huggingface_settings(result["huggingface"])
     for section, keys in {
         "engine": ("type", "experts"),
         "verification": ("type", "model", "language"),

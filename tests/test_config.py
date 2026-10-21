@@ -41,6 +41,7 @@ class ConfigTests(unittest.TestCase):
             "extraction": {"include_auxiliary": False},
             "performance_policy": DEFAULT_POLICY,
             "jev": JEV_DEFAULTS,
+            "huggingface": {"api_key": ""},
         })
 
     def test_default_file_is_loaded_from_current_directory(self):

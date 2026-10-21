@@ -65,7 +65,8 @@ class RendererCLITests(unittest.TestCase):
 
     def test_chapters_only_passes_per_run_options_and_closes_models(self):
         engine, verifier = Mock(), Mock()
-        with (patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
               patch("epub_tts_narrator.renderer.workflow.render") as render):
             render.return_value = {"status": "chapters_complete", "chapter_count": 1,
@@ -128,7 +129,8 @@ class RendererCLITests(unittest.TestCase):
     def test_failed_render_closes_verifier_and_engine_even_if_cleanup_fails(self):
         engine, verifier = Mock(), Mock()
         verifier.close.side_effect = RuntimeError("cleanup fixture")
-        with (patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
               patch("epub_tts_narrator.renderer.workflow.render", side_effect=RuntimeError("render fixture"))):
             status, _, error = self.run_cli("render", self.bundle, "--config", self.config)

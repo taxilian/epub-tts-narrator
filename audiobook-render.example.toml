@@ -2,6 +2,11 @@
 # Append these to the analyzer settings once; both commands read that file.
 # Book paths and series IDs come from the analyzed book directory.
 
+# Optional Hugging Face credential for prompted model downloads. Empty means anonymous.
+# Keep your real key in the ignored global config; environment tokens are not used.
+[huggingface]
+api_key = ""
+
 [engine]
 type = "drama3_mlx"
 checkpoint = "./models/drama-3"

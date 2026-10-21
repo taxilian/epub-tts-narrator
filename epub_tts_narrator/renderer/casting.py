@@ -51,13 +51,14 @@ class CastingSession:
     """Series-scoped casting operations shared by CLI and terminal UI."""
 
     def __init__(self, bundle, config, *, engine_factory=None, verifier_factory=None,
-                 designer_factory=None, notify=print):
+                 designer_factory=None, model_setup_factory=None, notify=print):
         from .book_context import resolve_book_config, voice_store
         config = resolve_book_config(bundle, config)
         self.bundle = deepcopy(bundle)
         self.config = deepcopy(config)
         from .config import resolve_voice_design
         self.config["voice_design"] = resolve_voice_design(config)
+        self._model_setup = model_setup_factory(self.config) if model_setup_factory else None
         self.notify = notify
         self.store = voice_store(bundle, config)
         self._engine_factory = engine_factory
@@ -380,8 +381,18 @@ class CastingSession:
             self._save_draft(voice_id, draft)
         return deepcopy(draft)
 
+    def prepare_models(self, *, generation=False):
+        """CLI-only setup happens before changing selections or calling a designer."""
+        if self._model_setup is not None:
+            self._model_setup.ensure("engine")
+            self._model_setup.ensure("verification")
+            if generation:
+                self._model_setup.ensure("voice_design")
+
     def _get_engine(self):
         if self._engine is None:
+            if self._model_setup is not None:
+                self._model_setup.ensure("engine")
             factory = self._engine_factory
             if factory is None:
                 from .engines import create_engine
@@ -391,6 +402,8 @@ class CastingSession:
 
     def _get_verifier(self):
         if self._verifier is None:
+            if self._model_setup is not None:
+                self._model_setup.ensure("verification")
             if self._verifier_factory is None:
                 from .verification import create_verifier
                 self._verifier = create_verifier(self.config["verification"], self.config.get("jev"))
@@ -408,6 +421,8 @@ class CastingSession:
             except ValueError as exc:
                 raise RenderBlocked(str(exc)) from exc
         if self._designer is None:
+            if self._model_setup is not None:
+                self._model_setup.ensure("voice_design")
             factory = self._designer_factory
             if factory is None:
                 from .voice_design import create_designer
@@ -677,6 +692,7 @@ class CastingSession:
         return directory, previous
 
     def _generate_locked(self, voice_id, *, fresh=False):
+        self.prepare_models(generation=True)
         profile = self._profile(voice_id)
         draft = self._draft(voice_id, self.store.load(voice_id))
         prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
@@ -806,6 +822,7 @@ class CastingSession:
 
     def begin_regeneration(self, voice_ids):
         """Clear all bulk targets before synthesis, preserving their casting edits."""
+        self.prepare_models(generation=True)
         with self._locked():
             drafts = {}
             for voice_id in voice_ids:
@@ -826,26 +843,29 @@ class CastingSession:
     def regenerate(self, voice_id, *, voice_designer=None):
         """Create a fresh voice and select its verified reference under one lock."""
         self._profile(voice_id)
-        with self._locked():
-            regeneration = self.store.regeneration_status(voice_id)
-            if regeneration and regeneration["inherited"]:
-                # A retry in a descendant owns its new state, never the parent's.
-                self._save_draft(voice_id, self._draft(voice_id))
-                self.store.invalidate(voice_id)
-            try:
-                with self._using_voice_designer(voice_designer):
+        # A declined download must not clear inherited failed selections or
+        # change their status. Resolve temporary G/GG/G11 settings first.
+        with self._using_voice_designer(voice_designer):
+            self.prepare_models(generation=True)
+            with self._locked():
+                regeneration = self.store.regeneration_status(voice_id)
+                if regeneration and regeneration["inherited"]:
+                    # A retry in a descendant owns its new state, never the parent's.
+                    self._save_draft(voice_id, self._draft(voice_id))
+                    self.store.invalidate(voice_id)
+                try:
                     candidate = self._generate_locked(voice_id, fresh=True)
                     selected = self._accept_locked(voice_id, candidate["candidate_id"])
-            except (Exception, KeyboardInterrupt) as exc:
-                if regeneration and self.store.regeneration_status(voice_id):
-                    error = ("Regeneration interrupted." if isinstance(exc, KeyboardInterrupt)
-                             else safe_error_text(exc, secrets=configured_secrets(self.config)))
-                    self.store.mark_regeneration_failed(voice_id, error.strip() or type(exc).__name__)
-                raise
-            remote_id = selected.get("creation", {}).get("remote_voice_id")
-            if remote_id:
-                self.notify(f"Selected Gemini voice ID: {remote_id}")
-            return selected
+                except (Exception, KeyboardInterrupt) as exc:
+                    if regeneration and self.store.regeneration_status(voice_id):
+                        error = ("Regeneration interrupted." if isinstance(exc, KeyboardInterrupt)
+                                 else safe_error_text(exc, secrets=configured_secrets(self.config)))
+                        self.store.mark_regeneration_failed(voice_id, error.strip() or type(exc).__name__)
+                    raise
+                remote_id = selected.get("creation", {}).get("remote_voice_id")
+                if remote_id:
+                    self.notify(f"Selected Gemini voice ID: {remote_id}")
+                return selected
 
     def recover_attempt(self, voice_id, attempt_path, *, select=True):
         """Recheck and preserve a saved casting take without synthesizing again.

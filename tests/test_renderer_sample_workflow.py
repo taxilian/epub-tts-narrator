@@ -110,6 +110,7 @@ class SampleWorkflowTests(unittest.TestCase):
         with (patch("epub_tts_narrator.renderer.cli.load_config", return_value=self.config),
               patch("epub_tts_narrator.renderer.cli.load_bundle", return_value=self.bundle),
               patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts", return_value=self.bundle),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
               patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier),
               patch("epub_tts_narrator.renderer.workflow.ensure_voice") as ensure,

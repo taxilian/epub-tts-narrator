@@ -100,7 +100,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         inherited = self.seed(first, character)
         original_local = self.seed(second, narrator)
         before = self.snapshot(Path(first["directory"]))
-        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+        with patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"), \
+                patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
                 patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier), \
                 patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts",
                       wraps=ensure_bundle_scripts) as scripts:
@@ -128,7 +129,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         narrator, character, extra = self.ids(second)
         inherited = self.seed(first, character)
         before = self.snapshot(Path(first["directory"]))
-        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+        with patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"), \
+                patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
                 patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier):
             status, _, error = self.run_cast(second, "--include-inherited")
         self.assertEqual(status, 0, error)
@@ -213,7 +215,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
     def test_include_inherited_replaces_failed_ancestor_voice_only_in_child(self):
         first, second, character = self.failed_parent_lineage()
         before = self.snapshot(Path(first["directory"]))
-        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+        with patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"), \
+                patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
                 patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier):
             status, output, error = self.run_cast(second, "--include-inherited")
         self.assertEqual(status, 0, error)

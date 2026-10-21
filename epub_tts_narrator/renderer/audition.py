@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from .workflow import VerificationUnavailable
+from .model_setup import ModelSetup, ModelSetupError
 
 
 def display(value):
@@ -193,6 +194,9 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 say(f"[{generated}/{missing}] Generating {_label(row)}…")
             try:
                 session.ensure_ready(row["voice_id"])
+            except ModelSetupError as exc:
+                say(f"Voice preparation paused: {exc}")
+                break
             except VerificationUnavailable as exc:
                 say(f"Voice preparation paused: {exc}")
                 break
@@ -348,7 +352,7 @@ def casting_command(args, bundle, config):
             true_peak_db=settings.get("sample_true_peak_db", -1.5),
             ffmpeg=render.get("ffmpeg", "ffmpeg"),
         )
-    session = CastingSession(bundle, config)
+    session = CastingSession(bundle, config, model_setup_factory=ModelSetup)
     player = AudioPlayer(settings.get("player", ["/usr/bin/afplay"]), normalizer=normalizer)
     try:
         rows = session.rows()
