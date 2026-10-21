@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_wer": 0.0,
 }
 QUALITY_VERSION = 4
-REFERENCE_VARIATION_VERSION = 2
+REFERENCE_VARIATION_VERSION = 3
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -476,6 +476,58 @@ def _reference_variation_eligibility(metrics: dict) -> dict | None:
             "variation_count": len(changes), "alignment": changes}
 
 
+def _reference_stylization_eligibility(metrics: dict) -> dict | None:
+    """Recognize patterned consonant stretching only to request corroboration.
+
+    This does not rewrite the script or prove equivalent words/performance.
+    It cannot be used by the final transcript comparisons or speech verifier.
+    Ordinary double-letter edits alone lack the required stylization anchor.
+    """
+    expected = [word for edit in metrics["alignment"] for word in edit["expected"]]
+    actual = [word for edit in metrics["alignment"] for word in edit["actual"]]
+    if len(expected) != len(actual):
+        return None
+    consonants, distinct, base_words, edits = set(), set(), set(), []
+    anchor = False
+    for index, (source, heard) in enumerate(zip(expected, actual)):
+        if source == heard:
+            continue
+        if (not re.fullmatch(r"[a-z]+", source) or not re.fullmatch(r"[a-z]+", heard)
+                or source in _NUMBER_COMPONENTS or heard in _NUMBER_COMPONENTS):
+            return None
+        left = [match.group() for match in re.finditer(r"(.)\1*", source)]
+        right = [match.group() for match in re.finditer(r"(.)\1*", heard)]
+        if len(left) != len(right):
+            return None
+        reductions = []
+        for run_index, (original, shortened) in enumerate(zip(left, right)):
+            if original == shortened:
+                continue
+            letter = original[0]
+            if (letter != shortened[0] or letter not in "bcdfghjklmnpqrstvwxyz"
+                    or len(original) <= len(shortened)):
+                return None
+            consonants.add(letter)
+            if len(consonants) > 1:
+                return None
+            # Initial "ss" marks the common hiss spelling. Do not infer a
+            # general doubled-initial rule: "llama" is an ordinary word.
+            anchor |= len(original) >= 3 or (run_index == 0 and letter == "s")
+            reductions.append({"letter": letter, "source_count": len(original),
+                               "heard_count": len(shortened), "run_index": run_index})
+        distinct.add(source)
+        base_words.add(heard)
+        edits.append({"operation": "shorten_consonant_run", "word_index": index,
+                      "expected": source, "actual": heard, "reductions": reductions})
+    if len(distinct) < 3 or len(base_words) < 3 or not anchor:
+        return None
+    return {"method": "repeated_consonant_stylization_v1", "letter": next(iter(consonants)),
+            "stylized_word_count": len(edits), "distinct_stylized_words": sorted(distinct),
+            "distinct_heard_words": sorted(base_words),
+            "alignment": edits,
+            "performance_assessed": False}
+
+
 def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
     """Resolve a small reference-script variation with an independent decoder.
 
@@ -492,7 +544,8 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
         "transcript": None,
     }
     report["corroboration"] = corroboration
-    eligibility = _reference_variation_eligibility(metrics)
+    eligibility = (_reference_variation_eligibility(metrics)
+                   or _reference_stylization_eligibility(metrics))
     if eligibility is None:
         return False
     corroboration["eligibility"] = eligibility
