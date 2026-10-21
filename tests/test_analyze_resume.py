@@ -50,7 +50,10 @@ class CompletionClient:
         roles = {role["kind"]: role["id"] for role in payload["final_cast"]["roles"]}
         pieces = []
         for original in payload["original_segments"]:
-            piece = {key: deepcopy(original[key]) for key in ("text", "kind", "delivery")}
+            piece = {key: deepcopy(original[key]) for key in ("text", "delivery")}
+            # Retry input deliberately omits unconfirmed kind/speaker guesses.
+            # This fixture distinguishes quoted speech from its narrative tags.
+            piece["kind"] = original.get("kind", "dialogue" if '“' in original["text"] else "narration")
             missing = self.uncertain and original["role_id"] is None
             piece.update(role_id=None if missing else (original["role_id"] or
                          roles["dialogue" if piece["kind"] == "dialogue" else "narration"]),

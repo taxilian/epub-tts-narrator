@@ -55,6 +55,12 @@ kind, text boundaries, and delivery. You cannot override a user's assignment.
 When retry_unresolved is true, ALL original segments with assigned performers
 are protected, not only user assignments. Preserve their performer, kind, source
 boundaries, and delivery; reconsider only the remaining unassigned source spans.
+On these retries, unassigned original records intentionally omit previous guessed
+kinds, candidate speakers, and explanations. Their state is unassigned and their
+role_id is null; only exact source spans and existing delivery are supplied.
+Determine their kind and performer independently from the source. Missing prior
+labels are not evidence that somebody speaks: ordinary narration is a possible
+answer. Assigned original records retain their full attribution for protection.
 Only select multiple performers when exact source evidence establishes that these
 identified characters say the SAME words together. Represent that as
 simultaneous_role_ids with at least two distinct existing dialogue roles and
@@ -249,9 +255,14 @@ def _signature(items):
     return runs
 
 
-def _compact(items):
+def _compact(items, *, neutral_unassigned=False):
     result = []
     for item in items:
+        if neutral_unassigned and not has_assigned_speakers(item):
+            row = {key: deepcopy(item[key]) for key in ("id", "block_id", "start", "end", "text", "delivery")}
+            row.update(role_id=None, state="unassigned")
+            result.append(row)
+            continue
         row = {key: deepcopy(item[key]) for key in ("id", "block_id", "start", "end", "text", "kind", "role_id", "delivery")}
         row.update(deepcopy(item["attribution"]))
         if item.get("simultaneous_speakers"):
@@ -596,7 +607,7 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                 block_id = case["block_id"]
                 unit = _unit(source["blocks"][positions[block_id]])
                 base = dict(shared, mode="speaker_completion", target_units=[unit], context_units=[],
-                            original_segments=_compact(originals[block_id]), round=round_index,
+                            original_segments=_compact(originals[block_id], neutral_unassigned=retry_unresolved), round=round_index,
                             input_block_fingerprint=fingerprint(originals[block_id]),
                             completion_retry_token=case["completion_retry_token"])
                 # Leave room for serialization, reviewer metadata, and bounded repair hints.

@@ -47,6 +47,68 @@ def partly_assigned_document(*, basis="context"):
 
 
 class SpeakerCompletionRetryTests(unittest.TestCase):
+    def test_retry_hides_unassigned_guesses_but_keeps_exact_source_delivery_and_private_originals(self):
+        document = partly_assigned_document()
+        missing = document["segments"][1]
+        missing["kind"] = "thought"
+        missing["attribution"].update(reason="A speculative earlier explanation.", candidates=["mara"],
+                                       evidence=[{"block_id": "b1", "quote": "Hello"}])
+        before = deepcopy(document)
+        requests = Requests()
+        result = complete_speakers(document, requests, retry_unresolved=True)
+        unknown = requests.calls[0]["original_segments"][1]
+        self.assertEqual(set(unknown), {"id", "block_id", "start", "end", "text", "delivery", "role_id", "state"})
+        self.assertEqual(unknown["state"], "unassigned")
+        self.assertIsNone(unknown["role_id"])
+        for key in ("id", "block_id", "start", "end", "text", "delivery"):
+            self.assertEqual(unknown[key], missing[key])
+        self.assertEqual(requests.calls[0]["input_block_fingerprint"], fingerprint(before["segments"]))
+        self.assertEqual(result["provenance"]["speaker_completion"]["cases"][0]["original_segments"], before["segments"])
+        self.assertEqual(document, before)
+        self.assertEqual(unassigned_segments(result), [])
+
+    def test_retry_keeps_assigned_user_and_unison_attribution_in_request(self):
+        document = paired_document()
+        first, narrator, _ = document["segments"]
+        first.update(role_id=None, voice_id=None, simultaneous_speakers=[
+            {"role_id": "mara", "voice_id": "v1"}, {"role_id": "lena", "voice_id": "v2"}])
+        first["attribution"].update(basis="user", reason="The user selected these joint speakers.",
+                                     candidates=[], review_required=False)
+        narrator.update(role_id="narrator_main", voice_id="vn")
+        narrator["attribution"].update(basis="explicit", reason="Established narrative tag.",
+                                        candidates=[], review_required=False)
+        before = deepcopy(document)
+
+        class NeutralRequests(Requests):
+            def response(self, payload):
+                evidence = [{"block_id": "b1", "quote": payload["target_units"][0]["text"]}]
+                segments = []
+                for original in payload["original_segments"]:
+                    piece = {key: deepcopy(original[key]) for key in ("text", "delivery")}
+                    piece.update(role_id=original["role_id"] if "state" not in original else "mara",
+                                 kind=original.get("kind", "dialogue"), basis="explicit", reason="Source-bound selection.",
+                                 evidence=evidence, candidates=[], review_required=False)
+                    if "simultaneous_role_ids" in original:
+                        piece["simultaneous_role_ids"] = original["simultaneous_role_ids"]
+                    segments.append(piece)
+                return {"block_id": "b1", "reason": "Complete source assignment.", "evidence": evidence,
+                        "segments": segments}
+
+        requests = NeutralRequests()
+        result = complete_speakers(document, requests, retry_unresolved=True)
+        protected, narrative, missing = requests.calls[0]["original_segments"]
+        for original, compact in ((first, protected), (narrator, narrative)):
+            self.assertNotIn("state", compact)
+            for key in ("id", "block_id", "start", "end", "text", "kind", "role_id", "delivery"):
+                self.assertEqual(compact[key], original[key])
+            for key, value in original["attribution"].items():
+                self.assertEqual(compact[key], value)
+        self.assertEqual(protected["simultaneous_role_ids"], ["mara", "lena"])
+        self.assertEqual(missing["state"], "unassigned")
+        self.assertEqual(result["segments"][:2], before["segments"][:2])
+        self.assertEqual(document, before)
+        self.assertEqual(unassigned_segments(result), [])
+
     def test_explicit_retry_includes_exhausted_cases_and_advances_fresh_request_namespace(self):
         client = Client(unknown=True)
         with tempfile.TemporaryDirectory() as directory:
