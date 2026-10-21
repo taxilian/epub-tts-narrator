@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from audiobook_renderer.audition import AudioPlayer, run_casting
 from audiobook_renderer.cli import main
 from audiobook_renderer.config import load_config
+from audiobook_renderer.diagnostics import safe_error_text
 from audiobook_renderer.voices import VoiceStore
 from epub_audiobook.cli import export_bundle
 from test_contracts import valid_document
@@ -38,6 +39,19 @@ class SessionDouble:
 
     def row(self, voice_id):
         return next(row for row in self.data if row["voice_id"] == voice_id)
+
+    def canonical(self, voice_id):
+        return self.row(voice_id).get("canonical_voice_id", voice_id)
+
+    def begin_regeneration(self, voice_ids):
+        canonical = list(dict.fromkeys(self.canonical(voice_id) for voice_id in voice_ids))
+        self.events.append(("begin_regeneration", canonical))
+        for voice_id in canonical:
+            row = self.row(voice_id)
+            row["selected"] = None
+            row["regeneration"] = {"state": "pending", "error": None}
+            for candidate in row["candidates"]:
+                candidate["selected"] = False
 
     def generate(self, voice_id):
         self.events.append(("generate", voice_id))
@@ -66,11 +80,14 @@ class SessionDouble:
                                if candidate["candidate_id"] == candidate_id)
         for candidate in row["candidates"]:
             candidate["selected"] = candidate["candidate_id"] == candidate_id
+        row.pop("regeneration", None)
         return deepcopy(row["selected"])
 
     def ensure_ready(self, voice_id):
         self.events.append(("ensure_ready", voice_id))
         row = self.row(voice_id)
+        if row.get("regeneration"):
+            raise RuntimeError("Voice requires explicit regeneration")
         if row["selected"]:
             return deepcopy(row["selected"])
         candidate = row["candidates"][-1] if row["candidates"] else self.generate(voice_id)
@@ -80,8 +97,15 @@ class SessionDouble:
         if voice_designer is not None:
             self.events.append(("designer", voice_designer))
         self.events.append(("regenerate", voice_id))
-        candidate = self.generate(voice_id)
-        return self.accept(voice_id, candidate["candidate_id"])
+        canonical = self.canonical(voice_id)
+        try:
+            candidate = self.generate(canonical)
+            return self.accept(canonical, candidate["candidate_id"])
+        except Exception as exc:
+            row = self.row(canonical)
+            if row.get("regeneration"):
+                row["regeneration"] = {"state": "failed", "error": safe_error_text(exc)}
+            raise
 
     def generate_missing(self):
         return [self.ensure_ready(row["voice_id"]) for row in self.data
@@ -113,8 +137,8 @@ class SharedSessionDouble(SessionDouble):
         rows = super().rows()
         for row in rows:
             canonical = self.row(self.canonical(row["voice_id"]))
-            for key in ("selected", "candidates", "prompt", "reference_text"):
-                row[key] = deepcopy(canonical[key])
+            for key in ("selected", "candidates", "prompt", "reference_text", "regeneration"):
+                row[key] = deepcopy(canonical.get(key))
         return rows
 
     def ensure_ready(self, voice_id):
@@ -125,12 +149,7 @@ class SharedSessionDouble(SessionDouble):
         self.row(self.canonical(voice_id)).update(values)
 
     def regenerate(self, voice_id, *, voice_designer=None):
-        if voice_designer is not None:
-            self.events.append(("designer", voice_designer))
-        self.events.append(("regenerate", voice_id))
-        canonical = self.canonical(voice_id)
-        candidate = self.generate(canonical)
-        return self.accept(canonical, candidate["candidate_id"])
+        return super().regenerate(voice_id, voice_designer=voice_designer)
 
 
 class PlayerDouble:
@@ -450,6 +469,50 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertTrue(any("sample" in line.lower() and "G" in line for line in self.output))
 
 
+    def test_failed_bulk_voice_stays_failed_on_menu_restart_without_adopting_old_sample(self):
+        self.ready()
+        self.session.begin_regeneration(["v1"])
+        self.session.generation_error = RuntimeError("Voice prompt was blocked by safety policies.")
+        with self.assertRaises(RuntimeError):
+            self.session.regenerate("v1")
+        self.session.events.clear()
+        self.run_ui("1", "q")
+        menu = "\n".join(self.output)
+        self.assertIn("1/2 ready", menu)
+        self.assertIn("FAILED", menu)
+        self.assertIn("Voice prompt was blocked by safety policies.", menu)
+        self.assertEqual(self.player.played, [])
+        self.assertIsNone(self.session.row("v1")["selected"])
+        self.assertFalse(any(event[0] in {"generate", "ensure_ready", "accept"}
+                             for event in self.session.events))
+
+    def test_pending_bulk_voice_is_visible_without_automatic_retry(self):
+        self.ready()
+        self.session.begin_regeneration(["v1"])
+        self.session.events.clear()
+        self.run_ui("q")
+        self.assertTrue(any("Mara" in line and "regenerat" in line.lower() for line in self.output))
+        self.assertFalse(any(event[0] in {"generate", "ensure_ready", "accept"}
+                             for event in self.session.events))
+        self.assertIsNone(self.session.row("v1")["selected"])
+
+    def test_gg_repairs_failed_bulk_voice_and_clears_failed_menu_status(self):
+        self.ready()
+        self.session.begin_regeneration(["v1"])
+        self.session.generation_error = RuntimeError("A bad previous voice.")
+        with self.assertRaises(RuntimeError):
+            self.session.regenerate("v1")
+        self.session.events.clear()
+        self.run_ui("GG 1", "A better voice.", "", "q")
+        self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-2")
+        self.assertIsNone(self.session.row("v1").get("regeneration"))
+        self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
+        self.assertIn(("designer", "gemini"), self.session.events)
+        final_menu = "\n".join(self.output).rsplit("Voice casting", 1)[-1]
+        self.assertIn("2/2 ready", final_menu)
+        self.assertNotIn("FAILED", final_menu)
+
+
 class CastingCLITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -583,11 +646,15 @@ class CastingCLITests(unittest.TestCase):
         stdout, stderr = io.StringIO(), FlushTrackingStream()
 
         def check_warning_then_regenerate(voice_id):
+            if not any(event[0] == "regenerate" for event in session.events):
+                self.assertTrue(all(row["selected"] is None for row in session.rows()))
+                self.assertEqual([event for event in session.events if event[0] == "begin_regeneration"],
+                                 [("begin_regeneration", ["v1", "v2"])])
             self.assertEqual(len(stderr.flushed), 1)
             warning = stderr.flushed[0]
             self.assertIn("shared series voice library", warning)
             self.assertIn("Future renders of every book or role sharing these voice IDs", warning)
-            self.assertIn("Previous samples are preserved", warning)
+            self.assertIn("Previous samples remain as history only", warning)
             self.assertIn("existing audiobook audio is not rewritten", warning)
             self.assertIn("  Mara (narration); Mara", warning)
             return regenerate(voice_id)
@@ -616,7 +683,7 @@ class CastingCLITests(unittest.TestCase):
         self.assertEqual([event for event in session.events if event[0] == "regenerate"],
                          [("regenerate", "v1"), ("regenerate", "vn")])
 
-    def test_regenerate_all_continues_after_failure_without_replacing_failed_voice(self):
+    def test_regenerate_all_continues_after_failure_leaving_failed_voice_unselected(self):
         session = SharedSessionDouble()
         original = deepcopy(session.row("v1"))
         session.generation_error = RuntimeError("Transcript mismatch.\x1b[2J")
@@ -624,9 +691,13 @@ class CastingCLITests(unittest.TestCase):
                 patch("audiobook_renderer.audition.AudioPlayer") as player:
             code, output, error = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 2)
-        self.assertIn("1 voices could not be regenerated", error)
-        self.assertIn("prior references are retained", error)
-        self.assertEqual(session.row("v1"), original)
+        self.assertIn("1 voices failed regeneration", error)
+        self.assertIn("no active voice", error.lower())
+        self.assertIsNone(session.row("v1")["selected"])
+        self.assertEqual(session.row("v1")["regeneration"]["state"], "failed")
+        self.assertIn("Transcript mismatch", session.row("v1")["regeneration"]["error"])
+        self.assertEqual(session.row("v1")["candidates"][0]["reference_audio"],
+                         original["selected"]["reference_audio"])
         self.assertEqual(session.row("v2")["selected"]["candidate_id"], "v2-take-2")
         self.assertEqual([event for event in session.events if event[0] == "regenerate"],
                          [("regenerate", "vn"), ("regenerate", "v2")])
@@ -636,15 +707,30 @@ class CastingCLITests(unittest.TestCase):
         player.return_value.stop.assert_called_once_with()
         session.close.assert_called_once_with()
 
+    def test_default_play_does_not_use_old_candidate_after_failed_bulk_recast(self):
+        session = SharedSessionDouble()
+        session.begin_regeneration(["v1"])
+        session.generation_error = RuntimeError("Replacement was rejected")
+        with self.assertRaises(RuntimeError):
+            session.regenerate("v1")
+        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
+                patch("audiobook_renderer.audition.AudioPlayer") as player:
+            code, _, error = self.run_cli("--action", "play", "--voice-id", "vn")
+        self.assertEqual(code, 2)
+        self.assertIn("regenerat", error.lower())
+        player.return_value.start.assert_not_called()
+        session.close.assert_called_once_with()
+
     def test_regenerate_all_interrupt_stops_batch_and_closes_resources(self):
         session = SharedSessionDouble()
-        original = deepcopy(session.data)
         session.generation_error = KeyboardInterrupt()
         with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
                 patch("audiobook_renderer.audition.AudioPlayer") as player:
             code, _, _ = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 130)
-        self.assertEqual(session.data, original)
+        for row in session.rows():
+            self.assertIsNone(row["selected"])
+            self.assertIn(row["regeneration"]["state"], {"pending", "failed"})
         self.assertEqual([event for event in session.events if event[0] == "regenerate"],
                          [("regenerate", "vn")])
         player.return_value.stop.assert_called_once_with()

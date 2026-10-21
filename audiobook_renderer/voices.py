@@ -25,6 +25,11 @@ class VoiceStore:
     Inherited references are never copied just to reuse them. Returned bindings
     include ``inherited`` and ``voice_directory`` as unhashed lookup metadata.
 
+    Bulk recasting replaces the active selection with a pending/failed marker.
+    That marker stops local legacy and ancestor fallback until an explicit
+    candidate selection succeeds; immutable references remain available as
+    history. Descendants observe the nearest marker just like an active voice.
+
     ``alias_loader`` reads this book's editable explicit links on every lookup.
     In that mode saved alias metadata is an integrity-checked cache only; the
     current cast and local policy remain authoritative. Parent policy is never
@@ -261,47 +266,128 @@ class VoiceStore:
             return None
         self._regular_file(path)
         pointer = read_json(path)
-        fields = {"format", "version", "series_id", "voice_id", "candidate_id",
-                  "asset_hash", "selection_sha256"}
-        if (not isinstance(pointer, dict) or set(pointer) != fields or
+        fields = {"format", "version", "series_id", "voice_id", "selection_sha256"}
+        if (not isinstance(pointer, dict) or
                 pointer.get("format") != "audiobook-voice-selection" or
-                type(pointer.get("version")) is not int or pointer.get("version") != 1 or
+                type(pointer.get("version")) is not int or pointer.get("version") not in (1, 2) or
                 pointer.get("series_id") != self.series_id or pointer.get("voice_id") != voice_id):
             raise ValueError("Invalid active voice selection")
-        self._validate_candidate_id(pointer["candidate_id"])
-        if (not isinstance(pointer["asset_hash"], str) or
-                not re.fullmatch(r"[0-9a-f]{64}", pointer["asset_hash"]) or
-                pointer["selection_sha256"] != digest({
+        state = pointer.get("state", "selected")
+        if pointer["version"] == 2:
+            fields.add("state")
+        if state == "selected":
+            fields |= {"candidate_id", "asset_hash"}
+        elif pointer["version"] == 2 and state in ("pending", "failed"):
+            fields |= {"error", "excluded_candidate_ids"}
+        else:
+            raise ValueError("Invalid active voice selection")
+        if set(pointer) != fields:
+            raise ValueError("Invalid active voice selection")
+        if pointer["selection_sha256"] != digest({
                     key: value for key, value in pointer.items() if key != "selection_sha256"
-                })):
+                }):
             raise ValueError("Active voice selection changed")
+        if state == "selected":
+            self._validate_candidate_id(pointer["candidate_id"])
+            if (not isinstance(pointer["asset_hash"], str) or
+                    not re.fullmatch(r"[0-9a-f]{64}", pointer["asset_hash"])):
+                raise ValueError("Active voice selection changed")
+        else:
+            excluded = pointer["excluded_candidate_ids"]
+            if (not isinstance(excluded, list) or
+                    any(not isinstance(item, str) for item in excluded) or
+                    len(excluded) != len(set(excluded)) or
+                    (state == "pending" and pointer["error"] is not None) or
+                    (state == "failed" and (not isinstance(pointer["error"], str)
+                                           or not pointer["error"].strip()))):
+                raise ValueError("Invalid voice regeneration state")
+            for candidate_id in excluded:
+                self._validate_candidate_id(candidate_id)
         return pointer
+
+    def _write_selection(self, voice_id, payload):
+        path = self._selection_path(voice_id)
+        self._prepare_directory(path.parent)
+        if path.is_symlink():
+            raise ValueError("Active voice selection must not be a symlink")
+        write_json(path, {**payload, "selection_sha256": digest(payload)})
 
     def load(self, voice_id):
         """Resolve the nearest active reference without writing or copying it."""
         voice_id = self.canonical_id(voice_id)
-        local = self._load_local(voice_id)
-        if local is not None:
-            return local
-        for parent in self.parents:
-            binding = parent._load_local(voice_id)
+        for store in (self, *self.parents):
+            binding, regeneration = store._resolve_local(voice_id)
+            if regeneration is not None:
+                return None
             if binding is not None:
-                return dict(binding, inherited=True)
+                return dict(binding, inherited=store is not self)
         return None
 
     def _load_local(self, voice_id):
         """Read a canonical ID locally; invalid overrides never fall through."""
+        return self._resolve_local(voice_id)[0]
+
+    def _resolve_local(self, voice_id):
+        """Return (binding, regeneration marker), distinguishing missing from reset."""
         pointer = self._read_selection(voice_id)
         if pointer is not None:
+            if pointer.get("state") in ("pending", "failed"):
+                return None, pointer
             binding = self._read_binding(voice_id, pointer["candidate_id"])
             if binding["asset_hash"] != pointer["asset_hash"]:
                 raise ValueError("Active voice candidate changed")
-            return binding
+            return binding, None
         folder = self.folder(voice_id)
         self._check_directory(folder)
         if not folder.exists():
-            return None
-        return self._read_binding(voice_id, self.LEGACY_CANDIDATE)
+            return None, None
+        return self._read_binding(voice_id, self.LEGACY_CANDIDATE), None
+
+    def regeneration_status(self, voice_id):
+        """Resolve pending/failed recasting state with its owning book directory.
+
+        An active nearer voice shadows an older marker. A nearer marker blocks
+        all older references, including for descendants of the recasting book.
+        """
+        voice_id = self.canonical_id(voice_id)
+        for store in (self, *self.parents):
+            binding, marker = store._resolve_local(voice_id)
+            if marker is not None:
+                return {"voice_id": voice_id, "series_id": self.series_id,
+                        "state": marker["state"], "error": marker["error"],
+                        "excluded_candidate_ids": list(marker["excluded_candidate_ids"]),
+                        "inherited": store is not self,
+                        "voice_directory": str(store.directory.resolve())}
+            if binding is not None:
+                return None
+        return None
+
+    def invalidate(self, voice_id):
+        """Clear a local active choice before bulk recasting under the caller's lock.
+
+        No immutable asset is removed, and no ancestor store is changed. Old
+        candidate IDs are retained so callers cannot automatically reuse them.
+        """
+        voice_id = self.canonical_id(voice_id)
+        excluded = [item["candidate_id"] for item in self.list_candidates(voice_id)]
+        self._write_selection(voice_id, {
+            "format": "audiobook-voice-selection", "version": 2,
+            "series_id": self.series_id, "voice_id": voice_id,
+            "state": "pending", "error": None, "excluded_candidate_ids": excluded,
+        })
+        return self.regeneration_status(voice_id)
+
+    def mark_regeneration_failed(self, voice_id, error):
+        """Persist a caller-sanitized failure reason without restoring old voices."""
+        voice_id = self.canonical_id(voice_id)
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("A voice regeneration failure requires an error message")
+        pointer = self._read_selection(voice_id)
+        if pointer is None or pointer.get("state") not in ("pending", "failed"):
+            raise ValueError("Voice must be invalidated locally before recording regeneration failure")
+        payload = {key: value for key, value in pointer.items() if key != "selection_sha256"}
+        self._write_selection(voice_id, {**payload, "state": "failed", "error": error})
+        return self.regeneration_status(voice_id)
 
     def load_candidate(self, voice_id, candidate_id):
         """Read a local revision; ancestor candidates cannot be selected here."""
@@ -359,16 +445,11 @@ class VoiceStore:
             raise ValueError("Active voice changed; reload before selecting a candidate")
         candidate = self.load_candidate(voice_id, candidate_id)
         pointer = {
-            "format": "audiobook-voice-selection", "version": 1,
+            "format": "audiobook-voice-selection", "version": 2, "state": "selected",
             "series_id": self.series_id, "voice_id": voice_id,
             "candidate_id": candidate_id, "asset_hash": candidate["asset_hash"],
         }
-        pointer["selection_sha256"] = digest(pointer)
-        path = self._selection_path(voice_id)
-        self._prepare_directory(path.parent)
-        if path.is_symlink():
-            raise ValueError("Active voice selection must not be a symlink")
-        write_json(path, pointer)
+        self._write_selection(voice_id, pointer)
         return self.load(voice_id)
 
     def _publish(self, voice_id, profile, wav_path, reference_text, engine_identity,
@@ -415,6 +496,8 @@ class VoiceStore:
         self._check_directory(destination)
         if destination.exists() or self._load_local(voice_id) is not None:
             raise ValueError("Voice already exists; reference voices are never implicitly replaced")
+        if self.regeneration_status(voice_id) is not None:
+            raise ValueError("Voice regeneration is pending or failed; explicitly recast and select a candidate")
         self._publish(voice_id, profile, wav_path, reference_text, engine_identity,
                       report, metadata, candidate_id=self.LEGACY_CANDIDATE)
         return self.load(voice_id)

@@ -172,6 +172,83 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         self.assertIn("No voices to regenerate", output)
         self.assertNotIn("WARNING", error)
 
+    def failed_parent_lineage(self):
+        first = self.publish(1)
+        second = self.publish(2, first)
+        self.alias_narrator(first)
+        _, character, extra = self.ids(first)
+        self.alias_narrator(second, extra_target=extra)
+        self.seed(first, character)
+        self.seed(first, extra)
+        store = self.store(first)
+        lock = store.lock()
+        try:
+            store.invalidate(character)
+            store.mark_regeneration_failed(character, "Parent voice creation was rejected.")
+        finally:
+            lock.rmdir()
+        self.assertTrue(self.store(second).regeneration_status(character)["inherited"])
+        return first, second, character
+
+    def test_default_bulk_skips_inherited_failure_without_scripts_or_generation(self):
+        first, second, character = self.failed_parent_lineage()
+        before = self.snapshot(self.root)
+        with patch("epub_audiobook.audition_scripts.ensure_bundle_scripts") as scripts, \
+                patch("audiobook_renderer.engines.create_engine") as engine, \
+                patch("audiobook_renderer.voice_design.create_designer") as designer, \
+                patch("audiobook_renderer.verification.create_verifier") as verifier:
+            status, output, error = self.run_cast(second)
+        self.assertEqual(status, 0, error)
+        scripts.assert_not_called()
+        engine.assert_not_called()
+        designer.assert_not_called()
+        verifier.assert_not_called()
+        self.assertEqual(self.snapshot(self.root), before)
+        self.assertIn("Skipped 2 inherited voice", output)
+        self.assertIn("No voices to regenerate", output)
+        self.assertIsNone(self.store(second).load(character))
+        self.assertEqual(self.store(first).regeneration_status(character)["state"], "failed")
+
+    @unittest.skipUnless(FFMPEG, "FFmpeg is required for fixture voice normalization")
+    def test_include_inherited_replaces_failed_ancestor_voice_only_in_child(self):
+        first, second, character = self.failed_parent_lineage()
+        before = self.snapshot(Path(first["directory"]))
+        with patch("audiobook_renderer.engines.create_engine", return_value=self.engine), \
+                patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier):
+            status, output, error = self.run_cast(second, "--include-inherited")
+        self.assertEqual(status, 0, error)
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertIn("Regenerated 2", output)
+        replacement = self.store(second).load(character)
+        self.assertIsNotNone(replacement)
+        self.assertFalse(replacement["inherited"])
+        self.assertIsNone(self.store(second).regeneration_status(character))
+        self.assertIsNone(self.store(first).load(character))
+        self.assertEqual(self.store(first).regeneration_status(character)["state"], "failed")
+        self.assertEqual(self.snapshot(Path(first["directory"])), before)
+
+    @unittest.skipUnless(FFMPEG, "FFmpeg is required for fixture voice normalization")
+    def test_child_retry_records_its_own_failure_then_clears_it_without_changing_parent(self):
+        first, second, character = self.failed_parent_lineage()
+        before = self.snapshot(Path(first["directory"]))
+        with contextlib.closing(self.session(second)) as session:
+            with patch.object(session, "_generate_locked", side_effect=RuntimeError("Child provider rejected voice")):
+                with self.assertRaisesRegex(RuntimeError, "Child provider rejected voice"):
+                    session.regenerate(character)
+            marker = session.store.regeneration_status(character)
+            self.assertFalse(marker["inherited"])
+            self.assertEqual(marker["state"], "failed")
+            self.assertIn("Child provider rejected voice", marker["error"])
+            self.assertEqual(self.snapshot(Path(first["directory"])), before)
+        with contextlib.closing(self.session(second)) as resumed:
+            replacement = resumed.regenerate(character)
+            self.assertFalse(resumed.store.load(character)["inherited"])
+            self.assertEqual(resumed.store.load(character)["asset_hash"], replacement["asset_hash"])
+            self.assertIsNone(resumed.store.regeneration_status(character))
+        self.assertEqual(self.snapshot(Path(first["directory"])), before)
+        self.assertEqual(self.store(first).regeneration_status(character)["state"], "failed")
+        self.assertIsNone(self.store(first).load(character))
+
     def test_include_inherited_rejected_for_other_actions_before_scripts_or_session(self):
         first = self.publish(1)
         for action in ("list", "generate-missing", "interactive", "prepare-samples", "normalize-samples"):

@@ -129,7 +129,8 @@ def _warn_regenerate_all(rows, *, book_local=False):
         f"This run targets {len(groups)} distinct voices.",
         "Future renders of every book or role sharing these voice IDs will use successful "
         "replacements. Sharing may extend beyond this bundle.",
-        "Previous samples are preserved; existing audiobook audio is not rewritten.",
+        "All targeted active voices are cleared before generation. Failed replacements have no active voice.",
+        "Previous samples remain as history only; existing audiobook audio is not rewritten.",
     ]
     if book_local:
         lines = [
@@ -137,7 +138,8 @@ def _warn_regenerate_all(rows, *, book_local=False):
             f"This run targets {len(groups)} distinct voices.",
             "Future renders of this book and descendants that inherit these voices will use "
             "successful replacements. Earlier books and sibling branches are unchanged.",
-            "Previous samples are preserved; existing audiobook audio is not rewritten.",
+            "All targeted active voices are cleared before generation. Failed replacements have no active voice.",
+            "Previous samples remain as history only; existing audiobook audio is not rewritten.",
         ]
     shared = {canonical: members for canonical, members in groups.items() if len(members) > 1}
     if shared:
@@ -180,7 +182,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
         if callable(prepare):
             prepare()
         rows = session.rows()
-        pending = [row for row in rows if row["selected"] is None]
+        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")]
         missing = sum(not row["candidates"] for row in pending)
         if pending:
             say(f"Preparing voices: {len(pending) - missing} saved, {missing} to generate.")
@@ -203,6 +205,12 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             say(f"\nVoice casting — {ready}/{len(rows)} ready")
             for index, row in enumerate(rows, 1):
                 status = "" if row["selected"] else " — no sample"
+                regeneration = row.get("regeneration")
+                if regeneration:
+                    status = (" — FAILED — no active voice" if regeneration["state"] == "failed"
+                              else " — needs regeneration — no active voice")
+                    if regeneration.get("inherited"):
+                        status += " — inherited"
                 if row["selected"] and row["selected"].get("inherited"):
                     status += " — inherited"
                 canonical = row.get("canonical_voice_id", row["voice_id"])
@@ -211,6 +219,9 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     if shared:
                         status += " — shares " + _label(shared)
                 say(f"{index:3}. {_label(row)}{status}")
+                if regeneration and regeneration.get("error"):
+                    for line in regeneration["error"].splitlines():
+                        say("     " + line)
             say("Number: play   G [number]: regenerate locally   GG [number]: regenerate with Gemini   Q: quit")
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
@@ -313,7 +324,8 @@ def casting_command(args, bundle, config):
         if action == "regenerate-all" and not include_inherited:
             # Ignored references do not need new scripts or any analyzer calls.
             voice_ids = [voice["id"] for voice in bundle["cast"]["voices"]
-                         if not (store.load(voice["id"]) or {}).get("inherited", False)]
+                         if not (store.load(voice["id"]) or store.regeneration_status(voice["id"])
+                                 or {}).get("inherited", False)]
         if voice_ids is None or voice_ids:
             bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
                                            voice_ids=voice_ids)
@@ -361,7 +373,7 @@ def casting_command(args, bundle, config):
         elif action == "regenerate-all":
             if not include_inherited:
                 skipped = {row.get("canonical_voice_id", row["voice_id"]) for row in rows
-                           if (row["selected"] or {}).get("inherited", False)}
+                           if (row["selected"] or row.get("regeneration") or {}).get("inherited", False)}
                 rows = [row for row in rows if row.get("canonical_voice_id", row["voice_id"]) not in skipped]
                 if skipped:
                     print(f"Skipped {len(skipped)} inherited voice(s). Use --include-inherited to replace them in this book.")
@@ -369,6 +381,7 @@ def casting_command(args, bundle, config):
                 print("No voices to regenerate.")
                 return 0
             _warn_regenerate_all(rows, book_local=getattr(session, "config", config).get("_book_local_voices", False))
+            session.begin_regeneration([row["voice_id"] for row in rows])
             seen, failed = set(), []
             for row in rows:
                 canonical = row.get("canonical_voice_id", row["voice_id"])
@@ -381,11 +394,12 @@ def casting_command(args, bundle, config):
                 except VerificationUnavailable:
                     raise
                 except (ValueError, RuntimeError, OSError) as exc:
-                    failed.append(row["voice_id"])
+                    failed.append(display(_label(row)))
                     print(f"Could not regenerate {display(_label(row))}: {display(exc)}")
             if failed:
                 raise ValueError(
-                    f"{len(failed)} voices could not be regenerated; their prior references are retained."
+                    f"{len(failed)} voices failed regeneration and have no active voice: {', '.join(failed)}. "
+                    "Open casting and use G or GG to retry them."
                 )
             print(f"Regenerated {len(seen)} shared character voices.")
         elif action == "edit":
@@ -398,6 +412,8 @@ def casting_command(args, bundle, config):
             status = "saved without changing the active voice" if keep_unselected else "saved and selected"
             print(f"Recovered voice {status}: {candidate['candidate_id']}\n{candidate['reference_audio']}")
         elif action == "play":
+            if row.get("regeneration") and not args.candidate_id:
+                raise ValueError("No active voice after bulk regeneration; use G or GG in casting to retry")
             candidate = (next((c for c in row["candidates"] if c["candidate_id"] == args.candidate_id), None)
                          if args.candidate_id else row["selected"] or
                          (row["candidates"][-1] if row["candidates"] else None))

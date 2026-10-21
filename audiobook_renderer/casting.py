@@ -1,8 +1,8 @@
 """Voice casting with automatic selection and immutable audition history.
 
-Startup adopts an existing verified take or generates a missing voice. Explicit
-regeneration selects the new take only after verification succeeds, preserving
-the previous voice if generation fails. Browsing saved voices stays model-free.
+Startup adopts an existing verified take or generates a missing voice. Bulk
+regeneration clears its active choices first and keeps failures visible until
+explicitly repaired. Browsing saved voices stays model-free.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import re
 import uuid
 
 from .common import digest, file_hash, read_json, write_json
+from .diagnostics import configured_secrets, safe_error_text
 from .quality import validate_audio, validation_key
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
@@ -269,6 +270,7 @@ class CastingSession:
                 "description": profile["description"],
                 **draft,
                 "selected": selected,
+                "regeneration": self.store.regeneration_status(voice_id),
                 "candidates": self.store.list_candidates(voice_id),
                 "notice": self.notice,
             })
@@ -610,6 +612,12 @@ class CastingSession:
             selected = self.store.load(voice_id)
             if selected is not None:
                 return selected
+            regeneration = self.store.regeneration_status(voice_id)
+            if regeneration is not None:
+                raise RenderBlocked(
+                    f"Voice {voice_id} regeneration is {regeneration['state']}; no active voice. "
+                    "Use G or GG in the casting menu to retry."
+                )
             candidates = self.store.list_candidates(voice_id)
             designed = [candidate for candidate in candidates if candidate.get("description_applied") is True]
             candidate = designed[-1] if designed else self._generate_locked(voice_id)
@@ -638,12 +646,44 @@ class CastingSession:
                 if callable(close):
                     close()
 
+    def begin_regeneration(self, voice_ids):
+        """Clear all bulk targets before synthesis, preserving their casting edits."""
+        with self._locked():
+            drafts = {}
+            for voice_id in voice_ids:
+                self._profile(voice_id)
+                canonical = self.store.canonical_id(voice_id)
+                if canonical not in drafts:
+                    draft = self._draft(voice_id, self.store.load(voice_id))
+                    _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)
+                    _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
+                    drafts[canonical] = draft
+            # Preflight every target before removing any active selection. A
+            # selected reference may be the only source of custom casting edits.
+            for canonical, draft in drafts.items():
+                self._save_draft(canonical, draft)
+            for canonical in drafts:
+                self.store.invalidate(canonical)
+
     def regenerate(self, voice_id, *, voice_designer=None):
         """Create a fresh voice and select its verified reference under one lock."""
         self._profile(voice_id)
-        with self._locked(), self._using_voice_designer(voice_designer):
-            candidate = self._generate_locked(voice_id, fresh=True)
-            selected = self._accept_locked(voice_id, candidate["candidate_id"])
+        with self._locked():
+            regeneration = self.store.regeneration_status(voice_id)
+            if regeneration and regeneration["inherited"]:
+                # A retry in a descendant owns its new state, never the parent's.
+                self._save_draft(voice_id, self._draft(voice_id))
+                self.store.invalidate(voice_id)
+            try:
+                with self._using_voice_designer(voice_designer):
+                    candidate = self._generate_locked(voice_id, fresh=True)
+                    selected = self._accept_locked(voice_id, candidate["candidate_id"])
+            except (Exception, KeyboardInterrupt) as exc:
+                if regeneration and self.store.regeneration_status(voice_id):
+                    error = ("Regeneration interrupted." if isinstance(exc, KeyboardInterrupt)
+                             else safe_error_text(exc, secrets=configured_secrets(self.config)))
+                    self.store.mark_regeneration_failed(voice_id, error.strip() or type(exc).__name__)
+                raise
             remote_id = selected.get("creation", {}).get("remote_voice_id")
             if remote_id:
                 self.notify(f"Selected Gemini voice ID: {remote_id}")

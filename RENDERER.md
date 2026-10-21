@@ -263,8 +263,10 @@ timeout_seconds = 180.0
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer local
 ```
 
-An API error or failed Gemini verification is reported and preserves any existing
-selection. Automatic selection does not silently switch providers after a failure.
+An API error or failed Gemini verification is reported. Individual `G`/`GG`
+replacements preserve any existing selection on failure; `regenerate-all` clears
+its target selections first, so failed replacements have no active voice.
+Automatic selection does not silently switch providers after a failure.
 Use `G` in the menu for an explicit local replacement, or `GG` for Gemini.
 
 Casting prints the complete API error message and response details, including the
@@ -321,7 +323,13 @@ Changing the designer affects future creations and regenerations. Existing voice
 
 Description conditioning is not proof that every audible trait was followed. Whisper checks the spoken words; it does not assess gender presentation, age, accent, timbre, or the suitability of a performance. Use the menu to audition and regenerate a voice when needed.
 
-For scripts, `cast --action list` prints the cast and sample history as JSON without loading a model. `generate` immediately selects its verified result; `generate-missing` prepares all unselected voices, reusing existing samples first. `regenerate-all` creates and selects a new reference for each distinct canonical voice that is local or missing, skipping voices currently inherited from earlier books. Add `--include-inherited` to explicitly replace inherited voices too. Shared narration and dialogue are generated once. Skipped voices need no new sample scripts or generation calls; if every voice is inherited, the default command does nothing. Before generation, it prints a warning to stderr describing the targeted voices and linked roles known within the bundle. In the directory workflow, replacements are local to the current book and may be inherited by its descendants; earlier books and sibling branches are unchanged, including with `--include-inherited`. Legacy shared-library mode warns that replacements affect every book using that library and voice ID. Previous samples remain available, and existing audiobook audio is not rewritten. The command continues without a confirmation prompt, retains prior references after individual failures, and reports failure at the end. Run it in the book where you want the replacement voices to start applying. `edit` saves prompt changes without generation, and `play` plays the selected voice. Replace the voice ID below with an ID from the listing:
+For scripts, `cast --action list` prints the cast and sample history as JSON without loading a model. `generate` immediately selects its verified result; `generate-missing` prepares unselected voices, reusing existing samples first, except voices explicitly cleared by bulk regeneration. `edit` saves prompt changes without generation, and `play` plays the selected voice.
+
+`regenerate-all` clears all targeted active selections before generating replacements. It targets each distinct canonical voice that is local or missing, skipping voices inherited from earlier books. Add `--include-inherited` to explicitly replace inherited voices too. Shared narration and dialogue are generated once. Skipped voices need no new sample scripts or generation calls; if every voice is inherited, the default command does nothing.
+
+Failed replacements stay unassigned and appear as `FAILED — no active voice` in the casting menu, with their saved error details. Targets not attempted before an interruption appear as `needs regeneration — no active voice`. Reopening casting preserves these states without adopting old samples or retrying automatically. Use `G number` or `GG number` to fix them; a successful replacement clears the failure. Rendering cannot use an old reference or fall back to an ancestor for a cleared voice. Original recordings remain as explicit recovery history only, and existing audiobook audio is not rewritten.
+
+Before generation, the command warns about the targeted voices and linked roles, then continues without confirmation. In the directory workflow, replacements and failure states belong to the current book and may be inherited by its descendants; earlier books and sibling branches are unchanged, including with `--include-inherited`. Legacy shared-library mode warns that changes affect every book using that library and voice ID. The command continues after individual generation failures and reports them at the end. Run it in the book where you want replacement voices to start applying. Replace the voice ID below with an ID from the listing:
 
 ```sh
 .venv-renderer/bin/audiobook-render cast runs/book-01 \

@@ -235,6 +235,12 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
         if any(existing["created_with"].get(key) != engine.identity.get(key) for key in ("engine", "model")):
             raise RenderBlocked("Existing voice was created for a different model; use an explicit compatible binding")
         return existing
+    regeneration = store.regeneration_status(voice_id)
+    if regeneration is not None:
+        raise RenderBlocked(
+            f"Voice {voice_id} regeneration is {regeneration['state']}; no active reference. "
+            "Use G or GG in the casting menu to retry before rendering."
+        )
     draft = store.directory / "casting-drafts" / (digest(voice_id)[:24] + ".json")
     if store.list_candidates(voice_id) or draft.exists() or draft.is_symlink():
         raise RenderBlocked(
