@@ -168,7 +168,6 @@ class StagedWorkflowTests(unittest.TestCase):
         for section, name, value in (
             ("render", "seed", 123), ("render", "paragraph_pause_ms", 700),
             ("render", "target_lufs", -22), ("engine", "temperature", 0.1),
-            ("quality", "max_wer", 0.05), ("verification", "language", "fr"),
         ):
             with self.subTest(section=section, name=name):
                 old = self.config[section].get(name)
@@ -177,6 +176,57 @@ class StagedWorkflowTests(unittest.TestCase):
                     self.package()
                 self.config[section][name] = old
         self.assertFalse((self.root / "output").exists())
+
+    def test_changed_quality_or_verifier_reuses_completed_chapters_without_models_or_encoding(self):
+        original = self.chapters()
+        checkpoints = [self.checkpoint(number).read_bytes() for number in (1, 2)]
+        self.config["quality"]["min_duration_seconds"] = 2.0
+        self.config["verification"]["language"] = "fr"
+        self.verifier = FixtureVerifier(self.engine.fixture_transcripts, version=2)
+        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")), \
+             patch("audiobook_renderer.workflow.prepare_chapter", side_effect=AssertionError("No reencoding")):
+            resumed = self.chapters()
+            final = self.package()
+        self.assertEqual(original["chapters"], resumed["chapters"])
+        self.assertEqual(checkpoints, [self.checkpoint(number).read_bytes() for number in (1, 2)])
+        self.assertEqual(final["status"], "complete")
+        self.assertEqual(self.verifier.calls, [])
+        self.assertEqual(final["verification_policy"], "preserve_successful_acceptance")
+        self.assertEqual(final["verification_provenance"]["reports"], "verification.json")
+
+    def test_separately_accepted_chapters_can_assemble_across_verifier_changes(self):
+        self.config["render"]["chapter_numbers"] = [1]
+        self.chapters()
+        self.config["render"]["chapter_numbers"] = [2]
+        self.verifier = FixtureVerifier(self.engine.fixture_transcripts, version=2)
+        self.config["quality"]["max_wer"] = 0.05
+        self.chapters()
+        self.config["render"]["chapter_numbers"] = []
+        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
+            self.assertEqual(self.package()["status"], "complete")
+
+    def test_deleting_one_accepted_clip_regenerates_only_it_in_completed_chapter(self):
+        self.chapters()
+        clip_directory = next((self.root / "work" / "clips").iterdir())
+        accepted = read_json(clip_directory / "accepted.json")
+        (clip_directory / accepted["audio_file"]).unlink()
+        before = len(self.engine.speech_calls), len(self.verifier.calls)
+        with self.assertRaisesRegex(RenderBlocked, "saved clip.*removed"):
+            self.package()
+        self.chapters()
+        self.assertEqual(len(self.engine.speech_calls) - before[0], 1)
+        self.assertEqual(len(self.verifier.calls) - before[1], 1)
+        self.assertEqual(self.package()["status"], "complete")
+
+    def test_changed_constituent_clip_is_not_hidden_by_complete_chapter(self):
+        self.chapters()
+        clip_directory = next((self.root / "work" / "clips").iterdir())
+        accepted = read_json(clip_directory / "accepted.json")
+        wav = clip_directory / accepted["audio_file"]
+        wav.write_bytes(wav.read_bytes()[:-2] + b"xx")
+        for action in (self.package, self.chapters):
+            with self.subTest(action=action), self.assertRaisesRegex(RenderBlocked, "Cached audio changed"):
+                action()
 
     def test_changed_normalization_reuses_verified_clips_and_replaces_chapter_checkpoint(self):
         old = self.chapters()

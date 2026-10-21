@@ -155,25 +155,10 @@ class RendererQualityTests(unittest.TestCase):
     def test_malformed_asr_never_passes_or_falls_back_to_expected(self):
         examples = [None, {}, {"text": "Hello"}, {"text": "Hello", "segments": []}]
         bad = transcript("Hello")
-        bad["segments"][0]["words"][0]["end"] = float("nan")
-        examples.append(bad)
-        bad = transcript("Hello")
-        bad["segments"][0]["words"][0]["end"] = 4
-        examples.append(bad)
-        bad = transcript("Hello")
-        bad["segments"][0]["words"][0]["probability"] = 2
-        examples.append(bad)
-        bad = transcript("Hello")
         bad["segments"][0]["avg_logprob"] = float("-inf")
         examples.append(bad)
         bad = transcript("Hello")
         bad["text"] = "Different"
-        examples.append(bad)
-        bad = transcript("Hello there")
-        bad["segments"][0]["words"][1]["start"] = 0.1
-        examples.append(bad)
-        bad = transcript("Hello")
-        bad["segments"][0]["words"] = []
         examples.append(bad)
         for response in examples:
             with self.subTest(response=response):
@@ -183,37 +168,43 @@ class RendererQualityTests(unittest.TestCase):
                 self.assertIsNone(report["transcript"])
                 json.dumps(report, allow_nan=False)
 
-    def test_alignment_failure_preserves_unvalidated_transcript_for_review(self):
+    def test_alignment_failure_keeps_verified_transcript_and_omits_bad_times(self):
         result = transcript("Hello there")
         result["segments"][0]["words"][1]["start"] = 0.1
         report = validate_audio(self.audio, "Hello there", FakeVerifier(result))
-        self.assertFalse(report["passed"])
+        self.assertTrue(report["passed"], report)
         self.assertEqual(report["raw_transcript"], "Hello there")
-        self.assertIsNone(report["transcript"])
+        self.assertEqual(report["transcript"], "Hello there")
         self.assertEqual(report["words"], [])
+        self.assertEqual(report["word_timing_status"], "unavailable")
+        self.assertIn("overlap", report["alignment_warnings"][0])
+        # Timing failure must not hide wrong speech or fabricate the expected text.
+        mismatch = validate_audio(self.audio, "Goodbye there", FakeVerifier(result))
+        self.assertFalse(mismatch["passed"])
+        self.assertEqual(mismatch["reasons"], ["text_mismatch"])
 
-    def test_reference_ignores_missing_and_invalid_word_alignment_only(self):
+    def test_missing_invalid_and_nonfinite_alignment_is_optional_for_speech(self):
         examples = []
         for words in (None, [], "not alignment"):
             result = transcript("Hello there")
             result["segments"][0]["words"] = words
             examples.append(result)
-        for key, value in (("start", 0.1), ("end", 0.5), ("end", 5), ("end", float("nan"))):
+        for key, value in (("start", 0.1), ("end", 0.5), ("end", 5), ("end", float("nan")), ("probability", 2)):
             result = transcript("Hello there")
             result["segments"][0]["words"][1][key] = value
             examples.append(result)
         for response in examples:
-            with self.subTest(response=response):
-                reference = validate_audio(self.audio, "Hello there", FakeVerifier(response), purpose="reference")
-                speech = validate_audio(self.audio, "Hello there", FakeVerifier(response))
-                self.assertTrue(reference["passed"], reference)
-                self.assertEqual(reference["purpose"], "reference")
-                self.assertEqual(reference["transcript"], "Hello there")
-                self.assertEqual(reference["words"], [])
-                self.assertFalse(speech["passed"], speech)
-                json.dumps(reference, allow_nan=False)
+            for purpose in ("reference", "speech"):
+                with self.subTest(response=response, purpose=purpose):
+                    report = validate_audio(self.audio, "Hello there", FakeVerifier(response), purpose=purpose)
+                    self.assertTrue(report["passed"], report)
+                    self.assertEqual(report["transcript"], "Hello there")
+                    self.assertEqual(report["words"], [])
+                    if purpose == "speech":
+                        self.assertEqual(report["word_timing_status"], "unavailable")
+                    json.dumps(report, allow_nan=False)
 
-    def test_reference_ignores_missing_and_invalid_segment_timing_only(self):
+    def test_invalid_segment_timing_is_omitted_without_rejecting_speech(self):
         examples = []
         result = transcript("Hello")
         del result["segments"][0]["start"]
@@ -224,13 +215,12 @@ class RendererQualityTests(unittest.TestCase):
             result["segments"][0].update(start=start, end=end)
             examples.append(result)
         for response in examples:
-            with self.subTest(response=response):
-                reference = validate_audio(self.audio, "Hello", FakeVerifier(response), purpose="reference")
-                speech = validate_audio(self.audio, "Hello", FakeVerifier(response))
-                self.assertTrue(reference["passed"], reference)
-                self.assertFalse(speech["passed"], speech)
-                self.assertNotIn("start", reference["metrics"]["asr_segments"][0])
-                json.dumps(reference, allow_nan=False)
+            for purpose in ("reference", "speech"):
+                with self.subTest(response=response, purpose=purpose):
+                    report = validate_audio(self.audio, "Hello", FakeVerifier(response), purpose=purpose)
+                    self.assertTrue(report["passed"], report)
+                    self.assertNotIn("start", report["metrics"]["asr_segments"][0])
+                    json.dumps(report, allow_nan=False)
 
     def test_reference_keeps_exact_text_gate(self):
         expected = "I listened to the wind in the trees."

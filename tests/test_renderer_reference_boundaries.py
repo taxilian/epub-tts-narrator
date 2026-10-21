@@ -257,7 +257,7 @@ class ReferenceBoundaryTests(unittest.TestCase):
     def test_new_reference_policy_invalidates_reference_cache_but_keeps_speech_cache(self):
         verifier = consensus.IndependentVerifier(primary=ACTUAL, secondary=ACTUAL)
         legacy = {
-            "policy_version": 4,
+            "policy_version": quality.QUALITY_VERSION,
             "quality": quality.validate_policy(None),
             "verifier": verifier.identity,
             "expected_text": SCRIPT,

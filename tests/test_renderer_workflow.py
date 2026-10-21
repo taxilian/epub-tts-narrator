@@ -9,6 +9,7 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import wave
 
 from audiobook_renderer.assembly import probe_audio
@@ -144,23 +145,52 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.fixtures), fixture_count)
         self.assertEqual(file_hash(wav), first["audio_sha256"])
 
-    def test_changed_verifier_revalidates_same_audio_without_regeneration(self):
+    def test_changed_verifier_reuses_accepted_audio_without_reverification(self):
         wav, first = self.take()
         verifier = FixtureVerifier(self.fixtures, version=2)
+        verifier.wrong_texts.add("Hello there.")
         resumed_wav, resumed = self.take(verifier=verifier)
         self.assertEqual(wav, resumed_wav)
-        self.assertEqual(len(verifier.calls), 1)
-        self.assertNotEqual(first["validation_key"], resumed["validation_key"])
+        self.assertEqual(len(verifier.calls), 0)
+        self.assertEqual(first, resumed)
         self.assertEqual(first["audio_sha256"], resumed["audio_sha256"])
         self.assertEqual(len(list((self.root / "takes").glob("attempt-*-raw.wav"))), 1)
 
-    def test_changed_quality_revalidates_same_audio(self):
+    def test_changed_quality_keeps_original_successful_acceptance(self):
         wav, first = self.take()
-        self.config["quality"]["max_clipped_fraction"] = 0.1
+        self.config["quality"]["min_duration_seconds"] = 2.0
         resumed_wav, resumed = self.take()
         self.assertEqual(resumed_wav, wav)
-        self.assertNotEqual(resumed["validation_key"], first["validation_key"])
-        self.assertEqual(len(self.verifier.calls), 2)
+        self.assertEqual(resumed, first)
+        self.assertEqual(len(self.verifier.calls), 1)
+
+    def test_changed_verification_key_does_not_invalidate_accepted_take(self):
+        wav, first = self.take()
+        with patch("audiobook_renderer.workflow.make_validation_key", side_effect=AssertionError("rechecked policy")):
+            self.assertEqual((wav, first), self.take())
+
+    def test_missing_accepted_audio_regenerates_and_verifies_only_that_take(self):
+        wav, first = self.take()
+        for _ in range(2):
+            wav.unlink()
+            with patch.object(self.engine, "_write", wraps=self.engine._write) as generate:
+                replacement, accepted = self.take()
+            self.assertEqual(replacement, wav)
+            self.assertEqual(generate.call_count, 1)
+            self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(self.verifier.calls), 3)
+        self.assertEqual(len(list((self.root / "takes").glob("attempt-001-regenerated-*.wav"))), 2)
+
+    def test_changed_policy_rechecks_unsuccessful_saved_audio_without_new_synthesis(self):
+        self.verifier.wrong_texts.add("Hello there.")
+        with self.assertRaises(RenderBlocked):
+            self.take()
+        verifier = FixtureVerifier(self.fixtures, version=2)
+        with patch.object(self.engine, "_write", side_effect=AssertionError("regenerated saved attempt")):
+            wav, accepted = self.take(verifier=verifier)
+        self.assertEqual(wav.name, "attempt-001.wav")
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(verifier.calls), 1)
 
     def test_corrupt_accepted_audio_is_blocked_before_asr(self):
         wav, _ = self.take()
@@ -275,7 +305,7 @@ class RendererWorkflowTests(unittest.TestCase):
         path.write_bytes(data)
         with self.assertRaisesRegex(ValueError, "reference changed"):
             store.load(voice_id)
-        with self.assertRaisesRegex(ValueError, "already exists"):
+        with self.assertRaisesRegex(ValueError, "already exists|reference changed"):
             store.publish(voice_id, binding["profile"], path, binding["reference_text"],
                           self.engine.identity, {"passed": True}, {})
 

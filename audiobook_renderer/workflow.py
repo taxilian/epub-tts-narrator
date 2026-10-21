@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 import tempfile
 import unicodedata
-from types import SimpleNamespace
 
 from .assembly import extract_cover, normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
@@ -93,8 +92,11 @@ def _verification_failure_detail(report):
         "uncertain": "JEV could not confirm equivalent wording",
         "unavailable": "JEV text confirmation unavailable",
     }.get(judge_decision)
-    if judge_explanation:
+    if judge_explanation and not report.get("text_judge_skipped"):
         details.append(judge_explanation)
+    skipped = report.get("text_judge_skipped")
+    if isinstance(skipped, str):
+        details.append("JEV not called: " + skipped.replace("_", " "))
     error = report.get("provider_error") or report.get("error")
     if error:
         details.append(safe_error_text(error))
@@ -103,16 +105,19 @@ def _verification_failure_detail(report):
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None):
-    """Reuse only byte-bound, policy-bound accepted audio. Retain failed takes."""
+    """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
+
+    Verification settings govern new or unsuccessful candidates. An existing
+    successful verification remains provenance for the exact accepted bytes;
+    changing recognizers or policy does not revoke that acceptance.
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
     accepted_path = directory / "accepted.json"
 
     def pending_confirmation(report):
         judge = report.get("text_judge") if isinstance(report, dict) else None
-        return (purpose == "reference" and isinstance(judge, dict)
-                and judge.get("decision") == "unavailable")
+        return isinstance(judge, dict) and judge.get("decision") == "unavailable"
 
     def stop_for_confirmation():
         raise VerificationUnavailable(
@@ -136,17 +141,42 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 or not pending_confirmation(pending.get("report", {}))):
             raise RenderBlocked("Saved reference is not awaiting text confirmation")
 
-    if accepted_path.exists():
-        accepted = read_json(accepted_path)
+    accepted = None
+    missing_accepted_attempt = None
+    if accepted_path.exists() or accepted_path.is_symlink():
+        try:
+            accepted = read_json(regular_file(accepted_path))
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked("Invalid cached acceptance record") from exc
+        if not isinstance(accepted, dict):
+            raise RenderBlocked("Invalid cached acceptance record")
         name = accepted.get("audio_file", "")
-        if name != Path(name).name or not name.endswith(".wav"):
+        if not isinstance(name, str) or name != Path(name).name or not name.endswith(".wav"):
             raise RenderBlocked("Invalid cached audio path")
         wav = directory / name
-        if accepted.get("request_hash") != digest(request) or file_hash(wav) != accepted.get("audio_sha256"):
+        if accepted.get("request_hash") != digest(request):
             raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
-        if accepted.get("validation_key") == validation_key and accepted.get("report", {}).get("passed") is True:
-            return wav, accepted
-        # A new verifier or policy must hear the existing audio again.
+        if not wav.exists() and not wav.is_symlink():
+            missing_accepted_attempt = accepted.get("attempt")
+            if (type(missing_accepted_attempt) is not int or not 1 <= missing_accepted_attempt <= 10
+                    or name != f"attempt-{missing_accepted_attempt:03d}.wav"):
+                raise RenderBlocked("Invalid cached attempt for missing accepted audio")
+            notify("  Saved accepted audio was removed; generating a replacement.")
+            accepted_path.unlink()
+            accepted = None
+        else:
+            try:
+                checksum = file_hash(regular_file(wav))
+            except (ValueError, OSError) as exc:
+                raise RenderBlocked("Cached accepted audio is not a readable regular file") from exc
+            if checksum != accepted.get("audio_sha256"):
+                raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
+            if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
+                return wav, accepted
+    validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
+    if accepted is not None:
+        # Older versions could leave a failed revalidation in accepted.json.
+        # Such a record has no successful acceptance to preserve.
         report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
         accepted.update(validation_key=validation_key, report=report)
         write_json(accepted_path, accepted)
@@ -157,7 +187,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     attempts = config["render"]["max_attempts"]
     secrets = configured_secrets(config)
     last_report = None
-    for attempt in range(resume_attempt or 1, max(attempts, resume_attempt or 1) + 1):
+    first_attempt = missing_accepted_attempt or resume_attempt or 1
+    for attempt in range(first_attempt, max(attempts, first_attempt) + 1):
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
         result_path = directory / (prefix + ".json")
@@ -184,7 +215,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                         raise RenderBlocked("Candidate audio changed on disk")
             else:
                 # Orphans from interruption are retained; choose another raw name.
-                if raw.exists():
+                if attempt == missing_accepted_attempt:
+                    raw = directory / (prefix + "-regenerated-" + os.urandom(8).hex() + ".wav")
+                elif raw.exists():
                     raw = directory / (prefix + "-recovery-raw.wav")
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
@@ -211,6 +244,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         last_report = report
         if report.get("passed") is True:
             write_json(accepted_path, record)
+            judgment = report.get("text_judge", {})
+            if judgment.get("decision") == "equivalent":
+                notify("  JEV confirmed the transcript differences.")
             return wav, record
         if pending_confirmation(report):
             stop_for_confirmation()
@@ -424,6 +460,60 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     }
 
 
+def _same_chapter_audio_context(saved, current):
+    """Compare inputs that affect audio, retaining old verification provenance."""
+    verification_fields = {"verifier", "verification_config_hash", "quality", "quality_version"}
+    return ({key: value for key, value in saved.items() if key not in verification_fields}
+            == {key: value for key, value in current.items() if key not in verification_fields})
+
+
+def _has_accepted_verification(record):
+    return (isinstance(record.get("report"), dict) and record["report"].get("passed") is True
+            and isinstance(record.get("validation_key"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", record["validation_key"]) is not None)
+
+
+def _saved_chapter_clips_present(work, record):
+    """Honor clip deletion while refusing to overwrite existing changed bytes."""
+    acceptance = record.get("acceptance")
+    if not isinstance(acceptance, list):
+        raise RenderBlocked("Invalid saved chapter verification records")
+    present = True
+    for entry in acceptance:
+        if not isinstance(entry, dict):
+            raise RenderBlocked("Invalid saved chapter verification records")
+        lanes = entry.get("speaker_lanes", [entry])
+        if not isinstance(lanes, list):
+            raise RenderBlocked("Invalid saved chapter speaker verification records")
+        for lane in lanes:
+            key = lane.get("request_hash") if isinstance(lane, dict) else None
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+                raise RenderBlocked("Invalid saved chapter synthesis request")
+            directory = Path(work) / "clips" / key
+            path = directory / "accepted.json"
+            if directory.is_symlink() or path.is_symlink():
+                raise RenderBlocked("Cached accepted audio must not use symlinks")
+            if not path.exists():
+                present = False
+                continue
+            try:
+                cached = read_json(regular_file(path))
+                name = cached.get("audio_file") if isinstance(cached, dict) else None
+                if (not isinstance(name, str) or name != Path(name).name or not name.endswith(".wav")
+                        or cached.get("request_hash") != key):
+                    raise ValueError("Invalid accepted clip metadata")
+                wav = directory / name
+                if not wav.exists() and not wav.is_symlink():
+                    present = False
+                    continue
+                checksum = file_hash(regular_file(wav))
+                if checksum != cached.get("audio_sha256") or checksum != lane.get("audio_sha256"):
+                    raise ValueError("Cached audio changed")
+            except (ValueError, OSError) as exc:
+                raise RenderBlocked(f"Invalid saved chapter clip {key}: {exc}") from exc
+    return present
+
+
 def _checkpoint_path(work, chapter):
     return Path(work) / "completed-chapters" / (chapter["id"] + ".json")
 
@@ -449,14 +539,17 @@ def _read_checkpoint(work, chapter):
 
 
 def _restore_chapter(work, chapter, record, context, voices, config):
-    if record["context"] != context:
+    if not _same_chapter_audio_context(record["context"], context):
         raise RenderBlocked(
-            f"Completed {chapter['id']} is stale: source, selected voices, model, quality, or "
+            f"Completed {chapter['id']} is stale: source, selected voices, synthesis model, or "
             "render settings changed. Run render --chapters-only for this chapter again.")
+    if not _saved_chapter_clips_present(work, record):
+        raise RenderBlocked(f"A saved clip for {chapter['id']} was removed. "
+                            "Run render --chapters-only for this chapter to restore it.")
     try:
         composed = load_chapter(Path(work) / "chapters" / record["cache_key"],
                                 ffprobe=config["render"]["ffprobe"])
-        if composed["context"] != context or composed["settings"] != context["settings"]:
+        if composed["context"] != record["context"] or composed["settings"] != context["settings"]:
             raise ValueError("Chapter cache and checkpoint disagree")
         # A checkpoint binds every spoken chunk to a successful verification,
         # including exact expected words and the voice selected for that chunk.
@@ -467,12 +560,11 @@ def _restore_chapter(work, chapter, record, context, voices, config):
         cache_record = read_json(Path(composed["cache_directory"]) / "chapter.json")
         cached_clips = {clip["chunk_id"]: clip for clip in cache_record["identity"]["clips"]}
         timings = {item["chunk_id"]: item for item in composed["segments"]}
-        verifier = SimpleNamespace(identity=context["verifier"])
         for chunk, accepted in zip(expected, acceptance):
             if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
                 raise ValueError("Invalid chapter verification record")
             cached = cached_clips[chunk["chunk_id"]]
-            if (accepted["chunk_id"] != chunk["chunk_id"] or accepted["report"].get("passed") is not True
+            if (accepted["chunk_id"] != chunk["chunk_id"] or not _has_accepted_verification(accepted)
                     or accepted["audio_sha256"] != cached["audio_sha256"]):
                 raise ValueError("Chapter verification does not match the current plan")
             speakers = chunk_speakers(chunk)
@@ -505,15 +597,11 @@ def _restore_chapter(work, chapter, record, context, voices, config):
                     request = _speech_request(chunk, voices[speaker["voice_id"]], context["engine"],
                                               config, performer=speaker)
                     if (lane["role_id"] != speaker["role_id"] or lane["voice_id"] != speaker["voice_id"]
-                            or lane["request_hash"] != digest(request) or lane["report"].get("passed") is not True
-                            or lane["validation_key"] != make_validation_key(
-                                chunk["spoken_text"], verifier, config["quality"])):
+                            or lane["request_hash"] != digest(request) or not _has_accepted_verification(lane)):
                         raise ValueError("A simultaneous speaker lacks matching verification")
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
-                if (accepted["request_hash"] != digest(request)
-                        or accepted["validation_key"] != make_validation_key(
-                            chunk["spoken_text"], verifier, config["quality"])):
+                if accepted["request_hash"] != digest(request):
                     raise ValueError("Chapter verification does not match the current plan")
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
@@ -563,6 +651,12 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
             "partial_book": plan["partial_book"], "series_id": store.series_id,
             "voice_assets": {key: value["asset_hash"] for key, value in voices.items()},
             "engine": engine_identity, "verifier": verifier_identity, "quality": config["quality"],
+            "verification_policy": "preserve_successful_acceptance",
+            "verification_provenance": {
+                "reports": "verification.json",
+                "note": "Verifier and quality metadata do not imply cached audio was rechecked. "
+                        "Each clip retains its original successful validation key and report.",
+            },
             "review_items": plan["review_items"], "allow_review": config["render"]["allow_review"],
             "audio": audio, "files_sha256": {
                 p.relative_to(stage).as_posix(): file_hash(p) for p in sorted(stage.rglob("*")) if p.is_file()
@@ -633,7 +727,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         for chapter in plan["chapters"]:
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
-            if saved is not None and saved["context"] == context:
+            if (saved is not None and _same_chapter_audio_context(saved["context"], context)
+                    and _saved_chapter_clips_present(work, saved)):
                 composed, chapter_acceptance = _restore_chapter(work, chapter, saved, context, voices, config)
                 notify(f"Reusing completed {chapter['id']}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             else:
@@ -734,14 +829,15 @@ def assemble(bundle, config, *, notify=print):
         for chapter, record in zip(plan["chapters"], records):
             saved = record["context"]
             current = (saved["engine"], saved["verifier"])
-            if identities is not None and current != identities:
-                raise RenderBlocked("Completed chapters used different models or verifiers; rerun render "
+            if identities is not None and current[0] != identities[0]:
+                raise RenderBlocked("Completed chapters used different synthesis models; rerun render "
                                     "--chapters-only with consistent settings before assembly.")
             identities = current
             context = _chapter_context(bundle, chapter, config, voices, *identities)
             # Encoding is independent of verified speech and its PCM timeline.
             # Allow repackaging as MP3 or at a different bitrate without models;
-            # gain, pauses, source, voice and verification changes still block.
+            # Gain, pauses, source and voice changes still block; accepted
+            # verification remains attached to the unchanged saved audio.
             encoding_keys = {"chapter_format", "aac_bitrate", "mp3_bitrate", "ffmpeg", "ffprobe"}
             restore_context = deepcopy(context)
             for key in encoding_keys:

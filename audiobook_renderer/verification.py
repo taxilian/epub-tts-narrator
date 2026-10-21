@@ -1,4 +1,4 @@
-"""Configured speech verifier with optional independent reference rechecking."""
+"""Audio-only recognition with optional second recognition and JEV confirmation."""
 
 from .quality import MlxWhisperVerifier
 
@@ -37,9 +37,8 @@ class ReferenceTextJudgingVerifier:
     def __init__(self, verifier, judge):
         self.verifier = verifier
         self.judge = judge
-        # Ordinary speech verification keeps its existing identity. The quality
-        # layer binds this extra policy only into reference validation keys.
-        self.identity = verifier.identity
+        # Include the policy in chapter checkpoints as well as per-take keys.
+        self.identity = {**verifier.identity, "text_judge": judge.identity}
         self.reference_judge_identity = judge.identity
 
     def __getattr__(self, name):

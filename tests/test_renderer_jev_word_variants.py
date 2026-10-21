@@ -6,7 +6,7 @@ import unittest
 from audiobook_renderer.verification import ReferenceTextJudgingVerifier
 from epub_audiobook.jev import JevTranscriptJudge
 import test_renderer_reference_consensus as consensus
-from test_renderer_reference_consensus import IndependentVerifier
+from test_renderer_reference_consensus import PrimaryVerifier
 
 
 CONTEXT = (
@@ -23,7 +23,7 @@ class JevWordVariantTests(unittest.TestCase):
     check = consensus.ReferenceConsensusTests.check
 
     def wrapped(self, actual):
-        recognizer = IndependentVerifier(primary=actual, secondary=actual)
+        recognizer = PrimaryVerifier(actual)
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         return ReferenceTextJudgingVerifier(recognizer, judge), recognizer, judge
 
@@ -31,18 +31,18 @@ class JevWordVariantTests(unittest.TestCase):
     def response(score):
         return {
             "model": "jev-fixture",
-            "answers": {"harmless_variation": {"type": "noul", "noul": score}},
+            "answers": {"roughly_same": {"type": "noul", "noul": score}},
             "usage": {"input_tokens": 100, "output_tokens": 3},
         }
 
     def test_confirmed_spelling_and_pronunciation_variants_keep_actual_reference_words(self):
         cases = (
-            ("Givve me the book.", "Give me the book.", "givve", "give"),
-            ("I will recieve the book.", "I will receive the book.", "recieve", "receive"),
-            ("Meet me at the libary.", "Meet me at the library.", "libary", "library"),
-            ("Meet me at the library.", "Meet me at the libary.", "library", "libary"),
+            ("Givve me the book.", "Give me the book."),
+            ("I will recieve the book.", "I will receive the book."),
+            ("Meet me at the libary.", "Meet me at the library."),
+            ("Meet me at the library.", "Meet me at the libary."),
         )
-        for source, heard, expected_word, heard_word in cases:
+        for source, heard in cases:
             with self.subTest(source=source, heard=heard):
                 expected, actual = source + CONTEXT, heard + CONTEXT
                 verifier, recognizer, judge = self.wrapped(actual)
@@ -54,18 +54,21 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertEqual(report["reference_text"], actual)
                 self.assertTrue(report["reference_text_adjusted"])
                 self.assertGreater(report["reference_comparison"]["wer"], 0)
-                self.assertEqual(recognizer.calls, [("reference", self.audio), ("corroboration", self.audio)])
+                self.assertEqual(recognizer.calls, [("reference", self.audio)])
                 evaluate.assert_called_once()
                 state = evaluate.call_args.args[0]
-                self.assertEqual(state["expected_text"], expected_word)
-                self.assertEqual(state["primary_transcript"], heard_word)
+                self.assertEqual(set(state), {"requested_passage", "recognized_passage"})
+                self.assertEqual(state["requested_passage"], expected)
+                self.assertEqual(state["recognized_passage"], actual)
                 audit = report["text_judge"]
                 self.assertEqual(audit["decision"], "equivalent")
-                self.assertEqual(audit["probabilities"]["harmless_variation"], .98)
-                self.assertEqual({row["transcript"] for row in audit["differences"][0]["occurrences"]},
-                                 {"primary", "secondary"})
+                self.assertEqual(audit["probabilities"]["roughly_same"], .98)
+                self.assertEqual(audit["method"], "jev_spoken_passage")
+                self.assertEqual(audit["comparisons"][0]["transcripts"], ["primary"])
+                self.assertEqual(audit["comparisons"][0]["requested_passage"], expected)
+                self.assertEqual(audit["comparisons"][0]["recognized_passage"], actual)
 
-    def test_changed_words_names_quantities_and_negation_are_rejected(self):
+    def test_negative_passage_judgments_are_respected(self):
         cases = (
             ("Give me the book.", "Take me the book."),
             ("Jasper carried the book.", "Jasmine carried the book."),
@@ -82,25 +85,27 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertEqual(report["reasons"], ["text_mismatch"])
                 self.assertNotIn("reference_text", report)
                 self.assertEqual(report["text_judge"]["decision"], "different")
-                self.assertEqual(recognizer.calls, [("reference", self.audio), ("corroboration", self.audio)])
+                self.assertEqual(recognizer.calls, [("reference", self.audio)])
                 evaluate.assert_called_once()
 
-    def test_missing_and_added_words_cannot_be_hidden_by_harmless_spelling(self):
+    def test_entire_passage_including_missing_or_added_words_reaches_judge(self):
         expected = "Givve me the book." + CONTEXT
         corrected = expected.replace("Givve", "Give")
-        for actual in (corrected.replace("checked the doors", "checked doors"),
+        for actual in (corrected.replace("the captain checked", "checked"),
                        corrected + " Goodbye."):
             with self.subTest(actual=actual):
                 verifier, recognizer, judge = self.wrapped(actual)
-                with patch.object(judge._client, "evaluate", return_value=self.response(.99)) as evaluate:
+                with patch.object(judge._client, "evaluate", return_value=self.response(.01)) as evaluate:
                     report = self.check(verifier, expected=expected)
 
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["reasons"], ["text_mismatch"])
                 self.assertEqual(recognizer.calls, [("reference", self.audio)])
-                self.assertNotIn("text_judge", report)
+                self.assertEqual(report["text_judge"]["decision"], "different")
                 self.assertNotIn("reference_text", report)
-                evaluate.assert_not_called()
+                evaluate.assert_called_once()
+                self.assertEqual(evaluate.call_args.args[0],
+                                 {"requested_passage": expected, "recognized_passage": actual})
 
     def test_uncertain_word_variant_remains_rejected(self):
         expected = "Givve me the book." + CONTEXT
@@ -113,18 +118,31 @@ class JevWordVariantTests(unittest.TestCase):
         self.assertNotIn("reference_text", report)
         evaluate.assert_called_once()
 
-    def test_reference_word_variant_policy_does_not_relax_audiobook_speech(self):
+    def test_short_names_are_judged_without_character_distance_or_substring_gates(self):
+        cases = (("Jas!", "Chase!"), ("Jas!", "Jazz!"), ("Jas!", "Jace!"), ("Jas, wait.", "Jas"))
+        for purpose in ("reference", "speech"):
+            for expected, heard in cases:
+                with self.subTest(purpose=purpose, expected=expected, heard=heard):
+                    verifier, recognizer, judge = self.wrapped(heard)
+                    with patch.object(judge._client, "evaluate", return_value=self.response(.95)) as evaluate:
+                        report = self.check(verifier, expected=expected, purpose=purpose)
+                    self.assertTrue(report["passed"], report)
+                    evaluate.assert_called_once()
+                    self.assertEqual(evaluate.call_args.args[0],
+                                     {"requested_passage": expected, "recognized_passage": heard})
+
+    def test_jev_confirmed_word_variant_is_also_accepted_for_audiobook_speech(self):
         expected = "Givve me the book." + CONTEXT
         verifier, recognizer, judge = self.wrapped(expected.replace("Givve", "Give"))
         with patch.object(judge._client, "evaluate", return_value=self.response(.99)) as evaluate:
             report = self.check(verifier, expected=expected, purpose="speech")
 
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["reasons"], ["text_mismatch"])
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["reasons"], [])
         self.assertEqual(recognizer.calls, [("speech", self.audio)])
         self.assertNotIn("reference_text", report)
-        self.assertNotIn("text_judge", report)
-        evaluate.assert_not_called()
+        self.assertEqual(report["text_judge"]["decision"], "equivalent")
+        evaluate.assert_called_once()
 
 
 if __name__ == "__main__":

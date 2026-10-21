@@ -29,8 +29,8 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 4
-REFERENCE_VARIATION_VERSION = 4
+QUALITY_VERSION = 6
+REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -101,9 +101,9 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
     }
     if purpose == "reference":
         identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
-        judge_identity = getattr(verifier, "reference_judge_identity", None)
-        if judge_identity is not None:
-            identity["reference_text_judge"] = judge_identity
+    judge_identity = getattr(verifier, "reference_judge_identity", None)
+    if judge_identity is not None:
+        identity["text_judge"] = judge_identity
     return digest(identity)
 
 
@@ -323,9 +323,13 @@ def _audio_metrics(path: Path, policy: dict) -> dict:
     }
 
 
+class _AlignmentError(ValueError):
+    """Optional ASR timing is unusable; transcript verification may continue."""
+
+
 def _timestamp(value, label: str, duration: float) -> float:
     if not _finite_number(value) or value < 0 or value > duration + _TIME_TOLERANCE:
-        raise ValueError(f"{label} is not a finite timestamp within the audio")
+        raise _AlignmentError(f"{label} is not a finite timestamp within the audio")
     return min(float(value), duration)
 
 
@@ -382,40 +386,40 @@ def _checked_transcript(result, duration: float) -> tuple[str, list[dict], list[
         start = _timestamp(segment.get("start"), f"segment {index} start", duration)
         end = _timestamp(segment.get("end"), f"segment {index} end", duration)
         if end < start or start + _TIME_TOLERANCE < previous_segment_start:
-            raise ValueError("ASR segments have reversed or unordered timestamps")
+            raise _AlignmentError("ASR segments have reversed or unordered timestamps")
         previous_segment_start = start
         diagnostic = {"start": start, "end": end, **_segment_diagnostics(segment)}
         diagnostics.append(diagnostic)
         if not isinstance(segment.get("words"), list):
-            raise ValueError("ASR segment lacks word timestamps")
+            raise _AlignmentError("ASR segment lacks word timestamps")
         word_texts = []
         for word in segment["words"]:
             if not isinstance(word, dict) or not isinstance(word.get("word"), str) or not word["word"].strip():
-                raise ValueError("ASR word lacks nonempty text")
+                raise _AlignmentError("ASR word lacks nonempty text")
             word_start = _timestamp(word.get("start"), "word start", duration)
             word_end = _timestamp(word.get("end"), "word end", duration)
             if word_end <= word_start:
-                raise ValueError("ASR word timestamps have zero or negative duration")
+                raise _AlignmentError("ASR word timestamps have zero or negative duration")
             if (word_start + _TIME_TOLERANCE < previous_word_end
                     or word_start + _TIME_TOLERANCE < start
                     or word_end > end + _TIME_TOLERANCE):
-                raise ValueError("ASR word timestamps overlap, are unordered, or leave their segment")
+                raise _AlignmentError("ASR word timestamps overlap, are unordered, or leave their segment")
             checked = {"word": word["word"], "start": word_start, "end": word_end}
             if "probability" in word:
                 probability = word["probability"]
                 if not _finite_number(probability) or not 0 <= probability <= 1:
-                    raise ValueError("ASR word probability must be between zero and one")
+                    raise _AlignmentError("ASR word probability must be between zero and one")
                 checked["probability"] = probability
             words.append(checked)
             word_texts.append(word["word"])
             previous_word_end = word_end
         if normalize_words(" ".join(word_texts)) != normalize_words(segment["text"]):
-            raise ValueError("ASR word text does not reconstruct its segment")
+            raise _AlignmentError("ASR word text does not reconstruct its segment")
         segment_texts.append(segment["text"])
     if normalize_words(" ".join(segment_texts)) != normalize_words(result["text"]):
         raise ValueError("ASR segment text does not reconstruct the transcript")
     if not words:
-        raise ValueError("ASR produced no timed words")
+        raise _AlignmentError("ASR produced no timed words")
     return result["text"], words, diagnostics
 
 
@@ -541,81 +545,60 @@ def _valid_judge_model(model):
     return isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model) is not None
 
 
-def _valid_judged_differences(record, *, allow_model_change=False):
-    """Keep the changed-span audit finite, complete in shape, and model-bound."""
-    differences = record.get("differences")
-    if (record.get("method") != "jev_changed_spans"
-            or record.get("offset_unit") != "normalized_words"
-            or record.get("normalization") != "source_explicit_compounds_v1"
-            or not isinstance(differences, list) or not 1 <= len(differences) <= 32):
+def _valid_judged_comparisons(record, report, secondary, *, partial=False, allow_model_change=False):
+    """Bind every model score to the exact requested and recognized passages."""
+    comparisons = record.get("comparisons")
+    expected = report["expected_text"]
+    groups = {}
+    for label, heard in (("primary", report["transcript"]), ("secondary", secondary)):
+        if heard is not None and compare_words(expected, heard)["wer"] != 0:
+            groups.setdefault(heard, []).append(label)
+    if (record.get("method") != "jev_spoken_passage" or not isinstance(comparisons, list)
+            or not 1 <= len(comparisons) <= len(groups)
+            or (not partial and len(comparisons) != len(groups))):
         return False
-    identifiers = set()
-    for item in differences:
+    for index, (item, (heard, labels)) in enumerate(zip(comparisons, groups.items())):
         if (not isinstance(item, dict) or set(item) != {
-                "id", "expected_text", "primary_transcript", "context", "probability", "model",
-                "policy_version", "occurrences"}
-                or not isinstance(item["id"], str) or not item["id"] or item["id"] in identifiers
-                or any(not isinstance(item[field], str) for field in ("expected_text", "primary_transcript", "context"))
+                "id", "requested_passage", "recognized_passage", "transcripts", "probability", "model", "policy_version"}
+                or item["id"] != f"comparison_{index}"
+                or item["requested_passage"] != expected or item["recognized_passage"] != heard
+                or item["transcripts"] != labels
                 or not _finite_number(item["probability"]) or not 0 <= item["probability"] <= 1
                 or not _valid_judge_model(item["model"])
                 or (item["model"] != record["model"] and not allow_model_change)
-                or type(item["policy_version"]) is not int
-                or item["policy_version"] != record["policy_version"]
-                or not isinstance(item["occurrences"], list) or not item["occurrences"]):
+                or type(item["policy_version"]) is not int or item["policy_version"] != record["policy_version"]):
             return False
-        identifiers.add(item["id"])
-        for occurrence in item["occurrences"]:
-            if (not isinstance(occurrence, dict) or set(occurrence) != {
-                    "transcript", "operation", "expected_start", "expected_end", "actual_start", "actual_end",
-                    "expected", "actual"}
-                    or not isinstance(occurrence["transcript"], str)
-                    or occurrence["transcript"] not in {"primary", "secondary"}
-                    or not isinstance(occurrence["operation"], str)
-                    or occurrence["operation"] not in {"split", "join", "substitute", "shorten_consonant_run"}):
-                return False
-            for side in ("expected", "actual"):
-                start, end, words = occurrence[f"{side}_start"], occurrence[f"{side}_end"], occurrence[side]
-                if (type(start) is not int or type(end) is not int or not 0 <= start < end
-                        or not isinstance(words, list) or len(words) != end - start
-                        or any(not isinstance(word, str) or not word for word in words)):
-                    return False
-    return record["probabilities"]["harmless_variation"] == min(item["probability"] for item in differences)
+    return record["probabilities"]["roughly_same"] == max(item["probability"] for item in comparisons)
 
 
-def _valid_unavailable_judgment(record):
-    """Retain trustworthy partial work without treating it as a full judgment."""
+def _valid_unavailable_judgment(record, report, secondary):
+    """Retain trustworthy partial judgments without treating them as approval."""
     error = record.get("error_code")
     if error is not None and (not isinstance(error, str) or error not in {
             "unavailable", "disabled", "invalid_request", "request_too_large", "invalid_response",
-            "redirect_refused", "http_error", "transport_error", "difference_limit", "invalid_comparison",
+            "redirect_refused", "http_error", "transport_error", "invalid_comparison",
             "internal_error", "model_changed"}):
         return False
     usage = record.get("usage")
     if usage is not None and (not isinstance(usage, dict) or set(usage) != {"input_tokens", "output_tokens"}
-                              or any(type(value) is not int or not 0 <= value <= 32 * 10**9 for value in usage.values())):
+                              or any(type(value) is not int or not 0 <= value <= 2 * 10**9 for value in usage.values())):
         return False
-    probabilities, differences = record["probabilities"], record.get("differences", [])
+    probabilities, comparisons = record["probabilities"], record.get("comparisons", [])
     if probabilities == {} and record.get("model") is None:
-        return differences == [] and error != "model_changed"
-    if (error is None or error in {"disabled", "difference_limit"}
-            or set(probabilities) != {"harmless_variation"}
-            or not _finite_number(probabilities["harmless_variation"])
-            or not 0 <= probabilities["harmless_variation"] <= 1
+        return comparisons == [] and error != "model_changed"
+    if (error is None or error == "disabled" or set(probabilities) != {"roughly_same"}
+            or not _finite_number(probabilities["roughly_same"])
+            or not 0 <= probabilities["roughly_same"] <= 1
             or not _valid_judge_model(record.get("model"))
-            or not _valid_judged_differences(record, allow_model_change=error == "model_changed")):
+            or not _valid_judged_comparisons(record, report, secondary, partial=True, allow_model_change=error == "model_changed")):
         return False
     if error == "model_changed":
-        return (differences[0]["model"] == record["model"]
-                and any(item["model"] != record["model"] for item in differences[1:]))
+        return comparisons[0]["model"] == record["model"] and any(item["model"] != record["model"] for item in comparisons[1:])
     return True
 
 
 def _judge_reference(verifier, report, secondary_transcript):
-    """Require an enabled text judge to confirm a previously corroborated variation.
-
-    The judge sees text, never audio, and cannot establish what was spoken. It
-    is an additional semantic veto after independent ASR and hard eligibility.
-    """
+    """Require actual JEV approval of transcript differences for either purpose."""
     identity = getattr(verifier, "reference_judge_identity", None)
     if identity is None:
         return True
@@ -628,41 +611,90 @@ def _judge_reference(verifier, report, secondary_transcript):
     try:
         record = judge(report["expected_text"], report["transcript"], secondary_transcript)
     except Exception:
-        # Provider exceptions can contain credentials or request text. The
-        # adapter normally returns safe diagnostics; never serialize raw errors.
         report["text_judge"] = dict(unavailable, error_code="judge_failed")
         return False
-    if (not isinstance(identity, dict) or not isinstance(record, dict)
-            or record.get("identity") != identity):
+    if not isinstance(identity, dict) or not isinstance(record, dict) or record.get("identity") != identity:
         report["text_judge"] = unavailable
         return False
     record = {key: value for key, value in record.items() if key in {
         "identity", "decision", "probabilities", "model", "policy_version", "threshold", "usage", "error_code",
-        "differences", "method", "offset_unit", "normalization"}}
+        "comparisons", "method"}}
     decision, probabilities = record.get("decision"), record.get("probabilities")
     threshold = record.get("threshold")
     if (not isinstance(decision, str) or decision not in {"equivalent", "different", "uncertain", "unavailable"}
             or not isinstance(probabilities, dict)
-            or not _finite_number(threshold) or not .5 < threshold <= 1
-            or threshold != identity.get("threshold")
-            or type(record.get("policy_version")) is not int
-            or record.get("policy_version") != identity.get("policy_version")):
+            or not _finite_number(threshold) or not .5 < threshold <= 1 or threshold != identity.get("threshold")
+            or type(record.get("policy_version")) is not int or record["policy_version"] != identity.get("policy_version")):
         report["text_judge"] = unavailable
         return False
     if decision == "unavailable":
-        # A later isolated request may fail after earlier phrases succeeded.
-        # Keep their validated audit and the safe failure cause, never approve.
-        report["text_judge"] = record if _valid_unavailable_judgment(record) else unavailable
+        report["text_judge"] = record if _valid_unavailable_judgment(record, report, secondary_transcript) else unavailable
         return False
-    if (set(probabilities) != {"harmless_variation"}
+    if (decision == "different" and record.get("method") == "spoken_text_eligibility"
+            and record.get("error_code") in ("outside_spoken_text_limits", "invalid_comparison")
+            and record.get("model") is None and probabilities == {} and record.get("comparisons") == []):
+        report["text_judge"] = record
+        report["text_judge_skipped"] = record["error_code"]
+        return False
+    if (set(probabilities) != {"roughly_same"}
             or any(not _finite_number(value) or not 0 <= value <= 1 for value in probabilities.values())
-            or not isinstance(record.get("model"), str) or not record["model"].strip()
-            or not _valid_judged_differences(record)):
+            or not _valid_judge_model(record.get("model"))
+            or not _valid_judged_comparisons(record, report, secondary_transcript)):
         report["text_judge"] = unavailable
         return False
     report["text_judge"] = record
-    return (decision == "equivalent" and probabilities["harmless_variation"] >= threshold
-            and all(item["probability"] >= threshold for item in record["differences"]))
+    return decision == "equivalent" and probabilities["roughly_same"] >= threshold
+
+
+def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
+    """Ask JEV about every mismatch; another recognizer is a recovery option."""
+    expected, primary = report["expected_text"], report["transcript"]
+
+    def accept(transcript, method):
+        report["verified_transcript"] = transcript
+        report["text_confirmation_method"] = method
+        if report["purpose"] == "reference":
+            report.update(reference_text=transcript, reference_text_adjusted=transcript != expected)
+        elif transcript != primary:
+            report["words"] = []
+            report["word_timing_status"] = "unavailable"
+            report.setdefault("alignment_warnings", []).append(
+                "Accepted secondary recognition; primary word timings are not used.")
+        return True
+
+    report["text_judge_source"] = "primary"
+    if _judge_reference(verifier, report, None):
+        return accept(primary, "jev_primary")
+    if report.get("text_judge", {}).get("decision") == "unavailable":
+        return False
+    decode = getattr(verifier, "corroborate_reference", None)
+    if not callable(decode):
+        return False
+    corroboration = {"identity": getattr(verifier, "corroboration_identity", None),
+                     "decision": "pending_judgment", "transcript": None}
+    report["corroboration"] = corroboration
+    try:
+        # Expected text never goes to either recognizer.
+        secondary, _, diagnostics = _checked_reference_transcript(decode(path))
+        corroboration.update(transcript=secondary, asr_segments=diagnostics)
+    except Exception:
+        corroboration["decision"] = "verification_failed"
+        return False
+    if compare_words(primary, secondary)["wer"] == 0:
+        corroboration["decision"] = "same_transcript"
+        return False
+    first_judgment = report.pop("text_judge")
+    report["text_judge_history"] = [{"recognizer": "primary", "judgment": first_judgment}]
+    if compare_words(expected, secondary)["wer"] == 0:
+        report.pop("text_judge_source", None)
+        corroboration["decision"] = "secondary_matches_requested"
+        return accept(secondary, "secondary_exact")
+    secondary_report = {"expected_text": expected, "transcript": secondary}
+    confirmed = _judge_reference(verifier, secondary_report, None)
+    report["text_judge"] = secondary_report["text_judge"]
+    report["text_judge_source"] = "secondary"
+    corroboration["decision"] = "jev_confirmed_variations" if confirmed else "not_confirmed"
+    return accept(secondary, "jev_secondary") if confirmed else False
 
 
 def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
@@ -734,11 +766,10 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     Invalid policy/input text is a programming/configuration error. Bad audio,
     transcription failures and content mismatches produce a JSON-safe failure
     report, which can be retained alongside a rejected synthesis attempt.
-    References require the same acoustic checks, but do not require alignment
-    that cloning never consumes. Bounded reference-script variations require
-    either independent agreement on the actual words or an independent exact
-    match to the requested script. Speech chunks always retain their lexical
-    gate.
+    References do not require timing alignment that cloning never consumes.
+    When JEV is enabled, every nonexact transcript in either purpose reaches it for
+    approval. Hard acoustic checks still apply; unusable optional word timing
+    is omitted with a warning rather than causing speech regeneration.
     """
     purpose = _validate_purpose(purpose)
     settings = validate_policy(policy)
@@ -783,9 +814,16 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
             # Keep useful evidence even if an alignment/schema check fails;
             # this unvalidated text never substitutes for a passed transcript.
             report["raw_transcript"] = result["text"]
-        transcript, words, diagnostics = (
-            _checked_reference_transcript(result) if purpose == "reference"
-            else _checked_transcript(result, duration))
+        transcript, words, diagnostics = _checked_reference_transcript(result)
+        if purpose == "speech":
+            try:
+                transcript, words, diagnostics = _checked_transcript(result, duration)
+                report["word_timing_status"] = "available"
+            except _AlignmentError as exc:
+                # Chapter assembly and source sync use actual clip boundaries.
+                # Discard unusable optional word alignment, not valid speech.
+                report["word_timing_status"] = "unavailable"
+                report["alignment_warnings"] = [str(exc)]
         report["transcript"], report["words"] = transcript, words
         metrics["asr_segments"] = diagnostics
         metrics.update(compare_words(expected_text, transcript))
@@ -795,6 +833,10 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         return report
     if purpose == "reference":
         report["reference_comparison"] = compare_reference_words(expected_text, transcript)
+    if metrics["wer"] != 0 and getattr(verifier, "reference_judge_identity", None) is not None:
+        if not _confirm_text_variation(Path(path), verifier, report):
+            reasons.append("text_mismatch")
+    elif purpose == "reference":
         if metrics["wer"] == 0:
             report["reference_text"] = expected_text
             report["reference_text_adjusted"] = False
