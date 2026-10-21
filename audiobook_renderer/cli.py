@@ -11,7 +11,7 @@ import shutil
 import sys
 
 from .bundle import load_bundle, make_plan
-from .config import load_config
+from .config import load_config, select_voice_designer
 from .book_context import resolve_book_config, voice_store
 
 
@@ -46,6 +46,8 @@ def parser():
             command.add_argument("--transcript", type=Path, required=True,
                                  help="UTF-8 file containing the exact reference recording transcript")
         if name == "cast":
+            command.add_argument("--voice-designer", choices=("local", "gemini"),
+                                 help="Create new voices locally or with Gemini (default: configured local designer)")
             command.add_argument("--action", default="interactive",
                                  choices=("interactive", "list", "prepare-samples", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
                                  help="Default: interactive voice casting; other actions support scripting")
@@ -162,6 +164,7 @@ def main(argv=None):
             return 0
         if args.command == "cast":
             from .audition import casting_command
+            config = select_voice_designer(config, args.voice_designer)
             return casting_command(args, bundle, config)
         plan = make_plan(bundle, config)
         if args.command == "plan":

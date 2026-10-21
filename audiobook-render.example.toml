@@ -30,6 +30,14 @@ language = "en"
 # Continued books inherit the nearest saved voice in their parent-book chain.
 reference_text = "The morning light fell across the quiet room. I opened the door and listened to the wind in the trees. There was still time to decide what to do next."
 
+# Used only when cast is invoked with --voice-designer gemini.
+# Keep the real key in your ignored local epub-audiobook.toml.
+[gemini]
+api_key = ""
+model = "gemini-3.8-flash-tts"
+language_code = "en-US"
+timeout_seconds = 180.0
+
 [casting]
 # Executable and arguments; the sample's absolute path is appended. No shell.
 player = ["/usr/bin/afplay"]

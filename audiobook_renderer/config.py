@@ -22,6 +22,10 @@ DEFAULTS = {
         "type": "engine", "checkpoint": None, "language": "English",
         "temperature": 0.7, "max_tokens": 2048, "options": {},
     },
+    "gemini": {
+        "api_key": None, "model": "gemini-3.8-flash-tts",
+        "language_code": "en-US", "timeout_seconds": 180.0,
+    },
     "voices": {
         "directory": None, "series_id": None,
         "reference_text": (
@@ -83,6 +87,7 @@ def load_config(path=None):
         "engine": ("type", "experts"),
         "verification": ("type", "model", "language"),
         "voice_design": ("type", "language"),
+        "gemini": ("model", "language_code"),
         "voices": ("reference_text",),
         "render": ("chapter_format", "ffmpeg", "ffprobe"),
     }.items():
@@ -131,6 +136,15 @@ def load_config(path=None):
     if not isinstance(result["engine"]["options"], dict):
         raise ValueError("engine.options must be a table")
     design = result["voice_design"]
+    gemini = result["gemini"]
+    if gemini["api_key"] is not None and (
+            not isinstance(gemini["api_key"], str)
+            or any(ord(char) < 32 or ord(char) == 127 for char in gemini["api_key"])):
+        raise ValueError("gemini.api_key must be a string without control characters")
+    timeout = gemini["timeout_seconds"]
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or not 1 <= timeout <= 600):
+        raise ValueError("gemini.timeout_seconds must be a finite number from 1 to 600")
     if not isinstance(design["options"], dict):
         raise ValueError("voice_design.options must be a table")
     if (isinstance(design["temperature"], bool)
@@ -179,4 +193,22 @@ def load_config(path=None):
         raise ValueError("Voice, work, and output directories must not be nested")
     if any(a in b.parents or b in a.parents for a in model_paths for b in stores):
         raise ValueError("Model directories must not overlap voice, work, or output stores")
+    return result
+
+
+def select_voice_designer(config, choice):
+    """Apply a cast-only override without changing the saved global settings."""
+    result = deepcopy(config)
+    if choice is None:
+        return result
+    if choice == "local":
+        result["voice_design"] = {"type": "engine"}
+    elif choice == "gemini":
+        settings = {**DEFAULTS["gemini"], **result.get("gemini", {})}
+        key = settings["api_key"]
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Gemini casting requires gemini.api_key in your global TOML configuration")
+        result["voice_design"] = {"type": "gemini", **settings}
+    else:
+        raise ValueError("Voice designer must be local or gemini")
     return result

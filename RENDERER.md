@@ -222,6 +222,51 @@ With `[voice_design] type = "engine"`, the character description conditions Dram
 
 For a fresh analysis, the analyzer now supplies stable acoustic directions in both the voice description and traits, including voices added during identity reconciliation. Casting uses these automatically together with the selected book excerpt; no prompt-preparation or repair command is needed. Existing edited drafts and selected references retain precedence, so this change does not rewrite older casting work. Speech verification checks the words and audio quality, not whether vocal gender, character fit, or every requested texture sounds right.
 
+To create voices with Gemini instead, put the following in the same global
+`epub-audiobook.toml` file. Local Drama 3 remains the default; this section only
+supplies credentials and settings for the explicit casting option.
+
+```toml
+[gemini]
+api_key = "YOUR_GOOGLE_API_KEY"
+model = "gemini-3.8-flash-tts"
+language_code = "en-US"
+timeout_seconds = 180.0
+```
+
+```sh
+# Open casting, generating missing voices with Gemini.
+.venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer gemini
+
+# Replace all voices in this book with Gemini-created voices.
+.venv-renderer/bin/audiobook-render cast runs/book-01 \
+  --voice-designer gemini --action regenerate-all
+
+# Explicitly use the local speech engine for new voices.
+.venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer local
+```
+
+Gemini casting sends the voice description and selected sample script to Google's
+API. It creates a persistent custom voice, synthesizes the exact script, and runs
+the same independent transcription and audio checks as local creation. Existing
+selections are reused unless you regenerate them. Shared character roles still
+use one canonical reference, and later books inherit it through `--continue-from`.
+Drama 3 renders the audiobook locally by cloning the verified recording; Gemini
+is not needed to render that saved voice. Normalized audition copies work for
+both sources.
+
+The remote voice ID is recorded in candidate metadata and reused when a sample
+needs a verification retry. An uncertain creation timeout blocks new creation for
+that character, including after restarting casting. Follow the reported pending-file
+instructions to reconnect an existing remote voice before retrying. Credentials are read only
+from the configuration file and are excluded from candidate metadata and cache
+identities. No Google SDK is required.
+
+Google currently allows up to 200 stored custom voices per project, with expiration
+after one year of inactivity. Each regeneration creates another custom voice;
+manage unused remote voices in AI Studio. Local saved recordings remain usable
+after a remote voice expires. See [Google's voice design documentation](https://ai.google.dev/gemini-api/docs/voice-design).
+
 To use Qwen3 VoiceDesign instead, download its local checkpoint and configure the separate designer:
 
 ```sh
@@ -239,7 +284,7 @@ temperature = 0.7
 max_tokens = 2048
 ```
 
-Changing the designer affects future creations and regenerations. Existing voice selections stay fixed. Both designers retain the same persistent reference format and shared-character bindings.
+Changing the designer affects future creations and regenerations. Existing voice selections stay fixed. All designers retain the same persistent reference format and shared-character bindings.
 
 Description conditioning is not proof that every audible trait was followed. Whisper checks the spoken words; it does not assess gender presentation, age, accent, timbre, or the suitability of a performance. Use the menu to audition and regenerate a voice when needed.
 

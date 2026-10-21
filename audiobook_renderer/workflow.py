@@ -79,6 +79,8 @@ def _verification_failure_detail(report):
     }.get(decision)
     if explanation:
         details.append(explanation)
+    if report.get("provider_error"):
+        details.append(_diagnostic_text(report["provider_error"], limit=800))
     return "; ".join(details)
 
 
@@ -143,6 +145,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         except (ValueError, RuntimeError, OSError) as exc:
             report = {"passed": False, "reasons": ["generation_or_verification_error"],
                       "error": str(exc), "error_type": type(exc).__name__}
+            from .gemini_voice_design import GeminiVoiceError
+            if isinstance(exc, GeminiVoiceError):
+                report["provider_error"] = str(exc)
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,

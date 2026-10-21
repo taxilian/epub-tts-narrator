@@ -60,6 +60,9 @@ class CastingSession:
 
     @property
     def notice(self):
+        if self.config.get("voice_design", {}).get("type") == "gemini":
+            return ("Gemini creates new voices remotely from the description and sample script; "
+                    "the audiobook engine reuses their verified saved recordings locally.")
         if (self.config.get("voice_design", {}).get("type", "engine") == "engine"
                 and self.config.get("engine", {}).get("type") == "drama3_mlx"):
             return "Local Fish Audio Drama 3 designs this voice from the prompt, then reuses the saved recording."
@@ -304,6 +307,104 @@ class CastingSession:
         with self._locked():
             return self._generate_locked(voice_id)
 
+    def _prepare_gemini_request(self, request, directory):
+        """Reconnect ambiguous remote creation before starting another candidate.
+
+        Casting deliberately uses a fresh candidate for each regeneration. A
+        lost creation response is different: its pending marker must follow
+        the character across invocations until the user identifies the remote
+        voice or confirms that creation failed.
+        """
+        from .gemini_voice_design import (
+            GeminiVoiceDesigner, _read_state, _write_state, _VOICE_ID,
+        )
+
+        root = directory.parent
+        if root.is_symlink():
+            raise RenderBlocked("The casting candidate directory must not be a symlink")
+        recoveries = []
+        for pending_path in sorted(root.glob("*/gemini-voice-pending.json")):
+            previous_directory = pending_path.parent
+            request_path = previous_directory / "casting-request.json"
+            try:
+                if (previous_directory.is_symlink() or pending_path.is_symlink()
+                        or not pending_path.is_file()):
+                    raise ValueError
+                # Older attempts saved the request after the first failure.
+                # New candidates persist it before sending any remote request.
+                if not request_path.exists():
+                    request_path = next(iter(sorted(previous_directory.glob("attempt-*.json"))))
+                    if (request_path.is_symlink() or not request_path.is_file()
+                            or request_path.stat().st_size > 4 * 1024 * 1024):
+                        raise ValueError
+                    previous = read_json(request_path)["request"]
+                else:
+                    if (request_path.is_symlink() or not request_path.is_file()
+                            or request_path.stat().st_size > 4 * 1024 * 1024):
+                        raise ValueError
+                    previous = read_json(request_path)
+                if (not isinstance(previous, dict) or digest(previous) != previous_directory.name
+                        or previous.get("kind") != "casting_candidate"
+                        or not isinstance(previous.get("voice_id"), str)
+                        or not isinstance(previous.get("series_id"), str)):
+                    raise ValueError
+            except (OSError, ValueError, TypeError, KeyError, StopIteration):
+                raise RenderBlocked(
+                    f"Cannot identify the pending Gemini creation at {pending_path}. "
+                    "Inspect its casting request before generating another remote voice."
+                ) from None
+            if (previous["series_id"] != request["series_id"]
+                    or self.store.canonical_id(previous["voice_id"]) != request["voice_id"]):
+                continue
+            fingerprint = digest({"designer": previous.get("designer"),
+                                  "description": previous.get("prompt")})
+            pending = _read_state(pending_path, fingerprint)
+            state_path = previous_directory / "gemini-voice.json"
+            # A crash after saving the returned ID can leave both files. The
+            # completed state is authoritative and requires no remote request.
+            state = (_read_state(state_path, fingerprint)
+                     if state_path.exists() or state_path.is_symlink() else pending)
+            remote_id = state.get("voice_id")
+            if not isinstance(remote_id, str) or not _VOICE_ID.fullmatch(remote_id):
+                display_name = "Audiobook voice " + digest(str(previous_directory.resolve()))[:16]
+                raise RenderBlocked(GeminiVoiceDesigner._pending_message(pending_path, display_name))
+            if (previous.get("designer") != request["designer"]
+                    or previous.get("prompt") != request["prompt"]):
+                raise RenderBlocked(
+                    f"The repaired Gemini creation at {pending_path} belongs to a different "
+                    "voice prompt or Gemini configuration. Restore those settings to finish "
+                    "this recovery before requesting a new voice."
+                )
+            recoveries.append((pending_path, remote_id, fingerprint, previous_directory.name))
+        if len({item[1] for item in recoveries}) > 1:
+            raise RenderBlocked(
+                "Multiple different repaired Gemini voices exist for this character. "
+                "Inspect the pending files before choosing which remote voice to recover."
+            )
+        if directory.exists() or directory.is_symlink():
+            raise RenderBlocked("Casting candidate directory already exists")
+        directory.mkdir(parents=True)
+        write_json(directory / "casting-request.json", request)
+        if not recoveries:
+            return
+        pending_path, remote_id, fingerprint, previous_hash = recoveries[0]
+        recovered = {
+            "version": 1, "request_fingerprint": fingerprint, "voice_id": remote_id,
+            "recovered_from_pending": True, "recovered_from_request_hash": previous_hash,
+        }
+        # The new request and its remote ID are both durable before resolving
+        # any original pending marker. Keep the source ID as an audit record.
+        _write_state(directory / "gemini-voice.json", recovered)
+        for pending_path, remote_id, fingerprint, previous_hash in recoveries:
+            state_path = pending_path.parent / "gemini-voice.json"
+            if not state_path.exists():
+                _write_state(state_path, {
+                    "version": 1, "request_fingerprint": fingerprint, "voice_id": remote_id,
+                    "recovered_from_pending": True, "recovered_to_request_hash": directory.name,
+                })
+            pending_path.unlink()
+        self.notify("Recovered the existing Gemini voice; no new remote voice will be created.")
+
     def _generate_locked(self, voice_id):
         profile = self._profile(voice_id)
         engine, designer = self._get_engine(), self._get_designer()
@@ -321,10 +422,13 @@ class CastingSession:
             "prompt": prompt, "text": text, "base_seed": self.config["render"]["seed"],
             "sample_source": deepcopy(draft["sample_source"]),
         }
+        directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
+        if self.config.get("voice_design", {}).get("type") == "gemini":
+            self._prepare_gemini_request(request, directory)
         self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
         wav, accepted = verified_take(
             text, lambda path, seed: design_voice(designer, prompt, text, path, seed=seed),
-            Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request),
+            directory,
             request, verifier, self.config, notify=self.notify, purpose="reference",
         )
         if accepted.get("engine_metadata", {}).get("description_applied") is not True:

@@ -1,4 +1,4 @@
-"""Local, prompt-conditioned reference creation, separate from book synthesis."""
+"""Prompt-conditioned reference creation, separate from book synthesis."""
 
 from __future__ import annotations
 
@@ -165,6 +165,12 @@ class Qwen3VoiceDesigner:
 
 def create_designer(config):
     """Resolve an explicit reference designer without unconditioned fallback."""
+    if config.get("type") == "gemini":
+        from .gemini_voice_design import GeminiVoiceDesigner
+        allowed = {"type", "api_key", "model", "language_code", "timeout_seconds"}
+        if set(config) - allowed:
+            raise EngineError("Unknown Gemini voice-design settings")
+        return GeminiVoiceDesigner(**{key: value for key, value in config.items() if key != "type"})
     if config.get("type") == "qwen3_mlx":
         allowed = {"type", "checkpoint", "language", "temperature", "max_tokens", "options"}
         if set(config) - allowed or config.get("options"):

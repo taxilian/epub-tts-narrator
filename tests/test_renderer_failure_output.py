@@ -94,6 +94,24 @@ class FailureOutputTests(unittest.TestCase):
             ])
             self.assertFalse((Path(temp) / "accepted.json").exists())
 
+    def test_safe_gemini_error_is_visible_without_exposing_arbitrary_errors(self):
+        from audiobook_renderer.gemini_voice_design import GeminiVoiceError
+        safe = "Gemini API request failed (HTTP 403). Check Gemini API access and project permissions."
+        for error, visible in ((GeminiVoiceError(safe), True), (RuntimeError("private detail"), False)):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temp:
+                messages = []
+                config = {"quality": {}, "render": {
+                    "max_attempts": 1, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
+                }}
+                def generate(path, seed):
+                    raise error
+                with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"):
+                    with self.assertRaises(RenderBlocked):
+                        verified_take("Sample text.", generate, temp, {"test": True},
+                                      object(), config, notify=messages.append)
+                self.assertEqual(safe in " ".join(messages), visible)
+                self.assertNotIn("private detail", " ".join(messages))
+
 
 if __name__ == "__main__":
     unittest.main()
