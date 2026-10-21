@@ -86,9 +86,14 @@ target_lufs = -20.0
 true_peak_db = -1.5
 chapter_numbers = []
 max_chunk_chars = 320
+paragraph_synthesis = true
+max_paragraph_chars = 1000
 max_attempts = 3
 seed = 1729
 sample_rate = 44100
+normalize_pauses = true
+sentence_pause_ms = 220
+clause_pause_ms = 100
 paragraph_pause_ms = 250
 blank_pause_ms = 500
 bracket_pause_ms = 120
@@ -392,6 +397,10 @@ To choose separate work and publication directories for one run, add `--work-dir
 
 M4A chapters with AAC audio at 128 kb/s are the default. They are directly playable and use the same codec as the final M4B. `--chapter-format mp3` on `render` or `assemble` produces MP3 chapter copies when needed; the final book remains AAC in an M4B container. Bitrates are global settings in `[render]`.
 
+Drama 3 renders new paragraphs as continuous performances by default. Dialogue and narration within a source paragraph use the saved character references and speaker tags in one generation; adjacent fragments with the same voice and delivery are joined. Long paragraphs split at existing safe boundaries under `max_paragraph_chars` (default 1000). Bracketed passages, simultaneous speech, and passages whose source mapping cannot be joined exactly retain their individual treatment. Other engines without multi-speaker support retain the existing clip workflow. Set `paragraph_synthesis = false` to opt out.
+
+Accepted older clips keep their original boundaries and remain reusable, including when paragraph mode is enabled midway through a chapter. Saved paragraph performances also retain their boundaries on resume. Verification checks the complete paragraph; synchronization records its exact audio interval plus all original text ranges and voice assignments in `source_segments`. These entries have `precision = "paragraph"`; exact speaker-change or word timestamps are not inferred. To compare paragraph rendering for a previously completed chapter, use a separate `--work-dir` and output directory: that creates new speech without deleting the previous recordings.
+
 To generate and listen to one chapter before committing to the whole book, inspect the chapter list and save a chapter checkpoint:
 
 ```sh
@@ -411,6 +420,10 @@ To generate the remaining chapters and package later:
 ```
 
 `assemble` uses the verified chapter checkpoints and loads neither TTS nor transcription models. Missing, changed, or incompatible checkpoints stop assembly with an explanation; use `render` to prepare them. Changing only chapter format or bitrate can re-encode from saved lossless PCM during assembly. Changes to text, voices, pauses, or loudness require `render` again; unchanged accepted speech is reused. Verification-policy changes alone do not invalidate accepted clips or chapters. Use the same `--work-dir` if it was overridden. To package a subset, pass the same `--chapters` selection to `assemble` and choose a separate `-o` directory, preserving the final output location for the full book. Existing finished audiobooks are never overwritten.
+
+Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. Pauses inside a clip are unchanged. The renderer then targets consistent gaps between clips: `sentence_pause_ms = 220` for sentence boundaries, `clause_pause_ms = 100` for clause boundaries, and the existing paragraph, blank-line, and bracket settings for their respective boundaries. These are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. Protected audio is never removed just to meet a target. Set `normalize_pauses = false` to retain the previous composition behavior.
+
+Changing pause settings rebuilds chapter audio from the accepted clips; it does not regenerate speech or modify voice references. Rerun `render BOOK_DIRECTORY --chapters N --chapters-only` using the same work directory, then listen to the newly printed chapter file. Use `assemble` afterward to package it, choosing a new output directory if a finished audiobook already exists. Timing records include `source_audio_start_frame` and `source_audio_end_frame` so each assembled clip can be traced to the retained range of its original accepted WAV. Source text ranges remain unchanged.
 
 By default, completed chapters receive two-pass loudness normalization to -20 LUFS with a -1.5 dB true-peak ceiling. Normalization preserves the PCM frame count and timing data, and operates on the assembled chapter rather than flattening every short utterance to the same level. Voice references and verified speech clips remain unchanged. These controls are separate from casting playback: use `[render] normalize_loudness`, `target_lufs`, and `true_peak_db` for the audiobook. Empty chapters and chapters shorter than the loudness measurement window are explicitly recorded as skipped for normalization.
 

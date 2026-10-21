@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 import gc
 import hashlib
 import importlib.metadata
@@ -31,6 +32,7 @@ from .drama3_design import (
 DRAMA3_RUNTIME_VERSION = "0.1.1"
 DRAMA3_RUNTIME_REVISION = "3b76bf84714d3766d7872f3409639a438e296cc8"
 DRAMA3_MODEL_REVISION = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+DRAMA3_MAX_SPEAKERS = 16
 DRAMA3_INSTALL = (
     "drama3-mlx @ git+https://github.com/Sogni-AI/drama3-mlx@"
     + DRAMA3_RUNTIME_REVISION
@@ -42,6 +44,9 @@ class EngineError(RuntimeError):
 
 
 class TTSEngine(Protocol):
+    # Engines may additionally advertise multi_speaker=True and implement
+    # synthesize_dialogue(turns, output_path, *, seed). It is optional so
+    # existing single-voice plugins remain compatible.
     @property
     def identity(self) -> dict[str, Any]: ...
 
@@ -76,6 +81,37 @@ def _text(value: str, label: str) -> str:
 def _seed(value: int) -> None:
     if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
         raise EngineError("seed must be an integer from 0 through 4294967295")
+
+
+def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
+    """Apply only supported controls to already validated literal book text."""
+    if not isinstance(direction, str):
+        raise EngineError("direction must be text")
+    direction = direction.strip()
+    if len(direction) > 240 or any(char in direction for char in "[]<>\r\n"):
+        raise EngineError("direction must be a single plain-text phrase of at most 240 characters")
+    if any(ord(char) < 32 for char in direction):
+        raise EngineError("direction contains control characters")
+    control = {
+        "whisper": "whisper", "whispering": "whisper", "whispered": "whisper",
+        "nervous": "nervous", "sigh": "sighs", "sighs": "sighs",
+        "laugh": "laughs", "laughing": "laughs", "laughs": "laughs",
+    }.get(direction.casefold())
+    if control == "whisper":
+        engine_text = f"<whisper>{text}</whisper>"
+    elif control:
+        engine_text = f"[{control}] {text}"
+    else:
+        engine_text = text
+    return engine_text, {
+        "direction": direction,
+        "direction_applied": control is not None,
+        "applied_control": control,
+        "direction_note": (
+            "Unsupported free-form direction was not applied"
+            if direction and control is None else ""
+        ),
+    }
 
 
 def _runtime_details() -> dict[str, Any]:
@@ -218,6 +254,7 @@ class Drama3MLXEngine:
             "reference_voice": True,
             "preset_voice": False,
             "delivery_control": True,
+            "multi_speaker": True,
             "unconditioned_voice_creation": False,
         }
 
@@ -346,30 +383,20 @@ class Drama3MLXEngine:
     ) -> dict[str, Any]:
         text = _text(text, "text")
         _seed(seed)
-        if not isinstance(direction, str):
-            raise EngineError("direction must be text")
-        direction = direction.strip()
-        if len(direction) > 240 or any(char in direction for char in "[]<>\r\n"):
-            raise EngineError("direction must be a single plain-text phrase of at most 240 characters")
-        if any(ord(char) < 32 for char in direction):
-            raise EngineError("direction contains control characters")
+        engine_text, delivery = _directed_text(text, direction)
+        return {
+            **self._generate_audio(engine_text, output_path, seed=seed, references=references),
+            **delivery,
+        }
+
+    def _generate_audio(
+        self, engine_text: str, output_path: Path, *, seed: int, references: list[Any],
+    ) -> dict[str, Any]:
+        """Render adapter-built text; public entry points validate source text first."""
         output_path = Path(output_path)
         if output_path.exists():
             raise EngineError(f"Audio output already exists: {output_path}")
         model = self._load()
-        # Only documented controls are admitted. A descriptive cast direction
-        # is not automatically a valid model command.
-        control = {
-            "whisper": "whisper", "whispering": "whisper", "whispered": "whisper",
-            "nervous": "nervous", "sigh": "sighs", "sighs": "sighs",
-            "laugh": "laughs", "laughing": "laughs", "laughs": "laughs",
-        }.get(direction.casefold())
-        if control == "whisper":
-            engine_text = f"<whisper>{text}</whisper>"
-        elif control:
-            engine_text = f"[{control}] {text}"
-        else:
-            engine_text = text
         try:
             iterator = iter(model.generate(
                 engine_text, references=references, temperature=self.temperature,
@@ -388,13 +415,6 @@ class Drama3MLXEngine:
         return {
             **metadata,
             "seed": seed,
-            "direction": direction,
-            "direction_applied": control is not None,
-            "applied_control": control,
-            "direction_note": (
-                "Unsupported free-form direction was not applied"
-                if direction and control is None else ""
-            ),
         }
 
     def _save_segment(self, segment: Any, model: Any, expected_text: str,
@@ -488,6 +508,95 @@ class Drama3MLXEngine:
             direction=direction,
         )
 
+    def synthesize_dialogue(
+        self, turns: list[dict[str, Any]], output_path: Path, *, seed: int,
+    ) -> dict[str, Any]:
+        """Speak a paragraph's ordered turns with request-local speaker references.
+
+        This uses the installed runtime's ordinary public ``generate`` API and
+        one model instance. It is sequential dialogue, not simultaneous voices.
+        The planner must split oversized paragraphs; runtime context and output
+        limits still apply, and an incomplete take is never published.
+        """
+        _seed(seed)
+        if not isinstance(turns, list) or not turns:
+            raise EngineError("dialogue turns must be a nonempty list")
+        if Path(output_path).exists():
+            raise EngineError(f"Audio output already exists: {output_path}")
+        voices: list[dict[str, Any]] = []
+        speaker_keys: dict[tuple[Any, ...], int] = {}
+        speaker_mapping: list[dict[str, Any]] = []
+        turn_directions: list[dict[str, Any]] = []
+        rendered_turns: list[dict[str, Any]] = []
+        # Validate the entire paragraph before loading or encoding any voice.
+        for index, turn in enumerate(turns):
+            if not isinstance(turn, dict) or not isinstance(turn.get("voice"), dict):
+                raise EngineError(f"dialogue turn {index + 1} must contain a saved voice")
+            text = _text(turn.get("text"), f"dialogue turn {index + 1} text")
+            _, delivery = _directed_text(text, turn.get("direction", ""))
+            voice = turn["voice"]
+            if voice.get("kind") != "reference":
+                raise EngineError("Drama 3 dialogue requires saved reference voices")
+            transcript = _text(voice.get("reference_text"), "reference_text")
+            reference_path = voice.get("reference_audio")
+            if not isinstance(reference_path, str) or not Path(reference_path).is_absolute():
+                raise EngineError("reference_audio must be an absolute local file path")
+            asset_hash = voice.get("asset_hash")
+            checksum = voice.get("reference_sha256", voice.get("reference_audio_sha256"))
+            if any(value is not None and not isinstance(value, str)
+                   for value in (asset_hash, checksum)):
+                raise EngineError("saved voice reference identifiers must be text")
+            # A saved asset identifies a voice across aliases. Include its
+            # content binding so inconsistent external records cannot silently
+            # merge different references under one speaker tag.
+            key = (asset_hash, checksum or reference_path, transcript)
+            if key not in speaker_keys:
+                if len(voices) >= DRAMA3_MAX_SPEAKERS:
+                    raise EngineError("Drama 3 dialogue supports at most 16 distinct voices per request")
+                speaker_id = speaker_keys[key] = len(voices)
+                voices.append(voice)
+                speaker_mapping.append({
+                    "speaker_id": speaker_id,
+                    "voice_id": voice.get("voice_id"),
+                    "asset_hash": asset_hash,
+                })
+            speaker_id = speaker_keys[key]
+            turn_directions.append({"speaker_id": speaker_id, **delivery})
+            # Segment boundaries often separate narration from quotations by
+            # the same character. Preserve a single natural performance unless
+            # the actual voice or supported delivery control changes. Append
+            # source text exactly, without inventing or stripping whitespace.
+            if (rendered_turns
+                    and rendered_turns[-1]["speaker_id"] == speaker_id
+                    and rendered_turns[-1]["applied_control"] == delivery["applied_control"]):
+                rendered_turns[-1]["text"] += text
+            else:
+                rendered_turns.append({"speaker_id": speaker_id, "text": text, **delivery})
+        lines = []
+        for turn in rendered_turns:
+            # Adjacent literal fragments must not form a control tag when
+            # concatenated, even if neither fragment contained a full tag.
+            text = _text(turn["text"], "dialogue rendered turn text")
+            directed, _ = _directed_text(text, turn["direction"])
+            lines.append(f"<|speaker:{turn['speaker_id']}|> {directed}")
+        references = []
+        for speaker_id, voice in enumerate(voices):
+            reference = self._reference(voice)
+            # Reference is a runtime dataclass. replace creates a new instance
+            # sharing the encoded codec codes, leaving the cached transcript
+            # untouched for later single-voice requests or different tag orders.
+            references.append(replace(
+                reference, text=f"<|speaker:{speaker_id}|> {reference.text}",
+            ))
+        return {
+            **self._generate_audio("\n".join(lines), output_path, seed=seed, references=references),
+            "speaker_mapping": speaker_mapping,
+            "speaker_count": len(voices),
+            "turn_count": len(turns),
+            "rendered_turn_count": len(rendered_turns),
+            "turn_directions": turn_directions,
+        }
+
 
 def create_engine(config: Mapping[str, Any]) -> TTSEngine:
     """Resolve an explicitly configured provider without a silent fallback."""
@@ -505,6 +614,8 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
                     not isinstance(capabilities, dict) or
                     any(type(capabilities.get(key)) is not bool for key in
                         ("voice_design", "reference_voice", "preset_voice", "delivery_control")) or
+                    ("multi_speaker" in capabilities and type(capabilities["multi_speaker"]) is not bool) or
+                    (capabilities.get("multi_speaker") and not callable(getattr(engine, "synthesize_dialogue", None))) or
                     not all(callable(getattr(engine, key, None)) for key in ("create_voice", "synthesize"))):
                 raise ValueError("Incomplete plugin protocol")
             json.dumps(identity, allow_nan=False)

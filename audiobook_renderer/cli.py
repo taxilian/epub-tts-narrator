@@ -172,6 +172,8 @@ def main(argv=None):
             return casting_command(args, bundle, config)
         plan = make_plan(bundle, config)
         if args.command == "plan":
+            from .workflow import make_render_plan
+            plan = make_render_plan(bundle, config, multi_speaker=config["engine"]["type"] == "drama3_mlx")
             print(json.dumps({
                 "book": plan["book"]["title"], "chapters": len(plan["chapters"]),
                 "chunks": sum(len(c["chunks"]) for c in plan["chapters"]),

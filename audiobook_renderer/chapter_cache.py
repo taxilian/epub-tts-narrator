@@ -18,10 +18,13 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 def chapter_settings(render):
     """Return only the settings that affect chapter composition or encoding."""
     settings = {
-        "version": 1, "sample_rate": render.get("sample_rate", 44100),
+        "version": 2, "sample_rate": render.get("sample_rate", 44100),
         "paragraph_pause_ms": render.get("paragraph_pause_ms", 250),
         "blank_pause_ms": render.get("blank_pause_ms", 500),
         "bracket_pause_ms": render.get("bracket_pause_ms", 120),
+        "normalize_pauses": render.get("normalize_pauses", True),
+        "sentence_pause_ms": render.get("sentence_pause_ms", 220),
+        "clause_pause_ms": render.get("clause_pause_ms", 100),
         "chapter_format": render.get("chapter_format", "m4a"),
         "aac_bitrate": render.get("aac_bitrate", "128k"),
         "mp3_bitrate": render.get("mp3_bitrate", "128k"),
@@ -35,6 +38,12 @@ def chapter_settings(render):
         raise ValueError("chapter_format must be m4a or mp3")
     if type(settings["normalize_loudness"]) is not bool:
         raise ValueError("normalize_loudness must be boolean")
+    if type(settings["normalize_pauses"]) is not bool:
+        raise ValueError("normalize_pauses must be boolean")
+    for key in ("paragraph_pause_ms", "blank_pause_ms", "bracket_pause_ms",
+                "sentence_pause_ms", "clause_pause_ms"):
+        if type(settings[key]) is not int or not 0 <= settings[key] <= 5000:
+            raise ValueError(f"Invalid chapter {key}")
     for key, low, high in (("target_lufs", -40, -10), ("true_peak_db", -9, 0)):
         value = settings[key]
         if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
@@ -121,6 +130,31 @@ def _timings(chapter):
         if (type(start) is not int or type(end) is not int
                 or not previous <= start <= end <= chapter["frames"]):
             raise ValueError("Cached chapter synchronization frame range is invalid")
+        if "source_audio_start_frame" in segment or "source_audio_end_frame" in segment:
+            audio_start, audio_end = (segment.get("source_audio_start_frame"),
+                                      segment.get("source_audio_end_frame"))
+            if (type(audio_start) is not int or type(audio_end) is not int
+                    or not 0 <= audio_start <= audio_end or audio_end - audio_start != end - start):
+                raise ValueError("Cached source audio synchronization frame range is invalid")
+        if "source_segments" in segment:
+            sources = segment["source_segments"]
+            if not isinstance(sources, list) or len(sources) < 2:
+                raise ValueError("Cached paragraph source segments are invalid")
+            for source in sources:
+                if (not isinstance(source, dict)
+                        or any(not isinstance(source.get(key), str) or not source[key]
+                               for key in ("chunk_id", "segment_id", "block_id", "voice_id", "role_id",
+                                           "spoken_text"))
+                        or type(source.get("spoken_start")) is not int
+                        or type(source.get("spoken_end")) is not int
+                        or not 0 <= source["spoken_start"] <= source["spoken_end"]
+                        or source["spoken_end"] - source["spoken_start"] != len(source["spoken_text"])
+                        or not isinstance(source.get("source_ranges"), list)
+                        or not source["source_ranges"]
+                        or any(not isinstance(span, dict) or type(span.get("start")) is not int
+                               or type(span.get("end")) is not int or not 0 <= span["start"] < span["end"]
+                               for span in source["source_ranges"])):
+                    raise ValueError("Cached paragraph source segments are invalid")
         if "speaker_lanes" in segment:
             lanes = segment["speaker_lanes"]
             if (not isinstance(lanes, list) or len(lanes) < 2
@@ -295,7 +329,9 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         composed = compose_chapter(
             clips, stage / "chapter.wav", sample_rate=settings["sample_rate"],
             paragraph_pause_ms=settings["paragraph_pause_ms"],
-            blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"])
+            blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
+            normalize_pauses=settings["normalize_pauses"],
+            sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"])
         composed.update(metadata)
         normalization = _normalize(stage / "chapter.wav", settings)
         encoded = None

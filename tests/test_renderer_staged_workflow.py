@@ -163,6 +163,19 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertFalse((self.root / "output").exists())
         self.assertEqual(self.package()["status"], "complete")
 
+    def test_changed_pacing_recomposes_without_tts_or_asr(self):
+        first = self.chapters()
+        before = {str(path): path.read_bytes()
+                  for path in (self.root / "work" / "clips").rglob("accepted.json")}
+        self.config["render"]["sentence_pause_ms"] += 20
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")):
+            second = self.chapters()
+        self.assertNotEqual(first["chapters"][0]["cache_directory"],
+                            second["chapters"][0]["cache_directory"])
+        self.assertEqual(before, {str(path): path.read_bytes()
+                                 for path in (self.root / "work" / "clips").rglob("accepted.json")})
+
     def test_assembly_rejects_changed_generation_or_normalization_settings(self):
         self.chapters()
         for section, name, value in (

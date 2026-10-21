@@ -171,6 +171,34 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertFalse((self.root / "voices").exists())
 
+    def test_pause_normalization_settings_have_defaults_and_strict_types(self):
+        settings = load_config(self.config)["render"]
+        self.assertIs(settings["normalize_pauses"], True)
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (220, 100))
+        before = self.config.read_text()
+        invalid = {
+            "paragraph_synthesis": ("1", '"true"'),
+            "max_paragraph_chars": ("319", "1501", "1000.0", "true"),
+            "normalize_pauses": ("1", '"true"'),
+            "sentence_pause_ms": ("-1", "5001", "220.0", "true", "nan"),
+            "clause_pause_ms": ("-1", "5001", "100.0", "false", "inf"),
+        }
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.config.write_text(before + f"[render]\n{key}={value}\n")
+                    with self.assertRaisesRegex(ValueError, key):
+                        load_config(self.config)
+        self.config.write_text(before + '[render]\nnormalize_pauses=false\n'
+                               'sentence_pause_ms=300\nclause_pause_ms=0\n')
+        settings = load_config(self.config)["render"]
+        self.assertIs(settings["normalize_pauses"], False)
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (300, 0))
+        # These controls also remain valid in the one shared global file when
+        # the analyzer reads it; no book-specific configuration is required.
+        from epub_audiobook.config import load_config as load_analyzer_config
+        load_analyzer_config(self.config)
+
     def test_config_paths_are_relative_to_file_not_cwd_or_environment(self):
         with patch.dict("os.environ", {"AUDIOBOOK_OUTPUT_DIR": "/wrong", "FISH_CHECKPOINT": "/wrong"}):
             config = load_config(self.config)

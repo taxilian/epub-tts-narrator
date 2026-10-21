@@ -25,6 +25,7 @@ import zipfile
 from epub_audiobook.epub import (
     MAX_ARCHIVE_BYTES, _Archive, _parse_xml, _resolve_href, _tag,
 )
+from .pacing import audio_edges, punctuation_pause
 
 
 def _hash(path: Path) -> str:
@@ -166,7 +167,9 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
 
 def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     sample_rate: int = 44100, paragraph_pause_ms: float = 250,
-                    blank_pause_ms: float = 500, bracket_pause_ms: float = 120) -> dict:
+                    blank_pause_ms: float = 500, bracket_pause_ms: float = 120,
+                    normalize_pauses: bool = True, sentence_pause_ms: float = 220,
+                    clause_pause_ms: float = 100) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for
@@ -177,11 +180,16 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     paragraph_frames = _pause_frames(paragraph_pause_ms, sample_rate)
     blank_frames = _pause_frames(blank_pause_ms, sample_rate)
     bracket_frames = _pause_frames(bracket_pause_ms, sample_rate)
+    sentence_frames = _pause_frames(sentence_pause_ms, sample_rate)
+    clause_frames = _pause_frames(clause_pause_ms, sample_rate)
+    if type(normalize_pauses) is not bool:
+        raise ValueError("normalize_pauses must be boolean")
     target = Path(output_wav)
     if target.exists() or target.is_symlink():
         raise ValueError(f"Output already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    timings, cursor, pending_pause = [], 0, 0
+    timings, cursor, pending_pause, previous_tail = [], 0, 0, 0
+    pending_punctuation = 0
     with tempfile.TemporaryDirectory(prefix=".compose-", dir=target.parent) as temporary:
         staged = Path(temporary) / "chapter.wav"
         with wave.open(str(staged), "wb") as destination:
@@ -220,25 +228,36 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                         and performance.get("enter") is True):
                     pause_before = max(pause_before, bracket_frames)
                 pending_pause = max(pending_pause, pause_before)
-                if clip.get("wav_path") is not None:
-                    silence(pending_pause)
-                    pending_pause = 0
-                first_frame = cursor
+                edges = None
                 if clip.get("wav_path") is not None:
                     source = Path(clip["wav_path"])
                     info = _wave_info(source, sample_rate)
                     if not info["frames"]:
                         raise ValueError(f"Verified clip has no audio frames: {source}")
+                    # Unison lanes retain their original common origin and timing.
+                    edges = (audio_edges(source, trim="speaker_lanes" not in clip)
+                             if normalize_pauses else
+                             dict(start=0, end=info["frames"], leading=0, trailing=0))
+                    silence(max(0, max(pending_pause, pending_punctuation)
+                                - previous_tail - edges["leading"]))
+                    pending_pause = 0
+                    pending_punctuation = 0
+                first_frame = cursor
+                if clip.get("wav_path") is not None:
                     count = 0
                     with wave.open(str(source), "rb") as audio:
-                        while chunk := audio.readframes(65536):
-                            if len(chunk) % 2:
+                        audio.setpos(edges["start"])
+                        remaining = edges["end"] - edges["start"]
+                        while remaining:
+                            requested = min(65536, remaining)
+                            chunk = audio.readframes(requested)
+                            if len(chunk) != requested * 2:
                                 raise ValueError(f"Truncated PCM frame: {source}")
                             destination.writeframesraw(chunk)
                             count += len(chunk) // 2
-                    if count != info["frames"]:
-                        raise ValueError(f"Truncated PCM audio: {source}")
+                            remaining -= requested
                     cursor += count
+                    previous_tail = edges["trailing"]
                 timing = {
                     "chunk_id": clip["chunk_id"], "segment_id": row["id"],
                     "block_id": row["block_id"], "voice_id": row.get("voice_id"),
@@ -250,6 +269,22 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     "chapter_start_frame": first_frame, "chapter_end_frame": cursor,
                     "no_speech": clip.get("wav_path") is None,
                 }
+                if edges is not None:
+                    timing.update(source_audio_start_frame=edges["start"],
+                                  source_audio_end_frame=edges["end"])
+                if "paragraph_turns" in clip:
+                    # A single continuous performance has paragraph timing. Do not
+                    # invent word/speaker timestamps from unreliable ASR alignment.
+                    timing["precision"] = "paragraph"
+                    timing["source_segments"] = [{
+                        "chunk_id": turn["chunk_id"], "segment_id": turn["segment"]["id"],
+                        "block_id": turn["segment"]["block_id"],
+                        "voice_id": turn["segment"]["voice_id"],
+                        "role_id": turn["segment"]["role_id"],
+                        "source_ranges": deepcopy(turn["source_ranges"]),
+                        "spoken_text": turn["spoken_text"],
+                        "spoken_start": turn["spoken_start"], "spoken_end": turn["spoken_end"],
+                    } for turn in clip["paragraph_turns"]]
                 if performance:
                     timing["performance"] = deepcopy(performance)
                 if row.get("simultaneous_speakers"):
@@ -270,6 +305,9 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                         chapter_end_frame=first_frame + lane["end_frame"]) for lane in lanes]
                     timing["mix"] = deepcopy(clip["mix"])
                 timings.append(timing)
+                if normalize_pauses:
+                    pending_punctuation = max(pending_punctuation, punctuation_pause(
+                        clip["spoken_text"], sentence_frames, clause_frames))
                 if end == len(spoken) and row.get("break_after") == "paragraph":
                     pending_pause = max(pending_pause, paragraph_frames)
                 if (end == len(spoken) and performance.get("kind") == "bracketed"
@@ -278,7 +316,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
             # Empty scripts deliberately remain frame-empty and are skipped
             # during packaging. A real chapter keeps its final paragraph pause.
             if cursor:
-                silence(pending_pause)
+                silence(max(0, pending_pause - previous_tail))
         try:
             target.hardlink_to(staged)
         except OSError as exc:

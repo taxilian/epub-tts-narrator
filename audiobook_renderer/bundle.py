@@ -135,7 +135,14 @@ def ranges(indices):
 
 
 def chunk_speakers(chunk):
-    """Return actual performers; simultaneous entries are never alternatives."""
+    """Return performers in order; simultaneous entries are never alternatives."""
+    if "paragraph_turns" in chunk:
+        speakers = []
+        for turn in chunk["paragraph_turns"]:
+            for speaker in chunk_speakers(turn):
+                if speaker not in speakers:
+                    speakers.append(speaker)
+        return speakers
     row = chunk["segment"]
     if "simultaneous_speakers" in row:
         speakers = row["simultaneous_speakers"]

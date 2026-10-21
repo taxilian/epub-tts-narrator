@@ -44,8 +44,10 @@ DEFAULTS = {
     "render": {
         "work_dir": None, "output_dir": None,
         "chapter_format": "m4a", "max_chunk_chars": 320, "max_attempts": 3,
+        "paragraph_synthesis": True, "max_paragraph_chars": 1000,
         "seed": 1729, "sample_rate": 44100, "paragraph_pause_ms": 250,
         "blank_pause_ms": 500, "bracket_pause_ms": 120, "allow_review": False, "chapter_numbers": [],
+        "normalize_pauses": True, "sentence_pause_ms": 220, "clause_pause_ms": 100,
         "normalize_loudness": True, "target_lufs": -20.0, "true_peak_db": -1.5,
         "aac_bitrate": "128k", "mp3_bitrate": "128k",
         "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "epub": None,
@@ -107,17 +109,23 @@ def load_config(path=None):
     render = result["render"]
     for key, low, high in (
         ("max_chunk_chars", 40, 1000), ("max_attempts", 1, 10),
+        ("max_paragraph_chars", 320, 1500),
         ("seed", 0, 2**32 - 1), ("sample_rate", 44100, 44100),
         ("paragraph_pause_ms", 0, 5000), ("blank_pause_ms", 0, 5000),
         ("bracket_pause_ms", 0, 5000),
+        ("sentence_pause_ms", 0, 5000), ("clause_pause_ms", 0, 5000),
     ):
         value = render[key]
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"Invalid render.{key}")
     if type(render["allow_review"]) is not bool:
         raise ValueError("render.allow_review must be boolean")
+    if type(render["paragraph_synthesis"]) is not bool:
+        raise ValueError("render.paragraph_synthesis must be boolean")
     if type(render["normalize_loudness"]) is not bool:
         raise ValueError("render.normalize_loudness must be boolean")
+    if type(render["normalize_pauses"]) is not bool:
+        raise ValueError("render.normalize_pauses must be boolean")
     for key, low, high in (("target_lufs", -40, -10), ("true_peak_db", -9, 0)):
         value = render[key]
         if (type(value) not in (int, float) or not math.isfinite(value)

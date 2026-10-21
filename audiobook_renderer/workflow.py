@@ -386,14 +386,44 @@ def _publish(stage, destination):
         reservation.rmdir()
 
 
-def _preflight(bundle, config, *, chapters_only=False):
+def make_render_plan(bundle, config, *, multi_speaker=True):
+    """Group new paragraphs while preserving legacy accepted chunk boundaries."""
+    plan = make_plan(bundle, config)
+    if not multi_speaker or not config["render"].get("paragraph_synthesis", True):
+        return plan
+    from .paragraphs import group_paragraphs
+    preserved, preserved_groups = set(), []
+    work = config["render"].get("work_dir")
+    if work:
+        for path in (Path(work) / "clips").glob("*/accepted.json"):
+            # A deleted WAV still preserves its request boundary: only that
+            # deliberately removed clip should need regeneration on resume.
+            record = read_json(regular_file(path))
+            if not isinstance(record, dict) or not isinstance(record.get("request"), dict):
+                raise RenderBlocked(f"Invalid accepted synthesis record: {path}")
+            request = record.get("request", {})
+            if request.get("kind") == "speech":
+                chunk = request.get("chunk", {})
+                if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str):
+                    preserved.add(chunk["chunk_id"])
+            elif request.get("kind") == "paragraph_speech":
+                chunk = request.get("chunk", {})
+                turns = chunk.get("paragraph_turns", []) if isinstance(chunk, dict) else []
+                if isinstance(turns, list) and len(turns) >= 2 and all(isinstance(turn, dict)
+                        and isinstance(turn.get("chunk_id"), str) for turn in turns):
+                    preserved_groups.append([turn["chunk_id"] for turn in turns])
+    return group_paragraphs(plan, max_chars=config["render"].get("max_paragraph_chars", 1000),
+                           preserved_chunk_ids=preserved, preserved_groups=preserved_groups)
+
+
+def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True):
     from .book_context import resolve_book_config, voice_store
     _check_analysis_update(bundle)
     try:
         config = resolve_book_config(bundle, config)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
-    plan = make_plan(bundle, config)
+    plan = make_render_plan(bundle, config, multi_speaker=multi_speaker)
     if plan["errors"]:
         raise RenderBlocked("\n".join(plan["errors"]))
     output = Path(config["render"]["output_dir"])
@@ -441,6 +471,14 @@ def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
     if performer is not None:
         request["performer"] = dict(performer)
     return request
+
+
+def _paragraph_request(chunk, voices, engine_identity, config):
+    return {"kind": "paragraph_speech", "version": 1, "engine": engine_identity,
+            "chunk": chunk, "base_seed": config["render"]["seed"],
+            "sample_rate": config["render"]["sample_rate"],
+            "voice_assets": {speaker["voice_id"]: voices[speaker["voice_id"]]["asset_hash"]
+                             for speaker in chunk_speakers(chunk)}}
 
 
 def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity):
@@ -568,7 +606,11 @@ def _restore_chapter(work, chapter, record, context, voices, config):
                     or accepted["audio_sha256"] != cached["audio_sha256"]):
                 raise ValueError("Chapter verification does not match the current plan")
             speakers = chunk_speakers(chunk)
-            if len(speakers) > 1:
+            if "paragraph_turns" in chunk:
+                request = _paragraph_request(chunk, voices, context["engine"], config)
+                if accepted["request_hash"] != digest(request):
+                    raise ValueError("Paragraph verification does not match its source or voices")
+            elif len(speakers) > 1:
                 lanes, mix = accepted.get("speaker_lanes"), accepted.get("mix")
                 if (not isinstance(lanes, list) or len(lanes) != len(speakers)
                         or not isinstance(mix, dict)
@@ -693,7 +735,9 @@ def _failed_run(work, exc, notify):
 
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
-    config, plan, store = _preflight(bundle, config, chapters_only=chapters_only)
+    config, plan, store = _preflight(
+        bundle, config, chapters_only=chapters_only,
+        multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False))
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
     book_lock = None
@@ -737,6 +781,26 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                 for number, chunk in enumerate(chapter["chunks"], 1):
                     if chunk["silent_control"]:
                         clips.append(dict(chunk, wav_path=None))
+                        continue
+                    if "paragraph_turns" in chunk:
+                        request = _paragraph_request(chunk, voices, engine_identity, config)
+                        directory = work / "clips" / digest(request)
+                        turns = [{"text": turn["spoken_text"],
+                                  "voice": voices[turn["segment"]["voice_id"]],
+                                  "direction": turn["segment"].get("delivery", {}).get("direction", "")}
+                                 for turn in chunk["paragraph_turns"]]
+                        cached = (directory / "accepted.json").is_file()
+                        notify(f"  Chunk {number}/{len(chapter['chunks'])}: "
+                               f"{'checking saved paragraph' if cached else 'generating paragraph'} "
+                               f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
+                        wav, accepted = verified_take(
+                            chunk["spoken_text"],
+                            lambda path, seed, t=turns: engine.synthesize_dialogue(t, path, seed=seed),
+                            directory, request, verifier, config, notify=notify)
+                        chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
+                            **{key: accepted[key] for key in
+                               ("audio_sha256", "request_hash", "validation_key", "report")}))
+                        clips.append(dict(chunk, wav_path=str(wav)))
                         continue
                     direction = chunk["segment"].get("delivery", {}).get("direction", "")
                     speakers = chunk_speakers(chunk)

@@ -2,6 +2,7 @@
 
 from array import array
 from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import tempfile
@@ -17,6 +18,12 @@ from audiobook_renderer.voices import VoiceStore
 class FakeEntryPoints(list):
     def select(self, *, name):
         return [entry for entry in self if entry.name == name]
+
+
+@dataclass
+class FakeReference:
+    text: str
+    codes: object
 
 
 class RendererEngineTests(unittest.TestCase):
@@ -111,6 +118,127 @@ class RendererEngineTests(unittest.TestCase):
         self.assertEqual(kwargs["attempts"], 1)
         self.assertTrue(kwargs["single_chunk"])
         self.assertNotIn("accept", kwargs)
+
+    def dialogue_voice(self, name):
+        return {
+            "kind": "reference", "voice_id": name, "asset_hash": name,
+            "reference_audio": str(self.root / f"{name}.wav"),
+            "reference_sha256": name, "reference_text": f"Reference words for {name}.",
+        }
+
+    def test_dialogue_assigns_reused_voices_and_keeps_reference_cache_unchanged(self):
+        narrator = self.dialogue_voice("narrator")
+        character = self.dialogue_voice("character")
+        alias = {**narrator, "voice_id": "narrator-alias"}
+        cached = {
+            "narrator": FakeReference(narrator["reference_text"], object()),
+            "character": FakeReference(character["reference_text"], object()),
+        }
+        turns = [
+            {"text": "She leaned closer.", "voice": narrator},
+            {"text": "Listen to me.", "voice": character, "direction": "whispering"},
+            {"text": "Then she smiled.", "voice": alias, "direction": "warmly"},
+        ]
+        before = deepcopy(turns)
+        engine_text = (
+            "<|speaker:0|> She leaned closer.\n"
+            "<|speaker:1|> <whisper>Listen to me.</whisper>\n"
+            "<|speaker:0|> Then she smiled."
+        )
+        self.generate(self.segment(text=engine_text))
+        with patch.object(self.engine, "_reference", side_effect=lambda v: cached[v["asset_hash"]]) as reference:
+            result = self.engine.synthesize_dialogue(turns, self.output, seed=31)
+        self.assertEqual(reference.call_count, 2)
+        args, kwargs = self.model.generate.call_args
+        self.assertEqual(args, (engine_text,))
+        self.assertEqual(kwargs["seed"], 31)
+        self.assertEqual(kwargs["attempts"], 1)
+        self.assertTrue(kwargs["single_chunk"])
+        for i, name in enumerate(("narrator", "character")):
+            tagged = kwargs["references"][i]
+            self.assertIsNot(tagged, cached[name])
+            self.assertIs(tagged.codes, cached[name].codes)
+            self.assertEqual(tagged.text, f"<|speaker:{i}|> {cached[name].text}")
+            self.assertEqual(cached[name].text, f"Reference words for {name}.")
+        self.assertEqual(turns, before)
+        self.assertEqual((result["speaker_count"], result["turn_count"]), (2, 3))
+        self.assertEqual(result["speaker_mapping"], [
+            {"speaker_id": 0, "voice_id": "narrator", "asset_hash": "narrator"},
+            {"speaker_id": 1, "voice_id": "character", "asset_hash": "character"},
+        ])
+        self.assertTrue(result["turn_directions"][1]["direction_applied"])
+        self.assertFalse(result["turn_directions"][2]["direction_applied"])
+        self.assertTrue(self.engine.capabilities["multi_speaker"])
+        self.assertEqual(self.output.read_bytes(), b"wave")
+
+    def test_dialogue_validates_all_turns_and_speaker_limit_before_loading(self):
+        valid = {"text": "Hello.", "voice": self.dialogue_voice("narrator")}
+        cases = [[], None, [valid, {}], [valid, {**valid, "text": "<|speaker:3|> Bad."}],
+                 [valid, {**valid, "text": "A [Fireball]."}],
+                 [valid, {**valid, "direction": "<whisper>"}],
+                 [valid, {**valid, "voice": {"kind": "preset"}}],
+                 [valid, {**valid, "voice": {**valid["voice"], "reference_text": "[fake]"}}],
+                 [{**valid, "text": "<|speaker:"}, {**valid, "text": "3|> Bad."}],
+                 [{"text": "Hello.", "voice": self.dialogue_voice(str(i))} for i in range(17)]]
+        with patch.object(self.engine, "_reference") as reference, patch.object(self.engine, "_load") as load:
+            for turns in cases:
+                with self.subTest(turns=turns), self.assertRaises(EngineError):
+                    self.engine.synthesize_dialogue(turns, self.output, seed=1)
+            with self.assertRaisesRegex(EngineError, "seed"):
+                self.engine.synthesize_dialogue([valid], self.output, seed=-1)
+        reference.assert_not_called()
+        load.assert_not_called()
+        self.model.generate.assert_not_called()
+
+    def test_dialogue_combines_adjacent_same_voice_and_applied_direction_without_text_changes(self):
+        narrator = self.dialogue_voice("narrator")
+        character = self.dialogue_voice("character")
+        turns = [
+            {"text": "He looked ", "voice": narrator},
+            {"text": "back. ", "voice": narrator, "direction": "warmly"},
+            {"text": "Hello.", "voice": character},
+            {"text": "Stay ", "voice": character, "direction": "whisper"},
+            {"text": "here.", "voice": character, "direction": "whispering"},
+        ]
+        expected = (
+            "<|speaker:0|> He looked back. \n"
+            "<|speaker:1|> Hello.\n"
+            "<|speaker:1|> <whisper>Stay here.</whisper>"
+        )
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", side_effect=lambda voice: FakeReference(
+            voice["reference_text"], object(),
+        )):
+            result = self.engine.synthesize_dialogue(turns, self.output, seed=31)
+        self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(result["turn_count"], 5)
+        self.assertEqual(result["rendered_turn_count"], 3)
+        self.assertEqual(len(result["turn_directions"]), 5)
+        self.assertEqual(result["turn_directions"][1]["direction"], "warmly")
+        self.assertFalse(result["turn_directions"][1]["direction_applied"])
+        self.assertEqual(result["turn_directions"][4]["direction"], "whispering")
+        self.assertTrue(result["turn_directions"][4]["direction_applied"])
+
+    def test_dialogue_retains_failure_and_exclusive_publication_contract(self):
+        voice = self.dialogue_voice("narrator")
+        turns = [{"text": "Hello.", "voice": voice}]
+        cached = FakeReference(voice["reference_text"], object())
+        for segments in ([], [self.segment(text="<|speaker:0|> Hello.", finish="length")],
+                         [self.segment(text="Wrong text")],
+                         [self.segment(text="<|speaker:0|> Hello.")] * 2):
+            self.generate(*segments)
+            with patch.object(self.engine, "_reference", return_value=cached), self.assertRaises(EngineError):
+                self.engine.synthesize_dialogue(turns, self.output, seed=1)
+            self.assertFalse(self.output.exists())
+        self.model.generate.side_effect = ValueError("prompt rows plus output exceed model context")
+        with patch.object(self.engine, "_reference", return_value=cached), self.assertRaisesRegex(EngineError, "model context"):
+            self.engine.synthesize_dialogue(turns, self.output, seed=1)
+        self.assertFalse(self.output.exists())
+        self.output.write_bytes(b"accepted recording")
+        with patch.object(self.engine, "_reference") as reference, self.assertRaisesRegex(EngineError, "already exists"):
+            self.engine.synthesize_dialogue(turns, self.output, seed=1)
+        reference.assert_not_called()
+        self.assertEqual(self.output.read_bytes(), b"accepted recording")
 
     def test_never_publishes_truncated_empty_multi_or_changed_text(self):
         cases = [
@@ -344,6 +472,8 @@ class RendererEngineTests(unittest.TestCase):
             self.plugin(capabilities={"reference_voice": "yes"}),
             self.plugin(create_voice=None),
             self.plugin(synthesize="not a method"),
+            self.plugin(capabilities={**self.plugin().capabilities, "multi_speaker": "yes"}),
+            self.plugin(capabilities={**self.plugin().capabilities, "multi_speaker": True}),
         ]
         for plugin in malformed:
             entry = self.entry(plugin)
