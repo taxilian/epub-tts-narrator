@@ -16,8 +16,11 @@ from .common import digest, file_hash, read_json
 
 
 _HASH = re.compile(r"[0-9a-f]{64}")
-_RAW = re.compile(r"attempt-(\d{3})-(?:raw|recovery-raw|regenerated-[0-9a-f]{16})\.wav")
-_ATTEMPT = re.compile(r"attempt-(\d{3})\.(?:wav|json)")
+# Per-run retry limits do not limit cumulative take IDs. Keep canonical
+# minimum-three-digit names, including attempts beyond 999, recognizable.
+_ATTEMPT_NUMBER = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})"
+_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
+_ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})\.(?:wav|json)")
 _SPEECH = {"speech", "paragraph_speech"}
 _STORES = ("clips", "chapters", "mixes", "completed-chapters")
 
@@ -110,7 +113,7 @@ def _request(record, path):
 
 def _normalized(record, directory, plan, *, request_hash, attempt=None):
     number = record.get("attempt")
-    if (type(number) is not int or not 1 <= number <= 10
+    if (type(number) is not int or number < 1
             or attempt is not None and number != attempt
             or record.get("request_hash") != request_hash
             or record.get("audio_file") != f"attempt-{number:03d}.wav"
@@ -174,6 +177,60 @@ def clean_take_intermediates(directory, *, dry_run=False):
     plan = _Plan(directory)
     _take(directory, plan)
     return plan.finish(dry_run=dry_run)
+
+
+def discard_interrupted_raw(directory):
+    """Discard unfinished raw speech before a replacement generation starts.
+
+    The caller must identify this as a speech directory and hold its take/work
+    locks. Known reference metadata opts the entire directory out. Normalized
+    candidates, successful verification records, and unknown files are retained;
+    no recognized unsafe file is followed or removed.
+    """
+    directory = Path(directory)
+    _directory(directory)
+    plan = _Plan(directory)
+    protected = set()
+    accepted_path = directory / "accepted.json"
+    if _exists(accepted_path):
+        accepted = _json(accepted_path)
+        plan.check_file(accepted_path)
+        if _request(accepted, accepted_path).get("kind") not in _SPEECH:
+            return 0
+        if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
+            number = accepted.get("attempt")
+            if type(number) is not int or number < 1:
+                raise ValueError(f"Cleanup found an invalid accepted attempt: {accepted_path}")
+            protected.add(number)
+    paths = sorted(directory.iterdir())
+    for metadata in paths:
+        match = _ATTEMPT.fullmatch(metadata.name)
+        if match is None or metadata.suffix != ".json":
+            continue
+        record = _json(metadata)
+        plan.check_file(metadata)
+        if _request(record, metadata).get("kind") not in _SPEECH:
+            return 0
+        number = int(match[1])
+        if type(record.get("attempt")) is not int or record["attempt"] != number:
+            raise ValueError(f"Cleanup found mismatched attempt metadata: {metadata}")
+        if not isinstance(record.get("report"), dict):
+            raise ValueError(f"Cleanup found invalid verification metadata: {metadata}")
+        if record["report"].get("passed") is True:
+            protected.add(number)
+    for raw in paths:
+        match = _RAW.fullmatch(raw.name)
+        if match is None:
+            continue
+        _file(raw)
+        number = int(match[1])
+        normalized = directory / f"attempt-{number:03d}.wav"
+        if _exists(normalized):
+            plan.check_file(normalized)
+            continue
+        if number not in protected:
+            plan.remove_file(raw, "interrupted_speech")
+    return plan.finish(dry_run=False)["files_removed"]
 
 
 def _signed(path, expected_format, plan):

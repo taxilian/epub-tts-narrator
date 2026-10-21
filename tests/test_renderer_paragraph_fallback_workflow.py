@@ -131,7 +131,7 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assert_snapshot_unchanged(before)
         self.assert_individual_plan(original)
 
-    def test_failed_individual_child_stops_without_recursive_recovery_or_attempt_reset(self):
+    def test_failed_individual_child_gets_fresh_attempts_only_in_next_render_invocation(self):
         original = deepcopy(self.target())
         child_text = original["paragraph_turns"][0]["spoken_text"]
         self.verifier.wrong_texts.update({original["spoken_text"], child_text})
@@ -145,7 +145,17 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         with self.assertRaisesRegex(RenderBlocked, "after 2 attempts"):
             self.chapters()
-        self.assertEqual(counts, (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls)))
+        self.assertEqual(counts[0], len(self.engine.dialogue_calls))
+        self.assertEqual(counts[1] + 2, len(self.engine.speech_calls))
+        self.assertEqual(counts[2] + 2, len(self.verifier.calls))
+        child_calls = [call for call in self.engine.speech_calls if call["text"] == child_text]
+        self.assertEqual(len(child_calls), 4)
+        self.assertEqual(len({call["seed"] for call in child_calls}), 4)
+        self.assert_snapshot_unchanged(before)
+        self.verifier.wrong_texts.remove(child_text)
+        self.assertEqual(self.chapters()["status"], "chapters_complete")
+        self.assertEqual(len(self.target_calls()), 2)  # never retry the failed full paragraph
+        self.assertEqual(sum(call["text"] == child_text for call in self.engine.speech_calls), 5)
         self.assert_snapshot_unchanged(before)
 
     def test_recast_failed_paragraph_overrides_old_group_boundary_without_touching_old_audio(self):

@@ -221,10 +221,15 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertTrue(all(read_json(path)["report"]["passed"] is False for path in attempts))
         self.assertFalse(list((work / "clips").glob("*/accepted.json")))
-        # Resume does not reset the bounded attempt budget or conceal failures.
+        # Each command gets a bounded fresh retry budget; failed takes stay saved.
+        original_attempts = {path: path.read_bytes() for path in attempts}
         with self.assertRaises(RenderBlocked):
             self.run_render()
-        self.assertEqual(len(self.engine.speech_calls), 2)
+        self.assertEqual(len(self.engine.speech_calls), 4)
+        self.assertEqual(len(list((work / "clips").glob("*/attempt-*.json"))), 4)
+        self.assertEqual(len({call["seed"] for call in self.engine.speech_calls}), 4)
+        for path, contents in original_attempts.items():
+            self.assertEqual(path.read_bytes(), contents)
 
     def test_interrupted_render_resumes_accepted_chunks_and_voice_assets(self):
         self.engine.interrupt_speech_number = 3

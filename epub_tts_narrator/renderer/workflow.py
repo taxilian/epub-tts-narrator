@@ -21,6 +21,7 @@ from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
 from .quality import validation_key as make_validation_key, validate_audio
 from .progress import ChapterProgress, format_duration, set_phase
+from .retry_budget import SpeechRetryBudget, generation_attempts
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
 
@@ -154,16 +155,23 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
 
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
-                  purpose="speech", resume_attempt=None):
+                  purpose="speech", resume_attempt=None, retry_budget=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new or unsuccessful candidates. An existing
     successful verification remains provenance for the exact accepted bytes;
     changing recognizers or policy does not revoke that acceptance.
+    Individual speech gets a fresh bounded generation allowance per explicit
+    render invocation, separate from cumulative saved take numbers. Paragraphs
+    keep their original allowance when a splitting recovery loop is available.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
+    fresh_speech = (retry_budget is not None and purpose == "speech"
+                    and (request.get("kind") == "speech"
+                         or (request.get("kind") == "paragraph_speech" and retry_budget.retry_paragraphs)))
+    request_hash = digest(request)
     set_phase(notify, "checking saved audio")
 
     def finish(wav, record):
@@ -221,7 +229,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
         if not wav.exists() and not wav.is_symlink():
             missing_accepted_attempt = accepted.get("attempt")
-            if (type(missing_accepted_attempt) is not int or not 1 <= missing_accepted_attempt <= 10
+            if (type(missing_accepted_attempt) is not int or missing_accepted_attempt < 1
+                    or (purpose != "speech" and missing_accepted_attempt > 10)
                     or name != f"attempt-{missing_accepted_attempt:03d}.wav"):
                 raise RenderBlocked("Invalid cached attempt for missing accepted audio")
             notify("  Saved accepted audio was removed; generating a replacement.")
@@ -252,12 +261,23 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     secrets = configured_secrets(config)
     last_report = None
     first_attempt = missing_accepted_attempt or resume_attempt or 1
-    for attempt in range(first_attempt, max(attempts, first_attempt) + 1):
+    if fresh_speech:
+        saved_attempts = generation_attempts(directory)
+        if missing_accepted_attempt is not None and missing_accepted_attempt not in saved_attempts:
+            saved_attempts = sorted([*saved_attempts, missing_accepted_attempt])
+        next_attempt = max(saved_attempts, default=0) + 1
+        attempt_numbers = ([number for number in saved_attempts if number >= first_attempt]
+                           + list(range(next_attempt, next_attempt + attempts)))
+    else:
+        saved_attempts = []
+        attempt_numbers = range(first_attempt, max(attempts, first_attempt) + 1)
+    for attempt in attempt_numbers:
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
         result_path = directory / (prefix + ".json")
         seed = _seed(config["render"]["seed"], request, attempt)
         report = None
+        generation_ordinal = None
         metadata = {}
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
@@ -268,6 +288,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             previous = read_json(result_path)
             if previous.get("request_hash") != digest(request):
                 raise RenderBlocked("Attempt belongs to a different synthesis request")
+            if (fresh_speech and not wav.exists() and attempt != missing_accepted_attempt
+                    and not previous.get("report", {}).get("passed")):
+                # No waveform exists to recheck, even if verification settings
+                # changed. Preserve the failed request and append a new take.
+                last_report = previous.get("report", {})
+                continue
             if (previous.get("validation_key") == validation_key
                     and not previous.get("report", {}).get("passed")
                     and not pending_confirmation(previous.get("report", {}))
@@ -275,6 +301,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 last_report = previous.get("report", {})
                 continue
             metadata = previous.get("engine_metadata", {})
+        if (fresh_speech and attempt in saved_attempts and not wav.exists()
+                and attempt != missing_accepted_attempt):
+            # Interrupted raw-only takes reserve their IDs but cannot be
+            # verified. Append a new seed rather than recycling an orphan.
+            continue
         try:
             if (elevenlabs and attempt != missing_accepted_attempt
                     and (generation_path.exists() or generation_path.is_symlink())):
@@ -310,8 +341,32 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
+                    if fresh_speech:
+                        generation_ordinal = retry_budget.claim(directory, request_hash, attempts)
+                        if generation_ordinal is None:
+                            break
+                        # Reserve this take before discarding abandoned raw
+                        # audio. Even an interruption before the engine writes
+                        # anything must retain the cumulative ID and seed.
+                        if attempt != missing_accepted_attempt:
+                            write_json(result_path, {
+                                "request_hash": request_hash, "request": request,
+                                "attempt": attempt, "seed": seed, "validation_key": validation_key,
+                                "report": {"passed": False, "reasons": ["generation_incomplete"],
+                                           "retry_on_resume": True},
+                                "engine_metadata": {}, "audio_file": None, "audio_sha256": None,
+                            })
+                        from .cleanup import discard_interrupted_raw
+                        try:
+                            discard_interrupted_raw(directory)
+                        except (ValueError, OSError) as exc:
+                            raise RenderBlocked(f"Could not remove interrupted raw speech: {exc}") from exc
+                        if generation_ordinal == 1 and saved_attempts and missing_accepted_attempt is None:
+                            notify(f"  Retrying failed speech with up to {attempts} new attempts; "
+                                   "previous rejection reports retained.")
                     kind = "paragraph" if request.get("kind") == "paragraph_speech" else "speech"
-                    set_phase(notify, f"generating {kind}, attempt {attempt}/{attempts}", generated=True)
+                    current_attempt = generation_ordinal if fresh_speech else attempt
+                    set_phase(notify, f"generating {kind}, attempt {current_attempt}/{attempts}", generated=True)
                     metadata = generate(raw, seed)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
@@ -325,7 +380,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 if generation is not None:
                     generation["normalized_sha256"] = file_hash(regular_file(wav))
                     _save_elevenlabs_generation(generation_path, generation)
-            set_phase(notify, f"verifying speech, attempt {attempt}/{attempts}")
+            if fresh_speech and generation_ordinal is None:
+                set_phase(notify, f"verifying saved take {attempt}")
+            else:
+                current_attempt = generation_ordinal if fresh_speech else attempt
+                set_phase(notify, f"verifying speech, attempt {current_attempt}/{attempts}")
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
         except RenderBlocked:
             raise
@@ -363,8 +422,19 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             raise RenderBlocked(report["provider_error"] if "provider_error" in report else report["error"])
         detail = _verification_failure_detail(report)
         suffix = f" ({detail})" if detail else ""
-        notify(f"  Attempt {attempt}/{attempts} rejected: {', '.join(report.get('reasons', []))}{suffix}")
-    failure = f"Speech verification failed after {attempts} attempts. Inspect {directory}"
+        if fresh_speech:
+            label = (f"Saved take {attempt}" if generation_ordinal is None
+                     else f"Attempt {generation_ordinal}/{attempts}")
+            if generation_ordinal is not None and attempt != generation_ordinal:
+                label += f" (saved take {attempt})"
+        else:
+            label = f"Attempt {attempt}/{attempts}"
+        notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
+    if fresh_speech:
+        used = retry_budget.started(directory, request_hash)
+        failure = f"Speech verification failed after {used} attempts in this run. Inspect {directory}"
+    else:
+        failure = f"Speech verification failed after {attempts} attempts. Inspect {directory}"
     error = (last_report or {}).get("provider_error") or (last_report or {}).get("error")
     if error:
         failure += "\nLast error: " + safe_error_text(error, secrets=secrets)
@@ -892,7 +962,7 @@ def _failed_run(work, exc, notify):
 
 
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
-                  config, work, take_locks, take_locks_guard, *, notify):
+                  config, work, take_locks, take_locks_guard, *, notify, retry_budget=None):
     """Render one complete performance; publication and ordering stay upstream."""
     if chunk["silent_control"]:
         return dict(chunk, wav_path=None), None
@@ -904,7 +974,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         # Duplicate logical jobs must never race over the same attempt files.
         with lock:
             return verified_take(text, generate, work / "clips" / key, request,
-                                 verifier, config, notify=notify)
+                                 verifier, config, notify=notify, retry_budget=retry_budget)
 
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
@@ -914,7 +984,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                  for turn in chunk["paragraph_turns"]]
         cached = (directory / "accepted.json").is_file()
         notify(f"  Chunk {number}/{total}: "
-               f"{'checking saved paragraph' if cached else 'generating paragraph'} "
+               f"{'checking saved paragraph' if cached else 'preparing paragraph'} "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request)
@@ -933,7 +1003,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         cached = (directory / "accepted.json").is_file()
         lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
         notify(f"  Chunk {number}/{total}{lane_label}: "
-               f"{'checking saved take' if cached else 'generating speech'} ({speaker['voice_id']})")
+               f"{'checking saved take' if cached else 'preparing speech'} ({speaker['voice_id']})")
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed, v=voice: engine.synthesize(
                 chunk["spoken_text"], v, path, seed=seed, direction=direction), request)
@@ -956,10 +1026,17 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
 
 def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, config, work, *, notify,
-                           total_chapters=None):
+                           total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
-    take_locks, take_locks_guard = {}, Lock()
+    if retry_budget is None:
+        # Standalone chapter workers have no paragraph-splitting recovery loop.
+        # Their explicit reruns need a fresh allowance for paragraphs too.
+        retry_budget = SpeechRetryBudget(retry_paragraphs=True)
+    if (take_locks is None) != (take_locks_guard is None):
+        raise ValueError("Shared take locks require both the mapping and its guard")
+    if take_locks is None:
+        take_locks, take_locks_guard = {}, Lock()
     parallel = getattr(engine, "max_inflight", getattr(engine, "max_parallel", 1))
     if type(parallel) is not int or parallel < 1:
         raise RenderBlocked("Render worker concurrency must be a positive integer")
@@ -970,7 +1047,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             with progress.task(index) as task_notify:
                 return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
                                      engine_identity, verifier, config, work, take_locks,
-                                     take_locks_guard, notify=task_notify)
+                                     take_locks_guard, notify=task_notify, retry_budget=retry_budget)
 
         if parallel == 1:
             results = [run(index) for index in range(len(chunks))]
@@ -1002,10 +1079,12 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
 
 
 def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
-                                verifier, config, work, *, notify):
+                                verifier, config, work, *, notify, retry_budget=None):
     """Split only exhausted paragraph performances, retaining verified work."""
     from .paragraph_recovery import record_paragraph_fallback
 
+    if retry_budget is None:
+        retry_budget = SpeechRetryBudget()
     recoverable = {"text_mismatch", "audio_too_short", "audio_too_long", "silent_audio",
                    "audio_too_quiet", "excessive_silence", "internal_silence_stall",
                    "excessive_clipping"}
@@ -1013,7 +1092,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
         try:
             clips, acceptance = _render_chapter_chunks(
                 chapter, voices, engine, engine_identity, verifier, config, work,
-                notify=notify, total_chapters=len(bundle["chapters"]))
+                notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
             request, report = exc.request, exc.report
@@ -1046,6 +1125,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
     run_started = monotonic()
+    retry_budget = SpeechRetryBudget()
     wrap_verifier = getattr(engine, "wrap_verifier", None)
     if callable(wrap_verifier):
         verifier = wrap_verifier(verifier)
@@ -1095,7 +1175,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                 notify(f"Rendering {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                     bundle, chapter, voices, engine, engine_identity, verifier, config, work,
-                    notify=notify)
+                    notify=notify, retry_budget=retry_budget)
                 if chapter != plan["chapters"][chapter_index]:
                     plan["chapters"][chapter_index] = chapter
                     write_json(work / "runs" / digest(plan) / "plan.json", plan)

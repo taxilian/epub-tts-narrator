@@ -5,7 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_tts_narrator.renderer.cleanup import clean_take_intermediates, cleanup_work
+from epub_tts_narrator.renderer.cleanup import (
+    clean_take_intermediates, cleanup_work, discard_interrupted_raw,
+)
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 
 
@@ -86,6 +88,119 @@ class CleanupTests(unittest.TestCase):
         (directory / "attempt-001.json").unlink()
         self.assertEqual(clean_take_intermediates(directory)["files_removed"], 1)
         self.assertTrue((directory / "accepted.json").is_file())
+
+    def test_cumulative_attempts_beyond_per_run_limit_remain_resumable_after_cleanup(self):
+        directory, _ = self.take(number=1000)
+        self.take(number=11, accepted=False)
+        self.take(number=999, accepted=False)
+        protected = {path.name: path.read_bytes() for path in directory.iterdir()
+                     if not path.name.endswith("-raw.wav")}
+        self.assertEqual(clean_take_intermediates(directory)["files_removed"], 3)
+        self.assertEqual(protected, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
+
+    def test_discard_recognizes_high_attempts_but_rejects_noncanonical_names(self):
+        directory, _ = self.take(number=1000)
+        self.take(number=11, accepted=False)
+        unknown = directory / "attempt-0011-raw.wav"
+        unknown.write_bytes(b"not a canonical owned filename")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "unrecognized"):
+            cleanup_work(self.work, discard_render_cache=True)
+        self.assertEqual(before, self.snapshot())
+        unknown.unlink()
+        self.assertEqual(cleanup_work(self.work, discard_render_cache=True)["files_removed"], 7)
+        self.assertFalse(directory.exists())
+
+    def test_interrupted_raw_cleanup_keeps_normalized_takes_records_and_unknown_files(self):
+        directory, failed = self.take(number=2, accepted=False)
+        self.take(number=3)
+        names = ["attempt-001-raw.wav", "attempt-001-recovery-raw.wav",
+                 "attempt-1000-regenerated-0123456789abcdef.wav"]
+        for name in names:
+            (directory / name).write_bytes(b"interrupted synthesis")
+        for name in ("attempt-001-generation.json", "attempt-0001-raw.wav", "debug.wav"):
+            (directory / name).write_bytes(b"preserve unknown file")
+        before = self.snapshot()
+        self.assertEqual(discard_interrupted_raw(directory), 3)
+        self.assertEqual(self.snapshot(), {name: data for name, data in before.items()
+                                          if Path(name).name not in names})
+        self.assertEqual(discard_interrupted_raw(directory), 0)
+        self.assertEqual(file_hash(directory / failed["audio_file"]), failed["audio_sha256"])
+
+    def test_interrupted_raw_cleanup_keeps_failure_json_when_no_normalized_audio_exists(self):
+        directory, failure = self.take(number=1000, accepted=False)
+        (directory / failure["audio_file"]).unlink()
+        record_path = directory / "attempt-1000.json"
+        record_bytes = record_path.read_bytes()
+        self.assertEqual(discard_interrupted_raw(directory), 1)
+        self.assertEqual(record_path.read_bytes(), record_bytes)
+
+    def test_interrupted_raw_cleanup_preserves_success_even_if_normalized_audio_was_removed(self):
+        directory, accepted = self.take(number=1000)
+        (directory / accepted["audio_file"]).unlink()
+        (directory / "attempt-001-raw.wav").write_bytes(b"unfinished")
+        self.assertEqual(discard_interrupted_raw(directory), 1)
+        self.assertTrue((directory / "attempt-1000-raw.wav").is_file())
+        # Either durable successful record is enough to protect its raw audio.
+        for removed in ("accepted.json", "attempt-1000.json"):
+            path = directory / removed
+            contents = path.read_bytes()
+            path.unlink()
+            self.assertEqual(discard_interrupted_raw(directory), 0)
+            self.assertTrue((directory / "attempt-1000-raw.wav").is_file())
+            path.write_bytes(contents)
+
+    def test_interrupted_raw_cleanup_excludes_reference_directory_from_any_known_record(self):
+        for accepted in (False, True):
+            directory, _ = self.take(kind="create_voice", accepted=accepted)
+            (directory / "attempt-1000-raw.wav").write_bytes(b"unfinished reference")
+            before = self.snapshot()
+            self.assertEqual(discard_interrupted_raw(directory), 0)
+            self.assertEqual(self.snapshot(), before)
+
+    def test_interrupted_raw_cleanup_preflights_unsafe_files_before_any_deletion(self):
+        directory, _ = self.take(accepted=False)
+        orphan = directory / "attempt-002-raw.wav"
+        orphan.write_bytes(b"safe but must survive failed preflight")
+        unsafe = directory / "attempt-999-raw.wav"
+        target = self.work / "outside.wav"
+        target.write_bytes(b"never delete")
+        unsafe.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "nonregular files or symlinks"):
+            discard_interrupted_raw(directory)
+        self.assertTrue(orphan.is_file())
+        self.assertTrue(unsafe.is_symlink())
+        self.assertEqual(target.read_bytes(), b"never delete")
+        unsafe.unlink()
+        unsafe.mkdir()
+        with self.assertRaisesRegex(ValueError, "nonregular files or symlinks"):
+            discard_interrupted_raw(directory)
+        self.assertTrue(orphan.is_file())
+
+    def test_interrupted_raw_cleanup_preserves_everything_when_metadata_is_corrupt(self):
+        directory, _ = self.take(accepted=False)
+        (directory / "attempt-002-raw.wav").write_bytes(b"unfinished")
+        (directory / "attempt-003.json").write_text("{}")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "request metadata"):
+            discard_interrupted_raw(directory)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_interrupted_raw_cleanup_rejects_symlinked_normalized_audio_before_deletion(self):
+        directory, failure = self.take(accepted=False)
+        orphan = directory / "attempt-002-raw.wav"
+        orphan.write_bytes(b"unfinished")
+        normalized = directory / failure["audio_file"]
+        contents = normalized.read_bytes()
+        target = self.work / "outside.wav"
+        target.write_bytes(contents)
+        normalized.unlink()
+        normalized.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "nonregular files or symlinks"):
+            discard_interrupted_raw(directory)
+        self.assertTrue(orphan.is_file())
+        self.assertEqual(target.read_bytes(), contents)
 
     def test_dry_run_is_exact_preview_and_repeat_is_noop(self):
         directory, _ = self.take()
