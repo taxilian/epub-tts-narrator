@@ -17,10 +17,17 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v2
+VOICE PROFILE CONTRACT v3
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
+The system interpreting this prompt knows nothing about the book. Make each
+description self-contained: never rely on familiarity with character names,
+species names, fictional places, lore, or book-specific terminology to convey
+a sound. Translate those references into explicit audible characteristics and,
+only when helpful, a brief plain-language description of the fictional speaker.
+A direction such as 'sound like the protagonist' or a fictional species name is insufficient;
+describe the intended vocal presentation, resonance, texture, and phrasing.
 Choose a few distinctive, compatible traits rather than a repetitive list.
 Include age, gender presentation, or fictional context when they help establish
 the intended sound. Translate personality into vocal choices: precise consonants

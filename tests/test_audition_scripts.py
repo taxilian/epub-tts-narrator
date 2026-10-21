@@ -10,7 +10,8 @@ from unittest.mock import patch
 import unittest
 
 from epub_audiobook.audition_scripts import (
-    FILENAME, VERSION, ensure_bundle_scripts, prepare_document_samples, prepare_samples, validate_script,
+    FILENAME, PROMPT_VERSION, SYSTEM, VERSION, ensure_bundle_scripts, prepare_document_samples,
+    prepare_samples, validate_script,
 )
 from epub_audiobook.contracts import validate_document
 from epub_audiobook.pipeline import CachedRequests, fingerprint
@@ -143,6 +144,160 @@ class AuditionScriptTests(unittest.TestCase):
         self.assertEqual(result["scripts"]["vn"], result["scripts"]["v1"])
         self.assertEqual(result["samples"]["vn"], result["samples"]["v1"])
         self.assertEqual({row["id"] for row in requests.calls[0]["roles"]}, {"narrator", "mara"})
+
+    def test_refresh_replaces_only_targeted_group_in_every_saved_location(self):
+        data, requests = bundle(), Requests()
+        original = validate_script({"text": BOOK_TEXT, "reason": "Older casting instructions."})
+        data["cast"]["voices"].append({"id": "unrelated", "description": "Other", "traits": [],
+                                         "sample_script": deepcopy(original)})
+        for voice in data["cast"]["voices"]:
+            voice["sample_script"] = deepcopy(original)
+        scripts = {voice["id"]: deepcopy(original) for voice in data["cast"]["voices"]}
+        data["manifest"]["provenance"]["voice_samples"] = {"scripts": deepcopy(scripts)}
+        data["audition_scripts"] = deepcopy(scripts)
+        before = deepcopy(data)
+        canonical = lambda value: "v1" if value == "vn" else value
+        result = prepare_samples(data, requests, canonical_id=canonical, voice_ids=["vn", "vn"], refresh=True)
+        self.assertEqual(len(requests.calls), 1)
+        self.assertEqual(requests.calls[0]["version"], PROMPT_VERSION)
+        self.assertNotIn("sample_script", requests.calls[0]["voice"])
+        self.assertEqual(result["scripts"]["v1"]["text"], SCRIPT)
+        self.assertEqual(result["scripts"]["vn"], result["scripts"]["v1"])
+        self.assertEqual(result["scripts"]["unrelated"], original)
+        self.assertEqual(result["samples"]["vn"]["reference_text"], SCRIPT)
+        self.assertEqual(result["replaced_voice_ids"], ["v1", "vn"])
+        self.assertEqual(result["cast_fingerprint"], fingerprint(before["cast"]))
+        self.assertEqual(data, before)
+
+    def test_refresh_source_only_persists_old_fallback_suppression_without_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = bundle()
+            data["directory"] = directory
+            old = validate_script({"text": SCRIPT, "reason": "Older creative fallback."})
+            for voice in data["cast"]["voices"]:
+                voice["sample_script"] = deepcopy(old)
+            data["manifest"]["provenance"]["voice_samples"] = {
+                "scripts": {voice["id"]: deepcopy(old) for voice in data["cast"]["voices"]}}
+            before = deepcopy(data)
+            source_sample = {"reference_text": BOOK_TEXT, "source": {"kind": "book_excerpt"}}
+            with patch("audiobook_renderer.samples.select_book_sample", return_value=source_sample), \
+                    patch("audiobook_renderer.samples.select_sample", return_value=source_sample), \
+                    patch("epub_audiobook.config.load_config", side_effect=AssertionError("No model needed")):
+                result = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True)
+            record = json.loads((Path(directory) / FILENAME).read_text())
+            self.assertEqual(record["version"], VERSION)
+            self.assertEqual(record["replaced_voice_ids"], ["v1"])
+            self.assertEqual(record["scripts"], {"vn": old})
+            self.assertEqual(record["cast_fingerprint"], fingerprint(data["cast"]))
+            self.assertEqual(result["audition_script_overrides"], ["v1"])
+            self.assertEqual(data, before)
+            # Once the new selector declines source speech, old provenance and
+            # inline fallbacks must not silently return on a subsequent run.
+            with patch("epub_audiobook.config.load_config", side_effect=RuntimeError("Model needed now")), \
+                    self.assertRaisesRegex(RuntimeError, "Model needed now"):
+                ensure_bundle_scripts(data, voice_ids=["v1"])
+            self.assertFalse((Path(directory) / ".audition-scripts.lock").exists())
+            self.assertEqual(json.loads((Path(directory) / FILENAME).read_text()), record)
+
+    def test_refresh_v1_sidecar_uses_current_cached_guidance_and_preserves_unselected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = bundle()
+            data["directory"] = directory
+            old = validate_script({"text": BOOK_TEXT, "reason": "Old guidance."})
+            record = {"version": 1, "source_fingerprint": data["manifest"]["source_fingerprint"],
+                      "cast_fingerprint": fingerprint(data["cast"]), "scripts": {"v1": old, "vn": old}}
+            (root / FILENAME).write_text(json.dumps(record))
+            config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
+                      "max_request_chars": 200000, "attribution_workers": 5}}
+            client = Client()
+            with patch("epub_audiobook.config.load_config", return_value=config), \
+                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=client):
+                first = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
+                second = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
+            self.assertEqual(client.calls, ["v1"])
+            self.assertEqual(first, second)
+            self.assertEqual(first["audition_scripts"]["v1"]["text"], SCRIPT)
+            self.assertEqual(first["audition_scripts"]["vn"], old)
+            self.assertEqual(first["cast"], data["cast"])
+            self.assertFalse((root / ".audition-scripts.lock").exists())
+
+    def test_refresh_failure_keeps_original_sidecar_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = bundle()
+            data["directory"] = directory
+            old = validate_script({"text": BOOK_TEXT, "reason": "Old guidance."})
+            record = {"version": VERSION, "source_fingerprint": data["manifest"]["source_fingerprint"],
+                      "cast_fingerprint": fingerprint(data["cast"]), "scripts": {"v1": old, "vn": old}}
+            path = root / FILENAME
+            path.write_text(json.dumps(record))
+            before = path.read_bytes()
+            config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
+                      "max_request_chars": 200000, "attribution_workers": 5}}
+            with patch("epub_audiobook.config.load_config", return_value=config), \
+                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=Client(fail_once="v1")), \
+                    self.assertRaises(ProviderError):
+                ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse((root / ".audition-scripts.lock").exists())
+
+    def test_refresh_rejects_invalid_override_metadata_before_model(self):
+        for replaced in (None, "v1", ["unknown"], [{}]):
+            with self.subTest(replaced=replaced), tempfile.TemporaryDirectory() as directory:
+                data = bundle()
+                data["directory"] = directory
+                record = {"version": VERSION, "source_fingerprint": data["manifest"]["source_fingerprint"],
+                          "cast_fingerprint": fingerprint(data["cast"]), "scripts": {},
+                          "replaced_voice_ids": replaced}
+                (Path(directory) / FILENAME).write_text(json.dumps(record))
+                with patch("epub_audiobook.config.load_config", side_effect=AssertionError("No model allowed")), \
+                        self.assertRaisesRegex(ValueError, "replaced character"):
+                    ensure_bundle_scripts(data, refresh=True)
+
+    def test_new_creative_scripts_strip_only_balanced_outer_speech_quotes(self):
+        inner = SCRIPT.replace("the path ahead", 'the path called "Moon Road"')
+        for opening, closing in (("“", "”"), ('"', '"')):
+            text = SCRIPT if opening == '"' else inner
+            self.assertEqual(validate_script({"text": opening + text + closing, "reason": "Audition."})["text"], text)
+        self.assertIn("Do not wrap the script or individual statements", SYSTEM)
+
+    def test_new_creative_scripts_reject_separately_wrapped_statements(self):
+        sentences = SCRIPT.split(". ")
+        for opening, closing in (("“", "”"), ('"', '"'), ("‘", "’"), ("'", "'")):
+            text = " ".join(opening + sentence.rstrip(".") + "." + closing for sentence in sentences)
+            with self.subTest(opening=opening), self.assertRaisesRegex(ValueError, "separately quoted statements"):
+                validate_script({"text": text, "reason": "Audition."})
+        mixed = " ".join(opening + sentence.rstrip(".") + "." + closing for sentence, (opening, closing)
+                         in zip(sentences, (("“", "”"), ('"', '"'), ("‘", "’"))))
+        with self.assertRaisesRegex(ValueError, "separately quoted statements"):
+            validate_script({"text": mixed, "reason": "Audition."})
+
+    def test_new_creative_script_preserves_quoted_wording_and_apostrophes(self):
+        text = SCRIPT.replace("the path ahead", 'the path called "Moon Road"').replace(
+            "the bridge", "our friends’ bridge").replace("We have", "We've still got")
+        self.assertEqual(validate_script({"text": text, "reason": "Audition."})["text"], text)
+        quoted = "“" + text + "”"
+        self.assertEqual(validate_script({"text": quoted, "reason": "Audition."})["text"], text)
+        quoted_with_connective = SCRIPT.replace("the path ahead", '“the path ahead” or “the safer road”')
+        self.assertEqual(validate_script({"text": quoted_with_connective, "reason": "Audition."})["text"],
+                         quoted_with_connective)
+
+    def test_existing_quoted_creative_scripts_can_be_loaded_and_refreshed(self):
+        text = " ".join("“" + sentence.rstrip(".") + ".”" for sentence in SCRIPT.split(". "))
+        old = {"text": text, "reason": "Legacy audition.", "basis": "casting"}
+        data = bundle()
+        for voice in data["cast"]["voices"]:
+            voice["sample_script"] = deepcopy(old)
+        before = deepcopy(data)
+        existing = prepare_samples(data, None)
+        self.assertEqual(existing["scripts"]["v1"], old)
+        requests = Requests()
+        refreshed = prepare_samples(data, requests, voice_ids=["v1"], refresh=True)
+        self.assertEqual(refreshed["scripts"]["v1"]["text"], SCRIPT)
+        self.assertEqual(refreshed["scripts"]["vn"], old)
+        self.assertEqual(len(requests.calls), 1)
+        self.assertEqual(data, before)
 
     def test_prepared_provenance_sidecar_or_inline_script_needs_no_configuration_or_api(self):
         for location in ("provenance", "sidecar", "inline"):

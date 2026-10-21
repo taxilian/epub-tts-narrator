@@ -10,6 +10,8 @@ import re
 import shutil
 import sys
 
+from epub_audiobook.provider import ProviderError
+
 from .bundle import load_bundle, make_plan
 from .config import load_config, select_voice_designer
 from .book_context import resolve_book_config, voice_store
@@ -49,8 +51,8 @@ def parser():
             command.add_argument("--voice-designer", choices=("local", "gemini"),
                                  help="Override voice creation (default: Gemini when configured, otherwise local)")
             command.add_argument("--action", default="interactive",
-                                 choices=("interactive", "list", "prepare-samples", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
-                                 help="Default: interactive voice casting; other actions support scripting")
+                                 choices=("interactive", "list", "prepare-samples", "refresh-prompts", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
+                                 help="Default: interactive voice casting; refresh-prompts rewrites draft descriptions and scripts using the analysis model")
             command.add_argument("--include-inherited", action="store_true",
                                  help="Also replace inherited voices with book-local overrides (--action regenerate-all)")
             command.add_argument("--voice-id")
@@ -244,6 +246,11 @@ def main(argv=None):
             else:
                 print(f"Completed audiobook: {config['render']['output_dir']}")
         return 0
+    except ProviderError as exc:
+        print(f"Renderer stopped: {exc}", file=sys.stderr)
+        print("Validated text-model responses remain cached. Rerun the same command to retry incomplete requests.",
+              file=sys.stderr)
+        return 2
     except (ValueError, RuntimeError, OSError, KeyError) as exc:
         print(f"Renderer stopped: {exc}", file=sys.stderr)
         return 2

@@ -364,6 +364,13 @@ def casting_command(args, bundle, config):
             print(f"Prepared {len(session.generate_missing())} voices for use.")
         elif action == "prepare-samples":
             print(json.dumps(session.prepare_samples(), ensure_ascii=False, indent=2))
+        elif action == "refresh-prompts":
+            result = session.refresh_prompts(
+                voice_ids=[args.voice_id] if args.voice_id else None,
+                config_path=getattr(args, "config", None))
+            print(f"Refreshed voice descriptions and sample scripts for {len(result['voices'])} distinct voice(s).")
+            print(f"Previous drafts and refresh details: {result['history']}")
+            print("Recorded voices are unchanged. Use G/GG in casting or regenerate-all to apply the refreshed drafts.")
         elif action == "normalize-samples":
             prepared, failed = _prepare_playback_samples(
                 player, rows, lambda text: print(display(text)), include_candidates=True)

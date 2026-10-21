@@ -14,7 +14,7 @@ import unicodedata
 from .bundle import ranges, spoken_mapping
 
 
-SELECTION_VERSION = 3
+SELECTION_VERSION = 4
 _MAX_CHARS = 650
 _MIN_WORDS = 25
 _TARGET_MIN_WORDS = 35
@@ -52,6 +52,71 @@ def _trim(text, start, end):
     while end > start and text[end - 1].isspace():
         end -= 1
     return start, end
+
+
+def _speech_wrapper_end(text, start, end):
+    """Find a matched speech delimiter without treating contractions as quotes."""
+    if end - start < 2:
+        return None
+    opening = text[start]
+    closing = {'"': '"', "“": "”", "'": "'", "‘": "’"}.get(opening)
+    if closing is None:
+        return None
+    depth = 1
+    for offset in range(start + 1, end):
+        char = text[offset]
+        # Word-internal apostrophes are lexical content, not quote delimiters.
+        if (char in {"'", "’"} and offset + 1 < end
+                and text[offset - 1].isalnum() and text[offset + 1].isalnum()):
+            continue
+        if char == closing:
+            depth -= 1
+            if depth == 0:
+                return offset
+        elif char == opening:
+            depth += 1
+    return None
+
+
+def _speech_bounds(text):
+    """Remove one balanced speech wrapper, retaining an exact source slice.
+
+    The caller has already established that this is speech, rather than quoted
+    wording in narration. Only a pair surrounding the entire utterance counts;
+    separate quotations and apostrophes must not become stray quote marks.
+    """
+    start, end = _trim(text, 0, len(text))
+    if _speech_wrapper_end(text, start, end) == end - 1:
+        return _trim(text, start + 1, end - 1)
+    return start, end
+
+
+def strip_speech_wrapper(text):
+    """Strip a balanced outer speech pair, preserving embedded quoted wording.
+
+    This is for audition speech only. Source-backed selection uses the same
+    bounds directly so its original block and spoken offsets remain accurate.
+    """
+    start, end = _speech_bounds(text)
+    return text[start:end]
+
+
+def has_repeated_speech_wrappers(text):
+    """Whether all prose consists of separately quoted utterances.
+
+    Ordinary prose containing quoted wording is deliberately left alone. This
+    check lets creative generation repair formatting without deleting meaningful
+    punctuation or rewriting a saved source transcript.
+    """
+    cursor, end = _trim(text, 0, len(text))
+    count = 0
+    while cursor < end:
+        closing = _speech_wrapper_end(text, cursor, end)
+        if closing is None or not text[cursor + 1:closing].strip():
+            return False
+        count += 1
+        cursor, _ = _trim(text, closing + 1, end)
+    return count > 1
 
 
 def _complete(text):
@@ -171,7 +236,12 @@ def _candidate_data(bundle, voice_id, canonical_id):
                 rejected["unsupported_source_mapping"] += 1
                 continue
             found = False
-            for start, end in _spans(spoken):
+            speech_start, speech_end = (
+                _speech_bounds(spoken) if row["kind"] in {"dialogue", "thought", "letter"}
+                else (0, len(spoken))
+            )
+            for start, end in _spans(spoken[speech_start:speech_end]):
+                start, end = start + speech_start, end + speech_start
                 text = spoken[start:end]
                 words = _WORDS.findall(text)
                 if not _MIN_EXCERPT_WORDS <= len(words) <= _MAX_WORDS or not _safe_text(text):
@@ -295,9 +365,12 @@ def select_sample(bundle, voice_id, *, canonical_id, fallback_text=None):
     target = source_base["canonical_voice_id"]
     profiles = sorted((voice for voice in bundle["cast"]["voices"] if canonical[voice["id"]] == target),
                       key=lambda voice: (voice["id"] != target, voice["id"]))
+    overridden = set(bundle.get("audition_script_overrides", []))
+    provenance_scripts = bundle["manifest"].get("provenance", {}).get("voice_samples", {}).get("scripts", {})
     script_sets = [bundle.get("audition_scripts", {}),
-                   bundle["manifest"].get("provenance", {}).get("voice_samples", {}).get("scripts", {}),
-                   {profile["id"]: profile.get("sample_script") for profile in profiles}]
+                   {key: script for key, script in provenance_scripts.items() if key not in overridden},
+                   {profile["id"]: profile.get("sample_script") for profile in profiles
+                    if profile["id"] not in overridden}]
     keys = list(dict.fromkeys([target, *[profile["id"] for profile in profiles]]))
     prepared = [(key, scripts[key]) for scripts in script_sets for key in keys if key in scripts]
     for script_voice_id, script in prepared:

@@ -101,6 +101,8 @@ class CastingSession:
         audits = self.store.directory / "casting-acceptance"
         if audits.is_symlink():
             raise ValueError("The casting acceptance directory must not be a symlink")
+        if (self.store.directory / "casting-refreshes").is_symlink():
+            raise ValueError("The casting refresh directory must not be a symlink")
 
     def _profile(self, voice_id):
         if not isinstance(voice_id, str) or voice_id not in self._profiles:
@@ -223,6 +225,79 @@ class CastingSession:
                 changed = self._save_draft(voice_id, draft)
                 prepared.append({"voice_id": canonical, "updated": changed, **deepcopy(draft)})
         return prepared
+
+    def refresh_prompts(self, *, voice_ids=None, config_path=None):
+        """Explicitly replace local draft directions and scripts, never recordings."""
+        from epub_audiobook.audition_scripts import ensure_bundle_scripts
+        from epub_audiobook.voice_prompt_refresh import refresh_bundle_prompts
+        from .samples import MissingSampleScript, select_sample
+
+        selected = list(self._profiles) if voice_ids is None else list(dict.fromkeys(voice_ids))
+        if not selected:
+            raise ValueError("Choose at least one voice to refresh")
+        with self._locked():
+            groups, current_prompts, previous = {}, {}, {}
+            for voice_id in selected:
+                profile = self._profile(voice_id)
+                canonical = profile["id"]
+                if canonical in groups:
+                    continue
+                groups[canonical] = voice_id
+                path = self._draft_path(voice_id)
+                saved = self.store.load(voice_id)
+                try:
+                    current_prompts[canonical] = self._draft(voice_id, saved)["prompt"]
+                except MissingSampleScript:
+                    # _draft validates an existing record before selecting a
+                    # replacement sample. Missing speech must not discard an
+                    # independently useful edited voice direction.
+                    current_prompts[canonical] = (
+                        read_json(path)["prompt"] if path.exists() else
+                        (saved or {}).get("creation", {}).get("requested_description")
+                        or _default_voice_prompt(profile))
+                previous[canonical] = read_json(path) if path.exists() else None
+            self.notify(f"Refreshing descriptions and sample scripts for {len(groups)} voice(s); "
+                        "this replaces their local casting drafts, including custom edits.")
+            descriptions = refresh_bundle_prompts(
+                self.bundle, config_path, canonical_id=self.store.canonical_id,
+                voice_ids=selected, current_prompts=current_prompts, progress=self.notify)
+            prepared = ensure_bundle_scripts(
+                self.bundle, config_path, canonical_id=self.store.canonical_id,
+                voice_ids=selected, refresh=True, progress=self.notify)
+            drafts = {}
+            for canonical, voice_id in groups.items():
+                sample = select_sample(prepared, voice_id, canonical_id=self.store.canonical_id)
+                prompt = audiobook_voice_prompt(descriptions["prompts"][canonical]["description"])
+                _validate_text(sample["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
+                drafts[canonical] = {"prompt": prompt, "reference_text": sample["reference_text"],
+                                     "sample_source": deepcopy(sample["source"])}
+            # All model results and selections validate before the first draft
+            # changes. Keep old drafts for explicit recovery and rollback on I/O.
+            history = self.store.directory / "casting-refreshes" / (uuid.uuid4().hex + ".json")
+            self.store._prepare_directory(history.parent)
+            audit = {"format": "audiobook-casting-refresh", "version": 1, "status": "prepared",
+                     "series_id": self.store.series_id, "created_at": datetime.now(timezone.utc).isoformat(),
+                     "descriptions": descriptions, "previous_drafts": previous, "drafts": drafts}
+            write_json(history, audit)
+            updated = []
+            try:
+                for canonical, draft in drafts.items():
+                    # Include a path before writing in case replacement succeeds
+                    # but the writer is interrupted immediately afterward.
+                    updated.append(canonical)
+                    self._save_draft(canonical, draft)
+                write_json(history, dict(audit, status="complete"))
+            except BaseException:
+                for canonical in reversed(updated):
+                    path = self._draft_path(canonical)
+                    if previous[canonical] is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        write_json(path, previous[canonical])
+                raise
+            self.bundle = deepcopy(prepared)
+            self._samples.clear()
+            return {"voices": list(groups), "history": str(history)}
 
     def rows(self):
         from .samples import MissingSampleScript

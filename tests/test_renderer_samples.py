@@ -5,7 +5,10 @@ from pathlib import Path
 import unittest
 
 from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.samples import MissingSampleScript, select_book_sample, select_sample, sample_word_count
+from audiobook_renderer.samples import (
+    MissingSampleScript, SELECTION_VERSION, select_book_sample, select_sample,
+    sample_word_count, strip_speech_wrapper,
+)
 
 
 TEXT = (
@@ -74,6 +77,84 @@ class SampleSelectionTests(unittest.TestCase):
         self.assertEqual(source["segment_ids"], ["s1"])
         self.assertEqual(source["chapter_title"], "The Beginning")
         self.assertEqual(data, before)
+
+    def test_speech_wrappers_are_removed_with_exact_source_offsets(self):
+        for opening, closing in (("“", "”"), ('"', '"'), ("‘", "’"), ("'", "'")):
+            with self.subTest(opening=opening):
+                original = " \t" + opening + "  " + TEXT + " " + closing + "\n"
+                data = bundle([row(original, start=17)])
+                before = deepcopy(data)
+                selected = self.select(data)
+                source = selected["source"]
+                start = original.index(TEXT)
+                self.assertEqual(selected["reference_text"], TEXT)
+                self.assertEqual(source["selection_version"], SELECTION_VERSION)
+                self.assertEqual((source["spoken_start"], source["spoken_end"]),
+                                 (start, start + len(TEXT)))
+                self.assertEqual(source["source_ranges"],
+                                 [{"start": 17 + start, "end": 17 + start + len(TEXT)}])
+                self.assertEqual(data, before)
+
+    def test_joined_quoted_statements_have_no_repeated_speech_wrappers(self):
+        texts = ["We crossed the river before dawn and left our packs beside the bridge.",
+                 "I checked the lantern while the others searched the narrow trail through the woods.",
+                 "There is still time to return, but we should make our choice together."]
+        quoted = ["“" + texts[0] + "”", '"' + texts[1] + '"', "‘" + texts[2] + "’"]
+        data = bundle([row(text, ident=f"quoted-{i}", sequence=i, start=17 * i)
+                       for i, text in enumerate(quoted)])
+        before = deepcopy(data)
+        selected = self.select(data)
+        self.assertEqual(selected["reference_text"], " ".join(texts))
+        self.assertEqual(selected["source"]["kind"], "book_excerpts")
+        for index, excerpt in enumerate(selected["source"]["excerpts"]):
+            self.assertEqual(excerpt["text"], texts[index])
+            self.assertEqual((excerpt["spoken_start"], excerpt["spoken_end"]),
+                             (1, len(quoted[index]) - 1))
+            self.assertEqual(excerpt["source_ranges"],
+                             [{"start": 17 * index + 1, "end": 17 * index + len(quoted[index]) - 1}])
+            self.assertEqual(excerpt["text"], selected["reference_text"][
+                excerpt["sample_start"]:excerpt["sample_end"]])
+        self.assertEqual(data, before)
+
+    def test_embedded_quotations_and_apostrophes_are_preserved(self):
+        for opening, closing, embedded in (
+            ("“", "”", "‘friends’"), ('"', '"', "'friends'"),
+            ("‘", "’", '“friends”'), ("'", "'", '"friends"'),
+        ):
+            with self.subTest(opening=opening):
+                content = TEXT.replace("our friends", "our " + embedded).replace("We know", "We're sure")
+                selected = self.select(bundle([row(opening + content + closing)]))
+                self.assertEqual(selected["reference_text"], content)
+                self.assertIn(embedded, selected["reference_text"])
+                self.assertIn("We're", selected["reference_text"])
+
+    def test_speech_cleanup_does_not_strip_unpaired_or_separate_quotes(self):
+        for text in ("'Tis " + TEXT, "’Tis " + TEXT, '"' + TEXT, TEXT + "”",
+                     '"The first sentence." "The second sentence."'):
+            with self.subTest(text=text[:25]):
+                self.assertEqual(strip_speech_wrapper(text), text)
+
+    def test_narrative_quotation_is_not_removed(self):
+        text = "“" + TEXT + "”"
+        selected = self.select(bundle([row(text, voice="vn", role="rn", kind="narration")]), "vn")
+        self.assertEqual(selected["reference_text"], text)
+        self.assertEqual(selected["source"]["source_ranges"], [{"start": 0, "end": len(text)}])
+
+    def test_quote_cleanup_preserves_unicode_and_discontinuous_bracket_mapping(self):
+        content = TEXT.replace("road", "[café road]")
+        original = "\t“ " + content + " ”\n"
+        sample = row(original, start=19)
+        sample["spoken_text"] = original.translate(str.maketrans("", "", "[]"))
+        before = deepcopy(sample)
+        selected = self.select(bundle([sample]))
+        source = selected["source"]
+        self.assertEqual(selected["reference_text"], TEXT.replace("road", "café road"))
+        self.assertEqual(selected["reference_text"], sample["spoken_text"][
+            source["spoken_start"]:source["spoken_end"]])
+        self.assertEqual(selected["reference_text"], "".join(
+            original[part["start"] - 19:part["end"] - 19] for part in source["source_ranges"]))
+        self.assertGreater(len(source["source_ranges"]), 1)
+        self.assertEqual(sample, before)
 
     def test_aliases_choose_the_same_dialogue_over_narration(self):
         narration = row(TEXT + " We know the way.", voice="vn", role="rn",
@@ -211,6 +292,17 @@ class SampleSelectionTests(unittest.TestCase):
         self.assertTrue(result["reference_text"].endswith("."))
         self.assertTrue(source["spoken_start"] == 0 or text[:source["spoken_start"]].rstrip().endswith("."))
 
+    def test_long_wrapped_speech_excerpt_does_not_keep_a_stray_outer_quote(self):
+        content = TEXT + " " + ("The long journey continued through the forest and over the mountains. " * 12)
+        text = "“" + content.rstrip() + "”"
+        result = self.select(bundle([row(text, start=31)]))
+        source = result["source"]
+        self.assertNotIn("“", result["reference_text"])
+        self.assertNotIn("”", result["reference_text"])
+        self.assertEqual(result["reference_text"], text[source["spoken_start"]:source["spoken_end"]])
+        self.assertEqual(source["source_ranges"],
+                         [{"start": 31 + source["spoken_start"], "end": 31 + source["spoken_end"]}])
+
     def test_long_unpunctuated_row_is_not_chopped_into_an_invented_sentence(self):
         data = bundle([row("we walk quietly through the forest " * 20)])
         self.assertEqual(self.select(data)["source"]["kind"], "casting_script")
@@ -287,6 +379,30 @@ class SampleSelectionTests(unittest.TestCase):
             else:
                 data["cast"]["voices"][0]["sample_script"] = script
             self.assertEqual(self.select(data)["reference_text"], FALLBACK)
+
+    def test_refresh_overrides_suppress_stale_provenance_and_profile_scripts(self):
+        for location in ("provenance", "profile"):
+            with self.subTest(location=location):
+                data = bundle([])
+                old_script = data.pop("audition_scripts")["v1"]
+                if location == "provenance":
+                    data["manifest"]["provenance"] = {"voice_samples": {"scripts": {"v1": old_script}}}
+                else:
+                    data["cast"]["voices"][0]["sample_script"] = old_script
+                data["audition_script_overrides"] = ["v1"]
+                with self.assertRaises(MissingSampleScript):
+                    self.select(data)
+                # A newly prepared sidecar script still takes precedence.
+                refreshed = dict(old_script, text=TEXT, reason="A refreshed audition.")
+                data["audition_scripts"] = {"v1": refreshed}
+                self.assertEqual(self.select(data)["reference_text"], TEXT)
+
+    def test_refresh_override_does_not_hide_unaffected_voice_scripts(self):
+        data = bundle([])
+        old_script = data.pop("audition_scripts")["v1"]
+        data["manifest"]["provenance"] = {"voice_samples": {"scripts": {"v1": old_script}}}
+        data["audition_script_overrides"] = ["v2"]
+        self.assertEqual(self.select(data)["reference_text"], FALLBACK)
 
     def test_too_short_or_control_bearing_creative_script_is_rejected(self):
         for text in ("Hello, my friend.", "[shouting] " + FALLBACK, FALLBACK + "\x00"):

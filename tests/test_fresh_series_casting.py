@@ -153,7 +153,8 @@ class FreshSeriesCastingTests(unittest.TestCase):
                     self.assertIn(trait["value"], call["prompt"])
                 self.assertNotIn(EVIDENCE_QUOTE, call["prompt"])
                 self.assertNotIn("softly", call["prompt"])
-                self.assertEqual(call["text"], SCRIPT)
+                self.assertEqual(call["text"], SCRIPT[1:-1])
+                self.assertEqual(first_bundle["source"]["blocks"][0]["text"], "Mara said softly, " + SCRIPT)
                 self.assertNotEqual(call["text"], config["voices"]["reference_text"])
                 selected = session.store.load(voice_id)
                 selected_bytes = Path(selected["reference_audio"]).read_bytes()
@@ -195,7 +196,7 @@ class FreshSeriesCastingTests(unittest.TestCase):
                 for row in session.rows():
                     self.assertEqual(row["canonical_voice_id"], voice_id)
                     self.assertEqual(row["selected"]["asset_hash"], selected["asset_hash"])
-                    self.assertEqual(row["reference_text"], SCRIPT)
+                    self.assertEqual(row["reference_text"], SCRIPT[1:-1])
                 self.assertEqual(Path(session.store.load(voice_id)["reference_audio"]).read_bytes(), selected_bytes)
             self.assertEqual(len(engine.calls), 1)
             self.assertEqual(len(verifier.calls), 1)
