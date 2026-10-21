@@ -8,7 +8,7 @@ from pathlib import Path
 import shlex
 import sys
 
-from .contracts import readiness, validate_document
+from .contracts import has_assigned_speakers, readiness, validate_document
 from .pipeline import fingerprint
 from .speaker_completion import ATTRIBUTION_ISSUE_KINDS, unassigned_segments
 
@@ -16,6 +16,11 @@ from .speaker_completion import ATTRIBUTION_ISSUE_KINDS, unassigned_segments
 def _display(value):
     # Book text and model explanations are display data, never terminal controls.
     return "".join(char for char in str(value) if char in "\n\t" or char.isprintable())
+
+
+def _context_text(text, limit=1000):
+    """Bound supporting context while leaving the actual assignment text whole."""
+    return text if len(text) <= limit else text[:limit] + " … [context truncated]"
 
 
 def _role_label(role, characters):
@@ -106,13 +111,25 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         position = positions[item["block_id"]]
         block = blocks[position]
         say(f"\nPassage {number}/{len(pending)} — {result['source']['book']['title']} — {item['block_id']}:{item['start']}:{item['end']}")
-        for offset in range(max(0, position - 1), min(len(blocks), position + 2)):
+        for offset in range(max(0, position - 2), min(len(blocks), position + 3)):
             neighbor = blocks[offset]
             if neighbor["chapter_id"] != block["chapter_id"]:
                 continue
-            label = "Source block" if offset == position else "Context"
-            text = neighbor["text"] if offset == position else neighbor["text"][:1000]
-            say(f"{label} [{neighbor['id']}]: {text}")
+            label = (f"Source block [{neighbor['id']}] (context only)" if offset == position
+                     else f"Context [{neighbor['id']}]")
+            say(f"{label}: {_context_text(neighbor['text'])}")
+        assigned = [segment for segment in result["segments"]
+                    if segment["block_id"] == item["block_id"] and has_assigned_speakers(segment)]
+        for segment in assigned:
+            role_ids = ([speaker["role_id"] for speaker in segment["simultaneous_speakers"]]
+                        if segment.get("simultaneous_speakers") else [segment["role_id"]])
+            names = "; ".join(labels[role_id] for role_id in role_ids)
+            if len(role_ids) > 1:
+                names += " together"
+            say(f"Already assigned [{segment['block_id']}:{segment['start']}:{segment['end']}] "
+                f"— {names}: {_context_text(segment['text'])}")
+        say(f"Choose a voice only for [{item['block_id']}:{item['start']}:{item['end']}] below "
+            f"({item['end'] - item['start']} characters). The surrounding context keeps its assignments.")
         say(f"Passage to assign: {item['text']}")
         candidates = [labels[role_id] for role_id in item["attribution"]["candidates"] if role_id in labels]
         if candidates:

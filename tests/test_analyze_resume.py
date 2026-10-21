@@ -52,7 +52,8 @@ class CompletionClient:
         for original in payload["original_segments"]:
             piece = {key: deepcopy(original[key]) for key in ("text", "kind", "delivery")}
             missing = self.uncertain and original["role_id"] is None
-            piece.update(role_id=None if missing else roles["dialogue" if piece["kind"] == "dialogue" else "narration"],
+            piece.update(role_id=None if missing else (original["role_id"] or
+                         roles["dialogue" if piece["kind"] == "dialogue" else "narration"]),
                          basis="unresolved" if missing else "explicit", reason="The source names the speaker.",
                          evidence=evidence, candidates=[], review_required=missing)
             pieces.append(piece)
@@ -234,33 +235,40 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertIn("Speaker selection incomplete", error)
         self.assertEqual(len(unassigned_segments(_completed_directory(path)[0])), 1)
 
-    def test_completed_unresolved_jury_prompts_immediately_without_provider_or_configured_model(self):
+    def test_completed_unresolved_jury_automatically_retries_only_remaining_blocks(self):
         _, path, original = self.seed(completed_jury=True)
-        self.config.write_text('[analysis]\nattribution_workers=1\n')
-        status, _, error, provider = self.run_cli(path, answers="2\n")
+        client = CompletionClient()
+        status, _, error, provider = self.run_cli(path, client=client)
         self.assertEqual(status, 0, error)
-        provider.assert_not_called()
-        self.assertIn("Speaker number(s)", error)
+        provider.assert_called_once()
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual({call["target_units"][0]["block_id"] for call in client.calls},
+                         {row["block_id"] for row in unassigned_segments(original)})
+        self.assertIn("Checking remaining speakers", error)
+        self.assertNotIn("Speaker number(s)", error)
         updated = _completed_directory(path)[0]
         self.assertFalse(unassigned_segments(updated))
         self.assertEqual(updated["source"], original["source"])
         self.assertEqual(updated["cast"], original["cast"])
 
-    def test_resolve_speakers_reuses_completed_jury_without_provider_or_configured_model(self):
+    def test_resolve_speakers_retries_completed_jury_then_prompts_if_still_unresolved(self):
         _, path, _ = self.seed(completed_jury=True)
-        self.config.write_text('[analysis]\nattribution_workers=1\n')
-        status, _, error, provider = self.run_cli(path, answers="2\n", command="resolve-speakers")
+        client = CompletionClient(uncertain=True)
+        status, _, error, provider = self.run_cli(path, answers="2\n", client=client, command="resolve-speakers")
         self.assertEqual(status, 0, error)
-        provider.assert_not_called()
+        provider.assert_called_once()
+        self.assertEqual(len(client.calls), 9)
         self.assertIn("Speaker number(s)", error)
         self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
 
-    def test_partial_manual_answers_do_not_restart_completed_juries_for_remaining_blocks(self):
+    def test_partial_manual_answers_survive_new_jury_for_remaining_blocks(self):
         _, path, original = self.seed(missing_all=True, completed_jury=True)
         self.assertGreater(len(unassigned_segments(original)), 2)
-        status, _, error, provider = self.run_cli(path, answers="1\n1\nq\n")
+        first = CompletionClient(uncertain=True)
+        status, _, error, provider = self.run_cli(path, answers="1\n1\nq\n", client=first)
         self.assertEqual(status, 2, error)
-        provider.assert_not_called()
+        provider.assert_called_once()
+        self.assertGreater(len(first.calls), 0)
         intermediate = _completed_directory(path)[0]
         choices = {row["id"]: row for row in intermediate["segments"] if row["attribution"]["basis"] == "user"}
         self.assertEqual(len(unassigned_segments(intermediate)), len(unassigned_segments(original)) - 2)
@@ -268,9 +276,12 @@ class AnalyzeResumeTests(unittest.TestCase):
                         {row["block_id"] for row in unassigned_segments(intermediate)},
                         "A saved choice and a remaining passage must share one source block")
         answers = "1\n" * len(unassigned_segments(intermediate))
-        status, _, error, provider = self.run_cli(path, answers=answers)
+        second = CompletionClient(uncertain=True)
+        status, _, error, provider = self.run_cli(path, answers=answers, client=second)
         self.assertEqual(status, 0, error)
-        provider.assert_not_called()
+        provider.assert_called_once()
+        self.assertEqual({call["target_units"][0]["block_id"] for call in second.calls},
+                         {row["block_id"] for row in unassigned_segments(intermediate)})
         updated = _completed_directory(path)[0]
         self.assertFalse(unassigned_segments(updated))
         self.assertEqual({row["id"]: row for row in updated["segments"] if row["id"] in choices}, choices)
@@ -295,7 +306,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual({row["id"]: row for row in updated["segments"] if row["id"] in previous_assigned},
                          previous_assigned)
 
-    def test_quitting_after_truncation_saves_manual_fallback_and_resume_makes_no_api_calls(self):
+    def test_quitting_after_truncation_retries_remaining_block_on_explicit_resume(self):
         _, path, _ = self.seed()
         client = TruncatedCompletionClient()
         status, _, error, _ = self.run_cli(path, answers="q\n", client=client)
@@ -304,10 +315,34 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 4)
         saved = _completed_directory(path)[0]
         self.assertEqual(len(unassigned_segments(saved)), 1)
-        status, _, error, provider = self.run_cli(path, answers="2\n")
+        retry = CompletionClient()
+        status, _, error, provider = self.run_cli(path, client=retry)
         self.assertEqual(status, 0, error)
-        provider.assert_not_called()
-        self.assertIn("Speaker number(s)", error)
+        provider.assert_called_once()
+        self.assertEqual(len(retry.calls), 3)
+        self.assertNotIn("Speaker number(s)", error)
+        self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
+
+    def test_completed_unresolved_retry_is_fresh_but_interrupted_retry_reuses_valid_votes(self):
+        _, path, _ = self.seed(completed_jury=True)
+        first = CompletionClient(uncertain=True)
+        status, _, error, _ = self.run_cli(path, answers="q\n", client=first)
+        self.assertEqual(status, 2, error)
+        self.assertEqual(len(first.calls), 9)
+        before_interruption = self.snapshot(path)
+        interrupted = CompletionClient(fail_after=1)
+        status, _, error, _ = self.run_cli(path, client=interrupted)
+        self.assertEqual(status, 1, error)
+        self.assertEqual(len(interrupted.calls), 1)
+        self.assertEqual(self.snapshot(path), before_interruption)
+        self.assertNotEqual(interrupted.calls[0]["completion_retry_token"],
+                            first.calls[0]["completion_retry_token"])
+        retry = CompletionClient()
+        status, _, error, _ = self.run_cli(path, client=retry)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(len(retry.calls), 2, "The completed first reviewer must be reused after timeout")
+        self.assertEqual({call["completion_retry_token"] for call in retry.calls},
+                         {interrupted.calls[0]["completion_retry_token"]})
         self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
 
     def test_truncated_block_keeps_other_automatic_assignments_when_manual_selection_quits(self):

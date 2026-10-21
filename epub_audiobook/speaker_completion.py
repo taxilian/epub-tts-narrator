@@ -18,7 +18,7 @@ from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fing
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE
 from .provider import ProviderError
 
-COMPLETION_VERSION = "1"
+COMPLETION_VERSION = "2"
 CONTEXT_CHARS = (12000, 100000, 160000)
 OUTPUT_TRUNCATED_MESSAGE = "The model output was truncated. Increase the output token limit or reduce the input."
 REVIEWERS = (
@@ -31,22 +31,39 @@ ATTRIBUTION_ISSUE_KINDS = frozenset({
 })
 
 SYSTEM = COMMON + PERFORMANCE_POLICY_GUIDANCE + """
-Mandatory independent speaker completion, version 1.
-Every target block contains spoken text without a selected performer. Independently
+Mandatory independent speaker completion, version 2.
+Every target block contains text without a selected performer. Independently
 assign the COMPLETE target block using the source and existing final_cast. No peer
 answers are supplied. Existing assignments, character descriptions, and candidates
-are fallible context. Trace who actually speaks rather than choosing the nearest
-name or alternating speakers. Separate narration/tags/actions from communicated
-words. A listener, addressee, or person mentioned is not thereby the speaker.
+are fallible context, subject to the protected assignments described below.
+An unassigned passage is not necessarily dialogue or thought: reconsider its kind
+from the source before selecting a performer. Ordinary first-person narration,
+reported actions, and narrative responses belong to the narrative frame even
+when near dialogue. Examine exact wording, surrounding actions, quotation marks,
+and available inline_spans (such as emphasis) together; typography is evidence,
+not a conclusive rule on its own. Trace who actually communicates words rather
+than choosing the nearest name or alternating speakers. A listener, addressee,
+or person mentioned is not thereby the speaker.
+An existing unassigned segment may incorrectly combine several speakers and
+narration. Split it wherever the source changes performer or kind; old unassigned
+boundaries are not constraints. Separate speech tags/actions from communicated
+words and distinguish successive turns from genuinely simultaneous speech.
 Use only existing role IDs. Never invent a character, role, voice, or source fact.
 Preserve all original local delivery directions, including empty directions.
 Preserve every original segment whose basis is user, including its performer,
 kind, text boundaries, and delivery. You cannot override a user's assignment.
+When retry_unresolved is true, ALL original segments with assigned performers
+are protected, not only user assignments. Preserve their performer, kind, source
+boundaries, and delivery; reconsider only the remaining unassigned source spans.
 Only select multiple performers when exact source evidence establishes that these
 identified characters say the SAME words together. Represent that as
 simultaneous_role_ids with at least two distinct existing dialogue roles and
 role_id=null, basis=explicit or context, candidates=[], review_required=false.
 Alternative possible speakers are candidates, NEVER simultaneous performers.
+A plural attribution covering several separate quotations does not establish
+that each quotation was spoken in unison. Adjacent calls may be sequential with
+unknown order; leave their performers unresolved unless evidence establishes
+which person speaks which call, or actually establishes simultaneous same words.
 Do not invent a representative narrator or group performer for an unknown crowd.
 If the cast lacks the actual speaker, or the visible source is still insufficient,
 leave role_id=null, basis=unresolved, review_required=true with plausible known
@@ -154,29 +171,30 @@ def _only_manual_assignments(before, after):
     return True
 
 
-def automatic_completion_targets(document):
-    """Return unassigned blocks that have not already exhausted their saved jury.
+def _completed_unresolved_cases(document):
+    """Find each block's latest matching completed case, including v1 audits.
 
     Reuse requires the same source, cast, and complete block records, allowing
     recorded user assignments to replace formerly unassigned spans. Decisions
-    elsewhere therefore do not restart an exhausted jury. This only selects work
-    for the CLI; saved audits never supply new speaker assignments here.
+    elsewhere therefore do not change the matching case.
+    Saved audits never supply new speaker assignments here. The case is only
+    an exhaustion marker or a stable namespace for an explicit fresh attempt.
     """
     missing = {item["block_id"] for item in unassigned_segments(document)}
     if not missing:
-        return []
+        return {}
     current = {block_id: [] for block_id in missing}
     for item in document["segments"]:
         if item["block_id"] in current:
             current[item["block_id"]].append(item)
     provenance = document["provenance"]
     history = provenance.get("speaker_completion_history", [])
-    audits = [provenance.get("speaker_completion"), *(history if isinstance(history, list) else [])]
+    audits = [provenance.get("speaker_completion"), *(reversed(history) if isinstance(history, list) else [])]
     source_hash, cast_hash = fingerprint(document["source"]), fingerprint(document["cast"])
     manual_ancestors = _manual_script_ancestors(document, source_hash, cast_hash)
-    exhausted = set()
+    completed = {}
     for audit in audits:
-        if (not isinstance(audit, dict) or audit.get("version") != COMPLETION_VERSION
+        if (not isinstance(audit, dict) or audit.get("version") not in ("1", COMPLETION_VERSION)
                 or audit.get("status") != "blocked"
                 or audit.get("source_fingerprint") != source_hash
                 or audit.get("cast_fingerprint") != cast_hash
@@ -187,14 +205,23 @@ def automatic_completion_targets(document):
             if not isinstance(case, dict) or not isinstance(case.get("block_id"), str):
                 continue
             block_id = case["block_id"]
-            if block_id not in missing or not _finished_case(case):
+            if block_id not in missing or block_id in completed or not _finished_case(case):
                 continue
             saved = case.get("applied_segments", case.get("original_segments"))
             audited_manual_change = (isinstance(audit.get("output_script_fingerprint"), str)
                                      and audit["output_script_fingerprint"] in manual_ancestors
                                      and _only_manual_assignments(saved, current[block_id]))
             if saved == current[block_id] or audited_manual_change:
-                exhausted.add(block_id)
+                completed[block_id] = {"version": audit["version"], "case": case}
+    return completed
+
+
+def automatic_completion_targets(document, *, retry_exhausted=False):
+    """Select unfinished blocks; explicit retries include previously exhausted juries."""
+    if type(retry_exhausted) is not bool:
+        raise ValueError("retry_exhausted must be a boolean")
+    missing = {item["block_id"] for item in unassigned_segments(document)}
+    exhausted = set() if retry_exhausted else set(_completed_unresolved_cases(document))
     return [block["id"] for block in document["source"]["blocks"]
             if block["id"] in missing - exhausted]
 
@@ -309,13 +336,16 @@ def _final_context(document, index, budget, originals, rounds):
     return [selected[position] for position in sorted(selected)]
 
 
-def _preserved_protected(proposed, originals):
+def _preserved_protected(proposed, originals, *, preserve_assigned=False):
     for old in originals:
         overlaps = [item for item in proposed if item["start"] < old["end"] and item["end"] > old["start"]]
         for item in overlaps:
-            if old["attribution"]["basis"] == "user" and (
+            protected = old["attribution"]["basis"] == "user" or (preserve_assigned and has_assigned_speakers(old))
+            if protected and (
                     _performers(item) != _performers(old) or item["kind"] != old["kind"]):
-                raise ValueError("Speaker completion cannot change an explicit user assignment")
+                raise ValueError("Speaker completion cannot change an explicit user assignment" if
+                                 old["attribution"]["basis"] == "user" else
+                                 "Speaker completion retry cannot change an already assigned source span")
 
 
 def _slice(item, start, end):
@@ -342,7 +372,7 @@ def _original_delivery(proposed, originals):
     return output
 
 
-def _accept(response, document, batch, originals):
+def _accept(response, document, batch, originals, *, preserve_assigned=False):
     _object(response, ("block_id", "reason", "evidence", "segments"), "Speaker completion")
     unit = batch["target_units"][0]
     if response["block_id"] != unit["block_id"]:
@@ -369,7 +399,7 @@ def _accept(response, document, batch, originals):
         raise ValueError("Speaker completion segment text must concatenate to the exact complete source block")
     proposed = align_units(document["source"], document["cast"], [unit],
                            {"units": [{"unit_id": unit["unit_id"], "segments": pieces}]})
-    _preserved_protected(proposed, originals)
+    _preserved_protected(proposed, originals, preserve_assigned=preserve_assigned)
     proposed = _original_delivery(proposed, originals)
     resolved = all(not _spoken(item) or (has_assigned_speakers(item) and
                    item["attribution"]["basis"] != "unresolved" and not item["attribution"]["review_required"])
@@ -390,7 +420,7 @@ def _unanimous(votes):
             and len({vote["assignment_fingerprint"] for vote in votes}) == 1)
 
 
-def _agreed_spans(votes, originals):
+def _agreed_spans(votes, originals, *, preserve_assigned=False):
     """Unanimity is per interval, with every reviewer's boundaries respected."""
     if not _independent_valid_votes(votes):
         return []
@@ -399,7 +429,8 @@ def _agreed_spans(votes, originals):
                          for item in rows for key in ("start", "end")})
     agreed = []
     for start, end in zip(boundaries, boundaries[1:]):
-        if any(old["attribution"]["basis"] == "user" and old["start"] <= start < old["end"]
+        if any((old["attribution"]["basis"] == "user" or (preserve_assigned and has_assigned_speakers(old)))
+               and old["start"] <= start < old["end"]
                for old in originals):
             continue
         choices = [[item for item in rows if item["start"] <= start and item["end"] >= end]
@@ -434,7 +465,7 @@ def _agreed_spans(votes, originals):
     return output
 
 
-def _apply(proposed, originals, retained_reviews):
+def _apply(proposed, originals, retained_reviews, *, preserve_assigned=False):
     """Keep user spans and existing delivery evidence, and unrelated review flags."""
     output = []
     for piece in proposed:
@@ -442,7 +473,7 @@ def _apply(proposed, originals, retained_reviews):
             start, end = max(piece["start"], old["start"]), min(piece["end"], old["end"])
             if start >= end:
                 continue
-            if old["attribution"]["basis"] == "user":
+            if old["attribution"]["basis"] == "user" or (preserve_assigned and has_assigned_speakers(old)):
                 continue
             item = _slice(piece, start, end)
             item["delivery"] = deepcopy(old["delivery"])
@@ -479,7 +510,8 @@ def _overlay(originals, patches):
     return [_slice(item, start, end) for item, start, end in runs]
 
 
-def complete_speakers(document, requests, *, workers=5, progress=lambda message: None, target_block_ids=None):
+def complete_speakers(document, requests, *, workers=5, progress=lambda message: None, target_block_ids=None,
+                      retry_unresolved=False):
     """Resolve every unassigned spoken block with three independently complete votes.
 
     Three bounded rounds widen chapter and identity-evidence context. Transport failures
@@ -488,9 +520,15 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
     output truncation goes to manual selection without discarding other results.
     A null or invalid response is never an approval. Disagreement remains visibly
     blocked.
+
+    An explicit retry gives finished unresolved cases fresh request identities,
+    while an interrupted retry of the same saved document keeps identical keys.
+    Already assigned source intervals are protected throughout that retry.
     """
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("workers must be an integer from 1 to 5")
+    if type(retry_unresolved) is not bool:
+        raise ValueError("retry_unresolved must be a boolean")
     errors = validate_document(document)
     if errors:
         raise ValueError("Invalid input analysis: " + "; ".join(errors[:12]))
@@ -512,8 +550,10 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
     for item in original["segments"]:
         by_block[item["block_id"]].append(item)
     originals = {block_id: by_block[block_id] for block_id in targets}
+    completed = _completed_unresolved_cases(original) if retry_unresolved else {}
     cases = [{"block_id": block["id"], "original_segments": deepcopy(originals[block["id"]]),
               "unassigned_segment_ids": [item["id"] for item in missing if item["block_id"] == block["id"]],
+              "completion_retry_token": fingerprint(completed[block["id"]]) if block["id"] in completed else None,
               "status": "pending", "rounds": []}
              for block in source["blocks"] if block["id"] in targets]
     audit = {"version": COMPLETION_VERSION, "source_fingerprint": fingerprint(source),
@@ -521,6 +561,7 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
              "provider": deepcopy(getattr(getattr(requests, "client", None), "identity", None)),
              "acceptance": "three independent matching resolved, source-validated assignments per span; no peer answers",
              "context_chars": list(CONTEXT_CHARS), "workers": min(workers, len(cases) * 3), "status": "running",
+             "retry_unresolved": retry_unresolved,
              "scope": {"mode": "target_blocks" if selected is not None else "all_unassigned_blocks",
                        "target_block_ids": [case["block_id"] for case in cases]},
              "initial_unassigned_segments": len(missing), "targeted_unassigned_segments": sum(len(case["unassigned_segment_ids"]) for case in cases),
@@ -531,7 +572,7 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                     "voices": [{"id": row["id"], "description": row["description"]} for row in cast["voices"]]}
     shared = {"final_cast": compact_cast, "performance_policy": original["provenance"].get("performance_policy", DEFAULT_POLICY),
               "completion_version": COMPLETION_VERSION, "source_fingerprint": audit["source_fingerprint"],
-              "cast_fingerprint": audit["cast_fingerprint"], "input_script_fingerprint": audit["input_script_fingerprint"]}
+              "cast_fingerprint": audit["cast_fingerprint"], "retry_unresolved": retry_unresolved}
     cache_dir = getattr(requests, "cache_dir", None)
     checkpoint = Path(cache_dir) / "speaker-completion-audits" / (fingerprint(audit) + ".json") if cache_dir is not None else None
     lock = Lock()
@@ -555,7 +596,9 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                 block_id = case["block_id"]
                 unit = _unit(source["blocks"][positions[block_id]])
                 base = dict(shared, mode="speaker_completion", target_units=[unit], context_units=[],
-                            original_segments=_compact(originals[block_id]), round=round_index)
+                            original_segments=_compact(originals[block_id]), round=round_index,
+                            input_block_fingerprint=fingerprint(originals[block_id]),
+                            completion_retry_token=case["completion_retry_token"])
                 # Leave room for serialization, reviewer metadata, and bounded repair hints.
                 available = max(0, getattr(requests, "max_request_chars", 200000) - len(system)
                                 - len(json.dumps(base, ensure_ascii=False)) - 8000)
@@ -579,7 +622,8 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                 def accept(response):
                     nonlocal last_response
                     last_response = deepcopy(response)
-                    return _accept(response, original, batch, originals[case["block_id"]])
+                    return _accept(response, original, batch, originals[case["block_id"]],
+                                   preserve_assigned=retry_unresolved)
                 try:
                     record.update(requests.run(system, payload, accept, cancelled=cancelled))
                 except ValueError as error:
@@ -603,13 +647,16 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
             for case in pending:
                 record = case["rounds"][-1]
                 record["votes"].sort(key=lambda row: row["reviewer_id"])
-                agreed = _agreed_spans(record["votes"], originals[case["block_id"]])
+                current = replacements.get(case["block_id"], originals[case["block_id"]])
+                agreed = _agreed_spans(record["votes"], current if retry_unresolved else originals[case["block_id"]],
+                                       preserve_assigned=retry_unresolved)
                 record["agreed_spans"] = [{"start": item["start"], "end": item["end"],
                                           "performers": [list(row) for row in _performers(item)], "kind": item["kind"]}
                                          for item in agreed]
                 record["status"] = "unanimous" if _unanimous(record["votes"]) else "partial" if agreed else "unresolved"
                 if agreed:
-                    patches = _apply(agreed, originals[case["block_id"]], retained_reviews)
+                    patches = _apply(agreed, originals[case["block_id"]], retained_reviews,
+                                     preserve_assigned=retry_unresolved)
                     replacements[case["block_id"]] = _overlay(
                         replacements.get(case["block_id"], originals[case["block_id"]]), patches)
                 current = replacements.get(case["block_id"], originals[case["block_id"]])
@@ -638,6 +685,13 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
         for item in decorated["segments"]:
             if item["block_id"] in decorated_by_block:
                 decorated_by_block[item["block_id"]].append(item)
+        # Deriving bracket cues also canonicalizes IDs. Restore protected source
+        # records exactly, including custom user IDs and all saved metadata.
+        for block_id, items in decorated_by_block.items():
+            protected = [item for item in by_block[block_id]
+                         if item["attribution"]["basis"] == "user"
+                         or (retry_unresolved and has_assigned_speakers(item))]
+            decorated_by_block[block_id] = _overlay(items, protected)
         result["segments"] = [deepcopy(item) for block in source["blocks"]
                               for item in decorated_by_block.get(block["id"], by_block[block["id"]])]
     remaining = unassigned_segments(result)

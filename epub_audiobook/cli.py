@@ -332,12 +332,10 @@ def main(argv=None):
         if hashes[str(directory)] != original_manifest_hash:
             raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
         settings = config["analysis"]
-        targets = automatic_completion_targets(revised) if remaining else []
-        already_checked = len({item["block_id"] for item in remaining}) - len(targets)
-        if already_checked:
-            print(f"Reusing completed speaker checks for {already_checked} block(s); "
-                  "remaining choices will be requested in the terminal.", file=sys.stderr, flush=True)
+        targets = automatic_completion_targets(revised, retry_exhausted=True) if remaining else []
         if targets:
+            print(f"Checking remaining speakers in {len(targets)} source block(s); "
+                  "saved assignments will be retained.", file=sys.stderr, flush=True)
             cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
@@ -350,7 +348,7 @@ def main(argv=None):
                                       max_request_chars=settings["max_request_chars"],
                                       progress=lambda message: print(message, file=sys.stderr))
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
-                                        target_block_ids=targets,
+                                        target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
         revised = prompt_speaker_decisions(revised, book_path=directory)
         if revised != original:
@@ -382,25 +380,24 @@ def main(argv=None):
             for directory in directories:
                 if directory not in selected:
                     continue
-                targets = automatic_completion_targets(documents[directory])
+                targets = automatic_completion_targets(documents[directory], retry_exhausted=True)
                 revised[directory] = documents[directory]
-                already_checked = len({row["block_id"] for row in unassigned_segments(documents[directory])}) - len(targets)
-                if already_checked:
-                    print(f"Reusing completed speaker checks for {already_checked} block(s) in {directory}; "
-                          "remaining choices will be requested in the terminal.", file=sys.stderr, flush=True)
                 if not targets:
                     continue
                 if requests is None:
+                    if not config["provider"]["model"]:
+                        raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
                     model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
                     client = OpenAICompatibleClient(**config["provider"])
                     print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
                     requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                               max_request_chars=settings["max_request_chars"],
                                               progress=lambda message: print(message, file=sys.stderr))
-                print(f"Resolving unassigned passages: {directory}", file=sys.stderr)
+                print(f"Checking remaining speakers in {len(targets)} source block(s): {directory}; "
+                      "saved assignments will be retained.", file=sys.stderr, flush=True)
                 revised[directory] = complete_speakers(
                     documents[directory], requests, workers=min(5, settings["attribution_workers"]),
-                    target_block_ids=targets,
+                    target_block_ids=targets, retry_unresolved=True,
                     progress=lambda message: print(message, file=sys.stderr))
             for directory in revised:
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory)

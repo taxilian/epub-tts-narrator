@@ -77,6 +77,62 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertIn("SAME words together", output)
         self.assertEqual(unassigned_segments(result), [])
 
+    def test_mixed_block_shows_assigned_narration_tail_and_exact_unassigned_range(self):
+        document = missing()
+        text = "As I had done all of my life, a voice reminded me as I worked."
+        boundary = len("As I had done all of my life,")
+        document["source"]["blocks"][0]["text"] = text
+        document["source"]["blocks"][0]["inline_spans"] = [
+            {"start": 0, "end": boundary, "kind": "emphasis", "origin": "style"}]
+        document["cast"]["characters"][0]["evidence"] = []
+        document["cast"]["voices"][1]["traits"] = []
+        thought, tail = deepcopy(document["segments"][1]), deepcopy(document["segments"][0])
+        thought.update(id="b1:0:29", start=0, end=boundary, text=text[:boundary], kind="thought")
+        tail.update(id=f"b1:{boundary}:{len(text)}", start=boundary, end=len(text), text=text[boundary:])
+        document["segments"] = [thought, tail, document["segments"][2]]
+        before = deepcopy(document)
+        result, output = self.decide(document, "q\n")
+        self.assertIn("Source block [b1] (context only): " + text, output)
+        self.assertIn(f"Already assigned [b1:{boundary}:{len(text)}] — Narrator (narration; narrator): " + text[boundary:], output)
+        self.assertIn("Choose a voice only for [b1:0:29] below (29 characters)", output)
+        self.assertIn("Passage to assign: " + text[:boundary], output)
+        self.assertNotIn("Passage to assign: " + text, output)
+        self.assertEqual(document, before)
+        self.assertEqual(result["segments"], before["segments"])
+
+    def test_two_neighbors_show_plural_attribution_after_repeated_calls(self):
+        document = missing()
+        call_text = "“Jasper.”"
+        document["source"]["blocks"][0]["text"] = call_text
+        document["source"]["blocks"][1]["text"] = call_text
+        document["cast"]["characters"][0]["evidence"] = []
+        document["cast"]["voices"][1]["traits"] = []
+        third = deepcopy(document["source"]["blocks"][1])
+        third.update(id="b3", text="Two feminine voices called my name.")
+        document["source"]["blocks"].append(third)
+        document["source"]["chapters"][0]["block_ids"].append("b3")
+        target = deepcopy(document["segments"][1])
+        target.update(start=0, end=len(call_text), text=call_text)
+        later = deepcopy(document["segments"][2])
+        later.update(start=0, end=len(call_text), text=call_text)
+        narration = deepcopy(later)
+        narration.update(id="s4", block_id="b3", end=len(third["text"]), text=third["text"])
+        document["segments"] = [target, later, narration]
+        _, output = self.decide(document, "q\n")
+        self.assertIn("Context [b2]: “Jasper.”", output)
+        self.assertIn("Context [b3]: Two feminine voices called my name.", output)
+
+    def test_context_is_bounded_but_passage_is_whole_and_display_is_sanitized(self):
+        document = missing((2,))
+        text = "ordinary text " * 100
+        document["source"]["blocks"][1]["text"] = text
+        document["segments"][2].update(text=text, end=len(text))
+        document["cast"]["characters"][0]["name"] = "Mara\x1b"
+        _, output = self.decide(document, "q\n")
+        self.assertIn("Source block [b2] (context only): " + text[:1000] + " … [context truncated]", output)
+        self.assertIn("Passage to assign: " + text, output)
+        self.assertNotIn("\x1b", output)
+
     def test_invalid_numbers_duplicate_roles_narrators_and_duplicate_voices_reprompt(self):
         document = missing()
         add_lena(document)
