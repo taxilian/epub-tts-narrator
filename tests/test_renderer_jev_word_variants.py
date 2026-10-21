@@ -4,7 +4,7 @@ from unittest.mock import patch
 import unittest
 
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
-from epub_tts_narrator.jev import JevTranscriptJudge
+from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
 import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import PrimaryVerifier
 
@@ -37,6 +37,7 @@ class JevWordVariantTests(unittest.TestCase):
 
     def test_confirmed_spelling_and_pronunciation_variants_keep_actual_reference_words(self):
         cases = (
+            ("She put the doll on the shelf.", "She put the dull on the shelf."),
             ("Givve me the book.", "Give me the book."),
             ("I will recieve the book.", "I will receive the book."),
             ("Meet me at the libary.", "Meet me at the library."),
@@ -64,12 +65,14 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertEqual(audit["decision"], "equivalent")
                 self.assertEqual(audit["probabilities"]["roughly_same"], .98)
                 self.assertEqual(audit["method"], "jev_spoken_passage")
+                self.assertEqual(audit["questions"], QUESTIONS)
                 self.assertEqual(audit["comparisons"][0]["transcripts"], ["primary"])
                 self.assertEqual(audit["comparisons"][0]["requested_passage"], expected)
                 self.assertEqual(audit["comparisons"][0]["recognized_passage"], actual)
 
     def test_negative_passage_judgments_are_respected(self):
         cases = (
+            ("She bought a doll.", "She purchased a toy."),
             ("Give me the book.", "Take me the book."),
             ("Jasper carried the book.", "Jasmine carried the book."),
             ("Seven travelers carried books.", "Eleven travelers carried books."),
@@ -119,7 +122,7 @@ class JevWordVariantTests(unittest.TestCase):
         evaluate.assert_called_once()
 
     def test_short_names_are_judged_without_character_distance_or_substring_gates(self):
-        cases = (("Jas!", "Chase!"), ("Jas!", "Jazz!"), ("Jas!", "Jace!"), ("Jas, wait.", "Jas"))
+        cases = (("Doll!", "Dull!"), ("Jas!", "Chase!"), ("Jas!", "Jazz!"), ("Jas!", "Jace!"), ("Jas, wait.", "Jas"))
         for purpose in ("reference", "speech"):
             for expected, heard in cases:
                 with self.subTest(purpose=purpose, expected=expected, heard=heard):

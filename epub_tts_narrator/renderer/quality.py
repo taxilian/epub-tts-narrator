@@ -618,7 +618,7 @@ def _judge_reference(verifier, report, secondary_transcript):
         return False
     record = {key: value for key, value in record.items() if key in {
         "identity", "decision", "probabilities", "model", "policy_version", "threshold", "usage", "error_code",
-        "comparisons", "method"}}
+        "comparisons", "method", "questions"}}
     decision, probabilities = record.get("decision"), record.get("probabilities")
     threshold = record.get("threshold")
     if (not isinstance(decision, str) or decision not in {"equivalent", "different", "uncertain", "unavailable"}

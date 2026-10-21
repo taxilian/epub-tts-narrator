@@ -96,16 +96,45 @@ class FailureOutputTests(unittest.TestCase):
 
     def test_jev_failure_is_explained_without_echoing_remote_details(self):
         for decision, expected in (
-            ("different", "JEV found a substantive text difference"),
-            ("uncertain", "JEV could not confirm equivalent wording"),
-            ("unavailable", "JEV text confirmation unavailable"),
+            ("different", "JEV judged the transcript unlikely for the requested speech"),
+            ("uncertain", "JEV could not confirm a plausible transcription"),
+            ("unavailable", "JEV transcription check unavailable"),
             ("equivalent", ""),
             ("unexpected private response", ""),
         ):
             with self.subTest(decision=decision):
-                self.assertEqual(_verification_failure_detail({"text_judge": {
+                detail = _verification_failure_detail({"text_judge": {
                     "decision": decision, "error": "private remote detail",
-                }}), expected)
+                }})
+                self.assertEqual(detail, expected)
+                self.assertNotIn("equivalent wording", detail)
+                self.assertNotIn("substantive text difference", detail)
+
+    def test_accepted_jev_take_reports_transcription_plausibility(self):
+        with tempfile.TemporaryDirectory() as temp:
+            messages = []
+            report = {"passed": True, "reasons": [],
+                      "text_judge": {"decision": "equivalent"}}
+
+            def generate(path, seed):
+                Path(path).write_bytes(b"saved audio fixture")
+                return {"seed": seed}
+
+            def normalize(raw, wav, **kwargs):
+                Path(wav).write_bytes(Path(raw).read_bytes())
+
+            config = {"quality": {}, "render": {
+                "max_attempts": 1, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
+            }}
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"), \
+                    patch("epub_tts_narrator.renderer.workflow.validate_audio", return_value=report), \
+                    patch("epub_tts_narrator.renderer.workflow.normalize_clip", side_effect=normalize):
+                verified_take("She carried the doll.", generate, temp, {"test": True},
+                              object(), config, notify=messages.append, purpose="reference")
+            self.assertEqual(messages, [
+                "  JEV accepted the transcript as plausible recognition of the requested speech.",
+            ])
+            self.assertNotIn("equivalent", " ".join(messages))
 
     def test_jev_outage_retains_audio_and_same_command_retries_verification_only(self):
         with tempfile.TemporaryDirectory() as temp:

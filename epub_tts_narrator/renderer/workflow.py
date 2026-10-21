@@ -92,9 +92,9 @@ def _verification_failure_detail(report):
     judge = report.get("text_judge", {})
     judge_decision = judge.get("decision") if isinstance(judge, dict) else None
     judge_explanation = {
-        "different": "JEV found a substantive text difference",
-        "uncertain": "JEV could not confirm equivalent wording",
-        "unavailable": "JEV text confirmation unavailable",
+        "different": "JEV judged the transcript unlikely for the requested speech",
+        "uncertain": "JEV could not confirm a plausible transcription",
+        "unavailable": "JEV transcription check unavailable",
     }.get(judge_decision)
     if judge_explanation and not report.get("text_judge_skipped"):
         details.append(judge_explanation)
@@ -346,7 +346,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             write_json(accepted_path, record)
             judgment = report.get("text_judge", {})
             if judgment.get("decision") == "equivalent":
-                notify("  JEV confirmed the transcript differences.")
+                notify("  JEV accepted the transcript as plausible recognition of the requested speech.")
             return finish(wav, record)
         if pending_confirmation(report):
             stop_for_confirmation()
