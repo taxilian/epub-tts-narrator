@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from time import monotonic
 import unicodedata
 
 from .assembly import extract_cover, normalize_clip, package_audio
@@ -17,6 +18,7 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
 from .quality import validation_key as make_validation_key, validate_audio
+from .progress import ChapterProgress, format_duration, set_phase
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
 
@@ -151,6 +153,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
+    set_phase(notify, "checking saved audio")
 
     def finish(wav, record):
         # Acceptance remains attached to the normalized bytes. Raw synthesis
@@ -226,6 +229,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     if accepted is not None:
         # Older versions could leave a failed revalidation in accepted.json.
         # Such a record has no successful acceptance to preserve.
+        set_phase(notify, "verifying saved audio")
         report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
         accepted.update(validation_key=validation_key, report=report)
         write_json(accepted_path, accepted)
@@ -294,6 +298,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
+                    kind = "paragraph" if request.get("kind") == "paragraph_speech" else "speech"
+                    set_phase(notify, f"generating {kind}, attempt {attempt}/{attempts}", generated=True)
                     metadata = generate(raw, seed)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
@@ -301,11 +307,13 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                                       "raw_sha256": file_hash(regular_file(raw)),
                                       "engine_metadata": metadata, "normalized_sha256": None}
                         _save_elevenlabs_generation(generation_path, generation)
+                set_phase(notify, "normalizing speech")
                 normalize_clip(raw, wav, sample_rate=config["render"]["sample_rate"],
                                ffmpeg=config["render"]["ffmpeg"])
                 if generation is not None:
                     generation["normalized_sha256"] = file_hash(regular_file(wav))
                     _save_elevenlabs_generation(generation_path, generation)
+            set_phase(notify, f"verifying speech, attempt {attempt}/{attempts}")
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
         except RenderBlocked:
             raise
@@ -850,6 +858,7 @@ def _failed_run(work, exc, notify):
 
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
+    run_started = monotonic()
     config, plan, store = _preflight(
         bundle, config, chapters_only=chapters_only,
         multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False))
@@ -884,73 +893,78 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         rendered, acceptance = [], []
         engine_identity, verifier_identity = engine.identity, verifier.identity
         for chapter in plan["chapters"]:
+            chapter_started = monotonic()
+            chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
             if (saved is not None and _same_chapter_audio_context(saved["context"], context)
                     and _saved_chapter_clips_present(work, saved)):
                 composed, chapter_acceptance = _restore_chapter(work, chapter, saved, context, voices, config)
-                notify(f"Reusing completed {chapter['id']}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
+                notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             else:
-                notify(f"Rendering {chapter['id']}: {chapter['title']} ({len(chapter['chunks'])} chunks)")
+                notify(f"Rendering {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 clips, chapter_acceptance = [], []
-                for number, chunk in enumerate(chapter["chunks"], 1):
-                    if chunk["silent_control"]:
-                        clips.append(dict(chunk, wav_path=None))
-                        continue
-                    if "paragraph_turns" in chunk:
-                        request = _paragraph_request(chunk, voices, engine_identity, config)
-                        directory = work / "clips" / digest(request)
-                        turns = [{"text": turn["spoken_text"],
-                                  "voice": voices[turn["segment"]["voice_id"]],
-                                  "direction": turn["segment"].get("delivery", {}).get("direction", "")}
-                                 for turn in chunk["paragraph_turns"]]
-                        cached = (directory / "accepted.json").is_file()
-                        notify(f"  Chunk {number}/{len(chapter['chunks'])}: "
-                               f"{'checking saved paragraph' if cached else 'generating paragraph'} "
-                               f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
-                        wav, accepted = verified_take(
-                            chunk["spoken_text"],
-                            lambda path, seed, t=turns: engine.synthesize_dialogue(t, path, seed=seed),
-                            directory, request, verifier, config, notify=notify)
-                        chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
-                            **{key: accepted[key] for key in
-                               ("audio_sha256", "request_hash", "validation_key", "report")}))
-                        clips.append(dict(chunk, wav_path=str(wav)))
-                        continue
-                    direction = chunk["segment"].get("delivery", {}).get("direction", "")
-                    speakers = chunk_speakers(chunk)
-                    lanes = []
-                    for lane_number, speaker in enumerate(speakers, 1):
-                        voice = voices[speaker["voice_id"]]
-                        request = _speech_request(chunk, voice, engine_identity, config,
-                                                  performer=speaker if len(speakers) > 1 else None)
-                        directory = work / "clips" / digest(request)
-                        cached = (directory / "accepted.json").is_file()
-                        lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
-                        notify(f"  Chunk {number}/{len(chapter['chunks'])}{lane_label}: "
-                               f"{'checking saved take' if cached else 'generating speech'} ({speaker['voice_id']})")
-                        wav, accepted = verified_take(
-                            chunk["spoken_text"],
-                            lambda path, seed, c=chunk, v=voice, d=direction:
-                                engine.synthesize(c["spoken_text"], v, path, seed=seed, direction=d),
-                            directory, request, verifier, config, notify=notify)
-                        lanes.append(dict(speaker, wav_path=str(wav),
-                            **{key: accepted[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
-                    if len(lanes) > 1:
-                        mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=notify)
-                        mix, speaker_lanes = mixed["mix"], mixed["speaker_lanes"]
-                        chapter_acceptance.append({
-                            "chunk_id": chunk["chunk_id"], "audio_sha256": mix["audio_sha256"],
-                            "request_hash": mix["cache_key"], "validation_key": mixture_validation_key(speaker_lanes),
-                            "report": {"passed": True, "method": "independently_verified_simultaneous_lanes"},
-                            "speaker_lanes": speaker_lanes, "mix": mix})
-                        clips.append(dict(chunk, wav_path=mixed["wav_path"], mix=mix,
-                            speaker_lanes=[{key: lane[key] for key in LANE_FIELDS} for lane in speaker_lanes]))
-                    else:
-                        lane = lanes[0]
-                        chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
-                            **{key: lane[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
-                        clips.append(dict(chunk, wav_path=lane["wav_path"]))
+                with ChapterProgress(chapter["number"], len(bundle["chapters"]),
+                                     chapter["chunks"], notify=notify) as progress:
+                    for number, chunk in enumerate(chapter["chunks"], 1):
+                        with progress.task(number - 1) as task_notify:
+                            if chunk["silent_control"]:
+                                clips.append(dict(chunk, wav_path=None))
+                                continue
+                            if "paragraph_turns" in chunk:
+                                request = _paragraph_request(chunk, voices, engine_identity, config)
+                                directory = work / "clips" / digest(request)
+                                turns = [{"text": turn["spoken_text"],
+                                          "voice": voices[turn["segment"]["voice_id"]],
+                                          "direction": turn["segment"].get("delivery", {}).get("direction", "")}
+                                         for turn in chunk["paragraph_turns"]]
+                                cached = (directory / "accepted.json").is_file()
+                                task_notify(f"  Chunk {number}/{len(chapter['chunks'])}: "
+                                       f"{'checking saved paragraph' if cached else 'generating paragraph'} "
+                                       f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
+                                wav, accepted = verified_take(
+                                    chunk["spoken_text"],
+                                    lambda path, seed, t=turns: engine.synthesize_dialogue(t, path, seed=seed),
+                                    directory, request, verifier, config, notify=task_notify)
+                                chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
+                                    **{key: accepted[key] for key in
+                                       ("audio_sha256", "request_hash", "validation_key", "report")}))
+                                clips.append(dict(chunk, wav_path=str(wav)))
+                                continue
+                            direction = chunk["segment"].get("delivery", {}).get("direction", "")
+                            speakers = chunk_speakers(chunk)
+                            lanes = []
+                            for lane_number, speaker in enumerate(speakers, 1):
+                                voice = voices[speaker["voice_id"]]
+                                request = _speech_request(chunk, voice, engine_identity, config,
+                                                          performer=speaker if len(speakers) > 1 else None)
+                                directory = work / "clips" / digest(request)
+                                cached = (directory / "accepted.json").is_file()
+                                lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
+                                task_notify(f"  Chunk {number}/{len(chapter['chunks'])}{lane_label}: "
+                                       f"{'checking saved take' if cached else 'generating speech'} ({speaker['voice_id']})")
+                                wav, accepted = verified_take(
+                                    chunk["spoken_text"],
+                                    lambda path, seed, c=chunk, v=voice, d=direction:
+                                        engine.synthesize(c["spoken_text"], v, path, seed=seed, direction=d),
+                                    directory, request, verifier, config, notify=task_notify)
+                                lanes.append(dict(speaker, wav_path=str(wav),
+                                    **{key: accepted[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
+                            if len(lanes) > 1:
+                                mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=task_notify)
+                                mix, speaker_lanes = mixed["mix"], mixed["speaker_lanes"]
+                                chapter_acceptance.append({
+                                    "chunk_id": chunk["chunk_id"], "audio_sha256": mix["audio_sha256"],
+                                    "request_hash": mix["cache_key"], "validation_key": mixture_validation_key(speaker_lanes),
+                                    "report": {"passed": True, "method": "independently_verified_simultaneous_lanes"},
+                                    "speaker_lanes": speaker_lanes, "mix": mix})
+                                clips.append(dict(chunk, wav_path=mixed["wav_path"], mix=mix,
+                                    speaker_lanes=[{key: lane[key] for key in LANE_FIELDS} for lane in speaker_lanes]))
+                            else:
+                                lane = lanes[0]
+                                chapter_acceptance.append(dict(chunk_id=chunk["chunk_id"],
+                                    **{key: lane[key] for key in ("audio_sha256", "request_hash", "validation_key", "report")}))
+                                clips.append(dict(chunk, wav_path=lane["wav_path"]))
                 composed = prepare_chapter(
                     dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                     clips, work / "chapters", book=bundle["source"]["book"],
@@ -958,6 +972,9 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
+            notify(f"Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
+                   f"run elapsed {format_duration(monotonic() - run_started)} "
+                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready).")
         if chapters_only:
             result = {
                 "format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
@@ -1029,7 +1046,7 @@ def assemble(bundle, config, *, notify=print):
                 composed["encoded_sha256"] = None
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
-            notify(f"Verified saved {chapter['id']}: {chapter['title']}")
+            notify(f"Verified saved chapter {chapter['number']} / {len(bundle['chapters'])}: {chapter['title']}")
         if identities is None:
             raise RenderBlocked("No chapters selected for assembly")
         result = _package(bundle, config, plan, store, voices, rendered, acceptance, *identities, notify=notify)

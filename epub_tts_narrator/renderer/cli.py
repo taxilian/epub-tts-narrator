@@ -271,7 +271,7 @@ def main(argv=None):
                 if isinstance(result, dict):
                     for chapter in result.get("chapters", []):
                         location = chapter.get("audio_file") or "empty chapter (no speech)"
-                        print(f"  Chapter {chapter['number']}: {location}")
+                        print(f"  Chapter {chapter['number']} / {len(bundle['chapters'])}: {location}")
             else:
                 print(f"Completed audiobook: {config['render']['output_dir']}")
         return 0

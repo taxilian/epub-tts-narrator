@@ -471,6 +471,10 @@ To generate and listen to one chapter before committing to the whole book, inspe
 
 Advisory notes do not require an override. Unassigned spoken passages still block the selected chapter. `--chapters-only` saves lossless chapter audio, its encoded playback copy, timing, and provenance beneath `<book-directory>/render-work/chapters/`; it does not publish a final audiobook directory. The CLI prints each playable file's path. `render-work/completed-chapters/chapter-NNNN.json` records the current checkpoint for each manifest chapter, pointing to its files under `render-work/chapters/<cache-key>/`. A completed chapter remains available if a later chapter fails.
 
+Rendering, assembly, encoding, and cache reuse show the chapter's position in the full book, such as `chapter 6 / 35`, even when rendering only selected chapters. During speech generation, a live terminal line shows completed blocks, elapsed time, and the active block's generation or verification phase. A block is usually a paragraph; standalone passages and split paragraphs count separately. The count advances only when the entire block succeeds, including verification and any simultaneous speakers.
+
+After at least three newly generated blocks, the display estimates the remaining speech work in that chapter from the text length and observed speed. This is an approximate estimate for generation and verification, excluding chapter encoding and final packaging. Reused clips do not inflate the measured generation speed. Drama 3 does not expose a within-paragraph percentage, so active generation shows elapsed time rather than an invented percentage. Redirected output receives periodic plain-text updates instead of terminal control sequences. Each finished chapter also reports its elapsed time, total run time, and the number of selected chapters ready. These display changes do not alter audio cache keys or regenerate accepted speech.
+
 To generate the remaining chapters and package later:
 
 ```sh

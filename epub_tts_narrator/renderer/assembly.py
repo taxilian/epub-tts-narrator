@@ -557,6 +557,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
     base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
     for chapter, record in audio_chapters:
         output = target / record["path"]
+        chapter_label = f"{record['number']} / {chapter.get('total_chapters', len(records))}"
         if chapter.get("encoded_path") is not None:
             cached = Path(chapter["encoded_path"])
             if (cached.is_symlink() or not cached.is_file()
@@ -564,13 +565,13 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                     or _hash(cached) != chapter.get("encoded_sha256")):
                 raise ValueError("Cached encoded chapter failed integrity checks")
             _check_encoded(cached, record["frames"], sample_rate, ffprobe=ffprobe)
-            notify(f"Reusing chapter audio: {record['number']}: {record['title']}")
+            notify(f"Reusing chapter audio {chapter_label}: {record['title']}")
             with output.open("xb") as destination, cached.open("rb") as source:
                 shutil.copyfileobj(source, destination)
             if _hash(output) != chapter["encoded_sha256"]:
                 raise ValueError("Cached encoded chapter changed during packaging")
         else:
-            notify(f"Encoding chapter {record['number']}: {record['title']}")
+            notify(f"Encoding chapter {chapter_label}: {record['title']}")
             encode_chapter(chapter, output, book=book,
                            ordinal=chapter.get("track_number", record["ordinal"]),
                            total_chapters=chapter.get("total_chapters", len(records)),

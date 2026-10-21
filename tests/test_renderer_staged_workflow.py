@@ -151,7 +151,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.chapters()
         self.assertEqual(file_hash(first["audio_file"]), checksum)
         self.assertEqual(len(self.engine.speech_calls), 5)
-        self.assertTrue(any("Reusing completed chapter-0001" in item for item in self.messages))
+        self.assertTrue(any("Reusing completed chapter 1 / 2" in item for item in self.messages))
         self.assertFalse((self.root / "work" / ".render.lock").exists())
 
     def test_failed_final_encoding_preserves_all_completed_chapters_for_assembly(self):

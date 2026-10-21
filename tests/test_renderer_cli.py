@@ -76,7 +76,7 @@ class RendererCLITests(unittest.TestCase):
                 "--chapters", "1", "--chapters-only", "--chapter-format", "mp3", "--allow-review")
         self.assertEqual(status, 0, error)
         self.assertIn("Completed chapter audio", output)
-        self.assertIn("Chapter 1: /fixture/chapter.mp3", output)
+        self.assertIn("Chapter 1 / 1: /fixture/chapter.mp3", output)
         config = render.call_args.args[1]
         self.assertEqual(config["render"]["chapter_numbers"], [1])
         self.assertEqual(config["render"]["chapter_format"], "mp3")

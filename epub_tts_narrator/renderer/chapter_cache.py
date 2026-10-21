@@ -313,19 +313,20 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     total = chapter.get("_total_chapters", context.get("total_chapters", ordinal))
     metadata = {key: deepcopy(chapter[key]) for key in ("id", "title", "number", "script_path")
                 if key in chapter}
+    chapter_label = f"{metadata.get('number', ordinal)} / {total}"
     identity = {"context": deepcopy(context), "chapter": metadata, "book": deepcopy(book),
                 "settings": settings, "clips": clip_identity, "ordinal": ordinal, "total_chapters": total}
     key = digest(identity)
     folder = directory / key
     if folder.exists() or folder.is_symlink():
         result = load_chapter(folder, ffprobe=settings["ffprobe"])
-        notify(f"Reusing completed chapter {metadata.get('number', ordinal)}: {metadata['title']}")
+        notify(f"Reusing completed chapter {chapter_label}: {metadata['title']}")
         return result
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=directory) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        notify(f"Assembling chapter {metadata.get('number', ordinal)}: {metadata['title']}")
+        notify(f"Assembling chapter {chapter_label}: {metadata['title']}")
         composed = compose_chapter(
             clips, stage / "chapter.wav", sample_rate=settings["sample_rate"],
             paragraph_pause_ms=settings["paragraph_pause_ms"],
@@ -336,7 +337,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         normalization = _normalize(stage / "chapter.wav", settings)
         encoded = None
         if composed["frames"]:
-            notify(f"Encoding chapter {metadata.get('number', ordinal)}: {metadata['title']}")
+            notify(f"Encoding chapter {chapter_label}: {metadata['title']}")
             encoded = encode_chapter(
                 composed, stage / f"chapter.{settings['chapter_format']}", book=book,
                 ordinal=ordinal, total_chapters=total, chapter_format=settings["chapter_format"],
@@ -360,7 +361,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             return load_chapter(folder, ffprobe=settings["ffprobe"])
     result = load_chapter(folder, ffprobe=settings["ffprobe"])
     if result["encoded_path"]:
-        notify(f"Chapter ready: {result['encoded_path']}")
+        notify(f"Chapter {chapter_label} ready: {result['encoded_path']}")
     else:
-        notify(f"Chapter {metadata.get('number', ordinal)} is empty; recorded as skipped")
+        notify(f"Chapter {chapter_label} is empty; recorded as skipped")
     return result
