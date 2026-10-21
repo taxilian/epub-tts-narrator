@@ -14,6 +14,7 @@ from audiobook_renderer.bundle import load_bundle
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
+from audiobook_renderer.voice_prompts import audiobook_voice_prompt
 from epub_audiobook.cli import export_bundle
 from epub_audiobook.contracts import validate_document
 from epub_audiobook.pipeline import analyze
@@ -25,10 +26,10 @@ from test_renderer_voice_design_integration import (
 )
 
 
-DESCRIPTION = (
-    "An adult woman with warm chest resonance and a natural low speaking register. "
-    "A single clearly audible conversational voice."
+INITIAL_DESCRIPTION = (
+    "An adult woman's low alto voice has warm chest resonance, a slight rasp, and crisp consonants."
 )
+DESCRIPTION = INITIAL_DESCRIPTION + " She speaks with a steady conversational cadence."
 EVIDENCE_QUOTE = "her voice always had a rough edge"
 SCRIPT = (
     "“We should take the lantern with us before we leave, because the narrow path "
@@ -48,7 +49,7 @@ class FreshSeriesClient(FakeClient):
         evidence_unit = next(unit for unit in payload["target_units"]
                              if EVIDENCE_QUOTE in unit["text"])
         profile = patch["voices"][0]
-        profile.update(description=DESCRIPTION, traits=[
+        profile.update(description=INITIAL_DESCRIPTION, traits=[
             {"name": "timbre", "value": "a slight rasp", "basis": "text",
              "evidence": [{"block_id": evidence_unit["block_id"], "quote": EVIDENCE_QUOTE}]},
             {"name": "pitch", "value": "low alto", "basis": "casting", "evidence": []},
@@ -79,6 +80,8 @@ class FreshSeriesClient(FakeClient):
                                 if voice["id"] == character["voice_id"]))
         profile["traits"].append({"name": "pace", "value": "steady conversational cadence",
                                   "basis": "casting", "evidence": []})
+        if profile["description"] == INITIAL_DESCRIPTION:
+            profile["description"] = DESCRIPTION
         patch["voices"] = [profile]
         return patch
 
@@ -145,7 +148,7 @@ class FreshSeriesCastingTests(unittest.TestCase):
                 self.assertEqual(len(engine.calls), 1)
                 self.assertEqual(len(verifier.calls), 1)
                 call = engine.calls[0]
-                self.assertIn(DESCRIPTION, call["prompt"])
+                self.assertEqual(call["prompt"], audiobook_voice_prompt(DESCRIPTION))
                 for trait in profile["traits"]:
                     self.assertIn(trait["value"], call["prompt"])
                 self.assertNotIn(EVIDENCE_QUOTE, call["prompt"])

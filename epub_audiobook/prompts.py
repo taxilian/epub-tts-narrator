@@ -17,11 +17,26 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT
-Each voice.description and every traits[].value become directions for creating
-one reusable voice reference. Write a concise acoustic design that will remain
-recognizable across scenes and books. Use a few compatible, concrete audible
-dimensions: register, resonance, texture, articulation, and habitual pace.
+VOICE PROFILE CONTRACT v2
+Write voice.description as a complete voice-creation prompt in one or two
+concise sentences. Describe concrete, audible characteristics: typical pitch,
+resonance, vocal weight, texture, accent, articulation, and natural cadence.
+Choose a few distinctive, compatible traits rather than a repetitive list.
+Include age, gender presentation, or fictional context when they help establish
+the intended sound. Translate personality into vocal choices: precise consonants
+and measured phrasing for a meticulous character, or a thin, reedy tone and dry
+rasp for an abrasive creature. Preserve unusual or harsh qualities when they are
+essential to the character. Include only story details that help define sound.
+Keep the voice's lasting identity separate from scene-specific performance.
+The creation prompt describes recognizable sound and habitual delivery; temporary
+emotions, urgency, whispering, shouting, and changes of pace belong in individual
+passages' delivery directions. State the audiobook's creative context plainly.
+The prose description is the complete direction sent to the voice engine.
+Include every chosen audible characteristic there; never depend on traits[] to
+supply missing directions. Keep traits[] as structured evidence and casting
+metadata, consistent with the description. Trait fields are not appended to the
+voice-creation prompt. Keep source quotations and analysis commentary in their
+metadata fields, outside the description.
 Write description and trait values as direct, positive audible directions only.
 Do not include commentary about the analysis, the source's omissions, the basis
 of a choice, or what the voice should NOT do. Even a phrase such as 'screams are
@@ -57,10 +72,12 @@ injuries, scene actions, or instructions to alternate between performances.
 Keep fear, anger, shouting, crying, and a particular whispered line in the
 passage's delivery instead. A habitual breathy or quiet voice may remain a
 stable trait, but its reference must still be clearly audible and intelligible.
-For nonhuman speakers, choose a manageable vocal texture such as a light rasp,
-grainy resonance, or a clipped cadence while preserving clear articulation.
-Do not request garbled words, extreme pitch distortion, endless stretched
-vowels, background noises, music, or effects as part of a reusable voice.
+For nonhuman speakers, retain distinctive harshness, a deep growl, a thin reedy
+tone, a dry rasp, or other unusual audible qualities when essential. Do not
+automatically soften them into a mild or conventionally pleasant voice. Combine
+the intended texture with intelligible words and compatible pitch and resonance.
+Do not request garbled words, endless stretched vowels, background noises,
+music, or layered sound effects as part of a reusable voice.
 Design one clean reference performer. A collective role may have a cohesive
 representative vocal identity as a casting choice; do not request overlapping
 voices, a crowd, or simultaneous layers in that reference. Keep individually

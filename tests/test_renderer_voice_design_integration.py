@@ -207,14 +207,30 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(read_json(records[0])["request"]["designer"], identity)
 
-    def test_missing_render_voice_uses_traits_and_records_exact_prompt(self):
+    def test_complete_render_description_reaches_designer_without_trait_list(self):
+        session = self.new_session()
+        profile = deepcopy(self.bundle["cast"]["voices"][0])
+        description = "A fictional creature with a harsh dry rasp, thin resonance, and precise consonants."
+        profile.update(description=description, traits=[
+            {"name": "texture", "value": "harsh dry rasp", "basis": "casting", "evidence": []},
+            {"name": "resonance", "value": "thin resonance", "basis": "casting", "evidence": []},
+        ])
+        selected = ensure_voice(
+            session.store, self.voice_id, profile, self.engine, self.verifier,
+            self.config, self.config["render"]["work_dir"], designer=self.designer,
+            notify=lambda _: None)
+        expected = audiobook_voice_prompt(description)
+        self.assertEqual(self.designer.calls[0]["prompt"], expected)
+        self.assertEqual(selected["creation"]["requested_description"], expected)
+
+    def test_missing_render_voice_uses_description_only_and_records_exact_prompt(self):
         session = self.new_session()
         profile = deepcopy(self.bundle["cast"]["voices"][0])
         profile.update(description="A reserved speaker.", traits=[
             {"name": "timbre", "value": "slightly husky",
              "basis": "casting", "evidence": [{"quote": "Do not speak this evidence."}]},
         ])
-        expected = audiobook_voice_prompt("A reserved speaker.\nVoice traits: timbre: slightly husky")
+        expected = audiobook_voice_prompt("A reserved speaker.")
         selected = ensure_voice(
             session.store, self.voice_id, profile, self.engine, self.verifier,
             self.config, self.config["render"]["work_dir"], designer=self.designer,

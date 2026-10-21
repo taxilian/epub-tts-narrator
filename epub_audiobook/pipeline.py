@@ -107,13 +107,13 @@ def seed_cast():
              "character_id": None, "voice_id": "voice_narrator_main",
              "description": "Default narrator; refine identity and scope from the book."}],
             "voices": [{"id": "voice_narrator_main",
-                        "description": "A clear, natural speaking voice with even resonance, precise but relaxed articulation, "
-                                       "and a steady conversational pace. One clean, intelligible reference performer.",
+                        "description": "A clear speaking voice with even and natural resonance, precise but relaxed articulation, "
+                                       "and a steady conversational pace.",
                         "traits": [{"name": "resonance", "value": "even and natural",
                                     "basis": "casting", "evidence": []},
                                    {"name": "articulation", "value": "precise but relaxed",
                                     "basis": "casting", "evidence": []},
-                                   {"name": "pace", "value": "steady and conversational",
+                                   {"name": "pace", "value": "steady conversational",
                                     "basis": "casting", "evidence": []}]}]}
 
 

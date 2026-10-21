@@ -12,7 +12,7 @@ from unittest.mock import patch
 import wave
 
 from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession, MAX_PROMPT_CHARACTERS, _default_voice_prompt
+from audiobook_renderer.casting import CastingSession, MAX_PROMPT_CHARACTERS
 from audiobook_renderer.common import read_json, write_json
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
@@ -142,7 +142,7 @@ class CastingTests(unittest.TestCase):
         self.assertEqual(self.verifier_factories, [])
         self.assertFalse((self.session.store.directory / ".lock").exists())
 
-    def test_first_casting_prompt_includes_traits_without_source_evidence(self):
+    def test_first_casting_prompt_uses_only_description_without_traits_or_source_evidence(self):
         profile = self.bundle["cast"]["voices"][0]
         profile["description"] = "A calm young man."
         profile["traits"] = [
@@ -155,9 +155,7 @@ class CastingTests(unittest.TestCase):
         ]
         session = self.new_session()
         self.addCleanup(session.close)
-        expected = audiobook_voice_prompt(
-            "A calm young man.\nVoice traits: pitch: young adult male, slightly husky; "
-            "delivery: calm and measured")
+        expected = audiobook_voice_prompt("A calm young man.")
         self.assertEqual(session.rows()[0]["prompt"], expected)
         session.generate(self.voice_id)
         self.assertEqual(self.engine.calls[0]["prompt"], expected)
@@ -196,14 +194,30 @@ class CastingTests(unittest.TestCase):
         draft = self.session._draft(self.voice_id, selected)
         self.assertEqual(draft["prompt"], custom)
 
-    def test_default_prompt_is_bounded_at_a_word_boundary(self):
-        prompt = _default_voice_prompt({
-            "description": "A steady voice.",
-            "traits": [{"name": "timbre", "value": "rounded resonance " * 500}],
-        })
-        self.assertLessEqual(len(prompt), MAX_PROMPT_CHARACTERS)
-        self.assertTrue(prompt.endswith(("rounded…", "resonance…")))
-        self.assertIn("Voice traits: timbre:", prompt)
+    def test_overlong_default_stops_before_loading_engine_or_creating_draft(self):
+        self.bundle["cast"]["voices"][0]["description"] = "A rounded resonant voice. " * 500
+        session = self.new_session()
+        self.addCleanup(session.close)
+        with self.assertRaisesRegex(ValueError, "shorten the description"):
+            session.generate(self.voice_id)
+        self.assertEqual(self.engine_factories, [])
+        self.assertEqual(self.engine.calls, [])
+        self.assertFalse(self.session._draft_path(self.voice_id).exists())
+
+    def test_complete_casting_description_reaches_designer_without_trait_list(self):
+        description = "An elderly masculine voice with a harsh dry rasp and precise consonants."
+        self.bundle["cast"]["voices"][0].update(description=description, traits=[
+            {"name": "presentation", "value": "masculine voice", "basis": "casting", "evidence": []},
+            {"name": "texture", "value": "harsh dry rasp", "basis": "casting", "evidence": []},
+        ])
+        session = self.new_session()
+        self.addCleanup(session.close)
+        script = session.rows()[0]["reference_text"]
+        selected = session.generate(self.voice_id)
+        expected = audiobook_voice_prompt(description)
+        self.assertEqual(self.engine.calls[0]["prompt"], expected)
+        self.assertEqual(self.engine.calls[0]["text"], script)
+        self.assertEqual(selected["creation"]["requested_description"], expected)
 
     def test_narration_and_noncharacter_voices_have_readable_labels(self):
         bundle = deepcopy(self.bundle)
