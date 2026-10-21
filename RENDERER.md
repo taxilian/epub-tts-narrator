@@ -259,6 +259,13 @@ An API error or failed Gemini verification is reported and preserves any existin
 selection. Automatic selection does not silently switch providers after a failure.
 Use `G` in the menu for an explicit local replacement, or `GG` for Gemini.
 
+Casting prints the complete API error message and response details, including the
+HTTP status, endpoint, model, and any field validation errors. Network errors
+include their underlying reason. These diagnostics are also saved in each
+`attempt-*.json` report. Messages are not shortened; configured credentials are
+masked and terminal control sequences are removed. The final failure includes
+the last generation or verification exception as well as the inspection path.
+
 Gemini casting sends the voice description and selected sample script to Google's
 API. It creates a persistent custom voice, synthesizes the exact script, and runs
 the same independent transcription and audio checks as local creation. Existing

@@ -295,11 +295,20 @@ class GeminiVoiceDesignTests(unittest.TestCase):
         self.assertEqual(call.kwargs["timeout"], 180)
         self.assertIsNone(_NoRedirect().redirect_request(None, None, 302, "Moved", {}, "https://other.invalid"))
 
-    def test_api_errors_do_not_expose_remote_body_url_or_exception_details(self):
+    def test_api_errors_preserve_full_response_and_mask_echoed_credentials(self):
         for code in (400, 401, 403, 404, 408, 429, 500):
+            body = {"error": {
+                "code": code, "status": "INVALID_ARGUMENT",
+                "message": "Voice description was rejected: " + "specific diagnostic " * 100,
+                "details": [{"@type": "type.googleapis.com/google.rpc.BadRequest",
+                             "fieldViolations": [{"field": "voice.prompted.input",
+                                                  "description": "The precise final explanation."}],
+                             "echoed_key": self.key}],
+            }}
+            response = io.BytesIO(json.dumps(body).encode())
             error = urllib.error.HTTPError(
-                "https://example.invalid?secret=" + self.key, code, self.key,
-                {}, io.BytesIO(self.key.encode()),
+                "https://example.invalid?secret=" + self.key, code, "Bad Request " + self.key,
+                {}, response,
             )
             self.designer._opener = Mock()
             self.designer._opener.open.side_effect = error
@@ -307,14 +316,76 @@ class GeminiVoiceDesignTests(unittest.TestCase):
                 self.designer._post("/voices", {})
             self.assertNotIn(self.key, str(caught.exception))
             self.assertIn(f"HTTP {code}", str(caught.exception))
+            self.assertIn("POST /voices; model " + GEMINI_DESIGN_MODEL, str(caught.exception))
+            self.assertIn("INVALID_ARGUMENT", str(caught.exception))
+            self.assertIn(body["error"]["message"], str(caught.exception))
+            self.assertIn("voice.prompted.input", str(caught.exception))
+            self.assertIn("The precise final explanation.", str(caught.exception))
+            self.assertIn("[REDACTED]", str(caught.exception))
             self.assertEqual(caught.exception.definite_rejection, 400 <= code < 500 and code != 408)
             self.assertTrue(caught.exception.__suppress_context__)
-        for error in (urllib.error.URLError(self.key), TimeoutError(self.key), OSError(self.key)):
+            self.assertTrue(response.closed)
+
+    def test_network_errors_include_original_reason_without_credentials(self):
+        detail = "Connection refused by proxy; credential=" + self.key
+        self.designer._opener = Mock()
+        for error in (urllib.error.URLError(detail), TimeoutError(detail), OSError(detail)):
             self.designer._opener.open.side_effect = error
             with self.assertRaises(_RequestFailure) as caught:
                 self.designer._post("/interactions", {})
             self.assertNotIn(self.key, str(caught.exception))
+            self.assertIn("Connection refused by proxy", str(caught.exception))
+            self.assertIn(type(error).__name__, str(caught.exception))
+            self.assertIn("POST /interactions", str(caught.exception))
             self.assertFalse(caught.exception.definite_rejection)
+
+    def test_plain_text_and_empty_error_responses_keep_http_context(self):
+        for body in (b"Backend rejected the requested voice.\nTry a supported language.", b""):
+            self.designer._opener = Mock()
+            self.designer._opener.open.side_effect = urllib.error.HTTPError(
+                "https://example.invalid", 400, "Bad Request", {}, io.BytesIO(body))
+            with self.subTest(body=body), self.assertRaises(_RequestFailure) as caught:
+                self.designer._post("/voices", {})
+            message = str(caught.exception)
+            self.assertIn("HTTP 400", message)
+            self.assertIn("Bad Request", message)
+            self.assertIn(body.decode() if body else "empty response body", message)
+
+    def test_failed_interaction_preserves_structured_error_and_status(self):
+        self.mock_posts({"id": "voice_failed"}, {
+            "id": "interaction_123", "status": "failed", "error": {
+                "code": "unsupported_voice", "message": "This voice cannot synthesize the script.",
+                "details": {"voice_id": "voice_failed", "echoed_key": self.key},
+            },
+        })
+        with self.assertRaises(EngineError) as caught:
+            self.generate()
+        message = str(caught.exception)
+        self.assertIn("interaction_123", message)
+        self.assertIn('"status": "failed"', message)
+        self.assertIn("unsupported_voice", message)
+        self.assertIn("This voice cannot synthesize the script.", message)
+        self.assertIn("voice_failed", message)
+        self.assertNotIn(self.key, message)
+        self.assertFalse(self.output.exists())
+
+    def test_local_save_failures_include_original_filesystem_error(self):
+        from audiobook_renderer.gemini_voice_design import _write_exclusive
+        for filename in ("gemini-voice.json", "attempt-001-raw.wav"):
+            target = self.root / filename / "attempt-001-raw.wav"
+
+            def write(path, content):
+                if path.name == filename:
+                    raise PermissionError("Permission denied for sample directory")
+                return _write_exclusive(path, content)
+
+            with self.subTest(filename=filename), patch.object(
+                self.designer, "_post", side_effect=[{"id": "voice_saved"}, audio_response()],
+            ), patch("audiobook_renderer.gemini_voice_design._write_exclusive", side_effect=write):
+                with self.assertRaises(EngineError) as caught:
+                    self.generate(output=target)
+            self.assertIn("PermissionError: Permission denied for sample directory", str(caught.exception))
+            self.assertFalse(target.exists())
 
     def test_invalid_and_oversized_json_responses_are_rejected(self):
         for data in (b"not json", b"[]", b"\xff"):

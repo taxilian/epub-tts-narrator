@@ -94,10 +94,10 @@ class FailureOutputTests(unittest.TestCase):
             ])
             self.assertFalse((Path(temp) / "accepted.json").exists())
 
-    def test_safe_gemini_error_is_visible_without_exposing_arbitrary_errors(self):
+    def test_generation_errors_are_visible_for_gemini_and_local_engines(self):
         from audiobook_renderer.gemini_voice_design import GeminiVoiceError
         safe = "Gemini API request failed (HTTP 403). Check Gemini API access and project permissions."
-        for error, visible in ((GeminiVoiceError(safe), True), (RuntimeError("private detail"), False)):
+        for error in (GeminiVoiceError(safe), RuntimeError("Local model could not allocate memory")):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temp:
                 messages = []
                 config = {"quality": {}, "render": {
@@ -109,8 +109,7 @@ class FailureOutputTests(unittest.TestCase):
                     with self.assertRaises(RenderBlocked):
                         verified_take("Sample text.", generate, temp, {"test": True},
                                       object(), config, notify=messages.append)
-                self.assertEqual(safe in " ".join(messages), visible)
-                self.assertNotIn("private detail", " ".join(messages))
+                self.assertIn(str(error), " ".join(messages))
 
 
 if __name__ == "__main__":

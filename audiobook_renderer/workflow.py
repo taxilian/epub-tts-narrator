@@ -16,6 +16,7 @@ from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare
 from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
+from .diagnostics import configured_secrets, safe_error_text
 from .quality import validation_key as make_validation_key, validate_audio
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
@@ -81,8 +82,9 @@ def _verification_failure_detail(report):
     }.get(decision)
     if explanation:
         details.append(explanation)
-    if report.get("provider_error"):
-        details.append(_diagnostic_text(report["provider_error"], limit=800))
+    error = report.get("provider_error") or report.get("error")
+    if error:
+        details.append(safe_error_text(error))
     return "; ".join(details)
 
 
@@ -110,6 +112,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         if report["passed"]:
             return wav, accepted
     attempts = config["render"]["max_attempts"]
+    secrets = configured_secrets(config)
+    last_report = None
     for attempt in range(1, attempts + 1):
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
@@ -124,6 +128,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             if previous.get("request_hash") != digest(request):
                 raise RenderBlocked("Attempt belongs to a different synthesis request")
             if previous.get("validation_key") == validation_key and not previous.get("report", {}).get("passed"):
+                last_report = previous.get("report", {})
                 continue
             metadata = previous.get("engine_metadata", {})
         try:
@@ -145,11 +150,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         except RenderBlocked:
             raise
         except (ValueError, RuntimeError, OSError) as exc:
+            error = safe_error_text(exc, secrets=secrets)
             report = {"passed": False, "reasons": ["generation_or_verification_error"],
-                      "error": str(exc), "error_type": type(exc).__name__}
+                      "error": error, "error_type": type(exc).__name__}
             from .gemini_voice_design import GeminiVoiceError
             if isinstance(exc, GeminiVoiceError):
-                report["provider_error"] = str(exc)
+                report["provider_error"] = error
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -157,13 +163,18 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             "audio_sha256": file_hash(wav) if wav.exists() else None,
         }
         write_json(result_path, record)
+        last_report = report
         if report.get("passed") is True:
             write_json(accepted_path, record)
             return wav, record
         detail = _verification_failure_detail(report)
         suffix = f" ({detail})" if detail else ""
         notify(f"  Attempt {attempt}/{attempts} rejected: {', '.join(report.get('reasons', []))}{suffix}")
-    raise RenderBlocked(f"Speech verification failed after {attempts} attempts. Inspect {directory}")
+    failure = f"Speech verification failed after {attempts} attempts. Inspect {directory}"
+    error = (last_report or {}).get("provider_error") or (last_report or {}).get("error")
+    if error:
+        failure += "\nLast error: " + safe_error_text(error, secrets=secrets)
+    raise RenderBlocked(failure)
 
 
 def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, notify=print,

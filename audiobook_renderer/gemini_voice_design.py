@@ -23,6 +23,7 @@ import urllib.request
 import wave
 
 from .engines import EngineError, _seed
+from .diagnostics import safe_error_text
 
 
 GEMINI_DESIGN_MODEL = "gemini-3.8-flash-tts"
@@ -33,7 +34,7 @@ _VOICE_ID = re.compile(r"voice_[A-Za-z0-9_-]{1,200}\Z")
 
 
 class GeminiVoiceError(EngineError):
-    """A credential-free diagnostic safe to show in casting progress."""
+    """A complete provider diagnostic with configured credentials removed."""
 
 
 class _RequestFailure(GeminiVoiceError):
@@ -158,6 +159,18 @@ class GeminiVoiceDesigner:
             "language_code": self.language_code, "output_encoding": "wav-pcm",
         })
 
+    def _error_detail(self, value):
+        """Keep provider messages and structured details, masking only the key."""
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
+        if not isinstance(value, str):
+            value = json.dumps(value, indent=2, ensure_ascii=False)
+        return safe_error_text(value, secrets=(self._api_key,))
+
     def _post(self, endpoint, payload):
         request = urllib.request.Request(
             _API_ROOT + endpoint, method="POST",
@@ -168,33 +181,40 @@ class GeminiVoiceDesigner:
         try:
             with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
-            if len(raw) > _MAX_RESPONSE_BYTES:
-                raise _RequestFailure("Gemini API response exceeded the size limit")
-            result = json.loads(raw)
-            if not isinstance(result, dict):
-                raise _RequestFailure("Gemini API returned an invalid response")
-            return result
         except urllib.error.HTTPError as exc:
-            # Remote bodies, URLs, exception strings and headers may contain
-            # credentials or echoed private text. Report only the status code.
             code = exc.code
-            exc.close()
-            hints = {
-                400: "Check the configured Gemini model and request settings.",
-                401: "Check gemini.api_key in the local config file.",
-                403: "Check Gemini API access and project permissions.",
-                404: "Check model availability and the stored Gemini voice ID.",
-                429: "The Gemini quota or rate limit was reached; try again later.",
-            }
-            hint = hints.get(code, "Try again after checking Gemini service availability.")
+            reason = self._error_detail(str(exc.reason))
+            try:
+                raw = exc.read(_MAX_RESPONSE_BYTES + 1)
+                detail = self._error_detail(raw[:_MAX_RESPONSE_BYTES]) or "(empty response body)"
+                if len(raw) > _MAX_RESPONSE_BYTES:
+                    detail += f"\n[Response exceeds {_MAX_RESPONSE_BYTES} bytes; remaining bytes omitted.]"
+            except (OSError, ValueError) as read_error:
+                detail = "Could not read the error response: " + self._error_detail(str(read_error))
+            finally:
+                exc.close()
             raise _RequestFailure(
-                f"Gemini API request failed (HTTP {code}). {hint}",
+                f"Gemini API request failed (HTTP {code}): {reason}\n"
+                f"POST {endpoint}; model {self.model}\n{detail}",
                 definite_rejection=400 <= code < 500 and code != 408,
             ) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise _RequestFailure("Gemini API request failed or timed out") from None
-        except (ValueError, UnicodeError):
-            raise _RequestFailure("Gemini API returned invalid JSON") from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise _RequestFailure(
+                f"Gemini API request failed or timed out (POST {endpoint}; model {self.model}):\n"
+                f"{type(exc).__name__}: {self._error_detail(str(exc))}",
+            ) from None
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise _RequestFailure("Gemini API response exceeded the size limit")
+        try:
+            result = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise _RequestFailure(
+                f"Gemini API returned invalid JSON (POST {endpoint}; model {self.model}):\n"
+                f"{self._error_detail(str(exc))}\n{self._error_detail(raw)}",
+            ) from None
+        if not isinstance(result, dict):
+            raise _RequestFailure("Gemini API returned an invalid response:\n" + self._error_detail(result))
+        return result
 
     @staticmethod
     def _pending_message(path, display_name):
@@ -252,10 +272,11 @@ class GeminiVoiceDesigner:
         state = {**pending, "voice_id": voice_id}
         try:
             _write_state(state_path, state)
-        except OSError:
+        except OSError as exc:
             raise GeminiVoiceError(
                 f"Gemini created {voice_id}, but its state could not be saved. "
-                f"Add this ID as voice_id in {pending_path} before retrying."
+                f"Add this ID as voice_id in {pending_path} before retrying.\n"
+                f"{type(exc).__name__}: {self._error_detail(str(exc))}"
             ) from None
         pending_path.unlink()
         return voice_id
@@ -287,7 +308,9 @@ class GeminiVoiceDesigner:
             "generation_config": {"seed": synthesis_seed, "speech_config": [{"voice": voice_id}]},
         })
         if response.get("status") != "completed" or response.get("error"):
-            raise GeminiVoiceError("Gemini sample synthesis did not complete successfully")
+            detail = self._error_detail({key: response[key] for key in ("id", "status", "error")
+                                         if key in response})
+            raise GeminiVoiceError("Gemini sample synthesis did not complete successfully:\n" + detail)
         steps = response.get("steps")
         if not isinstance(steps, list):
             raise GeminiVoiceError("Gemini returned invalid audio output")
@@ -315,8 +338,11 @@ class GeminiVoiceDesigner:
         details = _wav_details(audio)
         try:
             _write_exclusive(output_path, audio)
-        except OSError:
-            raise GeminiVoiceError(f"Could not publish Gemini audio without overwriting: {output_path}") from None
+        except OSError as exc:
+            raise GeminiVoiceError(
+                f"Could not publish Gemini audio without overwriting: {output_path}\n"
+                f"{type(exc).__name__}: {self._error_detail(str(exc))}"
+            ) from None
         return {
             "creation_method": "prompt_conditioned_voice_design", "description_applied": True,
             "requested_description": description, "designer": self.identity,
