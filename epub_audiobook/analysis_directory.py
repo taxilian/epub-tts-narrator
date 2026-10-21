@@ -105,6 +105,12 @@ def _continuation_entry(manifest):
     return link
 
 
+def _readiness_matches(saved, current):
+    """Accept the former advisory-review status without rewriting prior books."""
+    legacy = dict(current, ready=not current["errors"] and current["review_count"] == 0)
+    return saved == current or saved == legacy
+
+
 def _completed_directory(directory):
     """Validate the bundle and its matching cumulative series snapshot."""
     directory = Path(directory).resolve()
@@ -138,7 +144,7 @@ def _completed_directory(directory):
                 or manifest.get("book") != document["source"]["book"]
                 or manifest.get("chapters") != document["source"]["chapters"]
                 or manifest.get("provenance") != document["provenance"]
-                or manifest.get("readiness") != state
+                or not _readiness_matches(manifest.get("readiness"), state)
                 or _read_json(directory / "source.json") != document["source"]
                 or _read_json(directory / "cast.json") != document["cast"]
                 or _read_json(directory / "review.json") != review_items(document)):
@@ -165,8 +171,9 @@ def _completed_directory(directory):
         latest = registry["books"][-1]
         expected = {"source_fingerprint": source_hash, "book": document["source"]["book"],
                     "cast": document["cast"], "series_provenance": series,
-                    "issues": document["issues"], "readiness": state}
-        if any(latest.get(key) != value for key, value in expected.items()):
+                    "issues": document["issues"]}
+        if (any(latest.get(key) != value for key, value in expected.items())
+                or not _readiness_matches(latest.get("readiness"), state)):
             raise ValueError("Prior analysis does not match the latest series snapshot")
         return document, registry, names
     except FileNotFoundError as exc:

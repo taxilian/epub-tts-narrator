@@ -387,7 +387,7 @@ class _Validator:
 def validate_document(document: Any) -> list[str]:
     """Return structural/fidelity errors without trusting supplied readiness flags.
 
-    A valid document may still need human review; use :func:`readiness` before
+    A valid document may still have unassigned speech; use :func:`readiness` before
     generating audio.  Inputs with malformed JSON types return errors, not crashes.
     """
     return _Validator().validate(document)
@@ -417,7 +417,7 @@ def has_assigned_speakers(segment: Any) -> bool:
 
 
 def review_items(document: Any) -> list[dict[str, Any]]:
-    """Return unresolved issues and segments that still require a voice decision."""
+    """Return advisory issues and flagged or unassigned segments for optional edits."""
     if not isinstance(document, dict):
         return []
     result: list[dict[str, Any]] = []
@@ -451,7 +451,16 @@ def review_items(document: Any) -> list[dict[str, Any]]:
 
 
 def readiness(document: Any) -> dict[str, Any]:
-    """Compute readiness from validated content and outstanding review decisions."""
+    """Require valid source coverage and assigned speech, keeping notes advisory.
+
+    Review flags describe uncertainty worth retaining for later edits. They are
+    not a separate approval workflow once every spoken passage has a performer.
+    """
     errors = validate_document(document)
     review_count = len(review_items(document))
-    return {"ready": not errors and review_count == 0, "errors": errors, "review_count": review_count}
+    ready = not errors and not any(
+        any(char.isalnum() for char in segment.get("spoken_text", segment["text"]))
+        and not has_assigned_speakers(segment)
+        for segment in document["segments"]
+    )
+    return {"ready": ready, "errors": errors, "review_count": review_count}

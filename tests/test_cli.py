@@ -326,15 +326,39 @@ class CLITests(unittest.TestCase):
         self.assertIn("HTTP 429", stderr)
         self.assertEqual(output.read_text(), "preserved old output")
 
-    def test_export_refuses_pending_review_unless_draft_requested(self):
+    def test_export_keeps_advisory_notes_without_requiring_an_approval_flag(self):
         doc = valid_document()
         doc["segments"][0]["attribution"]["review_required"] = True
-        with self.assertRaises(ValueError):
-            export_bundle(doc, self.root / "blocked")
-        self.assertFalse((self.root / "blocked").exists())
-        export_bundle(doc, self.root / "draft", allow_review=True)
-        self.assertFalse(read_json(self.root / "draft/manifest.json")["readiness"]["ready"])
-        self.assertEqual(len(read_json(self.root / "draft/review.json")), 1)
+        for allow_review in (False, True):
+            with self.subTest(allow_review=allow_review):
+                output = self.root / f"bundle-{allow_review}"
+                export_bundle(doc, output, allow_review=allow_review)
+                self.assertTrue(read_json(output / "manifest.json")["readiness"]["ready"])
+                self.assertEqual(len(read_json(output / "review.json")), 1)
+
+    def test_cli_export_returns_success_for_advisory_notes_and_reports_no_review_gate(self):
+        doc = valid_document()
+        doc["segments"][0]["attribution"]["review_required"] = True
+        write_json(self.analysis, doc, overwrite=True)
+        status, output, diagnostics = self.run_cli("export", self.analysis, "-o", self.root / "advisory-bundle")
+        self.assertEqual(status, 0, diagnostics)
+        self.assertIn("1 advisory notes", output)
+        self.assertIn("No review step is required", output)
+        self.assertNotIn("draft", output)
+
+    def test_cli_export_preserves_unassigned_passages_and_returns_incomplete_status(self):
+        doc = valid_document()
+        doc["segments"][1].update(role_id=None, voice_id=None)
+        doc["segments"][1]["attribution"].update(basis="unresolved", review_required=True)
+        write_json(self.analysis, doc, overwrite=True)
+        bundle = self.root / "incomplete-bundle"
+        status, output, diagnostics = self.run_cli("export", self.analysis, "-o", bundle)
+        self.assertEqual(status, 2, diagnostics)
+        self.assertTrue((bundle / "manifest.json").exists())
+        self.assertFalse(read_json(bundle / "manifest.json")["readiness"]["ready"])
+        self.assertIn("1 spoken passage(s) still need a voice", diagnostics)
+        self.assertIn("Exiting with status 2", diagnostics)
+        self.assertNotIn("No review step is required", output)
 
     def test_export_chapters_preserves_global_order_and_empty_chapters(self):
         doc = valid_document()
@@ -438,13 +462,21 @@ class CLITests(unittest.TestCase):
         doc["segments"][0]["attribution"]["review_required"] = True
         write_json(self.analysis, doc, overwrite=True)
         self.assertEqual(self.run_cli("validate", self.analysis)[0], 0)
-        self.assertEqual(self.run_cli("validate", self.analysis, "--ready")[0], 2)
+        self.assertEqual(self.run_cli("validate", self.analysis, "--ready")[0], 0)
         status, output, _ = self.run_cli("review", self.analysis)
         review = json.loads(output)
         self.assertEqual(status, 0)
         self.assertEqual(review["cast_fingerprint"], fingerprint(doc["cast"]))
         self.assertEqual(review["source_fingerprint"], fingerprint(doc["source"]))
         self.assertEqual(len(review["items"]), 1)
+
+    def test_validate_ready_fails_for_missing_speaker_even_when_review_is_advisory(self):
+        doc = valid_document()
+        doc["segments"][1].update(role_id=None, voice_id=None)
+        doc["segments"][1]["attribution"].update(basis="unresolved", review_required=True)
+        write_json(self.analysis, doc, overwrite=True)
+        self.assertEqual(self.run_cli("validate", self.analysis)[0], 0)
+        self.assertEqual(self.run_cli("validate", self.analysis, "--ready")[0], 2)
 
     def test_existing_output_prevents_any_model_calls(self):
         with patch("epub_audiobook.cli.OpenAICompatibleClient") as provider:

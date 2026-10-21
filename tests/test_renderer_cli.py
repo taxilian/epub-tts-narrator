@@ -96,16 +96,15 @@ class RendererCLITests(unittest.TestCase):
         engine.assert_not_called()
         verifier.assert_not_called()
 
-    def test_review_override_is_explicit_and_never_bypasses_unassigned_speech(self):
+    def test_review_notes_need_no_override_and_missing_speech_still_blocks(self):
         document = valid_document()
         document["segments"][1]["attribution"]["review_required"] = True
         flagged = self.root / "flagged"
         export_bundle(document, flagged, allow_review=True)
         with patch("audiobook_renderer.workflow.assemble", create=True) as assemble:
             status, _, error = self.run_cli("assemble", flagged, "--config", self.config)
-            self.assertEqual(status, 2)
-            self.assertIn("outstanding review", error)
-            assemble.assert_not_called()
+            self.assertEqual(status, 0, error)
+            assemble.assert_called_once()
             status, _, error = self.run_cli("assemble", flagged, "--config", self.config, "--allow-review")
             self.assertEqual(status, 0, error)
         document["segments"][1].update(role_id=None, voice_id=None)

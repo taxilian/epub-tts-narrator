@@ -135,7 +135,7 @@ class RendererBundleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_bundle(target)
 
-    def test_flagged_attribution_is_not_hidden_by_empty_reviews_and_ready_manifest(self):
+    def test_flagged_attribution_remains_visible_without_blocking_assigned_speech(self):
         document = valid_document()
         document["segments"][0]["attribution"]["review_required"] = True
         target = self.export(document)
@@ -143,22 +143,28 @@ class RendererBundleTests(unittest.TestCase):
         manifest = json.loads((target / "manifest.json").read_text())
         manifest["readiness"] = {"ready": True, "errors": [], "review_count": 0}
         self.rewrite_json(target, "manifest.json", manifest)
-        try:
-            bundle = load_bundle(target)
-        except ValueError:
-            return
-        self.assertTrue(make_plan(bundle, self.config)["errors"])
+        bundle = load_bundle(target)
+        plan = make_plan(bundle, self.config)
+        self.assertEqual(plan["errors"], [])
+        self.assertEqual(plan["review_items"], 1)
 
-    def test_outstanding_issues_require_explicit_review_override(self):
+    def test_advisory_issues_and_legacy_draft_status_need_no_override(self):
         document = valid_document()
         document["issues"].append({
             "id": "identity-question", "kind": "cast", "target": "c1",
             "reason": "Check possible alias", "resolved": False,
         })
-        bundle = load_bundle(self.export(document))
-        self.assertTrue(make_plan(bundle, self.config)["errors"])
-        self.config["render"]["allow_review"] = True
-        self.assertEqual(make_plan(bundle, self.config)["errors"], [])
+        target = self.export(document)
+        manifest = json.loads((target / "manifest.json").read_text())
+        manifest["readiness"] = {"ready": False, "errors": [], "review_count": 1}
+        self.rewrite_json(target, "manifest.json", manifest)
+        bundle = load_bundle(target)
+        for allow_review in (False, True):
+            with self.subTest(allow_review=allow_review):
+                self.config["render"]["allow_review"] = allow_review
+                plan = make_plan(bundle, self.config)
+                self.assertEqual(plan["errors"], [])
+                self.assertEqual(plan["review_items"], 1)
 
     def test_null_voice_still_blocks_speech_when_review_override_is_enabled(self):
         document = valid_document()
@@ -166,9 +172,35 @@ class RendererBundleTests(unittest.TestCase):
         row.update(role_id=None, voice_id=None)
         row["attribution"].update(basis="unresolved", review_required=True)
         bundle = load_bundle(self.export(document))
-        self.config["render"]["allow_review"] = True
-        errors = make_plan(bundle, self.config)["errors"]
-        self.assertTrue(any("Missing voice" in error for error in errors), errors)
+        for allow_review in (False, True):
+            with self.subTest(allow_review=allow_review):
+                self.config["render"]["allow_review"] = allow_review
+                errors = make_plan(bundle, self.config)["errors"]
+                self.assertTrue(any("Missing voice" in error for error in errors), errors)
+
+    def test_unknown_role_still_blocks_loading_despite_advisory_review_policy(self):
+        target = self.export()
+        rows = [json.loads(line) for line in (target / "scripts/chapter-0001.jsonl").read_text().splitlines()]
+        rows[1]["role_id"] = "not-in-cast"
+        self.rewrite_rows(target, rows)
+        with self.assertRaisesRegex(ValueError, "unknown reference"):
+            load_bundle(target)
+
+    def test_unassigned_speech_blocks_its_chapter_without_blocking_other_chapters(self):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first scene has an assigned narrator.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("This later passage needs a speaker.", "narration", "p"),
+        ])
+        document["segments"][-1].update(role_id=None, voice_id=None)
+        document["segments"][-1]["attribution"].update(basis="unresolved", review_required=True)
+        bundle = load_bundle(self.export(document))
+        self.assertFalse(bundle["manifest"]["readiness"]["ready"])
+        self.config["render"]["chapter_numbers"] = [1]
+        self.assertEqual(make_plan(bundle, self.config)["errors"], [])
+        self.config["render"]["chapter_numbers"] = [2]
+        self.assertTrue(any("Missing voice" in message for message in make_plan(bundle, self.config)["errors"]))
 
     def test_series_provenance_prevents_silent_voice_namespace_switch(self):
         document = valid_document()

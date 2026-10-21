@@ -166,9 +166,9 @@ def make_plan(bundle, config):
     established_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if established_series and config["voices"]["series_id"] != established_series:
         errors.append("Configured voices.series_id differs from the analyzer series ID; reuse the exact series ID")
-    state = bundle["manifest"].get("readiness", {})
-    if (state.get("ready") is not True or bundle["reviews"] or bundle.get("implied_reviews")) and not settings["allow_review"]:
-        errors.append("Bundle has outstanding review items; resolve them or pass --allow-review for this run")
+    # Review flags are advisory, including the ready=false value in older
+    # bundles. load_bundle validates fidelity and cast links; the plan checks
+    # that every selected spoken passage has an actual performer below.
     for number, item in enumerate(bundle["chapters"], 1):
         if number not in selected:
             continue

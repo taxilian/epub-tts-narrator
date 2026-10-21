@@ -1172,7 +1172,7 @@ characters, covering identities, aliases, narrator scope, and important ambiguit
         self.assertEqual(document["issues"][0]["kind"], "identity_merge")
         self.assertEqual(document["issues"][0]["target"], mara["id"])
         self.assertFalse(document["issues"][0]["resolved"])
-        self.assertEqual(document["readiness"], {"ready": False, "errors": [], "review_count": 1})
+        self.assertEqual(document["readiness"], {"ready": True, "errors": [], "review_count": 1})
         corrected = apply_edits(document, {
             "source_fingerprint": fingerprint(document["source"]),
             "cast_fingerprint": fingerprint(document["cast"]),

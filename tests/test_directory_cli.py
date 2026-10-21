@@ -160,21 +160,47 @@ class DirectoryCLITests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         self.assert_bundle(self.root / "Book 1.audiobook", 1)
 
-    def test_review_items_export_a_marked_draft_without_a_manual_export_step(self):
-        epub, output = self.make_epub(), self.root / "draft-book"
+    def test_unassigned_passages_save_bundle_without_terminal_and_return_incomplete_status(self):
+        epub, output = self.make_epub(), self.root / "incomplete-book"
 
         def unresolved_client(*args, **kwargs):
             client = self.client(*args, **kwargs)
             client.unresolved = True
             return client
 
-        with patch("epub_audiobook.cli.OpenAICompatibleClient", side_effect=unresolved_client):
-            status, _, stderr = self.run_cli("analyze", epub, "-o", output)
-        self.assertEqual(status, 0, stderr)
+        with patch("epub_audiobook.cli.OpenAICompatibleClient", side_effect=unresolved_client), \
+                patch("sys.stdin", io.StringIO()), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+        self.assertEqual(status, 2, stderr)
         document, _ = self.assert_bundle(output, 1)
         self.assertFalse(document["readiness"]["ready"])
         self.assertFalse(load_bundle(output)["manifest"]["readiness"]["ready"])
         self.assertTrue(read_json(output / "review.json"))
+        self.assertIn("Bundle created", stdout)
+        self.assertIn("no interactive terminal is available", stderr)
+        self.assertIn("Speaker selection incomplete", stderr)
+        self.assertNotIn("draft", stdout)
+
+    def test_assigned_advisory_items_create_usable_bundle_without_review_step(self):
+        epub, output = self.make_epub(), self.root / "advisory-book"
+
+        def advisory_analysis(*args, **kwargs):
+            document = analyze(*args, **kwargs)
+            document["segments"][0]["attribution"]["review_required"] = True
+            return document
+
+        with patch("epub_audiobook.cli.OpenAICompatibleClient", side_effect=self.client), \
+                patch("epub_audiobook.cli.analyze", side_effect=advisory_analysis):
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+        self.assertEqual(status, 0, stderr)
+        document, _ = self.assert_bundle(output, 1)
+        self.assertTrue(document["readiness"]["ready"])
+        self.assertTrue(load_bundle(output)["manifest"]["readiness"]["ready"])
+        self.assertTrue(read_json(output / "review.json"))
+        self.assertIn("advisory notes. Bundle created", stdout)
+        self.assertIn("No review step is required", stdout)
+        self.assertNotIn("draft", stdout)
 
     def test_plan_for_a_continuation_does_not_call_model_or_write_any_files(self):
         _, prior = self.seed_book()
@@ -228,6 +254,27 @@ class DirectoryCLITests(unittest.TestCase):
         self.assertEqual(read_json(output)["format"], "epub-audiobook-analysis")
         self.assertFalse((self.root / "manifest.json").exists())
         self.assertFalse((self.root / "series-cast.json").exists())
+
+    def test_legacy_json_output_saves_incomplete_analysis_and_returns_status_two(self):
+        epub, output = self.make_epub(), self.root / "incomplete-legacy.json"
+
+        def unresolved_client(*args, **kwargs):
+            client = self.client(*args, **kwargs)
+            client.unresolved = True
+            return client
+
+        with patch("epub_audiobook.cli.OpenAICompatibleClient", side_effect=unresolved_client), \
+                patch("sys.stdin", io.StringIO()), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+        self.assertEqual(status, 2, stderr)
+        document = read_json(output)
+        self.assertEqual(document["format"], "epub-audiobook-analysis")
+        self.assertFalse(document["readiness"]["ready"])
+        self.assertIn("Speaker selection incomplete", stderr)
+        self.assertIn("Exiting with status 2", stderr)
+        self.assertNotIn("draft", stdout)
+        self.assertFalse((self.root / "manifest.json").exists())
 
     def test_continuation_rejects_conflicting_legacy_options_before_model_calls(self):
         _, prior = self.seed_book()
@@ -339,12 +386,12 @@ class DirectoryCLITests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(self.snapshot(self.root), before)
 
-    def test_existing_published_output_is_preserved_on_accidental_rerun(self):
+    def test_existing_completed_output_is_preserved_without_model_calls_on_rerun(self):
         epub, output = self.seed_book()
         before = self.snapshot(output)
         with patch("epub_audiobook.cli.OpenAICompatibleClient") as provider:
             status, _, stderr = self.run_cli("analyze", epub, "-o", output)
-        self.assertNotEqual(status, 0, stderr)
+        self.assertEqual(status, 0, stderr)
         provider.assert_not_called()
         self.assertEqual(self.snapshot(output), before)
 

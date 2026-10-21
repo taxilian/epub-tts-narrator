@@ -131,7 +131,7 @@ class SeriesTests(unittest.TestCase):
         linked = link_analysis(fixture(sequel=True), registry)
         self.assertNotEqual(linked["cast"]["characters"][0]["id"], first["cast"]["characters"][0]["id"])
         self.assertEqual(linked["issues"][0]["kind"], "series_identity")
-        self.assertFalse(linked["readiness"]["ready"])
+        self.assertTrue(linked["readiness"]["ready"])
 
     def test_unanimous_source_bound_identity_reuses_voice_without_any_name_overlap(self):
         first, registry = self.seed()
@@ -353,7 +353,7 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(issue["series_origin"]["issue_id"], "unclear")
         self.assertEqual(issue["series_origin"]["source_fingerprint"], first["provenance"]["series"]["source_fingerprint"])
         self.assertTrue(linked["provenance"]["series"]["identity_matches"][0]["prior_review_required"])
-        self.assertFalse(linked["readiness"]["ready"])
+        self.assertTrue(linked["readiness"]["ready"])
 
     def test_casting_details_and_informational_separation_do_not_create_new_identity(self):
         original = fixture()
@@ -368,7 +368,7 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(linked["cast"]["characters"][0]["id"], first["cast"]["characters"][0]["id"])
         self.assertEqual(linked["cast"]["characters"][0]["voice_id"], first["cast"]["characters"][0]["voice_id"])
         self.assertEqual({issue["series_origin"]["issue_id"] for issue in linked["issues"]}, {"distinct", "vocal"})
-        self.assertFalse(linked["readiness"]["ready"])
+        self.assertTrue(linked["readiness"]["ready"])
 
     def test_narration_interpretation_review_keeps_unique_existing_voice(self):
         original = fixture()
@@ -381,7 +381,7 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(len(carried), 1)
         self.assertEqual(carried[0]["target"], "narrator_main")
         self.assertFalse(carried[0]["resolved"])
-        self.assertFalse(linked["readiness"]["ready"])
+        self.assertTrue(linked["readiness"]["ready"])
 
     def test_afterword_role_review_does_not_leak_to_same_characters_main_narration(self):
         original = fixture(narrator_character=True)
@@ -424,7 +424,7 @@ class SeriesTests(unittest.TestCase):
         final = link_analysis(third, load_registry(self.path))
         self.assertEqual(len(final["issues"]), 1)
         self.assertEqual(final["issues"][0], linked["issues"][0])
-        self.assertFalse(final["readiness"]["ready"])
+        self.assertTrue(final["readiness"]["ready"])
         # The origin's explanation can be revised without creating a second
         # descendant of the same source-qualified issue.
         updated = load_registry(self.path)
@@ -487,7 +487,7 @@ class SeriesTests(unittest.TestCase):
         updated = load_registry(self.path)
         repeated = link_analysis(second_raw, updated)
         self.assertEqual(repeated, linked)
-        self.assertFalse(repeated["readiness"]["ready"])
+        self.assertTrue(repeated["readiness"]["ready"])
         save_registry(self.path, updated, repeated)
         self.assertEqual(updated, load_registry(self.path))
 
@@ -510,7 +510,7 @@ class SeriesTests(unittest.TestCase):
         linked = link_analysis(current, registry)
         self.assertEqual(linked["issues"][0]["id"], "new-review")
         self.assertEqual(linked["issues"][0]["target"], linked["cast"]["characters"][0]["id"])
-        self.assertFalse(linked["readiness"]["ready"])
+        self.assertTrue(linked["readiness"]["ready"])
 
     def test_exact_and_linked_reimports_refresh_new_prior_voice_review_without_recasting(self):
         first, registry = self.seed()
@@ -528,7 +528,7 @@ class SeriesTests(unittest.TestCase):
                 self.assertEqual(refreshed["segments"], linked["segments"])
                 self.assertEqual(len(refreshed["issues"]), 1)
                 self.assertEqual(refreshed["issues"][0]["series_origin"]["issue_id"], "new-prior-review")
-                self.assertFalse(refreshed["readiness"]["ready"])
+                self.assertTrue(refreshed["readiness"]["ready"])
                 self.assertTrue(refreshed["provenance"]["series"]["identity_matches"][0]["prior_review_required"])
                 self.assertIn("review_context_fingerprint", refreshed["provenance"]["series"])
                 self.assertEqual(refreshed, link_analysis(refreshed, updated))

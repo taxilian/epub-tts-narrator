@@ -1,9 +1,10 @@
 """Human decisions happen after bounded automatic work and survive retries."""
 
 from copy import deepcopy
+from contextlib import nullcontext
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 import unittest
 
 from epub_audiobook.contracts import readiness, validate_document
@@ -94,11 +95,13 @@ class SpeakerDecisionTests(unittest.TestCase):
         result, _ = self.decide(document, "3\n")
         self.assertEqual(result["segments"][1]["role_id"], "lena")
 
-    def test_enter_leaves_item_pending_and_continues_to_next_then_quit_keeps_decisions(self):
+    def test_blank_and_previous_skip_command_reprompt_then_quit_keeps_decisions(self):
         document = missing((0, 1, 2))
-        result, output = self.decide(document, "\n2\nq\n")
-        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s1", "s3"])
-        self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
+        result, output = self.decide(document, "\np\n1\nq\n")
+        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s2", "s3"])
+        self.assertEqual(result["segments"][0]["attribution"]["basis"], "user")
+        self.assertEqual(output.count("Speaker number(s),"), 4)
+        self.assertIn("A blank answer does not skip the passage", output)
         self.assertIn("epub-audiobook resolve-speakers 'books/A Book'", output)
         self.assertFalse(result["readiness"]["ready"])
 
@@ -108,15 +111,66 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
         self.assertIn("Input ended", output)
 
-    def test_nonterminal_never_reads_input_and_prints_actionable_draft_message(self):
+    def test_explicit_nonterminal_never_reads_input_or_falls_back_to_another_terminal(self):
         class Unreadable(StringIO):
             def readline(self):
                 raise AssertionError("Noninteractive input must not be read")
         document, output = missing(), StringIO()
-        result = prompt_speaker_decisions(document, book_path="book-01", input_stream=Unreadable("2\n"), output_stream=output)
+        with patch("epub_audiobook.speaker_decisions.open") as terminal_open:
+            result = prompt_speaker_decisions(document, book_path="book-01", input_stream=Unreadable("2\n"), output_stream=output)
+        terminal_open.assert_not_called()
         self.assertEqual(result, document)
-        self.assertIn("Saving a draft", output.getvalue())
+        self.assertIn("Speaker selection incomplete", output.getvalue())
         self.assertIn("epub-audiobook resolve-speakers book-01", output.getvalue())
+
+    def test_redirected_stdin_asks_on_controlling_terminal_for_input_and_output(self):
+        class Unreadable(StringIO):
+            def readline(self):
+                raise AssertionError("The redirected input must not be consumed")
+        terminal_input, terminal_output = Terminal("2\n"), StringIO()
+        redirected_output = StringIO()
+        with patch("sys.stdin", Unreadable()), patch("sys.stderr", redirected_output), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=[
+                    nullcontext(terminal_input), nullcontext(terminal_output)]) as terminal_open:
+            result = prompt_speaker_decisions(missing(), book_path="book-01")
+        self.assertEqual(terminal_open.call_args_list, [
+            call("/dev/tty", "r", encoding="utf-8"), call("/dev/tty", "w", encoding="utf-8")])
+        self.assertEqual(unassigned_segments(result), [])
+        self.assertIn("Speaker number(s)", terminal_output.getvalue())
+        self.assertEqual(redirected_output.getvalue(), "")
+
+    def test_controlling_terminal_uses_explicit_output_and_preserves_decisions_at_eof(self):
+        terminal_input, output = Terminal("2\n"), StringIO()
+        with patch("sys.stdin", StringIO()), \
+                patch("epub_audiobook.speaker_decisions.open", return_value=nullcontext(terminal_input)) as terminal_open:
+            result = prompt_speaker_decisions(missing((1, 2)), book_path="book-01", output_stream=output)
+        terminal_open.assert_called_once_with("/dev/tty", "r", encoding="utf-8")
+        self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
+        self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s3"])
+        self.assertIn("Input ended", output.getvalue())
+
+    def test_missing_controlling_terminal_saves_without_consuming_redirected_input(self):
+        class Unreadable(StringIO):
+            def readline(self):
+                raise AssertionError("There is no terminal; do not consume redirected input")
+        document, output = missing(), StringIO()
+        with patch("sys.stdin", Unreadable("2\n")), patch("sys.stderr", output), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
+            result = prompt_speaker_decisions(document, book_path="book-01")
+        self.assertEqual(result, document)
+        self.assertIn("no interactive terminal is available", output.getvalue())
+        self.assertIn("epub-audiobook resolve-speakers book-01", output.getvalue())
+        self.assertNotIn("Speaker number(s)", output.getvalue())
+
+    def test_terminal_output_open_failure_closes_input_and_leaves_passage_unassigned(self):
+        terminal_input, output = Terminal("2\n"), StringIO()
+        document = missing()
+        with patch("sys.stdin", StringIO()), patch("sys.stderr", output), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=[terminal_input, OSError("Output unavailable")]):
+            result = prompt_speaker_decisions(document, book_path="book-01")
+        self.assertTrue(terminal_input.closed)
+        self.assertEqual(result, document)
+        self.assertIn("no interactive terminal is available", output.getvalue())
 
     def test_only_covered_attribution_issues_clear_and_manual_decision_survives_retry(self):
         document = missing()
@@ -147,7 +201,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertIn("The tag names Mara", output)
         self.assertNotIn("\x1b", output)
 
-    def analyze_with_input(self, document, input_stream):
+    def analyze_with_input(self, document, input_stream, expected_status=0):
         """Exercise analyze's actual prompt and handoff without model or disk work."""
         from epub_audiobook.cli import main
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
@@ -184,10 +238,11 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_audiobook.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
                 patch("epub_audiobook.audition_scripts.prepare_document_samples", side_effect=prepare), \
                 patch("epub_audiobook.cli.publish_directory", side_effect=publish), \
+                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")), \
                 patch("sys.stdin", input_stream), \
                 patch("sys.stdout", new_callable=StringIO) as output, \
                 patch("sys.stderr", new_callable=StringIO) as diagnostics:
-            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 0)
+            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), expected_status)
         self.assertEqual(len(published), 1)
         # The refresh after user input must have no request client available.
         self.assertEqual([no_requests for _, no_requests in preparations], [False, True])
@@ -220,29 +275,32 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(result["provenance"]["speaker_decisions"]["decisions"][0]["selected_roles"], ["lena"])
         self.assertTrue(readiness(result)["ready"])
         self.assertIn("Speaker number(s)", diagnostics)
-        self.assertIn("Bundle is ready", output)
+        self.assertIn("Bundle created", output)
+        self.assertIn("No review step is required", output)
         self.assertNotIn("resolve-speakers", diagnostics)
 
-    def test_cli_analyze_nonterminal_publishes_draft_without_reading_input(self):
+    def test_cli_analyze_without_terminal_saves_incomplete_bundle_and_returns_status_two(self):
         class Unreadable(StringIO):
             def readline(self, *args, **kwargs):
                 raise AssertionError("analyze must not read nonterminal input")
 
         document = missing()
-        result, _, output, diagnostics = self.analyze_with_input(document, Unreadable("2\n"))
+        result, _, output, diagnostics = self.analyze_with_input(document, Unreadable("2\n"), expected_status=2)
 
         self.assertEqual(result, document)
         self.assertFalse(readiness(result)["ready"])
         self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s2"])
-        self.assertIn("Saving a draft; no terminal input is available", diagnostics)
+        self.assertIn("no interactive terminal is available", diagnostics)
+        self.assertIn("Exiting with status 2", diagnostics)
         self.assertNotIn("Speaker number(s)", diagnostics)
-        self.assertIn("Bundle is a draft pending review", output)
+        self.assertIn("Bundle created", output)
+        self.assertNotIn("draft", output)
 
     def test_cli_analyze_quit_or_eof_publishes_choices_already_made(self):
         for answers in ("2\nq\n", "2\n"):
             with self.subTest(answers=answers):
                 document = missing((1, 2))
-                result, _, output, diagnostics = self.analyze_with_input(document, Terminal(answers))
+                result, _, output, diagnostics = self.analyze_with_input(document, Terminal(answers), expected_status=2)
 
                 self.assertEqual((result["segments"][1]["role_id"], result["segments"][1]["voice_id"]), ("mara", "v1"))
                 self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
@@ -250,7 +308,9 @@ class SpeakerDecisionTests(unittest.TestCase):
                 self.assertEqual([item["id"] for item in unassigned_segments(result)], ["s3"])
                 self.assertEqual(result["provenance"]["speaker_decisions"]["remaining_unassigned_segments"], 1)
                 self.assertFalse(readiness(result)["ready"])
-                self.assertIn("Bundle is a draft pending review", output)
+                self.assertIn("Bundle created", output)
+                self.assertIn("Speaker selection incomplete", diagnostics)
+                self.assertNotIn("draft", output)
                 if answers == "2\n":
                     self.assertIn("Input ended", diagnostics)
 
@@ -289,7 +349,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_audiobook.audition_scripts.prepare_document_samples", side_effect=prepare), \
                 patch("epub_audiobook.cli.publish_directory", side_effect=publish), \
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
-            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 0)
+            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
         self.assertEqual(events, ["automatic", "auditions", "decisions", "auditions", "publish"])
 
 

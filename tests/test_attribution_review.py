@@ -100,7 +100,7 @@ class AttributionReviewTests(unittest.TestCase):
             self.assertEqual(len({vote["request_fingerprint"] for vote in change["votes"]}), 3)
             self.assertEqual(change["status"], "applied")
 
-    def test_dissent_and_uncertainty_keep_original_assignments_and_require_review(self):
+    def test_dissent_and_uncertainty_keep_original_assignments_and_advisory_notes(self):
         for verdict in ("reject", "uncertain"):
             with self.subTest(verdict=verdict):
                 document = fixture()
@@ -108,7 +108,7 @@ class AttributionReviewTests(unittest.TestCase):
                 self.assertEqual(result["segments"], document["segments"])
                 self.assertEqual(result["provenance"]["attribution_review"]["applied_blocks"], 0)
                 self.assertEqual(len(result["issues"]), 2)
-                self.assertFalse(result["readiness"]["ready"])
+                self.assertTrue(result["readiness"]["ready"])
                 self.assertEqual(validate_document(result), [])
 
     def test_invalid_jury_quote_cannot_approve_and_is_saved_as_error_vote(self):
@@ -181,7 +181,7 @@ class AttributionReviewTests(unittest.TestCase):
         result = audit_attribution(document, Requests())
         self.assertEqual(result["issues"][0], document["issues"][0])
         self.assertTrue(all(row["attribution"]["review_required"] for row in result["segments"] if row["block_id"] == "b1"))
-        self.assertFalse(result["readiness"]["ready"])
+        self.assertTrue(result["readiness"]["ready"])
 
     def test_explicit_user_corrections_cannot_be_replaced(self):
         document = fixture()

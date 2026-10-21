@@ -128,7 +128,7 @@ Aliases follow the same continuation chain as recordings. A mapping in book 1 is
 
 Choose chapters per book with `--chapters 3` or `--chapters 3-5,7` on `plan`, `render`, or `assemble`. Numbers use the **one-based order of script entries in the bundle manifest**, including front matter. Ranges are inclusive, duplicate numbers are ignored, and chapters always stay in source order. Omit the option to use all entries. `plan` lists the corresponding titles. The legacy global `chapter_numbers` setting remains supported, but book-specific selections belong on the command line. A selected subset produces a partial audiobook and records `partial_book: true`.
 
-The current Soulship bundles remain drafts with review flags and some unassigned voices. `--allow-review` permits acknowledged review issues for that command; it **does not permit spoken text with a null voice**. Correct those attributions in the analyzer and re-export, or select a pilot chapter without missing voices. There is no implicit narrator substitution. The global `allow_review` setting remains supported, but no configuration edit is needed to acknowledge review items for one book.
+Analysis notes are advisory and do not require a review or acceptance step. `--allow-review` and the global `allow_review` setting remain accepted for compatibility but are unnecessary. Rendering requires a valid script and assigned voices for every spoken passage in the selected chapters; missing speakers still block those chapters. Rerun `epub-audiobook analyze BOOK_DIRECTORY` to complete remaining assignments using the saved book. There is no implicit narrator substitution.
 
 ## Inspect, cast, and render
 
@@ -383,7 +383,7 @@ To generate and listen to one chapter before committing to the whole book, inspe
   --chapters 3 --chapters-only
 ```
 
-For a draft with review items, add `--allow-review` after inspecting them. Unassigned spoken passages still block the selected chapter. `--chapters-only` saves lossless chapter audio, its encoded playback copy, timing, and provenance beneath `<book-directory>/render-work/chapters/`; it does not publish a final audiobook directory. The CLI prints each playable file's path. `render-work/completed-chapters/chapter-NNNN.json` records the current checkpoint for each manifest chapter, pointing to its files under `render-work/chapters/<cache-key>/`. A completed chapter remains available if a later chapter fails.
+Advisory notes do not require an override. Unassigned spoken passages still block the selected chapter. `--chapters-only` saves lossless chapter audio, its encoded playback copy, timing, and provenance beneath `<book-directory>/render-work/chapters/`; it does not publish a final audiobook directory. The CLI prints each playable file's path. `render-work/completed-chapters/chapter-NNNN.json` records the current checkpoint for each manifest chapter, pointing to its files under `render-work/chapters/<cache-key>/`. A completed chapter remains available if a later chapter fails.
 
 To generate the remaining chapters and package later:
 

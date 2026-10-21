@@ -299,7 +299,7 @@ class SpeakerCompletionTests(unittest.TestCase):
         result = complete_speakers(document, Requests())
         self.assertEqual([item["resolved"] for item in result["issues"]], [True, True, False, False])
         self.assertEqual(result["issues"][2:], document["issues"][2:])
-        self.assertFalse(result["readiness"]["ready"])
+        self.assertTrue(result["readiness"]["ready"])
 
     def test_cosmetic_segmentation_and_reasons_do_not_break_consensus(self):
         def modify(row, payload):
@@ -371,7 +371,7 @@ class SpeakerCompletionTests(unittest.TestCase):
         self.assertEqual(issue["reason"], "Check performance nuance.")
         self.assertEqual(issue["source_segment_id"], document["segments"][0]["id"])
         self.assertFalse(issue["resolved"])
-        self.assertFalse(first["readiness"]["ready"])
+        self.assertTrue(first["readiness"]["ready"])
 
     def test_final_round_retrieves_candidate_identity_evidence_across_chapters_without_peer_answers(self):
         document = missing_document(2)

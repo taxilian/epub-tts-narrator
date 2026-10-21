@@ -204,13 +204,14 @@ class ContractTests(unittest.TestCase):
         self.assert_error("must be true for unresolved")
         self.assertEqual(readiness(self.doc)["review_count"], 1)
 
-    def test_issues_and_flagged_segments_both_block_readiness(self):
+    def test_issues_and_flagged_segments_are_advisory_when_speech_is_assigned(self):
         self.doc["issues"] = [
             {"id": "i1", "kind": "cast", "target": "c1", "reason": "Possible duplicate identity.", "resolved": False},
             {"id": "i2", "kind": "cast", "target": "c1", "reason": "Checked alias.", "resolved": True},
         ]
         self.doc["segments"][0]["attribution"]["review_required"] = True
         self.assertEqual(validate_document(self.doc), [])
+        self.assertTrue(readiness(self.doc)["ready"])
         self.assertEqual(readiness(self.doc)["review_count"], 2)
         self.assertEqual([item["type"] for item in review_items(self.doc)], ["issue", "segment"])
         self.doc["issues"][0]["resolved"] = True

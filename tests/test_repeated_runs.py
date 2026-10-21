@@ -58,7 +58,7 @@ class RepeatedRunTests(unittest.TestCase):
                 self.assertEqual(change["model_count"], model_count)
                 document = base_document(source, cast, accepted)
                 self.assertEqual(validate_document(document), [])
-                self.assertFalse(readiness(document)["ready"])
+                self.assertTrue(readiness(document)["ready"])
                 self.assertEqual((source, cast, units, response), original)
 
     def test_multiple_changed_runs_restore_together_and_keep_explicit_records(self):
@@ -164,7 +164,7 @@ class RepeatedRunTests(unittest.TestCase):
         self.assertEqual(len(restored), 1)
         self.assertEqual(restored[0]["text"], "“I ssssaid stop.”")
         self.assertTrue(restored[0]["attribution"]["review_required"])
-        self.assertFalse(document["readiness"]["ready"])
+        self.assertTrue(document["readiness"]["ready"])
 
 
 if __name__ == "__main__":

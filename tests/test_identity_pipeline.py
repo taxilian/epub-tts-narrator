@@ -70,13 +70,13 @@ class IdentityPipelineTests(unittest.TestCase):
         self.assertTrue(readiness(document)["ready"])
         self.assertEqual(validate_document(document), [])
 
-    def test_dissent_keeps_both_characters_and_blocks_ready_export(self):
+    def test_dissent_keeps_both_characters_and_retains_advisory_notes(self):
         for dissent in ("reject", "uncertain"):
             with self.subTest(dissent=dissent):
                 client = JuryClient(duplicate=True, verdicts=["approve", "approve", dissent])
                 output = analyze(self.source, client, self.cache / dissent, attribution_workers=5)
                 self.assertEqual(len(output["cast"]["characters"]), 2)
-                self.assertFalse(readiness(output)["ready"])
+                self.assertTrue(readiness(output)["ready"])
                 self.assertTrue(any(issue["kind"] == "identity_consensus" for issue in output["issues"]))
                 self.assertEqual(validate_document(output), [])
 
@@ -99,7 +99,7 @@ class IdentityPipelineTests(unittest.TestCase):
 
         document = self.run_analysis(PriorIssueClient(duplicate=True))
         self.assertEqual(len(document["cast"]["characters"]), 1)
-        self.assertFalse(readiness(document)["ready"])
+        self.assertTrue(readiness(document)["ready"])
         self.assertTrue(any(issue["reason"] == "A separate unresolved identity concern."
                             and not issue["resolved"] for issue in document["issues"]))
         concern = next(issue for issue in document["issues"] if issue["reason"] == "A separate unresolved identity concern.")

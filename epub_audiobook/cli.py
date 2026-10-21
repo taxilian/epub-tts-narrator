@@ -35,6 +35,19 @@ def read_json(path):
         return json.load(stream, parse_constant=reject_constant)
 
 
+def _speaker_completion_status(document):
+    """Advisory notes need no approval; missing performers need a real choice."""
+    from .speaker_completion import unassigned_segments
+    remaining = len(unassigned_segments(document))
+    if remaining:
+        print(f"Speaker selection incomplete: {remaining} spoken passage(s) still need a voice. "
+              "The book and completed decisions are saved. Audio generation cannot use these "
+              "passages until their speakers are selected. Exiting with status 2.", file=sys.stderr)
+        return 2
+    print("All spoken passages have assigned voices. No review step is required.")
+    return 0
+
+
 def read_analysis(path):
     document = read_json(path)
     errors = validate_document(document)
@@ -140,8 +153,6 @@ def export_bundle(document, output, *, allow_review=False):
     state = readiness(document)
     if state["errors"]:
         raise ValueError("Invalid analysis: " + "; ".join(state["errors"][:12]))
-    if not state["ready"] and not allow_review:
-        raise ValueError(f"{state['review_count']} review items remain; use apply or explicitly export a draft with --allow-review")
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}")
@@ -225,7 +236,7 @@ def parser():
     plan = input_command("plan", "Show extraction counts and baseline model request count")
     plan.add_argument("-o", "--output", type=Path,
                       help="Proposed output directory; defaults to ./<input stem>.audiobook")
-    run = input_command("analyze", "Discover the cast and tag every source text span")
+    run = input_command("analyze", "Analyze an EPUB, or resume unfinished speaker choices in an existing book directory")
     run.add_argument("-o", "--output", type=Path,
                      help="Output directory; defaults to ./<input stem>.audiobook. A .json path selects legacy file output.")
     run.add_argument("--force", action="store_true",
@@ -249,7 +260,7 @@ def parser():
 
     validate = commands.add_parser("validate", help="Verify schema, source coverage, and cast references")
     validate.add_argument("input", type=Path)
-    validate.add_argument("--ready", action="store_true", help="Also fail if review items remain")
+    validate.add_argument("--ready", action="store_true", help="Also fail if spoken passages have no assigned voice")
     review = commands.add_parser("review", help="Print unresolved attribution and casting issues as JSON")
     review.add_argument("input", type=Path)
     apply = commands.add_parser("apply", help="Apply human corrections without changing source text")
@@ -259,7 +270,7 @@ def parser():
     export = commands.add_parser("export", help="Export a documented bundle for an audio-generation CLI")
     export.add_argument("input", type=Path)
     export.add_argument("-o", "--output", type=Path, required=True)
-    export.add_argument("--allow-review", action="store_true", help="Export an explicitly incomplete draft")
+    export.add_argument("--allow-review", action="store_true", help="Compatibility option; analysis notes do not block export")
     return root
 
 
@@ -280,6 +291,74 @@ def main(argv=None):
             print("Completed, validated responses remain cached. After resolving the error or interruption, "
                   "rerun the same command with the same input, output, and configuration; "
                   "incomplete requests will be retried.", file=sys.stderr)
+
+    def resume_book(directory, config):
+        """Reuse a saved cast/script and only resolve its remaining speakers."""
+        nonlocal model_cache
+        from .analysis_directory import _completed_directory
+        from .analysis_revision import related_directories, revise_directories
+        from .audition_scripts import prepare_document_samples
+        from .speaker_completion import complete_speakers, unassigned_segments
+
+        original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+        original = _completed_directory(directory)[0]
+        ancestors = continuation_directories(directory)
+        if args.series is not None or config["analysis"]["series_registry"] is not None:
+            raise ValueError("Existing book directories retain their saved series context; remove --series or analysis.series_registry")
+        if args.continue_from is not None:
+            if not ancestors or args.continue_from.resolve() != ancestors[0]:
+                raise ValueError("--continue-from differs from this book's saved continuation parent; resume with the recorded parent or omit the option")
+        if not args.input.is_dir():
+            source = source_from(args.input, config["extraction"]["include_auxiliary"]
+                                 if args.input.suffix.lower() == ".epub" else False)
+            if fingerprint(source) != fingerprint(original["source"]):
+                raise ValueError("Input source does not match the existing book directory. Choose another output directory; the saved book was not changed")
+
+        revised = apply_edits(original, read_json(args.edits)) if args.edits else original
+        if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
+                or revised["provenance"].get("series") != original["provenance"].get("series")):
+            raise ValueError("Resuming an existing book accepts attribution edits only; cast or series changes require a separate output")
+        remaining = unassigned_segments(revised)
+        print(f"Resuming saved analysis in {directory}; {len(remaining)} unassigned spoken passage(s).")
+        if not remaining and revised == original:
+            if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
+                raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
+            print("Saved analysis is complete; no model calls or file changes are needed.")
+            return _speaker_completion_status(original)
+
+        directories = related_directories([directory])
+        hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                  for path in directories}
+        if hashes[str(directory)] != original_manifest_hash:
+            raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
+        settings = config["analysis"]
+        if remaining:
+            cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
+            if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
+                raise ValueError("The cache directory must be outside the existing book and its series directories")
+            if not config["provider"]["model"]:
+                raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
+            model_cache = announce_cache(cache)
+            client = OpenAICompatibleClient(**config["provider"])
+            print(f"Resolving speakers with {client.model} at {client.base_url}; unfinished book passages will be sent to this endpoint.", file=sys.stderr)
+            requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                      max_request_chars=settings["max_request_chars"],
+                                      progress=lambda message: print(message, file=sys.stderr))
+            revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
+                                        progress=lambda message: print(message, file=sys.stderr))
+        revised = prompt_speaker_decisions(revised, book_path=directory)
+        if revised != original:
+            # Prepared books already have creative scripts. Newly assigned
+            # dialogue can improve their auditions without another model call.
+            if "voice_samples" in original["provenance"]:
+                revised = prepare_document_samples(revised, None, workers=min(5, settings["attribution_workers"]))
+            result = revise_directories({directory: revised}, directories=directories,
+                                        expected_manifest_hashes=hashes)
+            print(f"Original analysis files and revision journal: {result['backup_directory']}")
+            print(f"Updated saved analysis and chapter scripts in {directory}.")
+        else:
+            print("No speaker decisions changed; saved files are unchanged.")
+        return _speaker_completion_status(revised)
 
     try:
         if args.command == "resolve-speakers":
@@ -315,11 +394,20 @@ def main(argv=None):
             print(f"Speaker completion finished: {remaining} unassigned spoken passage(s) remain.")
             return 2 if remaining else 0
         directory_mode = (args.command == "analyze" and
-                          (args.output is None or args.output.suffix.lower() != ".json"))
+                          (args.input.is_dir() or args.output is None or args.output.suffix.lower() != ".json"))
         if args.command == "analyze" and directory_mode:
             if args.force:
                 raise ValueError("--force applies only to legacy .json output; choose a new output directory")
-            args.output = validate_output(args.output or default_output(args.input))
+            if args.input.is_dir():
+                output = args.input.resolve()
+                if args.output is not None and args.output.resolve() != output:
+                    raise ValueError("When analyzing an existing book directory, omit --output or use that same directory")
+            else:
+                output = args.output or default_output(args.input)
+            if output.is_dir():
+                args.output = output.resolve()
+                return resume_book(args.output, load_config(args.config))
+            args.output = validate_output(output)
         if (args.command in {"extract", "analyze", "apply", "review-attribution"}
                 and not directory_mode and args.output.exists() and not args.force):
             raise FileExistsError(f"Output already exists: {args.output}; choose another path or use --force")
@@ -463,15 +551,14 @@ def main(argv=None):
                                           continue_from=args.continue_from)
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
-                      f"{state['review_count']} review items" +
-                      (". Bundle is a draft pending review." if not state["ready"] else ". Bundle is ready."))
-                return 0
+                      f"{state['review_count']} advisory notes. Bundle created.")
+                return _speaker_completion_status(document)
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:
                 save_registry(series_path, registry, document)
             state = readiness(document)
-            print(f"Wrote {len(document['segments'])} segments, {len(document['cast']['characters'])} characters; {state['review_count']} review items. {args.output}")
-            return 0
+            print(f"Wrote {len(document['segments'])} segments, {len(document['cast']['characters'])} characters; {state['review_count']} advisory notes. {args.output}")
+            return _speaker_completion_status(document)
         if args.command == "validate":
             state = readiness(read_json(args.input))
             print(json.dumps(state, indent=2))
@@ -525,7 +612,8 @@ def main(argv=None):
             print(f"Saved corrections to {args.output}; {readiness(result)['review_count']} review items remain")
         elif args.command == "export":
             state = export_bundle(document, args.output, allow_review=args.allow_review)
-            print(f"Exported {'ready' if state['ready'] else 'draft'} bundle to {args.output}")
+            print(f"Exported bundle to {args.output}; {state['review_count']} advisory notes.")
+            return _speaker_completion_status(document)
         return 0
     except (ValueError, OSError, ProviderError, KeyError, TypeError, IndexError, RecursionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -107,16 +107,45 @@ class AnalysisDirectoryTests(unittest.TestCase):
         self.assertEqual(self.read(output / "analysis.json"), document)
         self.assertFalse(list(self.root.glob(".audiobook-analysis-*")))
 
-    def test_draft_analysis_is_exported_with_visible_review(self):
+    def test_assigned_analysis_is_ready_with_advisory_notes_preserved(self):
         output = self.root / "draft"
         registry = fresh_registry(output)
         document = link_analysis(fixture(), registry)
         document["segments"][0]["attribution"]["review_required"] = True
         state = publish_directory(document, registry, output, export_bundle)
-        self.assertFalse(state["ready"])
-        self.assertFalse(self.read(output / "manifest.json")["readiness"]["ready"])
+        self.assertTrue(state["ready"])
+        self.assertTrue(self.read(output / "manifest.json")["readiness"]["ready"])
         self.assertTrue(self.read(output / "review.json"))
         self.assertEqual(len(continuation_registry(output, fixture(sequel=True)["source"])["books"]), 1)
+
+    def test_legacy_advisory_readiness_continues_without_rewriting_prior_book(self):
+        output = self.root / "legacy"
+        registry = fresh_registry(output)
+        document = link_analysis(fixture(), registry)
+        document["segments"][0]["attribution"]["review_required"] = True
+        publish_directory(document, registry, output, export_bundle)
+        legacy = {"ready": False, "errors": [], "review_count": 1}
+        for name in ("analysis.json", "series-cast.json", "manifest.json"):
+            record = self.read(output / name)
+            if name == "series-cast.json":
+                record["books"][-1]["readiness"] = legacy
+            else:
+                record["readiness"] = legacy
+            write_json(output / name, record, overwrite=True)
+            if name != "manifest.json":
+                self.rehash_metadata(output, name)
+        before = self.snapshot(output)
+        continued = continuation_registry(output, fixture(sequel=True)["source"])
+        self.assertEqual(continued["books"][-1]["readiness"], legacy)
+        self.assertEqual(self.snapshot(output), before)
+
+    def test_readiness_compatibility_does_not_accept_wrong_review_counts(self):
+        output, _ = self.first()
+        manifest = self.read(output / "manifest.json")
+        manifest["readiness"] = {"ready": False, "errors": [], "review_count": 99}
+        write_json(output / "manifest.json", manifest, overwrite=True)
+        with self.assertRaisesRegex(ValueError, "bundle and analysis disagree"):
+            continuation_registry(output, fixture(sequel=True)["source"])
 
     def test_continuation_requires_complete_metadata_without_creating_missing_registry(self):
         output, _ = self.first()

@@ -1,8 +1,9 @@
-"""Optional terminal decisions after automatic speaker resolution is exhausted."""
+"""Terminal speaker choices after automatic assignment is exhausted."""
 
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import ExitStack
 from pathlib import Path
 import shlex
 import sys
@@ -55,10 +56,11 @@ def _resume_command(book_path):
 
 
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None):
-    """Ask once per remaining passage in a terminal; preserve an orderly draft otherwise.
+    """Ask for every remaining speaker, preserving progress if input ends.
 
     This function is deliberately called only by the CLI after automatic review.
-    Neither the analysis library nor a noninteractive caller reads standard input.
+    Redirected standard input does not prevent use of the controlling terminal.
+    Explicit input streams never fall back to a different input source.
     """
     errors = validate_document(document)
     if errors:
@@ -67,13 +69,28 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     pending = unassigned_segments(result)
     if not pending:
         return result
+    if input_stream is None and not getattr(sys.stdin, "isatty", lambda: False)():
+        # Shell loops and pipelines can redirect stdin even when a person is
+        # using a terminal. Ask on that terminal instead of consuming the pipe
+        # or silently skipping the required speaker choices.
+        with ExitStack() as stack:
+            try:
+                terminal_input = stack.enter_context(open("/dev/tty", "r", encoding="utf-8"))
+                terminal_output = (output_stream if output_stream is not None else
+                                   stack.enter_context(open("/dev/tty", "w", encoding="utf-8")))
+            except OSError:
+                pass
+            else:
+                return prompt_speaker_decisions(
+                    document, book_path=book_path, input_stream=terminal_input,
+                    output_stream=terminal_output)
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stderr if output_stream is None else output_stream
     def say(message=""):
         print(_display(message), file=output_stream, flush=True)
     if not getattr(input_stream, "isatty", lambda: False)():
-        say(f"Automatic review left {len(pending)} unassigned spoken passage(s). Saving a draft; no terminal input is available.")
-        say("Review them from a terminal with: " + _resume_command(book_path))
+        say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
+        say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
         return result
 
     characters = {row["id"]: row for row in result["cast"]["characters"]}
@@ -82,9 +99,9 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     blocks = result["source"]["blocks"]
     positions = {block["id"]: index for index, block in enumerate(blocks)}
     decisions = []
-    say(f"Automatic review is finished. {len(pending)} passage(s) still need a speaker decision.")
+    say(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
     say("Choose a role number. Comma-separated numbers mean those characters speak these SAME words together.")
-    say("Enter or p leaves this passage pending; q stops and keeps decisions already made.")
+    say("A speaker is required for each passage. q saves progress and exits with speaker selection incomplete.")
     for number, item in enumerate(pending, 1):
         position = positions[item["block_id"]]
         block = blocks[position]
@@ -106,25 +123,23 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             say(f"  {choice}. {labels[role['id']]}")
         stop = False
         while True:
-            print("Speaker number(s), Enter/p to leave pending, q to stop: ", end="", file=output_stream, flush=True)
+            print("Speaker number(s), q to save and stop: ", end="", file=output_stream, flush=True)
             try:
                 answer = input_stream.readline()
             except (EOFError, KeyboardInterrupt, OSError):
                 answer = ""
             if answer == "":
-                say("\nInput ended. Keeping decisions made so far; remaining passages stay pending.")
+                say("\nInput ended before speaker selection finished. Progress will be saved; this run is incomplete.")
                 stop = True
                 break
             answer = answer.strip().casefold()
             if answer == "q":
                 stop = True
                 break
-            if answer in {"", "p"}:
-                break
             parts = [part.strip() for part in answer.split(",")]
             if (not all(part.isdecimal() and len(part) <= 8 for part in parts)
                     or any(not 1 <= int(part) <= len(roles) for part in parts)):
-                say("Enter a listed role number, comma-separated numbers, p, or q.")
+                say("Choose a listed role number, comma-separated numbers, or q to save and stop. A blank answer does not skip the passage.")
                 continue
             choices = [roles[int(part) - 1] for part in parts]
             if len({role["id"] for role in choices}) != len(choices):
@@ -184,5 +199,5 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         raise ValueError("Invalid speaker decisions: " + "; ".join(result["readiness"]["errors"][:12]))
     say(f"Speaker decisions: {len(decisions)} assigned; {len(remaining)} unassigned spoken passage(s) remain.")
     if remaining:
-        say("The remaining passages stay pending. Continue from a terminal with: " + _resume_command(book_path))
+        say("Speaker selection incomplete. Finish from a terminal with: " + _resume_command(book_path))
     return result

@@ -84,7 +84,7 @@ HTTP is supported for loopback servers; remote endpoints require HTTPS. Redirect
 6. Optionally scan the completed script against the source for passage attribution mistakes. Require three unanimous block-level reviews before applying a proposed correction.
 7. Find every remaining unassigned spoken passage deterministically and request three independent source-based assignments. Apply only unanimous resolved decisions. Revisit unresolved cases with wider source context; keep genuine uncertainty visible rather than choosing a fallback voice.
 8. Prepare a useful audition script for each voice: select enough clearly attributed source speech, joining separate statements when needed, or ask the configured model to write character-specific casting text.
-9. If speech remains unassigned after three automatic review rounds, ask for a final speaker decision when running in a terminal. Validate and save the analysis, cumulative series cast, and renderer bundle together. Mark the bundle as a draft when review items remain.
+9. If speech remains unassigned after three automatic review rounds, ask for a final speaker decision when running in a terminal. Validate and save the analysis, cumulative series cast, and renderer bundle together. Analysis notes are advisory; no separate review or acceptance step is required.
 
 A character, a narrative/dialogue role, a voice profile, and a passage's local delivery are separate records. Distinct characters receive distinct voice profiles. A narrator role may reference a character and share that character's profile. Voice profiles contain text-supported traits separately from creative casting choices. Accent, perceived age, and other unspecified traits need not be invented.
 
@@ -124,7 +124,7 @@ The final scan and cases are retained in `provenance.identity_consensus`, with t
 
 Responses with invalid quotations or invalid references undergo bounded repair. If a proposed patch or verdict still fails validation, the case stays unresolved and its change is withheld. A failed source scan or provider request stops analysis without publishing a successful result. Valid cached work remains available to resume.
 
-All three calls use the configured model, so their errors can be correlated. A scan can also miss a candidate. Consensus reduces reliance on one answer; it does not certify identity accuracy. Directory analysis saves outstanding uncertainties in a draft bundle. The separate `export` command blocks outstanding review items unless `--allow-review` is supplied.
+All three calls use the configured model, so their errors can be correlated. A scan can also miss a candidate. Consensus reduces reliance on one answer; it does not certify identity accuracy. Directory analysis retains outstanding uncertainties as advisory notes. Those notes do not block export or rendering; genuinely unassigned speech still needs a performer.
 
 To explicitly disable the extra identity calls, set `identity_consensus = false` under `[analysis]`. This restores the earlier discovery/reconciliation behavior: proposed merges can be applied to the draft and are flagged for review, with no independent identity audit, exhaustive series continuity scan, or three-way verdict. Series matching then depends on optional proposals made during discovery/reconciliation and the deterministic matching safeguards. No environment variable or additional CLI flag controls this setting.
 
@@ -136,15 +136,23 @@ The scanner proposes complete replacements for source blocks needing correction.
 
 Every `analyze` run also performs mandatory speaker completion after this optional scan, including when `analysis.attribution_review = false`. It enumerates all unassigned spoken spans rather than relying on a scanner to notice them. Three reviewers independently assign the surrounding complete source block without seeing each other's answers. Only source spans with unanimous resolved decisions are updated; disagreement elsewhere in the block cannot erase an agreed assignment. Up to three rounds expand source context, with the last round adding relevant cast evidence from other chapters, while retaining the same evidence requirements. Exact source coverage, existing cast references, quotations, and protected human assignments are validated before changes are applied. Existing local delivery remains unchanged. Completion cannot invent a missing character or silently use the narrator. Per-case decisions, source/cast/script fingerprints, reviewer results, and remaining counts are retained in `provenance.speaker_completion` and resumable cache audit files.
 
-After automatic review, interactive `analyze` and `resolve-speakers` show each remaining passage with nearby source, candidate speakers, and the latest jury findings. Choose a numbered role, or comma-separated dialogue roles only when those characters say the same words together. Enter or `p` leaves the passage pending; `q` or end of input stops and preserves earlier decisions. These selections are recorded as source-bound user decisions, not model consensus. Without a terminal, the command saves a draft and prints the command to review it later. Unassigned speech continues to block audio generation.
+After automatic speaker assignment, `analyze` and `resolve-speakers` ask for each remaining passage with nearby source, candidate speakers, and the latest findings. Choose a numbered role, or comma-separated dialogue roles only when those characters say the same words together. Blank input asks again. `q` or end of input preserves earlier decisions and exits with status `2` while speakers remain missing. Redirected standard input uses the controlling terminal when one is available. With no terminal, the command saves progress and explains how to resume. These choices are recorded as source-bound user decisions. Unassigned speech blocks audio generation; advisory notes do not.
 
-To repair already completed book directories without repeating extraction, character discovery, or casting:
+To resume a saved book, rerun the original `analyze` command with the same output directory, or pass that directory directly:
+
+```sh
+.venv-renderer/bin/epub-audiobook analyze runs/book-06
+```
+
+The saved cast, assigned passages, and cached model responses are reused. Only remaining speaker assignments are attempted, followed by interactive choices for unresolved passages. A fully assigned book needs no model calls or rewrite. Supplying an EPUB with an existing output requires it to match the saved source; an unrelated book cannot overwrite that directory. Updates preserve voices and refresh linked descendant metadata.
+
+To resolve several existing book directories in one command:
 
 ```sh
 python3.11 -m epub_audiobook resolve-speakers runs/book-01 runs/book-02 runs/book-03
 ```
 
-This uses the same global configuration and cached model requests. It stages and validates the revised analyses, chapter scripts, review data, and cumulative series history, backs up the original managed files under `.analysis-revisions/` in the first affected book, and refreshes descendant continuation hashes. Linked descendants in the same parent folders are discovered automatically; include descendants stored elsewhere explicitly so their links can also be refreshed. Cast identities, saved voice references, per-book aliases, and rendered audio are retained. Existing rendered checkpoints whose source bundle changed must be rendered again before assembly; unchanged verified clip requests can still be reused. Do not run this while rendering an affected book. The command reports the backup location and returns status `2` when unassigned speech remains, keeping those cases visible for review.
+This uses the same global configuration and cached model requests. It stages and validates the revised analyses, chapter scripts, review data, and cumulative series history, backs up the original managed files under `.analysis-revisions/` in the first affected book, and refreshes descendant continuation hashes. Linked descendants in the same parent folders are discovered automatically; include descendants stored elsewhere explicitly so their links can also be refreshed. Cast identities, saved voice references, per-book aliases, and rendered audio are retained. Existing rendered checkpoints whose source bundle changed must be rendered again before assembly; unchanged verified clip requests can still be reused. Do not run this while rendering an affected book. The command reports the backup location and returns status `2` when unassigned speech remains, reporting that speaker selection is incomplete.
 
 Review an existing analysis without rediscovering characters or updating its series registry:
 
@@ -159,9 +167,9 @@ This explicit command runs the review regardless of the `analysis.attribution_re
 
 If a semantic review scan exceeds the model's output limit, its target blocks are divided into halves, up to two subdivision levels and four final groups. Child scans run sequentially inside the same worker and retain all source context visible to the original scan. Their validated proposals still receive three blind jury requests per original batch. Ordinary cache entries stay compatible; child responses and separate hints recording prior truncation support resumption. Other errors do not trigger subdivision. Truncation of a single-block scan or at the depth limit stops review. Jury responses are not subdivided; initial passage tagging has the separate unit-based recovery described above.
 
-All reviewers use the configured model, so shared errors remain possible, and the scanner can miss mistakes. Three-way agreement does not guarantee semantic accuracy. Invalid scans or provider failures stop the review without publishing output; valid cached calls remain resumable. Invalid jury responses undergo configured validation repairs, then remain recorded as error votes if still invalid. Outstanding review items continue to block ordinary export.
+All reviewers use the configured model, so shared errors remain possible, and the scanner can miss mistakes. Three-way agreement does not guarantee semantic accuracy. Invalid scans or provider failures stop the review without publishing output; valid cached calls remain resumable. Invalid jury responses undergo configured validation repairs, then remain recorded as error votes if still invalid. Outstanding notes remain available for optional corrections and do not block export or rendering once every spoken passage has a voice.
 
-## Review and corrections
+## Optional corrections
 
 `review` prints the current source and cast fingerprints, plus unresolved or flagged segments and issues. Examine the surrounding source in the analysis JSON. Copy both fingerprints into a corrections file:
 
@@ -213,7 +221,7 @@ Directory analysis creates the renderer bundle directly. Its files include:
 | `cast.json` | Characters, aliases, narrative/dialogue roles, and provider-independent voice profiles |
 | `scripts/chapter-0001.jsonl`, … | Chapter scripts with ordered text spans, `voice_id`, `role_id`, local delivery, source ranges, and paragraph breaks |
 | `source.json` | Canonical source blocks, EPUB locations, extraction policy, warnings, and exclusions |
-| `review.json` | Remaining review items; empty for a ready bundle |
+| `review.json` | Advisory notes and any unassigned passages; notes do not require approval |
 | `analysis.json` | Full validated analysis, including source evidence and audit provenance |
 | `series-cast.json` | Cumulative series history for the next book's `--continue-from` |
 
@@ -221,7 +229,7 @@ Bundles use format version 2. Read chapter scripts in the order of `manifest.fil
 
 The audio CLI should require the manifest and supported format version, check file hashes and readiness, and map each `voice_id` to one of its engine's voices. The renderer keeps that mapping beneath each book's `voices` directory and searches earlier books through the saved continuation link. Older version-1 bundles have one `script.jsonl`; version-2 bundles contain only the chapter files. Both retain the same segment IDs, global order, source offsets, and voice references. The analyzer emits no engine-specific voice names, SSML, audio parameters, or `.m4b` files.
 
-The separate `export` command is for legacy JSON analyses or a new bundle after manual review/corrections. It writes the renderer files above, without the directory workflow's `analysis.json` and `series-cast.json`. It publishes the manifest last and refuses existing output directories. An interrupted manual export without a manifest is incomplete; retry using a new directory. `export --allow-review` explicitly creates a draft bundle with `readiness.ready=false`, as directory analysis does automatically when review items remain. Neither kind of draft is a fully attributed script.
+The separate `export` command is for legacy JSON analyses or a new bundle after optional corrections. It writes the renderer files above, without the directory workflow's `analysis.json` and `series-cast.json`. It publishes the manifest last and refuses existing output directories. An interrupted manual export without a manifest is incomplete; retry using a new directory. `--allow-review` is retained for compatibility but is not required. `readiness.ready` reflects valid structure and assigned spoken passages, not whether advisory notes remain. Export saves unresolved work too, but returns status `2` when speakers are missing.
 
 ## Long books, resuming, and cost controls
 
@@ -261,7 +269,7 @@ Invalid model responses are retained in the cache's `failed/` subdirectory for d
 
 Attribution repairs explicitly request the complete original batch, including unaffected units, and include its ordered unit IDs when the request budget permits. Evidence feedback asks for short, sufficient quotations copied verbatim from the referenced visible block. The repair request drops redundant hints or the previous response if needed to fit the budget; it never trims source data or accepts a partial answer. These repair instructions and empty-delivery defaults leave normal prompt and request cache identities unchanged.
 
-`Repairing validation` means a proposed model response was rejected and a bounded retry is underway. A later successful result has passed validation; these messages are distinct from the final review-item count, which includes unresolved identity, continuity, and attribution decisions. Extraction notices about an SVG-only cover page or DOM text order are informational. A fatal validation error still stops the run, and remaining review items keep the output marked as a draft.
+`Repairing validation` means a proposed model response was rejected and a bounded retry is underway. A later successful result has passed validation; these messages are distinct from the final review-item count, which includes unresolved identity, continuity, and attribution decisions. Extraction notices about an SVG-only cover page or DOM text order are informational. A fatal validation error still stops the run. Advisory notes do not make a bundle a draft or require a review step; missing speakers require a selection before those passages can render.
 
 Citation diagnostics identify the failing field and evidence index, with bounded record and source-block IDs where available. They distinguish an unknown block ID from a quotation that is not an exact substring, and report when additional invalid locations were omitted from the feedback budget. Repairs must preserve the source's exact spelling, case, punctuation, whitespace, and block-ID leading zeros.
 
@@ -361,4 +369,4 @@ python3.11 scripts/validate_identity.py --config epub-audiobook.toml \
 
 This checks the identity audit against deliberately incorrect or potentially confusing cast records; it does not evaluate full-book discovery or passage attribution. Reports retain proposals and verdicts. Add `--check-fixtures` for local fixture validation without API calls, or `--case same_name_distinct_people` to run one scenario. `--cache-dir` can reuse independently validated model responses within the report directory. Invalid split proposals remain unresolved and cannot change the cast.
 
-Exit codes: `0` success; `1` invalid input, contract, I/O, or API failure; `2` valid analysis with review items when `validate --ready` is requested; `130` interrupted analysis. A successful `analyze` may contain review items; use `validate --ready` before production rendering.
+Exit codes: `0` success; `1` invalid input, contract, I/O, or API failure; `2` saved analysis with unassigned spoken passages after `analyze`, `resolve-speakers`, or `export`, or when `validate --ready` detects missing speakers; `130` interrupted analysis. Advisory notes alone do not change a successful exit status.

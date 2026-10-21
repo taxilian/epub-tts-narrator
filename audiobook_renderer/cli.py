@@ -28,7 +28,7 @@ def parser():
         if name in {"plan", "render", "assemble"}:
             command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
             command.add_argument("--allow-review", action="store_true", default=None,
-                                 help="Permit outstanding review items; unassigned speech still blocks rendering")
+                                 help="Compatibility option; review notes are advisory and need no override")
         if name in {"render", "assemble"}:
             command.add_argument("--chapter-format", choices=("m4a", "mp3"),
                                  help="Individual chapter format (default: configured format, normally m4a)")
