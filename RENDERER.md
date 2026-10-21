@@ -468,7 +468,19 @@ To generate the remaining chapters and package later:
 
 `assemble` uses the verified chapter checkpoints and loads neither TTS nor transcription models. Missing, changed, or incompatible checkpoints stop assembly with an explanation; use `render` to prepare them. Changing only chapter format or bitrate can re-encode from saved lossless PCM during assembly. Changes to text, voices, pauses, or loudness require `render` again; unchanged accepted speech is reused. Verification-policy changes alone do not invalidate accepted clips or chapters. Use the same `--work-dir` if it was overridden. To package a subset, pass the same `--chapters` selection to `assemble` and choose a separate `-o` directory, preserving the final output location for the full book. Existing finished audiobooks are never overwritten.
 
-Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. Pauses inside a clip are unchanged. The renderer then targets consistent gaps between clips: `sentence_pause_ms = 220` for sentence boundaries, `clause_pause_ms = 100` for clause boundaries, and the existing paragraph, blank-line, and bracket settings for their respective boundaries. These are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. Protected audio is never removed just to meet a target. Set `normalize_pauses = false` to retain the previous composition behavior.
+All pauses added during assembly are controlled in the global config's existing `[render]` table. Each value is an integer from 0 through 5000 milliseconds:
+
+| Setting | Default | Where it applies |
+| --- | ---: | --- |
+| `sentence_pause_ms` | 220 | After `.`, `!`, `?`, or an ellipsis at an audio clip boundary |
+| `clause_pause_ms` | 100 | After a comma, semicolon, colon, or dash at an audio clip boundary |
+| `paragraph_pause_ms` | 250 | At a source paragraph boundary, including the chapter's final paragraph |
+| `blank_pause_ms` | 500 | Before a paragraph marked as following a blank line |
+| `bracket_pause_ms` | 120 | On entering or leaving bracketed text |
+
+Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. The settings are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. For example, a sentence ending a paragraph uses the larger of the sentence and paragraph settings. Zero disables a particular added pause; another applicable cue or protected audio may still leave a gap. Protected audio is never removed just to meet a target.
+
+Pauses inside a clip are unchanged. When a whole paragraph is generated as one continuous performance, its internal sentence pauses and speaker transitions remain under the TTS engine's control. There is no separate added speaker-change pause, and chapter concatenation adds no extra silence of its own. Set `normalize_pauses = false` to retain original clip padding and disable sentence/clause targets; paragraph, blank-line, and bracket pauses are then added on top of the original padding.
 
 Changing pause settings rebuilds chapter audio from the accepted clips; it does not regenerate speech or modify voice references. Rerun `render BOOK_DIRECTORY --chapters N --chapters-only` using the same work directory, then listen to the newly printed chapter file. Use `assemble` afterward to package it, choosing a new output directory if a finished audiobook already exists. Timing records include `source_audio_start_frame` and `source_audio_end_frame` so each assembled clip can be traced to the retained range of its original accepted WAV. Source text ranges remain unchanged.
 

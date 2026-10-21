@@ -88,9 +88,19 @@ max_chunk_chars = 320
 max_attempts = 3
 seed = 1729
 sample_rate = 44100
-paragraph_pause_ms = 250
-blank_pause_ms = 500
-bracket_pause_ms = 120
+# All added pauses, in milliseconds (integers from 0 through 5000).
+# With normalization enabled, these are total gap targets between audio clips:
+# retained quiet edges count toward the gap, and overlapping cues use the largest.
+# Pauses inside a continuous TTS-generated paragraph are unchanged.
+normalize_pauses = true
+sentence_pause_ms = 220  # After . ! ? or an ellipsis at a clip boundary
+clause_pause_ms = 100    # After a comma, semicolon, colon, or dash at a clip boundary
+paragraph_pause_ms = 250 # At a source paragraph boundary, including the chapter's final one
+blank_pause_ms = 500     # Before a paragraph marked as following a blank line
+bracket_pause_ms = 120   # On entering or leaving bracketed text
+# Zero disables that added pause; it does not remove protected speech edges.
+# normalize_pauses = false keeps original clip padding, disables sentence/clause
+# targets, and adds paragraph/blank/bracket pauses on top of the existing padding.
 allow_review = false
 # Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
 chapter_numbers = [] # all manifest script entries
