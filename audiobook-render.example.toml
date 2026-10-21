@@ -12,8 +12,10 @@ top_k = 30
 max_new_tokens = 2048
 
 [voice_design]
-# Drama 3 casts one described character, then clones the saved recording.
-type = "engine"
+# Prefer Gemini when its API key is configured; otherwise create voices locally.
+# Drama 3 still synthesizes audiobook speech by cloning the saved recordings.
+# Use "engine" to force local creation, or "gemini" to require Gemini.
+type = "auto"
 
 [verification]
 type = "mlx_whisper"
@@ -30,7 +32,7 @@ language = "en"
 # Continued books inherit the nearest saved voice in their parent-book chain.
 reference_text = "The morning light fell across the quiet room. I opened the door and listened to the wind in the trees. There was still time to decide what to do next."
 
-# Used by GG in the casting menu or cast --voice-designer gemini.
+# Used automatically for voice creation when api_key is set, and by GG in the menu.
 # Keep the real key in your ignored local epub-audiobook.toml.
 [gemini]
 api_key = ""

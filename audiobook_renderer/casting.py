@@ -43,6 +43,8 @@ class CastingSession:
         config = resolve_book_config(bundle, config)
         self.bundle = deepcopy(bundle)
         self.config = deepcopy(config)
+        from .config import resolve_voice_design
+        self.config["voice_design"] = resolve_voice_design(config)
         self.notify = notify
         self.store = voice_store(bundle, config)
         self._engine_factory = engine_factory

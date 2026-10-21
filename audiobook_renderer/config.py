@@ -19,7 +19,7 @@ DEFAULTS = {
         "reference_model": None,
     },
     "voice_design": {
-        "type": "engine", "checkpoint": None, "language": "English",
+        "type": "auto", "checkpoint": None, "language": "English",
         "temperature": 0.7, "max_tokens": 2048, "options": {},
     },
     "gemini": {
@@ -194,6 +194,28 @@ def load_config(path=None):
     if any(a in b.parents or b in a.parents for a in model_paths for b in stores):
         raise ValueError("Model directories must not overlap voice, work, or output stores")
     return result
+
+
+def resolve_voice_design(config):
+    """Prefer configured Gemini for creation; never change the speech engine.
+
+    Auto selection is local configuration inspection, not an API probe. A
+    provider error stays an error instead of silently creating a different voice.
+    """
+    settings = deepcopy(config.get("voice_design", {"type": "auto"}))
+    kind = settings.get("type", "auto")
+    gemini = {**DEFAULTS["gemini"], **config.get("gemini", {})}
+    if kind == "auto":
+        key = gemini["api_key"]
+        if not isinstance(key, str) or not key.strip():
+            return {"type": "engine"}
+        return {"type": "gemini", **gemini}
+    if kind == "gemini":
+        # Explicit per-action settings already include credentials. A persisted
+        # type=gemini setting instead reads them from the global [gemini] table.
+        return {"type": "gemini", **gemini,
+                **{key: settings[key] for key in gemini if key in settings}}
+    return settings
 
 
 def select_voice_designer(config, choice):

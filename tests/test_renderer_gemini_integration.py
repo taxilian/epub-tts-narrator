@@ -1,4 +1,4 @@
-"""Gemini casting is opt-in and leaves local rendering and saved voices intact."""
+"""Gemini casting selection leaves local rendering and saved voices intact."""
 
 import base64
 import contextlib
@@ -16,7 +16,7 @@ from audition_fixtures import prepare_bundle, prepare_document
 from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.cli import main, parser
 from audiobook_renderer.common import read_json, write_json
-from audiobook_renderer.config import DEFAULTS, load_config, select_voice_designer
+from audiobook_renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
 from audiobook_renderer.quality import validate_policy
 from audiobook_renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
 from epub_audiobook.cli import export_bundle
@@ -54,7 +54,8 @@ class GeminiSelectionTests(unittest.TestCase):
 
     def test_local_default_requires_no_gemini_credentials(self):
         config = load_config(self.config_path)
-        self.assertEqual(config["voice_design"]["type"], "engine")
+        self.assertEqual(config["voice_design"]["type"], "auto")
+        self.assertEqual(resolve_voice_design(config)["type"], "engine")
         self.assertIsNone(config["gemini"]["api_key"])
         selected = select_voice_designer(config, None)
         self.assertEqual(selected, config)
@@ -74,7 +75,7 @@ class GeminiSelectionTests(unittest.TestCase):
         self.assertEqual(selected["voice_design"]["api_key"], SECRET)
         self.assertEqual(selected["voice_design"]["language_code"], "en-GB")
         self.assertEqual(selected["voice_design"]["timeout_seconds"], 150)
-        self.assertEqual(config["voice_design"]["type"], "engine")
+        self.assertEqual(config["voice_design"]["type"], "auto")
         self.assertEqual(self.config_path.read_bytes(), original)
 
     def test_explicit_gemini_requires_file_credentials_even_when_environment_has_key(self):
@@ -143,13 +144,13 @@ class GeminiSelectionTests(unittest.TestCase):
         self.assertNotIn(SECRET, stdout + stderr)
         self.assertEqual(self.config_path.read_bytes(), original)
 
-    def test_cli_default_stays_local_even_with_gemini_credentials(self):
+    def test_cli_default_prefers_gemini_with_configured_credentials(self):
         self.add_gemini()
         with patch("audiobook_renderer.audition.casting_command", return_value=0) as casting:
             status, stdout, stderr = self.run_cli(
                 "cast", self.bundle, "--config", self.config_path, "--action", "generate-missing")
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(casting.call_args.args[2]["voice_design"]["type"], "engine")
+        self.assertEqual(resolve_voice_design(casting.call_args.args[2])["type"], "gemini")
         self.assertNotIn(SECRET, stdout + stderr)
 
     def test_cli_missing_gemini_key_stops_before_casting(self):

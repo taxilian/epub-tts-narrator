@@ -15,6 +15,7 @@ from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .config import resolve_voice_design
 from .quality import validation_key as make_validation_key, validate_audio
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
@@ -184,7 +185,7 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
         )
     owned_designer = None
     try:
-        settings = config.get("voice_design", {"type": "engine"})
+        settings = resolve_voice_design(config)
         if designer is None and settings["type"] != "engine":
             from .voice_design import create_designer
             owned_designer = designer = create_designer(deepcopy(settings))
@@ -546,7 +547,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         store.persist_aliases()
         designer = None
         try:
-            settings = config.get("voice_design", {"type": "engine"})
+            settings = resolve_voice_design(config)
             if (settings["type"] != "engine"
                     and any(store.load(voice_id) is None for voice_id in plan["voice_ids"])):
                 from .voice_design import create_designer

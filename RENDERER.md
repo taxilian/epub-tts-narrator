@@ -2,7 +2,7 @@
 
 `audiobook-render` consumes a version-2 analyzer bundle, creates or reuses persistent character voices, verifies each generated chunk, and produces chapter audio plus a chaptered `.m4b`. The analyzer and renderer read the same global `epub-audiobook.toml`, while the book directory and optional path overrides are command arguments. They remain separate commands.
 
-Fish Audio Drama 3 creates character reference voices and renders the book locally through the **unofficial Sogni MLX port** on Apple Silicon. The renderer uses Drama 3's scene prompt to cast one character from a description, saves the recording, and clones it for later lines and books. Qwen3 VoiceDesign remains an optional alternative. The port reports 48–55 GB peak memory for `q8` on an M5 Max; Drama 3's download is about 41.5 GB. Allow additional disk space for Whisper, dependencies, voice references, and retained attempts. These are upstream memory figures, not combined-memory guarantees for this renderer. [Sogni port](https://github.com/Sogni-AI/drama3-mlx), [scene casting format](https://arxiv.org/html/2610.18010v1#A2)
+Voice creation prefers Gemini when its API key is configured. Fish Audio Drama 3 renders the book locally through the **unofficial Sogni MLX port** on Apple Silicon, cloning the saved character recordings. Drama 3 can also create references locally from scene prompts, and Qwen3 VoiceDesign remains an optional alternative. The port reports 48–55 GB peak memory for `q8` on an M5 Max; Drama 3's download is about 41.5 GB. Allow additional disk space for Whisper, dependencies, voice references, and retained attempts. These are upstream memory figures, not combined-memory guarantees for this renderer. [Sogni port](https://github.com/Sogni-AI/drama3-mlx), [scene casting format](https://arxiv.org/html/2610.18010v1#A2)
 
 **Validation status:** automated tests cover real FFmpeg encoding, synchronization, quality gates, adapters, interactive casting, and voice replacement across books. A live local Drama 3 / MLX Whisper pilot produced a 17.38-second chapter and M4B with two persisted voices and nine verified speech clips; every accepted clip had zero normalized word errors. During voice creation, the acoustic checks rejected one real attempt for excessive silence and a long internal stall, and a subsequent attempt passed. A separate live Whisper check rejected an extra spoken sentence. The pilot outputs are in `audiobooks/last-lantern-demo/`, with accepted transcripts in `verification.json` and retained attempts in `render-work/last-lantern-demo/`.
 
@@ -70,7 +70,7 @@ top_k = 30
 max_new_tokens = 2048
 
 [voice_design]
-type = "engine"
+type = "auto" # Gemini when its key is configured; otherwise the local engine
 
 [verification]
 type = "mlx_whisper"
@@ -161,7 +161,7 @@ Open the interactive casting tool:
   "runs/book-01"
 ```
 
-Startup automatically prepares all voices: it reuses existing selections, selects previously saved verified samples, and generates missing ones. New voices and successful regenerations are selected automatically. There is no acceptance step. Missing samples show generation progress; an individual failure leaves the other voices available.
+Startup automatically prepares all voices: it reuses existing selections, selects previously saved verified samples, and generates missing ones. By default, creation uses Gemini when `gemini.api_key` is configured, otherwise the local speech engine. This preference also applies to `generate`, `generate-missing`, `regenerate-all`, `create-voices`, and any missing references needed during rendering. Audiobook speech continues to use the configured local engine and its saved reference recordings. New voices and successful regenerations are selected automatically. There is no acceptance step. Missing samples show generation progress; an individual failure leaves the other voices available.
 
 Voice playback matches perceived loudness automatically, with a default target of -20 LUFS and a -1.5 dB true-peak ceiling. Startup prepares cached playback copies of the selected samples before showing the menu; regenerated samples are prepared before playback. Existing, inherited, imported, and newly generated voices all use the same settings. No reanalysis or voice regeneration is needed.
 
@@ -226,9 +226,11 @@ With `[voice_design] type = "engine"`, the character description conditions Dram
 
 For a fresh analysis, the analyzer now supplies stable acoustic directions in both the voice description and traits, including voices added during identity reconciliation. Casting uses these automatically together with the selected book excerpt; no prompt-preparation or repair command is needed. Existing edited drafts and selected references retain precedence, so this change does not rewrite older casting work. Speech verification checks the words and audio quality, not whether vocal gender, character fit, or every requested texture sounds right.
 
-To create voices with Gemini instead, put the following in the same global
-`epub-audiobook.toml` file. Local Drama 3 remains the default; this section supplies
-credentials and settings for `GG` in the casting menu and the optional CLI override.
+To configure Gemini voice creation, put the following in the same global
+`epub-audiobook.toml` file. The default `[voice_design] type = "auto"` prefers Gemini
+when its API key is present; with no key, it uses the local engine. Existing files
+that set `type = "engine"` explicitly keep local creation until changed to `auto`.
+These settings also supply credentials for `GG` in the casting menu.
 
 ```toml
 [gemini]
@@ -239,10 +241,10 @@ timeout_seconds = 180.0
 ```
 
 ```sh
-# Open the normal menu; type GG 5 to regenerate voice 5 with Gemini.
+# Open casting; missing voices prefer Gemini when configured.
 .venv-renderer/bin/audiobook-render cast runs/book-01
 
-# Optional: also generate missing startup voices with Gemini.
+# Optional: require Gemini even if voice_design.type selects another designer.
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer gemini
 
 # Replace all voices in this book with Gemini-created voices.
@@ -252,6 +254,10 @@ timeout_seconds = 180.0
 # Explicitly use the local speech engine for new voices.
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer local
 ```
+
+An API error or failed Gemini verification is reported and preserves any existing
+selection. Automatic selection does not silently switch providers after a failure.
+Use `G` in the menu for an explicit local replacement, or `GG` for Gemini.
 
 Gemini casting sends the voice description and selected sample script to Google's
 API. It creates a persistent custom voice, synthesizes the exact script, and runs
