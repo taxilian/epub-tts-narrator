@@ -2,7 +2,7 @@
 
 import unittest
 
-from audiobook_renderer.voice_prompts import (
+from epub_tts_narrator.renderer.voice_prompts import (
     AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
     default_voice_prompt,
 )

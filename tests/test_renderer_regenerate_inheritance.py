@@ -7,14 +7,14 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.cli import main
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.cli import main
+from epub_tts_narrator.analysis_directory import (
     continuation_registry, fresh_registry, publish_directory,
 )
-from epub_audiobook.audition_scripts import ensure_bundle_scripts
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.series import link_analysis
 from audition_fixtures import prepare_document
 import test_book_voice_workflow as book_fixtures
 from test_renderer_voice_design_integration import FFMPEG
@@ -100,9 +100,9 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         inherited = self.seed(first, character)
         original_local = self.seed(second, narrator)
         before = self.snapshot(Path(first["directory"]))
-        with patch("audiobook_renderer.engines.create_engine", return_value=self.engine), \
-                patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier), \
-                patch("epub_audiobook.audition_scripts.ensure_bundle_scripts",
+        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+                patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier), \
+                patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts",
                       wraps=ensure_bundle_scripts) as scripts:
             status, output, error = self.run_cast(second)
         self.assertEqual(status, 0, error)
@@ -128,8 +128,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         narrator, character, extra = self.ids(second)
         inherited = self.seed(first, character)
         before = self.snapshot(Path(first["directory"]))
-        with patch("audiobook_renderer.engines.create_engine", return_value=self.engine), \
-                patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier):
+        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+                patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier):
             status, _, error = self.run_cast(second, "--include-inherited")
         self.assertEqual(status, 0, error)
         self.assertEqual(len(self.engine.calls), 2)
@@ -156,10 +156,10 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         # Secondary narration needs an explicit identity mapping across books.
         self.alias_narrator(third, extra_target=extra)
         before = self.snapshot(self.root)
-        with patch("epub_audiobook.audition_scripts.ensure_bundle_scripts") as scripts, \
-                patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.voice_design.create_designer") as designer, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier:
+        with patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts") as scripts, \
+                patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.voice_design.create_designer") as designer, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier:
             status, output, error = self.run_cast(third)
         self.assertEqual(status, 0, error)
         scripts.assert_not_called()
@@ -193,10 +193,10 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
     def test_default_bulk_skips_inherited_failure_without_scripts_or_generation(self):
         first, second, character = self.failed_parent_lineage()
         before = self.snapshot(self.root)
-        with patch("epub_audiobook.audition_scripts.ensure_bundle_scripts") as scripts, \
-                patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.voice_design.create_designer") as designer, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier:
+        with patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts") as scripts, \
+                patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.voice_design.create_designer") as designer, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier:
             status, output, error = self.run_cast(second)
         self.assertEqual(status, 0, error)
         scripts.assert_not_called()
@@ -213,8 +213,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
     def test_include_inherited_replaces_failed_ancestor_voice_only_in_child(self):
         first, second, character = self.failed_parent_lineage()
         before = self.snapshot(Path(first["directory"]))
-        with patch("audiobook_renderer.engines.create_engine", return_value=self.engine), \
-                patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier):
+        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine), \
+                patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier):
             status, output, error = self.run_cast(second, "--include-inherited")
         self.assertEqual(status, 0, error)
         self.assertEqual(len(self.engine.calls), 2)
@@ -253,8 +253,8 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         first = self.publish(1)
         for action in ("list", "generate-missing", "interactive", "prepare-samples", "normalize-samples"):
             with self.subTest(action=action), \
-                    patch("epub_audiobook.audition_scripts.ensure_bundle_scripts") as scripts, \
-                    patch("audiobook_renderer.casting.CastingSession") as session:
+                    patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts") as scripts, \
+                    patch("epub_tts_narrator.renderer.casting.CastingSession") as session:
                 status, _, error = self.run_cast(first, "--action", action, "--include-inherited")
             self.assertEqual(status, 2)
             self.assertIn("--include-inherited", error)

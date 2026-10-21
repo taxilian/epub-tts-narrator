@@ -8,13 +8,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.pipeline import CachedRequests, fingerprint
-from epub_audiobook.prompts import COMMON, VOICE_PROFILE_GUIDANCE
-from epub_audiobook.provider import ProviderError
-from epub_audiobook.voice_prompt_refresh import (
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint
+from epub_tts_narrator.prompts import COMMON, VOICE_PROFILE_GUIDANCE
+from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.voice_prompt_refresh import (
     SYSTEM, refresh_bundle_prompts, refresh_voice_descriptions, validate_description,
 )
-from audiobook_renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS
+from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS
 from test_audition_scripts import bundle
 
 
@@ -153,7 +153,7 @@ class VoicePromptRefreshTests(unittest.TestCase):
             requests = CachedRequests(client, directory, repair_attempts=0)
             refresh_voice_descriptions(bundle(), requests, voice_ids=["v1"])
             refresh_voice_descriptions(bundle(), requests, voice_ids=["v1"], current_prompts={"v1": "A changed direction."})
-            with patch("epub_audiobook.voice_prompt_refresh.SYSTEM", SYSTEM + "\nNew guidance."):
+            with patch("epub_tts_narrator.voice_prompt_refresh.SYSTEM", SYSTEM + "\nNew guidance."):
                 refresh_voice_descriptions(bundle(), requests, voice_ids=["v1"])
         self.assertEqual(client.calls, ["v1", "v1", "v1"])
 
@@ -200,9 +200,9 @@ class VoicePromptRefreshTests(unittest.TestCase):
             config = {"provider": {"api_key": "do-not-persist"}, "analysis": {
                 "cache_dir": None, "repair_attempts": 0, "max_request_chars": 200000, "attribution_workers": 20}}
             client = Client()
-            with patch("epub_audiobook.config.load_config", return_value=config) as load, \
-                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=client), \
-                    patch("epub_audiobook.voice_prompt_refresh.refresh_voice_descriptions", wraps=refresh_voice_descriptions) as refresh:
+            with patch("epub_tts_narrator.config.load_config", return_value=config) as load, \
+                    patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=client), \
+                    patch("epub_tts_narrator.voice_prompt_refresh.refresh_voice_descriptions", wraps=refresh_voice_descriptions) as refresh:
                 result = refresh_bundle_prompts(data, "global.toml", progress=lambda message: None)
             load.assert_called_once_with("global.toml")
             self.assertEqual(refresh.call_args.kwargs["workers"], 5)

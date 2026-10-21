@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.drama3_sampling import wrap_model
+from epub_tts_narrator.renderer.drama3_sampling import wrap_model
 
 try:
     import numpy as np
@@ -19,7 +19,7 @@ class SamplingProxyContractTests(unittest.TestCase):
         tower = SimpleNamespace(forced=object(), make_caches=object(), embed_backbone=object())
         model = SimpleNamespace(tower=tower, backbone=object(), config=object())
         original = vars(model).copy()
-        with patch("audiobook_renderer.drama3_sampling._runtime") as runtime:
+        with patch("epub_tts_narrator.renderer.drama3_sampling._runtime") as runtime:
             proxy = wrap_model(model)
             self.assertIs(proxy.backbone, model.backbone)
             self.assertIs(proxy.config, model.config)
@@ -67,7 +67,7 @@ class SamplingProxyNumericalTests(unittest.TestCase):
 
     def decode(self, main=None, codebooks=30, top_k=30, args=None):
         proxy = wrap_model(self.model, main_top_k=main, codebook_top_k=codebooks)
-        with patch("audiobook_renderer.drama3_sampling._runtime", return_value=(np, self.sampling)):
+        with patch("epub_tts_narrator.renderer.drama3_sampling._runtime", return_value=(np, self.sampling)):
             return proxy.tower.decode_step(*(args or self.args), temperature=.7, top_k=top_k, top_p=.8)
 
     def test_uncapped_main_fixed_ras_and_residual_caps(self):

@@ -7,13 +7,13 @@ import json
 import tempfile
 import unittest
 
-from epub_audiobook.attribution_review import (
+from epub_tts_narrator.attribution_review import (
     SCAN, MAX_SCAN_SPLIT_DEPTH, _batches, audit_attribution, record_scan_truncation,
 )
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import CachedRequests, fingerprint
-from epub_audiobook.prompts import PROMPT_VERSION
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint
+from epub_tts_narrator.prompts import PROMPT_VERSION
+from epub_tts_narrator.provider import ProviderError
 from test_attribution_review import Requests, correction, fixture
 
 

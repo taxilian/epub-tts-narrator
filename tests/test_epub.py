@@ -10,7 +10,7 @@ from unittest.mock import patch
 import warnings
 import zipfile
 
-from epub_audiobook.epub import extract_epub
+from epub_tts_narrator.epub import extract_epub
 
 
 def xhtml(body: str, title: str = "Document", *, head: str = "") -> str:
@@ -473,10 +473,10 @@ class EpubExtractionTests(unittest.TestCase):
 
     def test_zip_member_and_total_size_limits(self):
         self.make_book()
-        with patch("epub_audiobook.epub.MAX_MEMBER_BYTES", 10):
+        with patch("epub_tts_narrator.epub.MAX_MEMBER_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "safety size"):
                 extract_epub(self.path)
-        with patch("epub_audiobook.epub.MAX_TOTAL_BYTES", 10):
+        with patch("epub_tts_narrator.epub.MAX_TOTAL_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "expanded size"):
                 extract_epub(self.path)
 

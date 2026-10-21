@@ -36,7 +36,7 @@ def main():
     model = Drama3.load(config["checkpoint"], experts=config.get("experts", "q8"))
     decode_model = model.model
     if "main_top_k" in config:
-        from audiobook_renderer.drama3_sampling import wrap_model
+        from epub_tts_narrator.renderer.drama3_sampling import wrap_model
         decode_model = wrap_model(model.model, main_top_k=config["main_top_k"],
                                   codebook_top_k=config.get("top_k", 30))
     print("Model loaded", flush=True)
@@ -89,7 +89,7 @@ def main():
     gc.collect()
     mx.clear_cache()
     if config.get("whisper_model"):
-        from audiobook_renderer.quality import MlxWhisperVerifier, compare_words
+        from epub_tts_narrator.renderer.quality import MlxWhisperVerifier, compare_words
         verifier = MlxWhisperVerifier(config["whisper_model"], language="en")
         for row in manifest["results"]:
             if "transcription" in row:

@@ -6,10 +6,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.book_aliases import alias_record
-from audiobook_renderer.book_context import voice_store
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.book_aliases import alias_record
+from epub_tts_narrator.renderer.book_context import voice_store
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.voices import VoiceStore
 
 
 class AuthorVoiceInheritanceTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class AuthorVoiceInheritanceTests(unittest.TestCase):
 
     def store(self, index, *, local_aliases=None):
         books = {book["directory"]: book for book in self.books}
-        with patch("audiobook_renderer.bundle.load_bundle", side_effect=lambda path: books[str(path)]):
+        with patch("epub_tts_narrator.renderer.bundle.load_bundle", side_effect=lambda path: books[str(path)]):
             return voice_store(self.books[index], self.config(index), local_aliases=local_aliases)
 
     def raw_store(self, index):

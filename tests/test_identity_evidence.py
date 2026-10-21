@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from epub_audiobook.identity import _evidence
+from epub_tts_narrator.identity import _evidence
 from test_identity import fixture
 
 

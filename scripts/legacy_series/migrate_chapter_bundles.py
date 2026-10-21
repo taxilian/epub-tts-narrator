@@ -19,8 +19,8 @@ import tempfile
 
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT))
-from epub_audiobook.cli import export_bundle, read_analysis
-from epub_audiobook.pipeline import fingerprint
+from epub_tts_narrator.cli import export_bundle, read_analysis
+from epub_tts_narrator.pipeline import fingerprint
 from bundle_validation import load_bundle, parse_json, regular_file, require, sha, validate_native_bundle
 
 BACKUP = "bundle-before-chapter-split-v1"

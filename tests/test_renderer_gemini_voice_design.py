@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 import urllib.error
 import wave
 
-from audiobook_renderer.engines import EngineError
-from audiobook_renderer.gemini_voice_design import (
+from epub_tts_narrator.renderer.engines import EngineError
+from epub_tts_narrator.renderer.gemini_voice_design import (
     GEMINI_DESIGN_MODEL, GeminiVoiceDesigner, _NoRedirect, _RequestFailure,
 )
 
@@ -370,7 +370,7 @@ class GeminiVoiceDesignTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_local_save_failures_include_original_filesystem_error(self):
-        from audiobook_renderer.gemini_voice_design import _write_exclusive
+        from epub_tts_narrator.renderer.gemini_voice_design import _write_exclusive
         for filename in ("gemini-voice.json", "attempt-001-raw.wav"):
             target = self.root / filename / "attempt-001-raw.wav"
 
@@ -381,7 +381,7 @@ class GeminiVoiceDesignTests(unittest.TestCase):
 
             with self.subTest(filename=filename), patch.object(
                 self.designer, "_post", side_effect=[{"id": "voice_saved"}, audio_response()],
-            ), patch("audiobook_renderer.gemini_voice_design._write_exclusive", side_effect=write):
+            ), patch("epub_tts_narrator.renderer.gemini_voice_design._write_exclusive", side_effect=write):
                 with self.assertRaises(EngineError) as caught:
                     self.generate(output=target)
             self.assertIn("PermissionError: Permission denied for sample directory", str(caught.exception))
@@ -394,7 +394,7 @@ class GeminiVoiceDesignTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(_RequestFailure):
                 self.designer._post("/voices", {})
         self.designer._opener.open.return_value = io.BytesIO(b"x" * 101)
-        with patch("audiobook_renderer.gemini_voice_design._MAX_RESPONSE_BYTES", 100):
+        with patch("epub_tts_narrator.renderer.gemini_voice_design._MAX_RESPONSE_BYTES", 100):
             with self.assertRaisesRegex(_RequestFailure, "size limit"):
                 self.designer._post("/voices", {})
 

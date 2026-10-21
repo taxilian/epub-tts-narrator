@@ -11,12 +11,12 @@ from threading import Event, Lock
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook import pipeline
-from epub_audiobook.analysis_directory import continuation_directories
-from epub_audiobook.cli import main
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.prompts import PROMPT_VERSION
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator import pipeline
+from epub_tts_narrator.analysis_directory import continuation_directories
+from epub_tts_narrator.cli import main
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.prompts import PROMPT_VERSION
+from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from test_identity_pipeline import JuryClient
 from test_pipeline import FakeClient
@@ -141,7 +141,7 @@ class TimeoutResumeTests(unittest.TestCase):
                 cache = self.cache / str(workers)
                 durable = DurableReplies("attribute")
                 first = TimeoutClient(fail_stage="attribute", durable=durable)
-                with patch("epub_audiobook.pipeline.write_json", side_effect=durable.write):
+                with patch("epub_tts_narrator.pipeline.write_json", side_effect=durable.write):
                     with self.assertRaises(ProviderError) as raised:
                         self.analyze(first, workers=workers, cache=cache)
                 self.assertTrue(raised.exception.retryable)
@@ -165,7 +165,7 @@ class TimeoutResumeTests(unittest.TestCase):
     def test_five_worker_semantic_jury_timeout_keeps_attribution_and_completed_votes(self):
         durable = DurableReplies("attribution_review_vote")
         first = TimeoutClient(fail_stage="attribution_review_vote", durable=durable, semantic=True)
-        with patch("epub_audiobook.pipeline.write_json", side_effect=durable.write):
+        with patch("epub_tts_narrator.pipeline.write_json", side_effect=durable.write):
             with self.assertRaises(ProviderError) as raised:
                 self.analyze(first, semantic=True)
         self.assertTrue(raised.exception.retryable)
@@ -209,7 +209,7 @@ class TimeoutResumeTests(unittest.TestCase):
 
         def command(client, arguments):
             stderr, stdout = io.StringIO(), io.StringIO()
-            with patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=client), \
+            with patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client), \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 status = main([str(value) for value in arguments])
             return status, stderr.getvalue()
@@ -224,7 +224,7 @@ class TimeoutResumeTests(unittest.TestCase):
                      "--config", config]
         durable = DurableReplies("attribute")
         first = TimeoutClient(fail_stage="attribute", durable=durable, duplicate=False)
-        with patch("epub_audiobook.pipeline.write_json", side_effect=durable.write):
+        with patch("epub_tts_narrator.pipeline.write_json", side_effect=durable.write):
             status, error = command(first, arguments)
         self.assertNotEqual(status, 0, error)
         self.assertFalse(second_book.exists())

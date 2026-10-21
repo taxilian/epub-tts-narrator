@@ -10,18 +10,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.book_context import resolve_book_config
-from audiobook_renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.book_context import resolve_book_config
+from epub_tts_narrator.renderer.bundle import load_bundle
 from audition_fixtures import prepare_bundle, prepare_document
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.cli import main, parser
-from audiobook_renderer.common import read_json, write_json
-from audiobook_renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
-from audiobook_renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.config import load_config as load_analyzer_config
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.cli import main, parser
+from epub_tts_narrator.renderer.common import read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
+from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.config import load_config as load_analyzer_config
 from test_contracts import valid_document
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, ReferencePlaybackEngine, TranscriptVerifier,
@@ -132,7 +132,7 @@ class GeminiSelectionTests(unittest.TestCase):
     def test_cli_passes_explicit_gemini_to_casting_without_editing_config(self):
         self.add_gemini()
         original = self.config_path.read_bytes()
-        with patch("audiobook_renderer.audition.casting_command", return_value=0) as casting:
+        with patch("epub_tts_narrator.renderer.audition.casting_command", return_value=0) as casting:
             status, stdout, stderr = self.run_cli(
                 "cast", self.bundle, "--config", self.config_path,
                 "--voice-designer", "gemini", "--action", "generate-missing")
@@ -147,7 +147,7 @@ class GeminiSelectionTests(unittest.TestCase):
 
     def test_cli_default_prefers_gemini_with_configured_credentials(self):
         self.add_gemini()
-        with patch("audiobook_renderer.audition.casting_command", return_value=0) as casting:
+        with patch("epub_tts_narrator.renderer.audition.casting_command", return_value=0) as casting:
             status, stdout, stderr = self.run_cli(
                 "cast", self.bundle, "--config", self.config_path, "--action", "generate-missing")
         self.assertEqual(status, 0, stderr)
@@ -155,7 +155,7 @@ class GeminiSelectionTests(unittest.TestCase):
         self.assertNotIn(SECRET, stdout + stderr)
 
     def test_cli_missing_gemini_key_stops_before_casting(self):
-        with patch("audiobook_renderer.audition.casting_command") as casting:
+        with patch("epub_tts_narrator.renderer.audition.casting_command") as casting:
             status, stdout, stderr = self.run_cli(
                 "cast", self.bundle, "--config", self.config_path,
                 "--voice-designer", "gemini", "--action", "generate-missing")
@@ -241,7 +241,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         first = self.session()
         legacy_prompt = "An established voice from the earlier book."
         first.update_prompt("voice_mara", legacy_prompt)
-        with patch("audiobook_renderer.casting.audiobook_voice_prompt", side_effect=lambda prompt: prompt):
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=lambda prompt: prompt):
             selected = first.ensure_ready("voice_mara")
         self.assertEqual(selected["creation"]["requested_description"], legacy_prompt)
         before = Path(selected["reference_audio"]).read_bytes()
@@ -396,7 +396,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         write_json(pending, value)
         designer = self.remote_designer([], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        with patch("audiobook_renderer.gemini_voice_design._write_state", side_effect=OSError("disk fixture")):
+        with patch("epub_tts_narrator.renderer.gemini_voice_design._write_state", side_effect=OSError("disk fixture")):
             with self.assertRaisesRegex(OSError, "disk fixture"):
                 restarted.ensure_ready("voice_mara")
         self.assertTrue(pending.exists())

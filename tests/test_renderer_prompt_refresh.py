@@ -6,10 +6,10 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.common import read_json
-from audiobook_renderer.voice_prompts import audiobook_voice_prompt
-from audiobook_renderer.samples import MissingSampleScript
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.renderer.common import read_json
+from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
+from epub_tts_narrator.renderer.samples import MissingSampleScript
+from epub_tts_narrator.provider import ProviderError
 import test_renderer_sample_drafts as drafts_fixture
 import test_renderer_audition as cli_fixture
 import test_book_voice_workflow as book_fixture
@@ -28,9 +28,9 @@ class PromptRefreshTests(unittest.TestCase):
                 canonical_id(voice_id): {"description": "A measured voice with clear consonants.",
                                          "reason": "Retains the intended identity."}
                 for voice_id in voice_ids}}
-        writer = self.enterContext(patch("epub_audiobook.voice_prompt_refresh.refresh_bundle_prompts",
+        writer = self.enterContext(patch("epub_tts_narrator.voice_prompt_refresh.refresh_bundle_prompts",
                                         side_effect=descriptions))
-        scripts = self.enterContext(patch("epub_audiobook.audition_scripts.ensure_bundle_scripts",
+        scripts = self.enterContext(patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts",
                                          return_value=session.bundle))
         return writer, scripts
 
@@ -83,7 +83,7 @@ class PromptRefreshTests(unittest.TestCase):
                         "sample_source": {"kind": "book_excerpt"}})
                 self.helpers()
                 with patch.object(self.session, "_sample_default", side_effect=MissingSampleScript("No script")), \
-                        patch("epub_audiobook.voice_prompt_refresh.refresh_bundle_prompts",
+                        patch("epub_tts_narrator.voice_prompt_refresh.refresh_bundle_prompts",
                               side_effect=ProviderError("Stop after reading prompt")) as writer:
                     with self.assertRaises(ProviderError):
                         self.session.refresh_prompts(voice_ids=[self.voice_id])
@@ -143,7 +143,7 @@ class RefreshCommandTests(unittest.TestCase):
         session = cli_fixture.SessionDouble()
         session.close = Mock()
         session.refresh_prompts = Mock(side_effect=ProviderError("Model request timed out"))
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session):
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session):
             status, output, error = self.run_cli("--action", "refresh-prompts")
         self.assertEqual(status, 2)
         self.assertIn("Model request timed out", error)
@@ -156,8 +156,8 @@ class RefreshCommandTests(unittest.TestCase):
             session = cli_fixture.SessionDouble()
             session.close = Mock()
             session.refresh_prompts = Mock(return_value={"voices": ["v1"], "history": "saved-history.json"})
-            with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
-                    patch("audiobook_renderer.audition.AudioPlayer") as player:
+            with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                    patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
                 args = ["--action", "refresh-prompts"] + (["--voice-id", voice_id] if voice_id else [])
                 status, output, error = self.run_cli(*args)
             self.assertEqual(status, 0, error)
@@ -198,10 +198,10 @@ class InheritedPromptRefreshTests(book_fixture.BookFixture):
             self.assertFalse(session._draft_path(voice_id).exists())
             description = "A measured warm voice with clear consonants."
             prepared = deepcopy(session.bundle)
-            with patch("epub_audiobook.voice_prompt_refresh.refresh_bundle_prompts", return_value={
+            with patch("epub_tts_narrator.voice_prompt_refresh.refresh_bundle_prompts", return_value={
                     "version": 1, "prompts": {voice_id: {
                         "description": description, "reason": "Preserves this character's vocal identity."}}}) as writer, \
-                    patch("epub_audiobook.audition_scripts.ensure_bundle_scripts", return_value=prepared) as scripts:
+                    patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts", return_value=prepared) as scripts:
                 result = session.refresh_prompts(voice_ids=[voice_id])
             draft_path = session._draft_path(voice_id)
             self.assertTrue(draft_path.is_relative_to(Path(third["directory"]) / "voices"))

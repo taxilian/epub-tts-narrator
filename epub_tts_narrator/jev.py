@@ -231,7 +231,7 @@ _POLICY_IDENTITY = {"name": "transcript_spoken_passages", "version": POLICY_VERS
 
 def _passage_comparisons(expected_text, primary_transcript, secondary_transcript):
     """Review each complete nonexact transcript, retaining its ASR provenance."""
-    from audiobook_renderer.quality import normalize_words
+    from epub_tts_narrator.renderer.quality import normalize_words
     comparisons, by_transcript = [], {}
     expected_words = normalize_words(expected_text)
     transcripts = [("primary", primary_transcript)]

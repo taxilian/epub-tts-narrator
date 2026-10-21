@@ -232,8 +232,8 @@ class CastingSession:
 
     def refresh_prompts(self, *, voice_ids=None, config_path=None):
         """Explicitly replace local draft directions and scripts, never recordings."""
-        from epub_audiobook.audition_scripts import ensure_bundle_scripts
-        from epub_audiobook.voice_prompt_refresh import refresh_bundle_prompts
+        from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
+        from epub_tts_narrator.voice_prompt_refresh import refresh_bundle_prompts
         from .samples import MissingSampleScript, select_sample
 
         selected = list(self._profiles) if voice_ids is None else list(dict.fromkeys(voice_ids))
@@ -304,7 +304,7 @@ class CastingSession:
             return {"voices": list(groups), "history": str(history)}
 
     def rows(self):
-        from epub_audiobook.narration_identity import author_narrator_name
+        from epub_tts_narrator.narration_identity import author_narrator_name
         from .samples import MissingSampleScript
         self._validate_paths()
         cast = self.bundle["cast"]

@@ -6,8 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.pipeline import CachedRequests, fingerprint, write_json
-from epub_audiobook.prompts import PROMPT_VERSION
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
+from epub_tts_narrator.prompts import PROMPT_VERSION
 
 
 class Client:

@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from audiobook_renderer.paragraphs import group_paragraphs
+from epub_tts_narrator.renderer.paragraphs import group_paragraphs
 
 
 def passages(texts, *, block="b1", offset=0, voices=None):

@@ -4,8 +4,8 @@ from copy import deepcopy
 from pathlib import Path
 import unittest
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.samples import (
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.samples import (
     MissingSampleScript, SELECTION_VERSION, select_book_sample, select_sample,
     sample_word_count, strip_speech_wrapper,
 )

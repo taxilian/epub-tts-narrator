@@ -4,8 +4,8 @@ from copy import deepcopy
 import math
 import unittest
 
-from epub_audiobook.jev import JevError
-from epub_audiobook.speaker_suggestions import rank_speakers
+from epub_tts_narrator.jev import JevError
+from epub_tts_narrator.speaker_suggestions import rank_speakers
 from test_contracts import valid_document
 
 

@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.cli import main
-from epub_audiobook.pipeline import write_json
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.cli import main
+from epub_tts_narrator.pipeline import write_json
+from epub_tts_narrator.provider import ProviderError
 from test_cli import NarrativeClient
 from test_contracts import valid_document
 
@@ -62,7 +62,7 @@ class CLIResumeMessageTests(unittest.TestCase):
             return instance
 
         command = ("analyze", self.source, "-o", output)
-        with patch("epub_audiobook.cli.OpenAICompatibleClient", side_effect=client):
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=client):
             status, stdout, stderr = self.run_cli(*command)
             self.assertEqual(status, 1)
             self.assertIn("Fixture API timeout", stderr)
@@ -88,8 +88,8 @@ class CLIResumeMessageTests(unittest.TestCase):
             stream.write('[analysis]\ncache_dir = "private-cache"\n')
         output = self.root / "reviewed.json"
         output.write_text("old review", encoding="utf-8")
-        with patch("epub_audiobook.cli.OpenAICompatibleClient", NarrativeClient), \
-                patch("epub_audiobook.cli.audit_attribution", side_effect=ProviderError("Fixture timeout")):
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
+                patch("epub_tts_narrator.cli.audit_attribution", side_effect=ProviderError("Fixture timeout")):
             status, _, stderr = self.run_cli("review-attribution", self.analysis, "-o", output, "--force")
         self.assertEqual(status, 1)
         self.assertIn(f"Request cache: {self.root / 'private-cache'}", stderr)
@@ -102,8 +102,8 @@ class CLIResumeMessageTests(unittest.TestCase):
 
     def test_interrupt_preserves_existing_message_and_adds_known_cache_path(self):
         output = self.root / "interrupted-book"
-        with patch("epub_audiobook.cli.OpenAICompatibleClient", NarrativeClient), \
-                patch("epub_audiobook.cli.analyze", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
+                patch("epub_tts_narrator.cli.analyze", side_effect=KeyboardInterrupt):
             status, stdout, stderr = self.run_cli("analyze", self.source, "-o", output)
         self.assertEqual(status, 130)
         self.assertIn("Interrupted. Completed model requests remain cached; rerun the same command to resume.", stderr)
@@ -112,15 +112,15 @@ class CLIResumeMessageTests(unittest.TestCase):
         self.assertNotIn("Wrote analysis", stdout)
 
     def test_validation_failure_during_model_work_has_recovery_guidance(self):
-        with patch("epub_audiobook.cli.OpenAICompatibleClient", NarrativeClient), \
-                patch("epub_audiobook.cli.analyze", side_effect=ValueError("Fixture validation failure")):
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
+                patch("epub_tts_narrator.cli.analyze", side_effect=ValueError("Fixture validation failure")):
             status, _, stderr = self.run_cli("analyze", self.source, "-o", self.root / "invalid-book")
         self.assertEqual(status, 1)
         self.assertIn("Fixture validation failure", stderr)
         self.assertIn("Resume cache:", stderr)
 
     def test_preflight_errors_and_plan_do_not_announce_model_work(self):
-        with patch("epub_audiobook.cli.OpenAICompatibleClient") as provider:
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, _, stderr = self.run_cli("analyze", self.root / "absent.epub", "-o", self.root / "book")
             self.assertEqual(status, 1)
             self.assertNotIn("Request cache:", stderr)
@@ -132,7 +132,7 @@ class CLIResumeMessageTests(unittest.TestCase):
             provider.assert_not_called()
 
     def test_early_interrupt_does_not_invent_a_cache_path(self):
-        with patch("epub_audiobook.cli.load_config", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.cli.load_config", side_effect=KeyboardInterrupt):
             status, _, stderr = self.run_cli("analyze", self.source, "-o", self.root / "book")
         self.assertEqual(status, 130)
         self.assertIn("Interrupted.", stderr)

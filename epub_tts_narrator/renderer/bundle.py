@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 import re
 
-from epub_audiobook.contracts import validate_document, review_items
-from epub_audiobook.cli import script_partitions
-from epub_audiobook.pipeline import fingerprint
+from epub_tts_narrator.contracts import validate_document, review_items
+from epub_tts_narrator.cli import script_partitions
+from epub_tts_narrator.pipeline import fingerprint
 from .common import digest, file_hash, read_json, regular_file
 from .quality import normalize_words
 

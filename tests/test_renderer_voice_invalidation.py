@@ -6,8 +6,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.voices import VoiceStore
 
 
 class VoiceInvalidationTests(unittest.TestCase):
@@ -224,7 +224,7 @@ class VoiceInvalidationTests(unittest.TestCase):
         self.one.invalidate("voice-one")
         self.one.mark_regeneration_failed("voice-one", "Rejected")
         fresh = self.candidate(self.one)
-        with patch("audiobook_renderer.voices.write_json", side_effect=OSError("Disk full")):
+        with patch("epub_tts_narrator.renderer.voices.write_json", side_effect=OSError("Disk full")):
             with self.assertRaisesRegex(OSError, "Disk full"):
                 self.one.select_candidate("voice-one", fresh["candidate_id"])
         self.assertIsNone(self.one.load("voice-one"))

@@ -6,14 +6,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import CachedRequests
-from epub_audiobook.provider import ProviderError
-from epub_audiobook.speaker_completion import (
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import CachedRequests
+from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.speaker_completion import (
     OUTPUT_TRUNCATED_MESSAGE, REVIEWERS, automatic_completion_targets,
     complete_speakers, unassigned_segments,
 )
-from epub_audiobook.speaker_decisions import prompt_speaker_decisions
+from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
 from test_speaker_completion import Requests, PairedRequests, missing_document, paired_document
 
 

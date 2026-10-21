@@ -5,8 +5,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.workflow import RenderBlocked, ensure_voice
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.workflow import RenderBlocked, ensure_voice
 import test_renderer_casting as casting_fixtures
 
 

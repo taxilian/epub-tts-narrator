@@ -12,7 +12,7 @@ import wave
 import zipfile
 import zlib
 
-from audiobook_renderer.assembly import (
+from epub_tts_narrator.renderer.assembly import (
     compose_chapter, extract_cover, normalize_clip, package_audio, probe_audio,
 )
 

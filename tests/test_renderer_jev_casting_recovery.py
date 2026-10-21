@@ -9,12 +9,12 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.config import DEFAULTS, select_voice_designer
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import RenderBlocked, VerificationUnavailable, _seed
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS, select_voice_designer
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import RenderBlocked, VerificationUnavailable, _seed
 from audition_fixtures import prepare_bundle
 
 
@@ -82,8 +82,8 @@ class Fixture:
         return report
 
     def run(self, session=None, action="ensure_ready"):
-        with patch("audiobook_renderer.workflow.validate_audio", side_effect=self.report), \
-                patch("audiobook_renderer.casting.validate_audio", side_effect=self.report):
+        with patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=self.report), \
+                patch("epub_tts_narrator.renderer.casting.validate_audio", side_effect=self.report):
             return getattr(session or self.session, action)(self.voice)
 
     def pending(self, *, action="ensure_ready"):
@@ -95,7 +95,7 @@ class Fixture:
 
 class JevCastingRecoveryTests(unittest.TestCase):
     def setUp(self):
-        normalize = patch("audiobook_renderer.workflow.normalize_clip",
+        normalize = patch("epub_tts_narrator.renderer.workflow.normalize_clip",
                           side_effect=lambda raw, wav, **kwargs: shutil.copyfile(raw, wav))
         normalize.start()
         self.addCleanup(normalize.stop)
@@ -309,7 +309,7 @@ class JevCastingRecoveryTests(unittest.TestCase):
         path, record = fixture.pending()
         wav = path.parent / record["audio_file"]
         original = wav.read_bytes()
-        with patch("audiobook_renderer.casting.validate_audio", side_effect=fixture.report):
+        with patch("epub_tts_narrator.renderer.casting.validate_audio", side_effect=fixture.report):
             with self.assertRaises(VerificationUnavailable):
                 fixture.new_session().recover_attempt(fixture.voice, path)
         self.assertEqual(wav.read_bytes(), original)

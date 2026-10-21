@@ -22,13 +22,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from epub_audiobook.config import load_config
-from epub_audiobook.contracts import readiness
-from epub_audiobook.pipeline import (
+from epub_tts_narrator.config import load_config
+from epub_tts_narrator.contracts import readiness
+from epub_tts_narrator.pipeline import (
     CachedRequests, base_document, check_cast, fingerprint, make_units, segment,
     write_json,
 )
-from epub_audiobook.provider import OpenAICompatibleClient, ProviderError
+from epub_tts_narrator.provider import OpenAICompatibleClient, ProviderError
 
 
 FIXTURE_ROOT = PROJECT_ROOT / "examples" / "identity-consensus"
@@ -157,7 +157,7 @@ def main(argv=None):
     }
     client = None
     if not args.check_fixtures:
-        from epub_audiobook.identity import audit_identities
+        from epub_tts_narrator.identity import audit_identities
         client = OpenAICompatibleClient(**config["provider"])
         report["provider"] = client.identity
     for fixture in fixtures:

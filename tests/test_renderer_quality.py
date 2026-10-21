@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.quality import (
+from epub_tts_narrator.renderer.quality import (
     MlxWhisperVerifier, QUALITY_DEFAULTS, compare_words, normalize_words,
     validate_audio, validate_policy, validation_key,
 )
@@ -345,7 +345,7 @@ class RendererQualityTests(unittest.TestCase):
         model.mkdir()
         (model / "config.json").write_text("{}")
         (model / "weights.safetensors").write_bytes(b"fake model for unit testing only")
-        with patch("audiobook_renderer.quality.metadata.version", return_value="test-version"):
+        with patch("epub_tts_narrator.renderer.quality.metadata.version", return_value="test-version"):
             first = MlxWhisperVerifier(model)
             different_language = MlxWhisperVerifier(model, language="fr")
         self.assertNotEqual(first.identity, different_language.identity)

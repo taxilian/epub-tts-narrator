@@ -6,8 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.pipeline import CachedRequests, align_units, fingerprint, make_units, seed_cast, write_json
-from epub_audiobook.prompts import ATTRIBUTE, PROMPT_VERSION
+from epub_tts_narrator.pipeline import CachedRequests, align_units, fingerprint, make_units, seed_cast, write_json
+from epub_tts_narrator.prompts import ATTRIBUTE, PROMPT_VERSION
 from test_contracts import valid_document
 
 

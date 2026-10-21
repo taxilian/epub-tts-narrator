@@ -5,8 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.contracts import readiness, validate_document
-from epub_audiobook.pipeline import analyze, make_units, merge_patch, seed_cast
+from epub_tts_narrator.contracts import readiness, validate_document
+from epub_tts_narrator.pipeline import analyze, make_units, merge_patch, seed_cast
 from test_contracts import valid_document
 from test_pipeline import FakeClient
 

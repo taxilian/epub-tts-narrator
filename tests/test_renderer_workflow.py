@@ -12,14 +12,14 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.assembly import probe_audio
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.common import digest, file_hash, read_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.workflow import RenderBlocked, render, verified_take
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.assembly import probe_audio
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_take
+from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
 
 
@@ -166,7 +166,7 @@ class RendererWorkflowTests(unittest.TestCase):
 
     def test_changed_verification_key_does_not_invalidate_accepted_take(self):
         wav, first = self.take()
-        with patch("audiobook_renderer.workflow.make_validation_key", side_effect=AssertionError("rechecked policy")):
+        with patch("epub_tts_narrator.renderer.workflow.make_validation_key", side_effect=AssertionError("rechecked policy")):
             self.assertEqual((wav, first), self.take())
 
     def test_missing_accepted_audio_regenerates_and_verifies_only_that_take(self):

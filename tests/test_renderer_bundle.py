@@ -7,10 +7,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audiobook_renderer.bundle import load_bundle, make_plan, ranges, spoken_mapping, split_text
-from audiobook_renderer.config import DEFAULTS
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.performance import apply_bracket_delivery
+from epub_tts_narrator.renderer.bundle import load_bundle, make_plan, ranges, spoken_mapping, split_text
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.performance import apply_bracket_delivery
 from test_chapter_export import chapter_document
 from test_contracts import valid_document
 from test_performance import book_with_text

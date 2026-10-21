@@ -38,7 +38,7 @@ def resolve_book_config(bundle, config, *, output=None, work_dir=None, epub=None
                 result[section][key] = str(directory / name)
         result["_voice_parents"] = []
         if analysis_directory:
-            from epub_audiobook.analysis_directory import continuation_directories
+            from epub_tts_narrator.analysis_directory import continuation_directories
             result["_voice_parents"] = [str(path) for path in continuation_directories(directory)]
         result["_book_directory"] = str(directory)
     for key, value in (("output_dir", output), ("work_dir", work_dir), ("epub", epub)):
@@ -89,7 +89,7 @@ def voice_store(bundle, config, *, local_aliases=None):
     from .book_aliases import read_book_aliases
     from .voice_bindings import validate_aliases
     from .voices import VoiceStore
-    from epub_audiobook.narration_identity import author_name_key, author_narrator_name
+    from epub_tts_narrator.narration_identity import author_name_key, author_narrator_name
     from functools import partial
     books = [bundle, *[load_bundle(path) for path in config.get("_voice_parents", [])]]
     entries, allowed_ids = [], set()

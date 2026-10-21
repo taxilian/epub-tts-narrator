@@ -3,8 +3,8 @@
 from unittest.mock import patch
 import unittest
 
-from audiobook_renderer.verification import ReferenceTextJudgingVerifier
-from epub_audiobook.jev import JevTranscriptJudge
+from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
+from epub_tts_narrator.jev import JevTranscriptJudge
 import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import PrimaryVerifier
 

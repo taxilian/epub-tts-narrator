@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook import analysis_directory
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator import analysis_directory
+from epub_tts_narrator.analysis_directory import (
     continuation_directories, continuation_registry, fresh_registry, publish_directory,
 )
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.pipeline import write_json
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.pipeline import write_json
+from epub_tts_narrator.series import link_analysis
 from test_series import fixture, propose
 
 

@@ -7,8 +7,8 @@ from threading import Event
 import tempfile
 import unittest
 
-from epub_audiobook.pipeline import CachedRequests
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.pipeline import CachedRequests
+from epub_tts_narrator.provider import ProviderError
 
 
 TRUNCATED = "The model output was truncated. Increase the output token limit or reduce the input."

@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.verification import ReferenceTextJudgingVerifier
-from audiobook_renderer.workflow import VerificationUnavailable, verified_take
-from epub_audiobook.jev import JevTranscriptJudge
+from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
+from epub_tts_narrator.renderer.workflow import VerificationUnavailable, verified_take
+from epub_tts_narrator.jev import JevTranscriptJudge
 import test_renderer_reference_consensus as consensus
 
 
@@ -129,7 +129,7 @@ class RelaxedJevTests(unittest.TestCase):
             judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
             verifier = ReferenceTextJudgingVerifier(
                 consensus.PrimaryVerifier(SCRIPT.replace("Mmm... ", "")), judge)
-            with patch("audiobook_renderer.workflow.normalize_clip",
+            with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
                        side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())), \
                     patch.object(judge._client, "evaluate", side_effect=[TimeoutError(), answer(.99)]) as evaluate:
                 with self.assertRaises(VerificationUnavailable):

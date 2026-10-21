@@ -62,6 +62,6 @@ def create_verifier(settings, jev_settings=None):
         verifier = ReferenceCorroboratingVerifier(
             primary, MlxParakeetVerifier(settings["reference_model"]))
     if jev_settings and jev_settings.get("enabled"):
-        from epub_audiobook.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev import JevTranscriptJudge
         verifier = ReferenceTextJudgingVerifier(verifier, JevTranscriptJudge(jev_settings))
     return verifier

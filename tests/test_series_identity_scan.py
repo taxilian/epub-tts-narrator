@@ -5,9 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.identity import audit_identities, _accept_series_scan, _series_scan_requests
-from epub_audiobook.pipeline import CachedRequests, check_cast, fingerprint, make_units
-from epub_audiobook.series import reconcile_series_cast, series_context
+from epub_tts_narrator.identity import audit_identities, _accept_series_scan, _series_scan_requests
+from epub_tts_narrator.pipeline import CachedRequests, check_cast, fingerprint, make_units
+from epub_tts_narrator.series import reconcile_series_cast, series_context
 from test_contracts import valid_document
 from test_identity import Requests
 

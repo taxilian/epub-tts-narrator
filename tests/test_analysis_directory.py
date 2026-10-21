@@ -7,12 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator.analysis_directory import (
     continuation_registry, default_output, fresh_registry, publish_directory, validate_output,
 )
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.pipeline import write_json
-from epub_audiobook.series import link_analysis, load_registry
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.pipeline import write_json
+from epub_tts_narrator.series import link_analysis, load_registry
 from test_series import fixture, propose
 
 
@@ -42,7 +42,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
         write_json(directory / "manifest.json", manifest, overwrite=True)
 
     def test_default_output_uses_working_directory_and_input_stem(self):
-        with patch("epub_audiobook.analysis_directory.Path.cwd", return_value=self.root):
+        with patch("epub_tts_narrator.analysis_directory.Path.cwd", return_value=self.root):
             self.assertEqual(default_output("/books/My Book.epub"), self.root / "My Book.audiobook")
 
     def test_validate_output_is_read_only_and_rejects_files_directories_and_dangling_links(self):
@@ -93,7 +93,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
             previous = output
 
     def test_publication_is_renderer_compatible_and_preserves_input_objects(self):
-        from audiobook_renderer.bundle import load_bundle
+        from epub_tts_narrator.renderer.bundle import load_bundle
 
         output = self.root / "result"
         registry = fresh_registry(output)
@@ -268,7 +268,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
                     self.assertTrue((output / "scripts/chapter-0001.jsonl").is_file())
             return original_link(source, destination)
 
-        with patch("epub_audiobook.analysis_directory.os.link", side_effect=observe):
+        with patch("epub_tts_narrator.analysis_directory.os.link", side_effect=observe):
             publish_directory(document, registry, output, export_bundle)
         self.assertEqual(published[-1], "manifest.json")
 
@@ -285,7 +285,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
                         raise failure
                     return original_link(source, destination)
 
-                with patch("epub_audiobook.analysis_directory.os.link", side_effect=fail):
+                with patch("epub_tts_narrator.analysis_directory.os.link", side_effect=fail):
                     with self.assertRaises(type(failure)):
                         publish_directory(document, registry, output, export_bundle)
                 self.assertFalse(output.exists())
@@ -324,7 +324,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
                 raise OSError("interrupted publication")
             return original_link(source, destination)
 
-        with patch("epub_audiobook.analysis_directory.os.link", side_effect=fail_after_replacement):
+        with patch("epub_tts_narrator.analysis_directory.os.link", side_effect=fail_after_replacement):
             with self.assertRaises(OSError):
                 publish_directory(document, registry, output, export_bundle)
         self.assertEqual({path.name for path in output.iterdir()}, {"analysis.json"})
@@ -334,7 +334,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
         output = self.root / "failed"
         registry = fresh_registry(output)
         document = link_analysis(fixture(), registry)
-        with patch("epub_audiobook.analysis_directory.save_registry", side_effect=ValueError("bad snapshot")):
+        with patch("epub_tts_narrator.analysis_directory.save_registry", side_effect=ValueError("bad snapshot")):
             with self.assertRaisesRegex(ValueError, "bad snapshot"):
                 publish_directory(document, registry, output, export_bundle)
         self.assertFalse(output.exists())

@@ -8,8 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
-from audiobook_renderer.quality import validate_audio, validation_key
-from audiobook_renderer.verification import ReferenceCorroboratingVerifier, create_verifier
+from epub_tts_narrator.renderer.quality import validate_audio, validation_key
+from epub_tts_narrator.renderer.verification import ReferenceCorroboratingVerifier, create_verifier
 
 
 def timed_transcript(text):
@@ -45,8 +45,8 @@ class RendererVerificationFactoryTests(unittest.TestCase):
         for extra in ({}, {"reference_model": None}, {"reference_model": ""}):
             with self.subTest(extra=extra):
                 primary = fake_primary()
-                with patch("audiobook_renderer.verification.MlxWhisperVerifier", return_value=primary) as whisper, \
-                     patch("audiobook_renderer.reference_asr.MlxParakeetVerifier") as parakeet:
+                with patch("epub_tts_narrator.renderer.verification.MlxWhisperVerifier", return_value=primary) as whisper, \
+                     patch("epub_tts_narrator.renderer.reference_asr.MlxParakeetVerifier") as parakeet:
                     result = create_verifier({"model": "/local/whisper", "language": "en", **extra})
                 self.assertIs(result, primary)
                 whisper.assert_called_once_with("/local/whisper", language="en")
@@ -56,8 +56,8 @@ class RendererVerificationFactoryTests(unittest.TestCase):
 
     def test_configured_reference_model_builds_wrapper_without_transcribing(self):
         primary, secondary = fake_primary(), fake_reference()
-        with patch("audiobook_renderer.verification.MlxWhisperVerifier", return_value=primary) as whisper, \
-             patch("audiobook_renderer.reference_asr.MlxParakeetVerifier", return_value=secondary) as parakeet:
+        with patch("epub_tts_narrator.renderer.verification.MlxWhisperVerifier", return_value=primary) as whisper, \
+             patch("epub_tts_narrator.renderer.reference_asr.MlxParakeetVerifier", return_value=secondary) as parakeet:
             result = create_verifier({
                 "model": "/local/whisper", "language": "fr", "reference_model": "/local/parakeet",
             })

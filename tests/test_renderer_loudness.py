@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.common import file_hash
-from audiobook_renderer.loudness import SampleNormalizer
+from epub_tts_narrator.renderer.common import file_hash
+from epub_tts_narrator.renderer.loudness import SampleNormalizer
 
 
 def signal(path, amplitude=6000, *, seconds=4, transient=False):
@@ -127,7 +127,7 @@ class SampleLoudnessTests(unittest.TestCase):
 
     def test_external_process_failure_reports_error_and_leaves_no_partial_output(self):
         source = signal(self.root / "source.wav")
-        with patch("audiobook_renderer.loudness.subprocess.run",
+        with patch("epub_tts_narrator.renderer.loudness.subprocess.run",
                    side_effect=subprocess.TimeoutExpired("ffmpeg", 120)):
             with self.assertRaisesRegex(ValueError, "Unable to normalize"):
                 self.normalizer.prepare(source)

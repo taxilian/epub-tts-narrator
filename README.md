@@ -20,10 +20,10 @@ cd epub-tts-narrator
 Analysis has no third-party runtime dependencies. Run from this directory:
 
 ```sh
-python3.11 -m epub_audiobook --help
+python3.11 -m epub_tts_narrator --help
 ```
 
-Install into your virtual environment with `python3.11 -m pip install -e .`; the primary command is `epub-tts-narrator`. For example, `epub-tts-narrator analyze book.epub -o runs/book-01`. The previous `epub-audiobook` command remains an alias, and `python -m epub_audiobook` remains supported. Audio generation uses the separate `audiobook-render` command.
+Install into your virtual environment with `python3.11 -m pip install -e .`; the primary command is `epub-tts-narrator`. For example, `epub-tts-narrator analyze book.epub -o runs/book-01`. The previous `epub-audiobook` command remains an alias. Python module invocations use `python -m epub_tts_narrator`; the renderer module is `python -m epub_tts_narrator.renderer`. Audio generation uses the separate `audiobook-render` command.
 
 On a new checkout, create one global configuration file and set your model and credentials once:
 
@@ -39,20 +39,20 @@ Keep your existing configured file rather than replacing it with the template. B
 
 ```sh
 # Inspect extraction and request counts without model calls or file writes.
-python3.11 -m epub_audiobook plan book.epub
+python3.11 -m epub_tts_narrator plan book.epub
 
 # Analyze one book and create its renderer bundle in ./book.audiobook.
-python3.11 -m epub_audiobook analyze book.epub
+python3.11 -m epub_tts_narrator analyze book.epub
 
 # Or choose an output directory.
-python3.11 -m epub_audiobook analyze book-one.epub -o runs/book-01
+python3.11 -m epub_tts_narrator analyze book-one.epub -o runs/book-01
 
 # Continue the series, using the preceding output directory as context.
-python3.11 -m epub_audiobook analyze book-two.epub \
+python3.11 -m epub_tts_narrator analyze book-two.epub \
   -o runs/book-02 --continue-from runs/book-01
 
-python3.11 -m epub_audiobook validate runs/book-02/analysis.json
-python3.11 -m epub_audiobook review runs/book-02/analysis.json
+python3.11 -m epub_tts_narrator validate runs/book-02/analysis.json
+python3.11 -m epub_tts_narrator review runs/book-02/analysis.json
 ```
 
 Omitting `-o` uses `./<input-stem>.audiobook` in the current directory. The output directory is itself the renderer bundle: it contains `cast.json`, chapter scripts, `manifest.json`, the full `analysis.json`, and a cumulative `series-cast.json`. No separate export step is needed. Every first-book analysis creates stable series IDs, even when no continuation is planned yet. When review items remain, the bundle is saved as a draft with `readiness.ready=false`; success means analysis finished, not that all speakers are resolved.
@@ -73,8 +73,8 @@ json_mode = false
 Saved extraction is also a valid analysis input:
 
 ```sh
-python3.11 -m epub_audiobook extract book.epub -o book.source.json
-python3.11 -m epub_audiobook analyze book.source.json -o runs/book
+python3.11 -m epub_tts_narrator extract book.epub -o book.source.json
+python3.11 -m epub_tts_narrator analyze book.source.json -o runs/book
 ```
 
 Set `provider.json_mode = true` or omit it when the server supports `response_format: {"type":"json_object"}`. Add `provider.api_key` if that server requires one. The client calls `POST <base-url>/chat/completions`; compatibility requires textual JSON content and a successful `finish_reason: "stop"`. Refusals and truncated outputs are never accepted; eligible attribution requests can use the bounded subdivision described below. JSON mode does not enforce the application schema, so all responses undergo local validation. These fields follow the [OpenAI Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) and [JSON-mode guidance](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat).
@@ -162,7 +162,7 @@ If a speaker-completion response is truncated twice, that reviewer cannot approv
 To resolve several existing book directories in one command:
 
 ```sh
-python3.11 -m epub_audiobook resolve-speakers runs/book-01 runs/book-02 runs/book-03
+python3.11 -m epub_tts_narrator resolve-speakers runs/book-01 runs/book-02 runs/book-03
 ```
 
 This uses the same global configuration and cached model requests. It stages and validates the revised analyses, chapter scripts, review data, and cumulative series history, backs up the original managed files under `.analysis-revisions/` in the first affected book, and refreshes descendant continuation hashes. Linked descendants in the same parent folders are discovered automatically; include descendants stored elsewhere explicitly so their links can also be refreshed. Cast identities, saved voice references, per-book aliases, and rendered audio are retained. Existing rendered checkpoints whose source bundle changed must be rendered again before assembly; unchanged verified clip requests can still be reused. Do not run this while rendering an affected book. The command reports the backup location and returns status `2` when unassigned speech remains, reporting that speaker selection is incomplete.
@@ -170,7 +170,7 @@ This uses the same global configuration and cached model requests. It stages and
 Review an existing analysis without rediscovering characters or updating its series registry:
 
 ```sh
-python3.11 -m epub_audiobook review-attribution runs/book/analysis.json \
+python3.11 -m epub_tts_narrator review-attribution runs/book/analysis.json \
   -o book.attribution-reviewed.json
 ```
 
@@ -200,10 +200,10 @@ All reviewers use the configured model, so shared errors remain possible, and th
 The IDs above illustrate the supplied example. Use IDs from your analysis.
 
 ```sh
-python3.11 -m epub_audiobook apply runs/book/analysis.json \
+python3.11 -m epub_tts_narrator apply runs/book/analysis.json \
   --edits corrections.json -o book.reviewed.json
-python3.11 -m epub_audiobook validate book.reviewed.json --ready
-python3.11 -m epub_audiobook export book.reviewed.json -o book-bundle
+python3.11 -m epub_tts_narrator validate book.reviewed.json --ready
+python3.11 -m epub_tts_narrator export book.reviewed.json -o book-bundle
 ```
 
 Corrections are saved in provenance. The original file stays intact unless you explicitly choose `--force`. A corrections file can also contain a complete replacement `cast` and exact per-block segment replacements; see [FORMAT.md](FORMAT.md). Changes to the cast update every segment's resolved voice reference.
@@ -303,14 +303,14 @@ Square-bracket text such as `[Fireball]` receives a separate delivery cue automa
 Every directory analysis saves a cumulative series cast automatically. To continue a series, pass the preceding book's output directory with `--continue-from`. That directory stays unchanged; the new output receives the full prior history plus the new book. Analyze books in order and point each run at the latest completed output, so returning characters can retain their established voice IDs even after an absence of several books. An unrelated book simply omits `--continue-from`.
 
 ```sh
-python3.11 -m epub_audiobook analyze book-one.epub -o runs/book-01
-python3.11 -m epub_audiobook analyze book-two.epub \
+python3.11 -m epub_tts_narrator analyze book-one.epub -o runs/book-01
+python3.11 -m epub_tts_narrator analyze book-two.epub \
   -o runs/book-02 --continue-from runs/book-01
-python3.11 -m epub_audiobook analyze book-three.epub \
+python3.11 -m epub_tts_narrator analyze book-three.epub \
   -o runs/book-03 --continue-from runs/book-02
 
 # Inspect the next run without calls or writes.
-python3.11 -m epub_audiobook plan book-four.epub \
+python3.11 -m epub_tts_narrator plan book-four.epub \
   -o runs/book-04 --continue-from runs/book-03
 ```
 
@@ -330,9 +330,9 @@ For compatibility, `analyze -o book.analysis.json` still writes a single analysi
 
 ```sh
 # Legacy JSON/registry workflow only.
-python3.11 -m epub_audiobook series-import book-one-analysis.json \
+python3.11 -m epub_tts_narrator series-import book-one-analysis.json \
   --series casts/my-series.json -o book-one-linked.json
-python3.11 -m epub_audiobook analyze book-two.epub \
+python3.11 -m epub_tts_narrator analyze book-two.epub \
   --series casts/my-series.json -o book-two-analysis.json
 ```
 
@@ -367,8 +367,8 @@ These limitations are separate from speaker-attribution uncertainty. Review extr
 `examples/last-lantern/` contains an original fictional EPUB and **hand-authored annotations**, not model-generated results. Mara is both a narrator and a character using one voice; Lena has a distinct voice. One line has no explicit speaker. The included correction selects Mara as a production decision and produces a ready example bundle.
 
 ```sh
-python3.11 -m epub_audiobook review examples/last-lantern/analysis.json
-python3.11 -m epub_audiobook validate examples/last-lantern/reviewed.json --ready
+python3.11 -m epub_tts_narrator review examples/last-lantern/analysis.json
+python3.11 -m epub_tts_narrator validate examples/last-lantern/reviewed.json --ready
 python3.11 -m unittest discover -s tests -q
 
 # Rebuild the example in a new directory without any API calls.

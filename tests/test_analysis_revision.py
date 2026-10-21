@@ -8,15 +8,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.analysis_directory import (_completed_directory, continuation_directories,
+from epub_tts_narrator.analysis_directory import (_completed_directory, continuation_directories,
     continuation_registry, fresh_registry, publish_directory)
-from epub_audiobook.analysis_revision import related_directories, revise_directories, _install
-from epub_audiobook.cli import export_bundle, main
-from epub_audiobook.config import DEFAULTS
-from epub_audiobook.contracts import readiness
-from epub_audiobook.pipeline import write_json
-from epub_audiobook.provider import ProviderError
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.analysis_revision import related_directories, revise_directories, _install
+from epub_tts_narrator.cli import export_bundle, main
+from epub_tts_narrator.config import DEFAULTS
+from epub_tts_narrator.contracts import readiness
+from epub_tts_narrator.pipeline import write_json
+from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.series import link_analysis
 from test_series import fixture, propose
 
 
@@ -117,7 +117,7 @@ class AnalysisRevisionTests(unittest.TestCase):
             if calls == 10:
                 raise OSError("interrupted publication")
             return _install(source, destination)
-        with patch("epub_audiobook.analysis_revision._install", side_effect=fail_once):
+        with patch("epub_tts_narrator.analysis_revision._install", side_effect=fail_once):
             with self.assertRaisesRegex(OSError, "interrupted publication"):
                 revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
         self.assertEqual(self.managed(), before)
@@ -135,7 +135,7 @@ class AnalysisRevisionTests(unittest.TestCase):
             _install(source, destination)
             if calls == 1:
                 raise KeyboardInterrupt()
-        with patch("epub_audiobook.analysis_revision._install", side_effect=replace_then_interrupt):
+        with patch("epub_tts_narrator.analysis_revision._install", side_effect=replace_then_interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
         self.assertEqual(self.managed(), before)
@@ -148,8 +148,8 @@ class AnalysisRevisionTests(unittest.TestCase):
         config["provider"].update(model="test-model", api_key="test-key")
         config["analysis"]["attribution_workers"] = 8
         output, errors = io.StringIO(), io.StringIO()
-        with (patch("epub_audiobook.cli.load_config", return_value=config),
-              patch("epub_audiobook.speaker_completion.complete_speakers", side_effect=complete) as completion,
+        with (patch("epub_tts_narrator.cli.load_config", return_value=config),
+              patch("epub_tts_narrator.speaker_completion.complete_speakers", side_effect=complete) as completion,
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
             code = main(["resolve-speakers", *map(str, selected)])
         return code, completion, output.getvalue(), errors.getvalue()

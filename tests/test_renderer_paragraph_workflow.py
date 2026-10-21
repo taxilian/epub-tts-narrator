@@ -7,13 +7,13 @@ import unittest
 from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.common import file_hash, read_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.workflow import RenderBlocked, assemble, render
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
+from epub_tts_narrator.cli import export_bundle
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
 
@@ -101,8 +101,8 @@ class ParagraphWorkflowTests(unittest.TestCase):
 
         # The completed chapter restores without TTS, ASR, or re-encoding.
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("reverified accepted audio")), \
-             patch("audiobook_renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("reverified accepted audio")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")):
             resumed = self.chapters()
             self.assertEqual(self.package()["status"], "complete")
         self.assertEqual(first["chapters"], resumed["chapters"])
@@ -158,8 +158,8 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual(len(accepted), 9)
         self.assertEqual(self.engine.dialogue_calls, [])
         self.config["render"]["paragraph_synthesis"] = True
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("regenerated accepted individual clips")), \
-             patch("audiobook_renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded unchanged chapter")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("regenerated accepted individual clips")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded unchanged chapter")):
             resumed = self.chapters()
         self.assertEqual(first["chapters"], resumed["chapters"])
         self.assertEqual(self.accepted_clips(), accepted)

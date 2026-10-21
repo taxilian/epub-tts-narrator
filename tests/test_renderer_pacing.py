@@ -6,8 +6,8 @@ import tempfile
 import unittest
 import wave
 
-from audiobook_renderer.assembly import compose_chapter
-from audiobook_renderer.pacing import audio_edges
+from epub_tts_narrator.renderer.assembly import compose_chapter
+from epub_tts_narrator.renderer.pacing import audio_edges
 from test_renderer_assembly import clip
 
 

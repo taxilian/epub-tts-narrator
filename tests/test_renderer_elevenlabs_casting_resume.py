@@ -11,15 +11,15 @@ import unittest
 from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.elevenlabs_voice_design import ElevenLabsVoiceDesigner, _publish
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import RenderBlocked
-from audiobook_renderer.assembly import normalize_clip
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.elevenlabs_voice_design import ElevenLabsVoiceDesigner, _publish
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import RenderBlocked
+from epub_tts_narrator.renderer.assembly import normalize_clip
+from epub_tts_narrator.cli import export_bundle
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferencePlaybackEngine, TranscriptVerifier,
 )
@@ -90,7 +90,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
     def interrupted_request(self):
         session = self.session()
         session.update_prompt("voice_mara", self.prompt, self.script)
-        with patch("audiobook_renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
+        with patch("epub_tts_narrator.renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
             with self.assertRaises(KeyboardInterrupt):
                 session.ensure_ready("voice_mara")
         session.close()
@@ -137,7 +137,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
     def verification_interruption(self):
         first = self.session()
         first.update_prompt("voice_mara", self.prompt, self.script)
-        with patch("audiobook_renderer.workflow.validate_audio", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 first.ensure_ready("voice_mara")
         first.close()
@@ -164,7 +164,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
             normalize_clip(*args, **kwargs)
             raise KeyboardInterrupt()
 
-        with patch("audiobook_renderer.workflow.normalize_clip", side_effect=interrupted_normalize):
+        with patch("epub_tts_narrator.renderer.workflow.normalize_clip", side_effect=interrupted_normalize):
             with self.assertRaises(KeyboardInterrupt):
                 first.ensure_ready("voice_mara")
         first.close()
@@ -234,7 +234,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
                 restarted = self.session(config=config, bundle=bundle,
                                          engine_model="changed-local-model" if change == "engine" else None)
                 before = len(self.posts)
-                with patch("audiobook_renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
+                with patch("epub_tts_narrator.renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
                     with self.assertRaises(KeyboardInterrupt):
                         restarted.ensure_ready("voice_mara")
                 self.assertEqual(len(self.posts), before + 1)
@@ -251,7 +251,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
     def test_newest_unfinished_explicit_regeneration_supersedes_older_request(self):
         older, _ = self.interrupted_request()
         second = self.session()
-        with patch("audiobook_renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
+        with patch("epub_tts_narrator.renderer.elevenlabs_voice_design._publish", side_effect=self.interrupt_wav_publish):
             with self.assertRaises(KeyboardInterrupt):
                 second.regenerate("voice_mara", voice_designer="elevenlabs")
         second.close()

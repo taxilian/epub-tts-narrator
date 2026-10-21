@@ -22,8 +22,8 @@ class SpeakerTerminalTests(unittest.TestCase):
 import os, sys
 sys.path[:0] = [sys.argv[1], sys.argv[1] + '/tests']
 from test_speaker_decisions import missing
-from epub_audiobook.speaker_decisions import prompt_speaker_decisions
-from epub_audiobook.speaker_completion import unassigned_segments
+from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+from epub_tts_narrator.speaker_completion import unassigned_segments
 try:
     with open('/dev/tty', 'r'), open('/dev/tty', 'w'):
         pass
@@ -46,9 +46,9 @@ import os, sys
 sys.path[:0] = [sys.argv[1], sys.argv[1] + '/tests']
 from unittest.mock import patch
 from test_analyze_resume import AnalyzeResumeTests, TruncatedCompletionClient
-from epub_audiobook.analysis_directory import _completed_directory
-from epub_audiobook.cli import main
-from epub_audiobook.speaker_completion import unassigned_segments
+from epub_tts_narrator.analysis_directory import _completed_directory
+from epub_tts_narrator.cli import main
+from epub_tts_narrator.speaker_completion import unassigned_segments
 try:
     with open('/dev/tty', 'r'), open('/dev/tty', 'w'):
         pass
@@ -63,7 +63,7 @@ try:
         os.dup2(redirected.fileno(), 0)
     assert not sys.stdin.isatty()
     client = TruncatedCompletionClient()
-    with patch('epub_audiobook.cli.OpenAICompatibleClient', return_value=client):
+    with patch('epub_tts_narrator.cli.OpenAICompatibleClient', return_value=client):
         status = main(['analyze', str(path), '--config', str(fixture.config)])
     assert status == 0, status
     assert len(client.calls) == 4, len(client.calls)

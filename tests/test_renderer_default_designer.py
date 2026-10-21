@@ -7,13 +7,13 @@ import unittest
 from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle, prepare_document
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import read_json
-from audiobook_renderer.config import DEFAULTS, resolve_voice_design, select_voice_designer
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import ensure_voice, render
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import read_json
+from epub_tts_narrator.renderer.config import DEFAULTS, resolve_voice_design, select_voice_designer
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import ensure_voice, render
+from epub_tts_narrator.cli import export_bundle
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, ReferencePlaybackEngine, TranscriptVerifier,
 )
@@ -137,7 +137,7 @@ class DefaultDesignerIntegrationTests(unittest.TestCase):
         profile = next(voice for voice in self.bundle["cast"]["voices"] if voice["id"] == "voice_mara")
         config = deepcopy(session.config)
         config["voice_design"] = deepcopy(self.config["voice_design"])
-        with patch("audiobook_renderer.voice_design.create_designer", return_value=self.designer) as factory:
+        with patch("epub_tts_narrator.renderer.voice_design.create_designer", return_value=self.designer) as factory:
             selected = ensure_voice(
                 session.store, "voice_mara", profile, self.engine, self.verifier,
                 config, config["render"]["work_dir"], bundle=self.bundle, notify=lambda _: None,
@@ -145,7 +145,7 @@ class DefaultDesignerIntegrationTests(unittest.TestCase):
         factory.assert_called_once_with({"type": "gemini", **self.config["gemini"]})
         self.assertEqual(selected["created_with"], self.engine.identity)
         self.assertEqual(selected["creation"]["designer"], self.designer.identity)
-        with patch("audiobook_renderer.voice_design.create_designer", side_effect=AssertionError("Must reuse saved voice")):
+        with patch("epub_tts_narrator.renderer.voice_design.create_designer", side_effect=AssertionError("Must reuse saved voice")):
             reused = ensure_voice(
                 session.store, "voice_mara", profile, self.engine, self.verifier,
                 config, config["render"]["work_dir"], bundle=self.bundle, notify=lambda _: None,
@@ -158,7 +158,7 @@ class DefaultDesignerIntegrationTests(unittest.TestCase):
         session = self.session()
         session.generate_missing()
         generation_count = len(self.designer.calls)
-        with patch("audiobook_renderer.voice_design.create_designer", side_effect=AssertionError("No new voice required")):
+        with patch("epub_tts_narrator.renderer.voice_design.create_designer", side_effect=AssertionError("No new voice required")):
             result = render(self.bundle, self.config, self.engine, self.verifier, notify=lambda _: None)
         self.assertGreater(len(self.engine.speech_calls), 0)
         self.assertEqual(len(self.designer.calls), generation_count)

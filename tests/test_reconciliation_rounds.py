@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import analyze
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import analyze
+from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from test_pipeline import FakeClient
 
@@ -110,7 +110,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
             seen.append((deepcopy(cast), deepcopy(kwargs["pending_merges"]), len(client.calls)))
             return cast, [], {"cases": []}
 
-        with patch("epub_audiobook.identity.audit_identities", side_effect=audit) as identity:
+        with patch("epub_tts_narrator.identity.audit_identities", side_effect=audit) as identity:
             document = self.run_analysis(client, identity_consensus=True, cast_reconciliation_rounds=3,
                                          cast_reconciliation_notes=["", "", "Verify remaining source identities."])
         identity.assert_called_once()
@@ -155,7 +155,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
                 return super().reconcile(payload)
 
         client = FailLater()
-        with patch("epub_audiobook.identity.audit_identities") as identity:
+        with patch("epub_tts_narrator.identity.audit_identities") as identity:
             with self.assertRaises(ProviderError):
                 self.run_analysis(client, identity_consensus=True, cast_reconciliation_rounds=3)
         identity.assert_not_called()
@@ -165,7 +165,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
         self.assertEqual({c["name"] for c in first_cast["characters"]}, {"Mara", "Jules"})
         # Successful responses remain cached, and a normal resume can finish.
         resumed = CumulativeClient()
-        with patch("epub_audiobook.identity.audit_identities",
+        with patch("epub_tts_narrator.identity.audit_identities",
                    side_effect=lambda source, cast, *args, **kwargs: (cast, [], {"cases": []})):
             result = self.run_analysis(resumed, cast_reconciliation_rounds=3, identity_consensus=True)
         self.assertEqual([p.get("mode", "attribute") for _, p in resumed.calls],

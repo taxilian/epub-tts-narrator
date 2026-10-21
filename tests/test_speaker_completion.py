@@ -9,11 +9,11 @@ import tempfile
 import time
 import unittest
 
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.performance import apply_bracket_delivery
-from epub_audiobook.pipeline import CachedRequests, analyze, fingerprint
-from epub_audiobook.provider import ProviderError
-from epub_audiobook.speaker_completion import (
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.performance import apply_bracket_delivery
+from epub_tts_narrator.pipeline import CachedRequests, analyze, fingerprint
+from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.speaker_completion import (
     REVIEWERS, SYSTEM, _final_context, _unanimous, complete_speakers, unassigned_segments,
 )
 from test_attribution_review import fixture, correction

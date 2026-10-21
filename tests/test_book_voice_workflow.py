@@ -13,18 +13,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.book_context import resolve_book_config, voice_store
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.cli import main as renderer_main
-from audiobook_renderer.config import DEFAULTS, load_config as renderer_config
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import import_voice
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.cli import main as renderer_main
+from epub_tts_narrator.renderer.config import DEFAULTS, load_config as renderer_config
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import import_voice
+from epub_tts_narrator.analysis_directory import (
     continuation_registry, fresh_registry, publish_directory,
 )
-from epub_audiobook.cli import export_bundle, main as analyzer_main
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.cli import export_bundle, main as analyzer_main
+from epub_tts_narrator.series import link_analysis
 from test_pipeline import FakeClient
 from test_renderer_voice_design_integration import (
     FFMPEG, FFPROBE, ReferenceDesigner, TranscriptVerifier,
@@ -195,7 +195,7 @@ class SharedGlobalConfigurationWorkflowTests(BookFixture):
         client.model = client.identity["model"]
         client.base_url = client.identity["base_url"]
         with contextlib.chdir(self.root):
-            with patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=client):
+            with patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client):
                 status, _, error = self.run_cli(analyzer_main, "analyze", source, "-o", output)
             self.assertEqual(status, 0, error)
             self.assertGreater(len(client.calls), 0)

@@ -9,13 +9,13 @@ import time
 from unittest.mock import patch
 import unittest
 
-from epub_audiobook.audition_scripts import (
+from epub_tts_narrator.audition_scripts import (
     FILENAME, PROMPT_VERSION, SYSTEM, VERSION, ensure_bundle_scripts, prepare_document_samples,
     prepare_samples, validate_script,
 )
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import CachedRequests, fingerprint
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint
+from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 
 
@@ -180,9 +180,9 @@ class AuditionScriptTests(unittest.TestCase):
                 "scripts": {voice["id"]: deepcopy(old) for voice in data["cast"]["voices"]}}
             before = deepcopy(data)
             source_sample = {"reference_text": BOOK_TEXT, "source": {"kind": "book_excerpt"}}
-            with patch("audiobook_renderer.samples.select_book_sample", return_value=source_sample), \
-                    patch("audiobook_renderer.samples.select_sample", return_value=source_sample), \
-                    patch("epub_audiobook.config.load_config", side_effect=AssertionError("No model needed")):
+            with patch("epub_tts_narrator.renderer.samples.select_book_sample", return_value=source_sample), \
+                    patch("epub_tts_narrator.renderer.samples.select_sample", return_value=source_sample), \
+                    patch("epub_tts_narrator.config.load_config", side_effect=AssertionError("No model needed")):
                 result = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True)
             record = json.loads((Path(directory) / FILENAME).read_text())
             self.assertEqual(record["version"], VERSION)
@@ -193,7 +193,7 @@ class AuditionScriptTests(unittest.TestCase):
             self.assertEqual(data, before)
             # Once the new selector declines source speech, old provenance and
             # inline fallbacks must not silently return on a subsequent run.
-            with patch("epub_audiobook.config.load_config", side_effect=RuntimeError("Model needed now")), \
+            with patch("epub_tts_narrator.config.load_config", side_effect=RuntimeError("Model needed now")), \
                     self.assertRaisesRegex(RuntimeError, "Model needed now"):
                 ensure_bundle_scripts(data, voice_ids=["v1"])
             self.assertFalse((Path(directory) / ".audition-scripts.lock").exists())
@@ -211,8 +211,8 @@ class AuditionScriptTests(unittest.TestCase):
             config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
             client = Client()
-            with patch("epub_audiobook.config.load_config", return_value=config), \
-                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=client):
+            with patch("epub_tts_narrator.config.load_config", return_value=config), \
+                    patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=client):
                 first = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
                 second = ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
             self.assertEqual(client.calls, ["v1"])
@@ -235,8 +235,8 @@ class AuditionScriptTests(unittest.TestCase):
             before = path.read_bytes()
             config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
-            with patch("epub_audiobook.config.load_config", return_value=config), \
-                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=Client(fail_once="v1")), \
+            with patch("epub_tts_narrator.config.load_config", return_value=config), \
+                    patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=Client(fail_once="v1")), \
                     self.assertRaises(ProviderError):
                 ensure_bundle_scripts(data, voice_ids=["v1"], refresh=True, progress=lambda text: None)
             self.assertEqual(path.read_bytes(), before)
@@ -251,7 +251,7 @@ class AuditionScriptTests(unittest.TestCase):
                           "cast_fingerprint": fingerprint(data["cast"]), "scripts": {},
                           "replaced_voice_ids": replaced}
                 (Path(directory) / FILENAME).write_text(json.dumps(record))
-                with patch("epub_audiobook.config.load_config", side_effect=AssertionError("No model allowed")), \
+                with patch("epub_tts_narrator.config.load_config", side_effect=AssertionError("No model allowed")), \
                         self.assertRaisesRegex(ValueError, "replaced character"):
                     ensure_bundle_scripts(data, refresh=True)
 
@@ -315,8 +315,8 @@ class AuditionScriptTests(unittest.TestCase):
                 else:
                     for voice in data["cast"]["voices"]:
                         voice["sample_script"] = scripts[voice["id"]]
-                with patch("epub_audiobook.config.load_config", side_effect=AssertionError("No config required")), \
-                        patch("epub_audiobook.provider.OpenAICompatibleClient", side_effect=AssertionError("No model required")):
+                with patch("epub_tts_narrator.config.load_config", side_effect=AssertionError("No config required")), \
+                        patch("epub_tts_narrator.provider.OpenAICompatibleClient", side_effect=AssertionError("No model required")):
                     prepared = ensure_bundle_scripts(data)
                 self.assertEqual(prepared["audition_scripts"], scripts)
 
@@ -333,8 +333,8 @@ class AuditionScriptTests(unittest.TestCase):
             config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
             client = Client()
-            with patch("epub_audiobook.config.load_config", return_value=config), \
-                    patch("epub_audiobook.provider.OpenAICompatibleClient", return_value=client):
+            with patch("epub_tts_narrator.config.load_config", return_value=config), \
+                    patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=client):
                 result = ensure_bundle_scripts(data, progress=lambda message: None)
             path = Path(data["directory"]) / FILENAME
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -366,7 +366,7 @@ class AuditionScriptTests(unittest.TestCase):
                     path.mkdir()
                 else:
                     path.write_text("not json" if mutation == "invalid_json" else json.dumps(record), encoding="utf-8")
-                with patch("epub_audiobook.config.load_config", side_effect=AssertionError("No config allowed")), \
+                with patch("epub_tts_narrator.config.load_config", side_effect=AssertionError("No config allowed")), \
                         self.assertRaises(ValueError):
                     ensure_bundle_scripts(data)
 

@@ -13,16 +13,16 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
-from audiobook_renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
 from audition_fixtures import prepare_bundle
-from audiobook_renderer.audition import casting_command
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.cli import parser
-from audiobook_renderer.common import digest, file_hash, read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy, validation_key
-from audiobook_renderer.workflow import RenderBlocked
-from audiobook_renderer.voice_prompts import audiobook_voice_prompt
+from epub_tts_narrator.renderer.audition import casting_command
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.cli import parser
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy, validation_key
+from epub_tts_narrator.renderer.workflow import RenderBlocked
+from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -217,7 +217,7 @@ class CastingRecoveryTests(unittest.TestCase):
                     "reference_text": text, "seed": seed}
 
         self.engine.create_voice = Mock(side_effect=create_voice)
-        with patch("audiobook_renderer.workflow.normalize_clip",
+        with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
                    side_effect=lambda source, destination, **kwargs: shutil.copyfile(source, destination)):
             saved = self.session.regenerate(self.voice_id)
         self.assertEqual(saved["reference_text"], actual_text)
@@ -370,8 +370,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         session.recover_attempt.return_value = {
             "candidate_id": "a" * 32, "reference_audio": "/tmp/saved-reference.wav"}
         output = StringIO()
-        with (patch("audiobook_renderer.casting.CastingSession", return_value=session),
-              patch("audiobook_renderer.audition.AudioPlayer") as player,
+        with (patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session),
+              patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player,
               redirect_stdout(output)):
             result = casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},
                                      {"casting": {"player": ["afplay"]}})
@@ -392,8 +392,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         session.recover_attempt.return_value = {
             "candidate_id": "a" * 32, "reference_audio": "/tmp/saved-reference.wav"}
         output = StringIO()
-        with (patch("audiobook_renderer.casting.CastingSession", return_value=session),
-              patch("audiobook_renderer.audition.AudioPlayer"),
+        with (patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session),
+              patch("epub_tts_narrator.renderer.audition.AudioPlayer"),
               redirect_stdout(output)):
             self.assertEqual(casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},
                                              {"casting": {"player": ["afplay"]}}), 0)
@@ -414,7 +414,7 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         ]
         for options, error in cases:
             with self.subTest(options=options):
-                with patch("audiobook_renderer.casting.CastingSession") as factory:
+                with patch("epub_tts_narrator.renderer.casting.CastingSession") as factory:
                     with self.assertRaisesRegex(ValueError, error):
                         casting_command(self.arguments(*options), {}, {})
                     factory.assert_not_called()
@@ -426,8 +426,8 @@ class CastingRecoveryCommandTests(unittest.TestCase):
         session.rows.return_value = [{"voice_id": "voice-1"}]
         session.recover_attempt.side_effect = RenderBlocked("text_mismatch")
         output = StringIO()
-        with (patch("audiobook_renderer.casting.CastingSession", return_value=session),
-              patch("audiobook_renderer.audition.AudioPlayer") as player,
+        with (patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session),
+              patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player,
               redirect_stdout(output)):
             with self.assertRaisesRegex(RenderBlocked, "text_mismatch"):
                 casting_command(args, {"cast": {"voices": [{"id": "voice-1"}]}},

@@ -325,7 +325,7 @@ def casting_command(args, bundle, config):
     if args.voice_id and args.voice_id not in {voice["id"] for voice in bundle["cast"]["voices"]}:
         raise ValueError("Voice ID is not in the bundle cast")
     if action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "generate"} and not args.text_file:
-        from epub_audiobook.audition_scripts import ensure_bundle_scripts
+        from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
         from .book_context import voice_store
         store = voice_store(bundle, config)
         voice_ids = [args.voice_id] if args.voice_id else None

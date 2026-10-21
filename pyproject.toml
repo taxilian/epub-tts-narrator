@@ -11,13 +11,13 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-epub-tts-narrator = "epub_audiobook.cli:main"
+epub-tts-narrator = "epub_tts_narrator.cli:main"
 # Compatibility with existing commands and scripts.
-epub-audiobook = "epub_audiobook.cli:main"
-audiobook-render = "audiobook_renderer.cli:main"
+epub-audiobook = "epub_tts_narrator.cli:main"
+audiobook-render = "epub_tts_narrator.renderer.cli:main"
 
 [project.urls]
 Repository = "https://github.com/taxilian/epub-tts-narrator"
 
 [tool.setuptools.packages.find]
-include = ["epub_audiobook*", "audiobook_renderer*"]
+include = ["epub_tts_narrator", "epub_tts_narrator.*"]

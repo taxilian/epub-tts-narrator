@@ -6,11 +6,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.identity import (audit_identities, SERIES_SCAN, SERIES_VOTE, VOTE,
+from epub_tts_narrator.identity import (audit_identities, SERIES_SCAN, SERIES_VOTE, VOTE,
                                      SERIES_IDENTITY_GUIDANCE, SERIES_RETRY_SCOPE_GUIDANCE)
-from epub_audiobook.pipeline import CachedRequests, fingerprint, make_units
-from epub_audiobook.prompts import PROMPT_VERSION
-from epub_audiobook.series import reconcile_series_cast
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, make_units
+from epub_tts_narrator.prompts import PROMPT_VERSION
+from epub_tts_narrator.series import reconcile_series_cast
 from test_series_identity_scan import fixture, decision, ScanRequests
 
 

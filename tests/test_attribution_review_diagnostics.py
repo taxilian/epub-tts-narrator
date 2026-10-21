@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from epub_audiobook.attribution_review import _accept_scan, _batches, _evidence, _object, audit_attribution
+from epub_tts_narrator.attribution_review import _accept_scan, _batches, _evidence, _object, audit_attribution
 from test_attribution_review import Requests, correction, fixture
 
 

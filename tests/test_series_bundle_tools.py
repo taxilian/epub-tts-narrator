@@ -8,9 +8,9 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.contracts import readiness, review_items
-from epub_audiobook.pipeline import fingerprint, write_json
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.contracts import readiness, review_items
+from epub_tts_narrator.pipeline import fingerprint, write_json
 from test_contracts import valid_document
 
 HELPERS = Path(__file__).resolve().parents[1] / "scripts" / "legacy_series"

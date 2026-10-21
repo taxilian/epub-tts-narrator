@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import tomllib
 
-from epub_audiobook.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
+from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
 
 DEFAULTS = {
@@ -62,7 +62,7 @@ DEFAULTS = {
 
 def load_config(path=None):
     from .quality import validate_policy
-    from epub_audiobook.config import DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path
+    from epub_tts_narrator.config import DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path
     path = resolve_config_path(path).resolve()
     try:
         with path.open("rb") as stream:

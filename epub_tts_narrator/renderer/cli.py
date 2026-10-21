@@ -10,7 +10,7 @@ import re
 import shutil
 import sys
 
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.provider import ProviderError
 
 from .bundle import load_bundle, make_plan
 from .config import load_config, select_voice_designer
@@ -132,9 +132,11 @@ def doctor(config):
     else:
         checks["drama_shards"] = False
     if config["engine"]["type"] != "drama3_mlx":
+        from .engines import engine_entry_points
+
         checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
         dependencies.pop("drama3-mlx")
-        matches = metadata.entry_points(group="audiobook_renderer.tts").select(name=config["engine"]["type"])
+        matches = engine_entry_points(config["engine"]["type"])
         checks["tts_plugin_installed"] = len(matches) == 1
     return {"ready": all(checks.values()) and all(dependencies.values()),
             "checks": checks, "packages": dependencies,
@@ -217,7 +219,7 @@ def main(argv=None):
         if args.command in {"render", "create-voices"}:
             missing = [voice for voice in plan["voice_ids"] if store.load(voice) is None]
             if missing:
-                from epub_audiobook.audition_scripts import ensure_bundle_scripts
+                from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
                 bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
         engine = create_engine(config["engine"])
         verifier = create_verifier(config["verification"], config.get("jev"))

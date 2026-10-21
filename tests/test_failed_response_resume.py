@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.pipeline import CachedRequests, fingerprint, write_json
-from epub_audiobook.prompts import PROMPT_VERSION
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
+from epub_tts_narrator.prompts import PROMPT_VERSION
 
 
 class Client:
@@ -101,7 +101,7 @@ class FailedResponseResumeTests(unittest.TestCase):
                 success = self.cache / f"{self.key()}.json"
                 success.unlink(missing_ok=True)
                 client = Client()
-                with patch("epub_audiobook.pipeline.MAX_RESPONSE_BYTES", 256):
+                with patch("epub_tts_narrator.pipeline.MAX_RESPONSE_BYTES", 256):
                     self.run_request(client, repair_attempts=0)
                 self.assertEqual(client.calls[0][1], self.payload)
         path.unlink()

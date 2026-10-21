@@ -5,12 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from audiobook_renderer.book_context import resolve_book_config, voice_store
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.config import DEFAULTS
-from epub_audiobook.analysis_directory import continuation_registry, fresh_registry, publish_directory
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.analysis_directory import continuation_registry, fresh_registry, publish_directory
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.series import link_analysis
 from test_series import fixture, propose
 
 

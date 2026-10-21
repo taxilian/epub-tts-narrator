@@ -9,8 +9,8 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.engines import EngineError
-from audiobook_renderer.voice_design import Qwen3VoiceDesigner, create_designer
+from epub_tts_narrator.renderer.engines import EngineError
+from epub_tts_narrator.renderer.voice_design import Qwen3VoiceDesigner, create_designer
 
 
 class FakeAudio(list):
@@ -70,7 +70,7 @@ class RendererVoiceDesignTests(unittest.TestCase):
         modules.start()
         self.addCleanup(modules.stop)
         versions = patch(
-            "audiobook_renderer.voice_design.importlib.metadata.version",
+            "epub_tts_narrator.renderer.voice_design.importlib.metadata.version",
             return_value="test-runtime",
         )
         versions.start()

@@ -34,7 +34,7 @@ Return exactly {"text":"audition speech only","reason":"brief casting rationale"
 
 
 def validate_script(value, *, require_plain_prose=True):
-    from audiobook_renderer.samples import _safe_text, has_repeated_speech_wrappers, strip_speech_wrapper
+    from epub_tts_narrator.renderer.samples import _safe_text, has_repeated_speech_wrappers, strip_speech_wrapper
     if not isinstance(value, dict) or set(value) != {"text", "reason"}:
         raise ValueError("Audition script requires exactly text and reason")
     text, reason = value["text"], value["reason"]
@@ -94,7 +94,7 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
     Their replacement scripts (or absence, when source speech suffices) override
     every older inline/provenance copy without rewriting the analysis bundle.
     """
-    from audiobook_renderer.samples import select_book_sample, select_sample
+    from epub_tts_narrator.renderer.samples import select_book_sample, select_sample
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("Audition workers must be between one and five")
     scripts = _saved(bundle)

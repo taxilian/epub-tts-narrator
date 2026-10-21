@@ -5,7 +5,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.drama3_design import (
+from epub_tts_narrator.renderer.drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION, build_scene_prompt,
     generate_scene_voice, validate_scene_fields,
 )

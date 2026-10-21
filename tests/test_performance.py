@@ -6,10 +6,10 @@ from pathlib import Path
 import json
 import unittest
 
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.performance import apply_bracket_delivery, bracket_ranges
-from epub_audiobook.pipeline import apply_edits, fingerprint
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.performance import apply_bracket_delivery, bracket_ranges
+from epub_tts_narrator.pipeline import apply_edits, fingerprint
 from test_contracts import valid_document
 
 

@@ -7,12 +7,12 @@ import tempfile
 from threading import Event, Lock
 import unittest
 
-from epub_audiobook.contracts import readiness, validate_document
-from epub_audiobook.pipeline import (
+from epub_tts_narrator.contracts import readiness, validate_document
+from epub_tts_narrator.pipeline import (
     CachedRequests, DEFAULT_POLICY, align_units, analyze, apply_edits, fingerprint, make_units, merge_patch, seed_cast,
 )
-from epub_audiobook.prompts import DISCOVER
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.prompts import DISCOVER
+from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from audition_fixtures import script_response
 

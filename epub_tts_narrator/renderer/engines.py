@@ -598,11 +598,25 @@ class Drama3MLXEngine:
         }
 
 
+def engine_entry_points(name: str) -> list[importlib.metadata.EntryPoint]:
+    """Find a configured plugin, preferring its current namespace by name.
+
+    Preserve duplicates for the caller to reject instead of hiding an ambiguous
+    installation behind a legacy registration. A legacy plugin remains usable
+    when only unrelated names are registered in the current namespace.
+    """
+    for group in ("epub_tts_narrator.tts", "audiobook_renderer.tts"):
+        matches = list(importlib.metadata.entry_points(group=group).select(name=name))
+        if matches:
+            return matches
+    return []
+
+
 def create_engine(config: Mapping[str, Any]) -> TTSEngine:
     """Resolve an explicitly configured provider without a silent fallback."""
     name = config.get("type", config.get("name", "drama3_mlx"))
     if name != "drama3_mlx":
-        entries = list(importlib.metadata.entry_points(group="audiobook_renderer.tts").select(name=name))
+        entries = engine_entry_points(name)
         if len(entries) != 1:
             raise EngineError(f"Unknown or ambiguous TTS engine: {name!r}")
         try:

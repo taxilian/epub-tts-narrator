@@ -8,7 +8,7 @@ import sys
 import time
 import unittest
 
-from audiobook_renderer.terminal import play_sample
+from epub_tts_narrator.renderer.terminal import play_sample
 
 try:
     import pty
@@ -25,7 +25,7 @@ import select
 import sys
 import termios
 import time
-from audiobook_renderer.terminal import play_sample
+from epub_tts_narrator.renderer.terminal import play_sample
 
 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 original = termios.tcgetattr(0)

@@ -6,8 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.contracts import readiness, validate_document
-from epub_audiobook.pipeline import (
+from epub_tts_narrator.contracts import readiness, validate_document
+from epub_tts_narrator.pipeline import (
     CachedRequests, align_attribution_response, align_units, analyze, base_document,
     make_units, restore_repeated_runs, seed_cast,
 )

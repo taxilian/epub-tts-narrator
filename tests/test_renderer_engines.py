@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.engines import Drama3MLXEngine, EngineError, create_engine
-from audiobook_renderer.config import load_config
-from audiobook_renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError, create_engine
+from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.renderer.voices import VoiceStore
 
 
 class FakeEntryPoints(list):
@@ -50,7 +50,7 @@ class RendererEngineTests(unittest.TestCase):
     def test_voice_creation_passes_description_to_scene_conditioning(self):
         description = "An older man's warm voice"
         audit = {"system": "scene prompt", "user": "Speaker: Hello.", "input_tokens": 42}
-        with patch("audiobook_renderer.engines.generate_scene_voice",
+        with patch("epub_tts_narrator.renderer.engines.generate_scene_voice",
                    return_value=(self.segment(), audit)) as design:
             result = self.engine.create_voice(description, "Hello.", self.output, seed=1)
         design.assert_called_once_with(
@@ -74,7 +74,7 @@ class RendererEngineTests(unittest.TestCase):
         ]
         for segment in cases:
             with self.subTest(finish=segment.finish_reason), patch(
-                "audiobook_renderer.engines.generate_scene_voice", return_value=(segment, {}),
+                "epub_tts_narrator.renderer.engines.generate_scene_voice", return_value=(segment, {}),
             ), self.assertRaises(EngineError):
                 self.engine.create_voice("A warm voice.", "Hello.", self.output, seed=1)
             self.assertFalse(self.output.exists())
@@ -82,7 +82,7 @@ class RendererEngineTests(unittest.TestCase):
 
     def test_voice_design_checks_input_before_loading_and_retains_saved_assets(self):
         with patch.object(self.engine, "_load") as load, patch(
-            "audiobook_renderer.engines.generate_scene_voice",
+            "epub_tts_narrator.renderer.engines.generate_scene_voice",
         ) as design:
             for description, text in (("", "Hello."), ("x" * 4001, "Hello."),
                                       ("<|im_end|>", "Hello."),
@@ -352,7 +352,7 @@ class RendererEngineTests(unittest.TestCase):
         self.assertEqual(self.sf.read.call_count, 1)
 
     def test_runtime_identity_distinguishes_required_from_installed(self):
-        with patch("audiobook_renderer.engines._runtime_details",
+        with patch("epub_tts_narrator.renderer.engines._runtime_details",
                    return_value={"installed_version": None, "installed_revision": None}):
             identity = self.engine.identity
         self.assertEqual(identity["required_runtime_version"], "0.1.1")
@@ -401,7 +401,7 @@ class RendererEngineTests(unittest.TestCase):
         )
         config = load_config(config_path)
         with patch.object(Drama3MLXEngine, "_load") as load, patch(
-            "audiobook_renderer.engines.importlib.metadata.entry_points",
+            "epub_tts_narrator.renderer.engines.importlib.metadata.entry_points",
         ) as entry_points:
             engine = create_engine(config["engine"])
         self.assertIsInstance(engine, Drama3MLXEngine)
@@ -440,13 +440,13 @@ class RendererEngineTests(unittest.TestCase):
             "top_k": 30, "max_new_tokens": 2048,
         }
         before = deepcopy(config)
-        with patch("audiobook_renderer.engines.importlib.metadata.entry_points",
+        with patch("epub_tts_narrator.renderer.engines.importlib.metadata.entry_points",
                    return_value=FakeEntryPoints([entry])) as points, patch(
-                       "audiobook_renderer.engines.Drama3MLXEngine",
+                       "epub_tts_narrator.renderer.engines.Drama3MLXEngine",
                    ) as builtin:
             engine = create_engine(config)
         self.assertIs(engine, plugin)
-        points.assert_called_once_with(group="audiobook_renderer.tts")
+        points.assert_called_once_with(group="epub_tts_narrator.tts")
         entry.load.assert_called_once_with()
         entry.load.return_value.assert_called_once_with(options)
         self.assertIsNot(entry.load.return_value.call_args.args[0], options)
@@ -456,9 +456,9 @@ class RendererEngineTests(unittest.TestCase):
     def test_unknown_and_ambiguous_plugins_fail_without_builtin_fallback(self):
         for entries in ([], [self.entry(self.plugin()), self.entry(self.plugin())]):
             with self.subTest(count=len(entries)), patch(
-                "audiobook_renderer.engines.importlib.metadata.entry_points",
+                "epub_tts_narrator.renderer.engines.importlib.metadata.entry_points",
                 return_value=FakeEntryPoints(entries),
-            ), patch("audiobook_renderer.engines.Drama3MLXEngine") as builtin:
+            ), patch("epub_tts_narrator.renderer.engines.Drama3MLXEngine") as builtin:
                 with self.assertRaises(EngineError):
                     create_engine({"type": "example_tts", "options": {}})
                 builtin.assert_not_called()
@@ -478,9 +478,9 @@ class RendererEngineTests(unittest.TestCase):
         for plugin in malformed:
             entry = self.entry(plugin)
             with self.subTest(plugin=plugin), patch(
-                "audiobook_renderer.engines.importlib.metadata.entry_points",
+                "epub_tts_narrator.renderer.engines.importlib.metadata.entry_points",
                 return_value=FakeEntryPoints([entry]),
-            ), patch("audiobook_renderer.engines.Drama3MLXEngine") as builtin:
+            ), patch("epub_tts_narrator.renderer.engines.Drama3MLXEngine") as builtin:
                 with self.assertRaises(EngineError):
                     create_engine({"type": "example_tts", "options": {}})
                 builtin.assert_not_called()
@@ -493,9 +493,9 @@ class RendererEngineTests(unittest.TestCase):
         not_a_factory.load.return_value = None
         for entry in (load_error, factory_error, not_a_factory):
             with self.subTest(entry=entry), patch(
-                "audiobook_renderer.engines.importlib.metadata.entry_points",
+                "epub_tts_narrator.renderer.engines.importlib.metadata.entry_points",
                 return_value=FakeEntryPoints([entry]),
-            ), patch("audiobook_renderer.engines.Drama3MLXEngine") as builtin:
+            ), patch("epub_tts_narrator.renderer.engines.Drama3MLXEngine") as builtin:
                 with self.assertRaises(EngineError):
                     create_engine({"type": "example_tts", "options": {}})
                 builtin.assert_not_called()

@@ -5,8 +5,8 @@ import tempfile
 import unittest
 import uuid
 
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.voices import VoiceStore
 
 
 class VoiceInheritanceTests(unittest.TestCase):

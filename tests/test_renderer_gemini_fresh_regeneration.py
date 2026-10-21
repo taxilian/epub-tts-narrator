@@ -8,13 +8,13 @@ import unittest
 from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import read_json, write_json
-from audiobook_renderer.config import DEFAULTS, select_voice_designer
-from audiobook_renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
-from audiobook_renderer.quality import validate_policy
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS, select_voice_designer
+from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.cli import export_bundle
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, ReferencePlaybackEngine, TranscriptVerifier,
 )
@@ -179,7 +179,7 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         original_prompt = "A quiet adult narrator with a measured pace."
         old_session = self.session(self.designer([_RequestFailure("Fixture old creation response lost")]))
         old_session.update_prompt("voice_mara", original_prompt)
-        with patch("audiobook_renderer.casting.audiobook_voice_prompt", side_effect=lambda prompt: prompt):
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=lambda prompt: prompt):
             with self.assertRaisesRegex(ValueError, "may already have succeeded"):
                 old_session.ensure_ready("voice_mara")
         pending = next(self.root.rglob("gemini-voice-pending.json"))

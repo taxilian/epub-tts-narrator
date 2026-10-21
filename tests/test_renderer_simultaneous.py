@@ -11,15 +11,15 @@ from audition_fixtures import prepare_bundle
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.assembly import mix_speakers
-from audiobook_renderer.bundle import chunk_speakers, load_bundle, make_plan
-from audiobook_renderer.chapter_cache import prepare_mixture
-from audiobook_renderer.common import digest, file_hash, read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import RenderBlocked, assemble, render
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.pipeline import segment
+from epub_tts_narrator.renderer.assembly import mix_speakers
+from epub_tts_narrator.renderer.bundle import chunk_speakers, load_bundle, make_plan
+from epub_tts_narrator.renderer.chapter_cache import prepare_mixture
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.pipeline import segment
 from test_renderer_workflow import EXAMPLE, FixtureEngine, FixtureVerifier, pcm_key, timed_transcript
 
 
@@ -70,7 +70,7 @@ class SimultaneousMixerTests(unittest.TestCase):
         self.assertFalse((self.root / "mixes").exists())
         mixed = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual([lane["end_frame"] for lane in mixed["speaker_lanes"]], [4, 2])
-        with patch("audiobook_renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
             self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
         path = Path(mixed["wav_path"])
         data = bytearray(path.read_bytes())
@@ -102,7 +102,7 @@ class SimultaneousMixerTests(unittest.TestCase):
             pcm(Path(accepted[0]["wav_path"]), [1000] * 4)
             return mix_speakers(accepted, target, **kwargs)
 
-        with patch("audiobook_renderer.chapter_cache.mix_speakers", side_effect=changed_before_mix):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=changed_before_mix):
             with self.assertRaisesRegex(ValueError, "changed before mixing"):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(list((self.root / "mixes").iterdir()), [])
@@ -110,7 +110,7 @@ class SimultaneousMixerTests(unittest.TestCase):
     def test_mixture_interruption_keeps_inputs_and_publishes_nothing(self):
         lanes = self.lanes()
         original = [file_hash(lane["wav_path"]) for lane in lanes]
-        with patch("audiobook_renderer.chapter_cache.mix_speakers", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(list((self.root / "mixes").iterdir()), [])
@@ -235,7 +235,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertTrue(lock.exists())
 
     def test_book_lock_covers_custom_work_directory_and_racing_revision(self):
-        from audiobook_renderer.workflow import _lock_book_audio
+        from epub_tts_narrator.renderer.workflow import _lock_book_audio
         book_lock = self.root / "bundle" / ".audio-render.lock"
         revision_lock = self.root / "bundle" / ".analysis-update.lock"
 
@@ -244,7 +244,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
             revision_lock.mkdir()
             raise RenderBlocked("analysis is being updated")
 
-        with patch("audiobook_renderer.workflow._check_analysis_update", side_effect=begin_revision_after_book_lock):
+        with patch("epub_tts_narrator.renderer.workflow._check_analysis_update", side_effect=begin_revision_after_book_lock):
             with self.assertRaisesRegex(RenderBlocked, "analysis is being updated"):
                 _lock_book_audio(self.bundle)
         self.assertFalse(book_lock.exists())
@@ -314,7 +314,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         first_voice = self.engine.speech_calls[0]["voice_hash"]
         self.assertEqual(sum(row["text"] == first_text and row["voice_hash"] == first_voice
                              for row in self.engine.speech_calls), 1)
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("ASR or TTS called")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("ASR or TTS called")):
             self.run_render(chapters_only=True)
             assemble(self.bundle, self.config, notify=lambda _: None)
         self.assertTrue((self.root / "output" / "book.m4b").is_file())

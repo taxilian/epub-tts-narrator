@@ -20,10 +20,10 @@ import unicodedata
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT))
 
-from epub_audiobook.contracts import readiness, validate_document
-from epub_audiobook.cli import source_from
-from epub_audiobook.pipeline import fingerprint
-from epub_audiobook.series import _inherited_review_issues, validate_registry
+from epub_tts_narrator.contracts import readiness, validate_document
+from epub_tts_narrator.cli import source_from
+from epub_tts_narrator.pipeline import fingerprint
+from epub_tts_narrator.series import _inherited_review_issues, validate_registry
 from bundle_validation import load_bundle, validate_native_bundle
 
 REVIEWERS = {f"identity_reviewer_{number}" for number in range(1, 4)}

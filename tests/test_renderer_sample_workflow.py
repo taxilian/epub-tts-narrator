@@ -8,13 +8,13 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.cli import main, parser
-from audiobook_renderer.common import read_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.workflow import ensure_voice
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.cli import main, parser
+from epub_tts_narrator.renderer.common import read_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.workflow import ensure_voice
 from test_renderer_workflow import FFMPEG, FixtureEngine, FixtureVerifier
 
 
@@ -59,7 +59,7 @@ class SampleWorkflowTests(unittest.TestCase):
             lock.rmdir()
 
     def test_book_sample_and_provenance_reach_generation_and_saved_reference(self):
-        with patch("audiobook_renderer.samples.select_sample", return_value=self.sample) as select:
+        with patch("epub_tts_narrator.renderer.samples.select_sample", return_value=self.sample) as select:
             saved = self.create_voice(bundle=self.bundle)
         select.assert_called_once_with(
             self.bundle, self.voice_id, canonical_id=self.store.canonical_id,
@@ -78,7 +78,7 @@ class SampleWorkflowTests(unittest.TestCase):
         saved = self.create_voice()
         before = {p: p.read_bytes() for p in self.store.folder(self.voice_id).iterdir() if p.is_file()}
         generation_count, verification_count = len(self.engine.voice_calls), len(self.verifier.calls)
-        with patch("audiobook_renderer.samples.select_sample",
+        with patch("epub_tts_narrator.renderer.samples.select_sample",
                    side_effect=AssertionError("An existing voice must not select a new sample")):
             reused = self.create_voice(bundle=self.bundle)
         self.assertEqual(reused, saved)
@@ -88,7 +88,7 @@ class SampleWorkflowTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in before}, before)
 
     def test_legacy_call_without_bundle_keeps_configured_script(self):
-        with patch("audiobook_renderer.samples.select_sample") as select:
+        with patch("epub_tts_narrator.renderer.samples.select_sample") as select:
             saved = self.create_voice()
         select.assert_not_called()
         self.assertEqual(self.engine.voice_calls[0]["text"], self.config["voices"]["reference_text"])
@@ -107,12 +107,12 @@ class SampleWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.engine.voice_calls), 1)
 
     def test_create_voices_cli_supplies_bundle_for_each_new_voice(self):
-        with (patch("audiobook_renderer.cli.load_config", return_value=self.config),
-              patch("audiobook_renderer.cli.load_bundle", return_value=self.bundle),
-              patch("epub_audiobook.audition_scripts.ensure_bundle_scripts", return_value=self.bundle),
-              patch("audiobook_renderer.engines.create_engine", return_value=self.engine),
-              patch("audiobook_renderer.verification.create_verifier", return_value=self.verifier),
-              patch("audiobook_renderer.workflow.ensure_voice") as ensure,
+        with (patch("epub_tts_narrator.renderer.cli.load_config", return_value=self.config),
+              patch("epub_tts_narrator.renderer.cli.load_bundle", return_value=self.bundle),
+              patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts", return_value=self.bundle),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier),
+              patch("epub_tts_narrator.renderer.workflow.ensure_voice") as ensure,
               redirect_stdout(io.StringIO())):
             result = main(["create-voices", str(EXAMPLE), "--config", "unused.toml"])
         self.assertEqual(result, 0)

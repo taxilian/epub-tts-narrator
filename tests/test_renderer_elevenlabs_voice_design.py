@@ -12,10 +12,10 @@ from unittest.mock import Mock, patch
 import urllib.error
 import wave
 
-from audiobook_renderer.elevenlabs_voice_design import ElevenLabsVoiceDesigner, ElevenLabsVoiceError, _NoRedirect
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.workflow import RenderBlocked, verified_take
+from epub_tts_narrator.renderer.elevenlabs_voice_design import ElevenLabsVoiceDesigner, ElevenLabsVoiceError, _NoRedirect
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.workflow import RenderBlocked, verified_take
 
 
 TEXT = ("The door stood open at the end of the quiet hallway. I paused to listen, "

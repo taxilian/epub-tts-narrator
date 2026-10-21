@@ -171,7 +171,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         raise ValueError("Cannot read configuration file.") from None
 
     result = deepcopy(DEFAULTS)
-    from audiobook_renderer.config import DEFAULTS as RENDERER_DEFAULTS
+    from epub_tts_narrator.renderer.config import DEFAULTS as RENDERER_DEFAULTS
     if any(section not in DEFAULTS and section not in RENDERER_DEFAULTS for section in supplied):
         raise ValueError("Unknown configuration section.")
     for section, settings in supplied.items():

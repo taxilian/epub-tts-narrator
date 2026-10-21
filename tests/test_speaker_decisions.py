@@ -9,10 +9,10 @@ from pathlib import Path
 from unittest.mock import call, patch
 import unittest
 
-from epub_audiobook.contracts import readiness, validate_document
-from epub_audiobook.pipeline import fingerprint
-from epub_audiobook.speaker_completion import complete_speakers, unassigned_segments
-from epub_audiobook.speaker_decisions import prompt_speaker_decisions
+from epub_tts_narrator.contracts import readiness, validate_document
+from epub_tts_narrator.pipeline import fingerprint
+from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
+from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
 from test_contracts import valid_document
 
 
@@ -323,7 +323,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(output.count("Most likely speakers"), 2)
 
     def test_no_likely_options_requires_other_and_never_accepts_blank(self):
-        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=[]):
+        with patch("epub_tts_narrator.speaker_decisions.rank_speakers", return_value=[]):
             result, output = self.decide(missing(), "\n1\no\n2\n")
         self.assertEqual(result["segments"][1]["role_id"], "mara")
         self.assertIn("No likely speaker found", output)
@@ -334,7 +334,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         add_lena(document)
         ranked = [{"role_id": role, "reason": "Plausible in this scene.", "score": score}
                   for score, role in zip((3, 2, 1), ("lena", "mara", "narrator"))]
-        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=ranked):
+        with patch("epub_tts_narrator.speaker_decisions.rank_speakers", return_value=ranked):
             result, output = self.decide(document, "1\n")
         self.assertEqual(result["segments"][1]["role_id"], "lena")
         self.assertIn("1. Lena — best guess", output)
@@ -378,7 +378,7 @@ class SpeakerDecisionTests(unittest.TestCase):
     def test_context_and_options_wrap_to_a_narrow_terminal(self):
         document = missing()
         document["source"]["book"]["title"] = "A long title that should still be readable in a narrow terminal window"
-        with patch("epub_audiobook.speaker_decisions.os.get_terminal_size",
+        with patch("epub_tts_narrator.speaker_decisions.os.get_terminal_size",
                    return_value=os.terminal_size((48, 24))):
             # StringIO lacks fileno; supply a stream with an explicit terminal descriptor.
             class Output(StringIO):
@@ -400,8 +400,8 @@ class SpeakerDecisionTests(unittest.TestCase):
             def readline(self):
                 raise AssertionError("Noninteractive input must not be read")
         document, output = missing(), StringIO()
-        with patch("epub_audiobook.speaker_decisions.open") as terminal_open, \
-                patch("epub_audiobook.speaker_decisions.rank_speakers") as rank:
+        with patch("epub_tts_narrator.speaker_decisions.open") as terminal_open, \
+                patch("epub_tts_narrator.speaker_decisions.rank_speakers") as rank:
             result = prompt_speaker_decisions(document, book_path="book-01", input_stream=Unreadable("2\n"), output_stream=output)
         terminal_open.assert_not_called()
         rank.assert_not_called()
@@ -416,7 +416,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         terminal_input, terminal_output = Terminal("1\n"), StringIO()
         redirected_output = StringIO()
         with patch("sys.stdin", Unreadable()), patch("sys.stderr", redirected_output), \
-                patch("epub_audiobook.speaker_decisions.open", side_effect=[
+                patch("epub_tts_narrator.speaker_decisions.open", side_effect=[
                     nullcontext(terminal_input), nullcontext(terminal_output)]) as terminal_open:
             result = prompt_speaker_decisions(missing(), book_path="book-01")
         self.assertEqual(terminal_open.call_args_list, [
@@ -428,7 +428,7 @@ class SpeakerDecisionTests(unittest.TestCase):
     def test_controlling_terminal_uses_explicit_output_and_preserves_decisions_at_eof(self):
         terminal_input, output = Terminal("1\n"), StringIO()
         with patch("sys.stdin", StringIO()), \
-                patch("epub_audiobook.speaker_decisions.open", return_value=nullcontext(terminal_input)) as terminal_open:
+                patch("epub_tts_narrator.speaker_decisions.open", return_value=nullcontext(terminal_input)) as terminal_open:
             result = prompt_speaker_decisions(missing((1, 2)), book_path="book-01", output_stream=output)
         terminal_open.assert_called_once_with("/dev/tty", "r", encoding="utf-8")
         self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
@@ -441,7 +441,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 raise AssertionError("There is no terminal; do not consume redirected input")
         document, output = missing(), StringIO()
         with patch("sys.stdin", Unreadable("2\n")), patch("sys.stderr", output), \
-                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
+                patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
             result = prompt_speaker_decisions(document, book_path="book-01")
         self.assertEqual(result, document)
         self.assertIn("no interactive terminal is available", output.getvalue())
@@ -452,7 +452,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         terminal_input, output = Terminal("1\n"), StringIO()
         document = missing()
         with patch("sys.stdin", StringIO()), patch("sys.stderr", output), \
-                patch("epub_audiobook.speaker_decisions.open", side_effect=[terminal_input, OSError("Output unavailable")]):
+                patch("epub_tts_narrator.speaker_decisions.open", side_effect=[terminal_input, OSError("Output unavailable")]):
             result = prompt_speaker_decisions(document, book_path="book-01")
         self.assertTrue(terminal_input.closed)
         self.assertEqual(result, document)
@@ -483,7 +483,7 @@ class SpeakerDecisionTests(unittest.TestCase):
              "raw_response": {"reason": "The tag names Mara.\x1b[31m"}},
         ]}]}]}
         ranked = [{"role_id": "mara", "score": 1, "reason": "The tag names Mara.\x1b[31m"}]
-        with patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=ranked):
+        with patch("epub_tts_narrator.speaker_decisions.rank_speakers", return_value=ranked):
             result, output = self.decide(document, "q\n")
         self.assertEqual(result["segments"], document["segments"])
         self.assertNotIn("speaker_completion_1", output)
@@ -494,8 +494,8 @@ class SpeakerDecisionTests(unittest.TestCase):
         client = object()
         terminal_input, output = Terminal("q\n"), StringIO()
         with patch("sys.stdin", StringIO()), \
-                patch("epub_audiobook.speaker_decisions.open", return_value=nullcontext(terminal_input)), \
-                patch("epub_audiobook.speaker_decisions.rank_speakers", return_value=[]) as rank:
+                patch("epub_tts_narrator.speaker_decisions.open", return_value=nullcontext(terminal_input)), \
+                patch("epub_tts_narrator.speaker_decisions.rank_speakers", return_value=[]) as rank:
             result = prompt_speaker_decisions(missing(), jev_client=client, output_stream=output)
         self.assertIs(rank.call_args.kwargs["jev_client"], client)
         self.assertIn("Ranking likely speakers with JEV", output.getvalue())
@@ -503,7 +503,7 @@ class SpeakerDecisionTests(unittest.TestCase):
 
     def analyze_with_input(self, document, input_stream, expected_status=0):
         """Exercise analyze's actual prompt and handoff without model or disk work."""
-        from epub_audiobook.cli import main
+        from epub_tts_narrator.cli import main
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
                   "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
@@ -530,15 +530,15 @@ class SpeakerDecisionTests(unittest.TestCase):
             published.append(deepcopy(doc))
             return readiness(doc)
 
-        with patch("epub_audiobook.cli.load_config", return_value=config), \
-                patch("epub_audiobook.cli.source_from", return_value=document["source"]), \
-                patch("epub_audiobook.cli.validate_output", side_effect=lambda path: path), \
-                patch("epub_audiobook.cli.fresh_registry", return_value={}), \
-                patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=Client()), \
-                patch("epub_audiobook.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
-                patch("epub_audiobook.audition_scripts.prepare_document_samples", side_effect=prepare), \
-                patch("epub_audiobook.cli.publish_directory", side_effect=publish), \
-                patch("epub_audiobook.speaker_decisions.open", side_effect=OSError("No controlling terminal")), \
+        with patch("epub_tts_narrator.cli.load_config", return_value=config), \
+                patch("epub_tts_narrator.cli.source_from", return_value=document["source"]), \
+                patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
+                patch("epub_tts_narrator.cli.fresh_registry", return_value={}), \
+                patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=Client()), \
+                patch("epub_tts_narrator.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
+                patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
+                patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
+                patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")), \
                 patch("sys.stdin", input_stream), \
                 patch("sys.stdout", new_callable=StringIO) as output, \
                 patch("sys.stderr", new_callable=StringIO) as diagnostics:
@@ -615,7 +615,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                     self.assertIn("Input ended", diagnostics)
 
     def test_cli_analyze_runs_decisions_after_model_and_before_publication(self):
-        from epub_audiobook.cli import main
+        from epub_tts_narrator.cli import main
         document = missing()
         events = []
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
@@ -639,15 +639,15 @@ class SpeakerDecisionTests(unittest.TestCase):
         def prepare(doc, *args, **kwargs):
             events.append("auditions")
             return doc
-        with patch("epub_audiobook.cli.load_config", return_value=config), \
-                patch("epub_audiobook.cli.source_from", return_value=document["source"]), \
-                patch("epub_audiobook.cli.validate_output", side_effect=lambda path: path), \
-                patch("epub_audiobook.cli.fresh_registry", return_value={}), \
-                patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=Client()), \
-                patch("epub_audiobook.cli.analyze", side_effect=analyze), \
-                patch("epub_audiobook.cli.prompt_speaker_decisions", side_effect=decide), \
-                patch("epub_audiobook.audition_scripts.prepare_document_samples", side_effect=prepare), \
-                patch("epub_audiobook.cli.publish_directory", side_effect=publish), \
+        with patch("epub_tts_narrator.cli.load_config", return_value=config), \
+                patch("epub_tts_narrator.cli.source_from", return_value=document["source"]), \
+                patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
+                patch("epub_tts_narrator.cli.fresh_registry", return_value={}), \
+                patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=Client()), \
+                patch("epub_tts_narrator.cli.analyze", side_effect=analyze), \
+                patch("epub_tts_narrator.cli.prompt_speaker_decisions", side_effect=decide), \
+                patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
+                patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
             self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
         self.assertEqual(events, ["automatic", "auditions", "decisions", "auditions", "publish"])

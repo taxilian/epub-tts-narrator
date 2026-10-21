@@ -7,14 +7,14 @@ import json
 from pathlib import Path
 import unittest
 
-from audiobook_renderer.book_context import resolve_book_config
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.cli import main as renderer_main
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator.renderer.book_context import resolve_book_config
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.cli import main as renderer_main
+from epub_tts_narrator.analysis_directory import (
     continuation_registry, fresh_registry, publish_directory,
 )
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.series import link_analysis
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.series import link_analysis
 from test_book_voice_workflow import BookFixture
 from test_renderer_voice_design_integration import FFMPEG
 from test_series import fixture, propose

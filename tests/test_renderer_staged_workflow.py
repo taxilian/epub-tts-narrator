@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.assembly import probe_audio
-from audiobook_renderer.bundle import load_bundle, make_plan
-from audiobook_renderer.common import digest, file_hash, read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.workflow import RenderBlocked, assemble, render
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.assembly import probe_audio
+from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
+from epub_tts_narrator.cli import export_bundle
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 from audition_fixtures import prepare_bundle
@@ -64,7 +64,7 @@ class StagedWorkflowTests(unittest.TestCase):
         for chapter in result["chapters"]:
             self.assertTrue(Path(chapter["audio_file"]).is_file())
         count = len(self.engine.speech_calls), len(self.verifier.calls)
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
             final = self.package()
         self.assertEqual(count, (len(self.engine.speech_calls), len(self.verifier.calls)))
         self.assertEqual(final["status"], "complete")
@@ -91,7 +91,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.config["render"]["chapter_numbers"] = [1]
         self.chapters()
         self.config["render"]["chapter_numbers"] = []
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No generation")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No generation")):
             result = self.chapters()
         self.assertEqual(result["chapters"][1]["audio_file"], second_path)
         final = self.package()
@@ -110,7 +110,7 @@ class StagedWorkflowTests(unittest.TestCase):
     def test_assembly_can_make_mp3_chapters_from_saved_pcm_without_models(self):
         chapters = self.chapters()
         self.config["render"]["chapter_format"] = "mp3"
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
             final = self.package()
         self.assertEqual(final["audio"]["chapter_format"], "mp3")
         for chapter in chapters["chapters"]:
@@ -155,7 +155,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertFalse((self.root / "work" / ".render.lock").exists())
 
     def test_failed_final_encoding_preserves_all_completed_chapters_for_assembly(self):
-        with patch("audiobook_renderer.workflow.package_audio", side_effect=ValueError("encoding failed")):
+        with patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=ValueError("encoding failed")):
             with self.assertRaisesRegex(ValueError, "encoding failed"):
                 render(self.bundle, self.config, self.engine, self.verifier, notify=self.messages.append)
         self.assertTrue(self.checkpoint(1).is_file())
@@ -196,8 +196,8 @@ class StagedWorkflowTests(unittest.TestCase):
         self.config["quality"]["min_duration_seconds"] = 2.0
         self.config["verification"]["language"] = "fr"
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts, version=2)
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")), \
-             patch("audiobook_renderer.workflow.prepare_chapter", side_effect=AssertionError("No reencoding")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("No reencoding")):
             resumed = self.chapters()
             final = self.package()
         self.assertEqual(original["chapters"], resumed["chapters"])
@@ -215,7 +215,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.config["quality"]["max_wer"] = 0.05
         self.chapters()
         self.config["render"]["chapter_numbers"] = []
-        with patch("audiobook_renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
             self.assertEqual(self.package()["status"], "complete")
 
     def test_deleting_one_accepted_clip_regenerates_only_it_in_completed_chapter(self):
@@ -289,7 +289,7 @@ class StagedWorkflowTests(unittest.TestCase):
 
     def test_failed_publication_leaves_no_partial_book_and_can_resume(self):
         self.chapters()
-        with patch("audiobook_renderer.workflow.os.rename", side_effect=OSError("publication interrupted")):
+        with patch("epub_tts_narrator.renderer.workflow.os.rename", side_effect=OSError("publication interrupted")):
             with self.assertRaisesRegex(OSError, "publication interrupted"):
                 self.package()
         self.assertFalse((self.root / "output").exists())

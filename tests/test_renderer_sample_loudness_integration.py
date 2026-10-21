@@ -7,11 +7,11 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.audition import AudioPlayer, _prepare_playback_samples, run_casting
-from audiobook_renderer.cli import main
-from audiobook_renderer.config import load_config
-from audiobook_renderer.voices import VoiceStore
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.audition import AudioPlayer, _prepare_playback_samples, run_casting
+from epub_tts_narrator.renderer.cli import main
+from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.cli import export_bundle
 from test_contracts import valid_document
 from test_renderer_audition import PlayerDouble, SessionDouble, SharedSessionDouble
 
@@ -33,8 +33,8 @@ class SamplePlaybackIntegrationTests(unittest.TestCase):
         process.poll.return_value = 0
         process.returncode = 0
         player = AudioPlayer(["afplay"], normalizer=normalizer)
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.subprocess.Popen", return_value=process) as popen:
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", return_value=process) as popen:
             player.start(self.sample)
             player.stop()
         normalizer.prepare.assert_called_once_with(self.sample)
@@ -45,7 +45,7 @@ class SamplePlaybackIntegrationTests(unittest.TestCase):
         normalizer = Mock()
         normalizer.prepare.side_effect = ValueError("silent sample")
         player = AudioPlayer(["afplay"], normalizer=normalizer)
-        with patch("audiobook_renderer.audition.subprocess.Popen") as popen:
+        with patch("epub_tts_narrator.renderer.audition.subprocess.Popen") as popen:
             with self.assertRaisesRegex(ValueError, "silent sample"):
                 player.start(self.sample)
         popen.assert_not_called()
@@ -132,10 +132,10 @@ class SampleNormalizationCommandTests(unittest.TestCase):
     def test_batch_prepares_existing_candidates_without_models_playback_or_asset_changes(self):
         store, candidates = self.saved_candidates()
         before = self.snapshot(store.directory)
-        with patch("audiobook_renderer.loudness.SampleNormalizer") as normalizer, \
-                patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier, \
-                patch("audiobook_renderer.audition.subprocess.Popen") as popen:
+        with patch("epub_tts_narrator.renderer.loudness.SampleNormalizer") as normalizer, \
+                patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier, \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen") as popen:
             code, output, error = self.run_cli("--action", "normalize-samples")
         self.assertEqual(code, 0, error)
         normalizer.assert_called_once_with(
@@ -153,7 +153,7 @@ class SampleNormalizationCommandTests(unittest.TestCase):
     def test_batch_reports_failure_after_trying_remaining_candidates(self):
         store, _ = self.saved_candidates()
         before = self.snapshot(store.directory)
-        with patch("audiobook_renderer.loudness.SampleNormalizer") as normalizer:
+        with patch("epub_tts_narrator.renderer.loudness.SampleNormalizer") as normalizer:
             normalizer.return_value.prepare.side_effect = [ValueError("cannot measure loudness"), Path("ready.wav")]
             code, output, error = self.run_cli("--action", "normalize-samples")
         self.assertEqual(code, 2)
@@ -168,8 +168,8 @@ class SampleNormalizationCommandTests(unittest.TestCase):
             '[casting]\nsample_loudness_lufs=-24.0\nsample_true_peak_db=-3.0\n'
             '[render]\nffmpeg="custom-ffmpeg"\n'))
         work = self.root / "custom-work"
-        with patch("audiobook_renderer.loudness.SampleNormalizer") as normalizer, \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.loudness.SampleNormalizer") as normalizer, \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, _, error = self.run_cli("--action", "play", "--voice-id", "v1", "--work-dir", str(work))
         self.assertEqual(code, 0, error)
         normalizer.assert_called_once_with(work / "voice-previews", target_lufs=-24.0,
@@ -179,8 +179,8 @@ class SampleNormalizationCommandTests(unittest.TestCase):
     def test_disabled_normalization_uses_raw_playback_and_rejects_batch(self):
         self.saved_candidates()
         self.config_path.write_text(self.base_config + '[casting]\nnormalize_samples=false\n')
-        with patch("audiobook_renderer.loudness.SampleNormalizer") as normalizer, \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.loudness.SampleNormalizer") as normalizer, \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, _, error = self.run_cli("--action", "play", "--voice-id", "v1")
         self.assertEqual(code, 0, error)
         normalizer.assert_not_called()
@@ -192,7 +192,7 @@ class SampleNormalizationCommandTests(unittest.TestCase):
     def test_batch_rejects_per_voice_and_generation_flags_before_session_creation(self):
         for args in (("--voice-id", "v1"), ("--candidate-id", "a" * 32),
                      ("--prompt-file", "missing.txt"), ("--text-file", "missing.txt")):
-            with self.subTest(args=args), patch("audiobook_renderer.casting.CastingSession") as session:
+            with self.subTest(args=args), patch("epub_tts_narrator.renderer.casting.CastingSession") as session:
                 code, _, error = self.run_cli("--action", "normalize-samples", *args)
                 self.assertEqual(code, 2)
                 self.assertIn(args[0], error)

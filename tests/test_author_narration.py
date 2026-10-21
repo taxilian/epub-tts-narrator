@@ -5,10 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.narration_identity import author_narrator_name
-from epub_audiobook.pipeline import fingerprint
-from epub_audiobook.series import link_analysis, load_registry, save_registry, series_context
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.narration_identity import author_narrator_name
+from epub_tts_narrator.pipeline import fingerprint
+from epub_tts_narrator.series import link_analysis, load_registry, save_registry, series_context
 from test_series import fixture
 
 

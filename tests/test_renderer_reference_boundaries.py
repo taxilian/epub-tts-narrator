@@ -1,9 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer import quality
-from audiobook_renderer.common import digest
-from audiobook_renderer.quality import compare_reference_words, compare_words, validation_key
+from epub_tts_narrator.renderer import quality
+from epub_tts_narrator.renderer.common import digest
+from epub_tts_narrator.renderer.quality import compare_reference_words, compare_words, validation_key
 import test_renderer_reference_consensus as consensus
 
 

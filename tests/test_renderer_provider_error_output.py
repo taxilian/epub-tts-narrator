@@ -8,13 +8,13 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import quote, quote_plus
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import read_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.diagnostics import configured_secrets, safe_error_text
-from audiobook_renderer.gemini_voice_design import GeminiVoiceError
-from audiobook_renderer.workflow import RenderBlocked, _verification_failure_detail, verified_take
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import read_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
+from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceError
+from epub_tts_narrator.renderer.workflow import RenderBlocked, _verification_failure_detail, verified_take
 from audition_fixtures import prepare_bundle
 
 
@@ -69,7 +69,7 @@ class ProviderErrorOutputTests(unittest.TestCase):
                 "max_attempts": 1, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
             }}
             generate = Mock(side_effect=GeminiVoiceError(diagnostic))
-            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"):
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"):
                 with self.assertRaises(RenderBlocked) as stopped:
                     verified_take("Sample text.", generate, temp, {"fixture": True},
                                   object(), config, notify=messages.append, purpose="reference")
@@ -90,7 +90,7 @@ class ProviderErrorOutputTests(unittest.TestCase):
                 "max_attempts": 1, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
             }}
             generate = Mock(side_effect=RuntimeError(diagnostic))
-            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"):
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"):
                 with self.assertRaises(RenderBlocked) as stopped:
                     verified_take("Sample text.", generate, temp, {"fixture": True},
                                   object(), config, notify=messages.append)
@@ -130,7 +130,7 @@ class ProviderErrorOutputTests(unittest.TestCase):
                                      notify=messages.append)
             self.addCleanup(session.close)
             voice_id = bundle["cast"]["voices"][0]["id"]
-            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"):
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"):
                 with self.assertRaises(RenderBlocked):
                     session.regenerate(voice_id)
             self.assertIn(diagnostic, "\n".join(messages))

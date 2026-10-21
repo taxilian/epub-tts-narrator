@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.cli import export_bundle, script_partitions
+from epub_tts_narrator.cli import export_bundle, script_partitions
 from test_contracts import valid_document
 
 

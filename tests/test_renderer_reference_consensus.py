@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import wave
 
-from audiobook_renderer.quality import validate_audio, validation_key
+from epub_tts_narrator.renderer.quality import validate_audio, validation_key
 
 
 EXPECTED = (

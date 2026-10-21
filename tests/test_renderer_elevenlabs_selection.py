@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.cli import main, parser
-from audiobook_renderer.config import DEFAULTS, load_config, resolve_voice_design, select_voice_designer
-from audiobook_renderer.engines import EngineError
-from audiobook_renderer.voice_design import create_designer
-from epub_audiobook.config import load_config as load_analyzer_config
+from epub_tts_narrator.renderer.cli import main, parser
+from epub_tts_narrator.renderer.config import DEFAULTS, load_config, resolve_voice_design, select_voice_designer
+from epub_tts_narrator.renderer.engines import EngineError
+from epub_tts_narrator.renderer.voice_design import create_designer
+from epub_tts_narrator.config import load_config as load_analyzer_config
 
 
 SECRET = "fixture-elevenlabs-key-do-not-echo"
@@ -102,9 +102,9 @@ class ElevenLabsSelectionTests(unittest.TestCase):
         self.write_provider()
         original = self.path.read_bytes()
         config = load_config(self.path)
-        with patch("audiobook_renderer.cli.load_bundle", return_value={}), \
-                patch("audiobook_renderer.cli.resolve_book_config", return_value=config), \
-                patch("audiobook_renderer.audition.casting_command", return_value=0) as casting:
+        with patch("epub_tts_narrator.renderer.cli.load_bundle", return_value={}), \
+                patch("epub_tts_narrator.renderer.cli.resolve_book_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.audition.casting_command", return_value=0) as casting:
             status = main(["cast", "fixture-book", "--config", str(self.path),
                            "--voice-designer", "elevenlabs"])
         self.assertEqual(status, 0)
@@ -114,9 +114,9 @@ class ElevenLabsSelectionTests(unittest.TestCase):
     def test_cli_missing_key_stops_before_any_casting_action(self):
         config = load_config(self.path)
         stderr = io.StringIO()
-        with patch("audiobook_renderer.cli.load_bundle", return_value={}), \
-                patch("audiobook_renderer.cli.resolve_book_config", return_value=config), \
-                patch("audiobook_renderer.audition.casting_command") as casting, \
+        with patch("epub_tts_narrator.renderer.cli.load_bundle", return_value={}), \
+                patch("epub_tts_narrator.renderer.cli.resolve_book_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.audition.casting_command") as casting, \
                 contextlib.redirect_stderr(stderr):
             status = main(["cast", "fixture-book", "--config", str(self.path),
                            "--voice-designer", "elevenlabs", "--action", "regenerate-all"])
@@ -126,7 +126,7 @@ class ElevenLabsSelectionTests(unittest.TestCase):
 
     def test_factory_passes_only_provider_settings_and_rejects_unknown_fields(self):
         settings = {"type": "elevenlabs", **DEFAULTS["elevenlabs"], "api_key": SECRET}
-        with patch("audiobook_renderer.elevenlabs_voice_design.ElevenLabsVoiceDesigner") as factory:
+        with patch("epub_tts_narrator.renderer.elevenlabs_voice_design.ElevenLabsVoiceDesigner") as factory:
             self.assertIs(create_designer(settings), factory.return_value)
         factory.assert_called_once_with(**{key: value for key, value in settings.items() if key != "type"})
         with self.assertRaisesRegex(EngineError, "Unknown ElevenLabs"):

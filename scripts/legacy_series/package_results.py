@@ -17,9 +17,9 @@ import zipfile
 
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT))
-from epub_audiobook.contracts import readiness
-from epub_audiobook.pipeline import fingerprint
-from epub_audiobook.series import validate_registry
+from epub_tts_narrator.contracts import readiness
+from epub_tts_narrator.pipeline import fingerprint
+from epub_tts_narrator.series import validate_registry
 from audit_continuity import audit_book
 from report_series import summarize
 from bundle_validation import (bundle_names, load_bundle, no_credentials, parse_json,

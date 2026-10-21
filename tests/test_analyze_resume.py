@@ -9,18 +9,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.analysis_directory import (
+from epub_tts_narrator.analysis_directory import (
     _completed_directory, continuation_directories, continuation_registry,
     fresh_registry, publish_directory,
 )
-from epub_audiobook.audition_scripts import prepare_document_samples
-from epub_audiobook.analysis_revision import related_directories
-from epub_audiobook.cli import export_bundle, main, source_from
-from epub_audiobook.jev import JevError
-from epub_audiobook.pipeline import CachedRequests, analyze, fingerprint, write_json
-from epub_audiobook.provider import ProviderError
-from epub_audiobook.series import link_analysis
-from epub_audiobook.speaker_completion import complete_speakers, unassigned_segments
+from epub_tts_narrator.audition_scripts import prepare_document_samples
+from epub_tts_narrator.analysis_revision import related_directories
+from epub_tts_narrator.cli import export_bundle, main, source_from
+from epub_tts_narrator.jev import JevError
+from epub_tts_narrator.pipeline import CachedRequests, analyze, fingerprint, write_json
+from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.series import link_analysis
+from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 import test_directory_cli as directory_fixtures
 from test_pipeline import FakeClient
 
@@ -135,8 +135,8 @@ class AnalyzeResumeTests(unittest.TestCase):
         output, error = StringIO(), StringIO()
         with (patch("sys.stdin", Terminal(answers)), contextlib.redirect_stdout(output),
               contextlib.redirect_stderr(error),
-              patch("epub_audiobook.cli.analyze", side_effect=AssertionError("Must reuse saved analysis")),
-              patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=client or CompletionClient()) as provider):
+              patch("epub_tts_narrator.cli.analyze", side_effect=AssertionError("Must reuse saved analysis")),
+              patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client or CompletionClient()) as provider):
             status = main([command, *map(str, args), "--config", str(self.config)])
         return status, output.getvalue(), error.getvalue(), provider
 
@@ -154,7 +154,7 @@ class AnalyzeResumeTests(unittest.TestCase):
             with self.subTest(command=command):
                 _, path, original = self.seed(number)
                 judge = SpeakerJudge()
-                with patch("epub_audiobook.cli.JevClient", return_value=judge) as factory:
+                with patch("epub_tts_narrator.cli.JevClient", return_value=judge) as factory:
                     status, _, error, _ = self.run_cli(
                         path, answers="\n", client=CompletionClient(uncertain=True), command=command)
                 self.assertEqual(status, 0, error)
@@ -177,7 +177,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         for number, command in enumerate(("analyze", "resolve-speakers"), 1):
             with self.subTest(command=command):
                 _, path, _ = self.seed(number)
-                with patch("epub_audiobook.cli.JevClient") as factory:
+                with patch("epub_tts_narrator.cli.JevClient") as factory:
                     status, _, error, _ = self.run_cli(
                         path, answers="o\n2\n", client=CompletionClient(uncertain=True), command=command)
                 self.assertEqual(status, 0, error)
@@ -191,7 +191,7 @@ class AnalyzeResumeTests(unittest.TestCase):
                 _, path, _ = self.seed(number, missing=False)
                 before = self.snapshot(path)
                 judge = SpeakerJudge()
-                with patch("epub_audiobook.cli.JevClient", return_value=judge):
+                with patch("epub_tts_narrator.cli.JevClient", return_value=judge):
                     status, _, error, provider = self.run_cli(path, command=command)
                 self.assertEqual(status, 0, error)
                 provider.assert_not_called()
@@ -204,7 +204,7 @@ class AnalyzeResumeTests(unittest.TestCase):
             with self.subTest(command=command):
                 _, path, original = self.seed(number)
                 judge = SpeakerJudge(fail=True)
-                with patch("epub_audiobook.cli.JevClient", return_value=judge):
+                with patch("epub_tts_narrator.cli.JevClient", return_value=judge):
                     status, _, error, _ = self.run_cli(
                         path, answers="o\n2\n", client=CompletionClient(uncertain=True), command=command)
                 self.assertEqual(status, 0, error)
@@ -298,7 +298,7 @@ class AnalyzeResumeTests(unittest.TestCase):
 
     def test_existing_prepared_auditions_refresh_locally_after_human_selection(self):
         _, path, _ = self.seed(prepared=True)
-        with patch("epub_audiobook.audition_scripts.prepare_document_samples", wraps=prepare_document_samples) as prepare:
+        with patch("epub_tts_narrator.audition_scripts.prepare_document_samples", wraps=prepare_document_samples) as prepare:
             status, _, error, _ = self.run_cli(path, answers="o\n2\n", client=CompletionClient(uncertain=True))
         self.assertEqual(status, 0, error)
         prepare.assert_called_once()
@@ -494,7 +494,7 @@ class AnalyzeResumeTests(unittest.TestCase):
             manifest["concurrent_revision"] = "preserve this newer manifest"
             write_json(manifest_path, manifest, overwrite=True)
             return result
-        with patch("epub_audiobook.analysis_revision.related_directories", side_effect=concurrent_change):
+        with patch("epub_tts_narrator.analysis_revision.related_directories", side_effect=concurrent_change):
             status, _, error, provider = self.run_cli(path)
         self.assertEqual(status, 1)
         self.assertIn("Analysis changed while loading", error)

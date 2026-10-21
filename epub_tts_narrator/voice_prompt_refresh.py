@@ -43,7 +43,7 @@ metadata and is never sent as voice-creation direction.
 
 def validate_description(value):
     """Enforce the output shape and actual voice-designer prompt size limit."""
-    from audiobook_renderer.voice_prompts import audiobook_voice_prompt
+    from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
     if not isinstance(value, dict) or set(value) != {"description", "reason"}:
         raise ValueError("Voice prompt refresh requires exactly description and reason")
     description, reason = value["description"], value["reason"]

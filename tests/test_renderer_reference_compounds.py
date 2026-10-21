@@ -1,6 +1,6 @@
 import unittest
 
-from audiobook_renderer.quality import compare_reference_words, compare_words
+from epub_tts_narrator.renderer.quality import compare_reference_words, compare_words
 import test_renderer_reference_consensus as consensus
 
 

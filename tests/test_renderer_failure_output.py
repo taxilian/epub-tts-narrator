@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.quality import compare_words
-from audiobook_renderer.workflow import (
+from epub_tts_narrator.renderer.quality import compare_words
+from epub_tts_narrator.renderer.workflow import (
     RenderBlocked, _diagnostic_text, _verification_failure_detail, verified_take,
 )
 
@@ -82,9 +82,9 @@ class FailureOutputTests(unittest.TestCase):
             config = {"quality": {}, "render": {
                 "max_attempts": 1, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
             }}
-            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"), \
-                    patch("audiobook_renderer.workflow.validate_audio", return_value=report), \
-                    patch("audiobook_renderer.workflow.normalize_clip", side_effect=normalize):
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"), \
+                    patch("epub_tts_narrator.renderer.workflow.validate_audio", return_value=report), \
+                    patch("epub_tts_narrator.renderer.workflow.normalize_clip", side_effect=normalize):
                 with self.assertRaises(RenderBlocked):
                     verified_take("My pack mate.", generate, temp, {"test": True},
                                   object(), config, notify=messages.append)
@@ -122,9 +122,9 @@ class FailureOutputTests(unittest.TestCase):
             config = {"quality": {}, "render": {
                 "max_attempts": 3, "seed": 42, "sample_rate": 44100, "ffmpeg": "unused",
             }}
-            with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"), \
-                    patch("audiobook_renderer.workflow.normalize_clip", side_effect=normalize), \
-                    patch("audiobook_renderer.workflow.validate_audio", side_effect=[unavailable, passed]) as validate:
+            with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"), \
+                    patch("epub_tts_narrator.renderer.workflow.normalize_clip", side_effect=normalize), \
+                    patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=[unavailable, passed]) as validate:
                 with self.assertRaisesRegex(RenderBlocked, "rerun the same command"):
                     verified_take("A reference.", generate, temp, {"test": True}, object(),
                                   config, purpose="reference")
@@ -138,7 +138,7 @@ class FailureOutputTests(unittest.TestCase):
             self.assertTrue(record["report"]["passed"])
 
     def test_generation_errors_are_visible_for_gemini_and_local_engines(self):
-        from audiobook_renderer.gemini_voice_design import GeminiVoiceError
+        from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceError
         safe = "Gemini API request failed (HTTP 403). Check Gemini API access and project permissions."
         for error in (GeminiVoiceError(safe), RuntimeError("Local model could not allocate memory")):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temp:
@@ -148,7 +148,7 @@ class FailureOutputTests(unittest.TestCase):
                 }}
                 def generate(path, seed):
                     raise error
-                with patch("audiobook_renderer.workflow.make_validation_key", return_value="fixture"):
+                with patch("epub_tts_narrator.renderer.workflow.make_validation_key", return_value="fixture"):
                     with self.assertRaises(RenderBlocked):
                         verified_take("Sample text.", generate, temp, {"test": True},
                                       object(), config, notify=messages.append)

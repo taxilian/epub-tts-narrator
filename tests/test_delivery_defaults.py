@@ -6,9 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.attribution_review import audit_attribution
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import (
+from epub_tts_narrator.attribution_review import audit_attribution
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import (
     CachedRequests, align_attribution_response, align_units, base_document,
 )
 from test_attribution_review import Requests, fixture as review_fixture

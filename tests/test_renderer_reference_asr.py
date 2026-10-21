@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.reference_asr import MlxParakeetVerifier
+from epub_tts_narrator.renderer.reference_asr import MlxParakeetVerifier
 
 
 class RendererReferenceAsrTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class RendererReferenceAsrTests(unittest.TestCase):
         for name in ("tokenizer.model", "tokenizer.vocab", "vocab.txt"):
             (self.model / name).write_text(name)
         with patch.dict(sys.modules, self.modules), patch(
-            "audiobook_renderer.reference_asr.metadata.version", return_value="test-version",
+            "epub_tts_narrator.renderer.reference_asr.metadata.version", return_value="test-version",
         ):
             verifier = MlxParakeetVerifier(self.model)
         self.loader.assert_not_called()
@@ -131,7 +131,7 @@ class RendererReferenceAsrTests(unittest.TestCase):
         self.loader.assert_not_called()
 
     def test_missing_optional_packages_are_recorded_without_importing_them(self):
-        with patch("audiobook_renderer.reference_asr.metadata.version",
+        with patch("epub_tts_narrator.renderer.reference_asr.metadata.version",
                    side_effect=metadata.PackageNotFoundError):
             verifier = MlxParakeetVerifier(self.model)
         self.assertEqual(verifier.identity["packages"], {

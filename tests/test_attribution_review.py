@@ -8,12 +8,12 @@ import tempfile
 import time
 import unittest
 
-from epub_audiobook.attribution_review import (
+from epub_tts_narrator.attribution_review import (
     LENSES, _accept_scan, _batches, audit_attribution, count_review_batches,
 )
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.performance import apply_bracket_delivery
-from epub_audiobook.pipeline import CachedRequests, fingerprint, segment
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.performance import apply_bracket_delivery
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, segment
 from test_contracts import valid_document
 
 

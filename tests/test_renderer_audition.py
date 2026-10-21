@@ -10,12 +10,12 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.audition import AudioPlayer, run_casting
-from audiobook_renderer.cli import main
-from audiobook_renderer.config import load_config
-from audiobook_renderer.diagnostics import safe_error_text
-from audiobook_renderer.voices import VoiceStore
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.audition import AudioPlayer, run_casting
+from epub_tts_narrator.renderer.cli import main
+from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.renderer.diagnostics import safe_error_text
+from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.cli import export_bundle
 from test_contracts import valid_document
 from audition_fixtures import prepare_document
 
@@ -463,7 +463,7 @@ class CastingTerminalTests(unittest.TestCase):
                     playback_fn=self.playback)
 
     def test_external_verification_outage_stops_preparing_more_voices_but_keeps_menu(self):
-        from audiobook_renderer.workflow import VerificationUnavailable
+        from epub_tts_narrator.renderer.workflow import VerificationUnavailable
         self.session.generation_error = VerificationUnavailable("JEV confirmation unavailable; saved audio retained.")
         self.run_ui("q")
         self.assertEqual([event for event in self.session.events if event[0] == "generate"],
@@ -599,8 +599,8 @@ class CastingCLITests(unittest.TestCase):
             lock.rmdir()
 
     def test_list_never_initializes_tts_or_verifier_and_creates_no_store(self):
-        with patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier:
             code, output, error = self.run_cli("--action", "list")
         self.assertEqual(code, 0, error)
         self.assertEqual({row["voice_id"] for row in json.loads(output)}, {"vn", "v1"})
@@ -610,9 +610,9 @@ class CastingCLITests(unittest.TestCase):
 
     def test_play_existing_asset_never_initializes_models(self):
         saved = self.publish_fixture()
-        with patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier, \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier, \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, output, error = self.run_cli("--action", "play", "--voice-id", "v1")
         self.assertEqual(code, 0, error)
         engine.assert_not_called()
@@ -627,7 +627,7 @@ class CastingCLITests(unittest.TestCase):
         session.ensure_ready("v1")
         session.events.clear()
         session.close = Mock()
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session):
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session):
             code, output, error = self.run_cli("--action", "generate", "--voice-id", "v1")
         self.assertEqual(code, 0, error)
         self.assertEqual(session.row("v1")["selected"]["candidate_id"], "v1-take-2")
@@ -641,7 +641,7 @@ class CastingCLITests(unittest.TestCase):
         session.generate("v1")
         session.events.clear()
         session.close = Mock()
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session):
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session):
             code, output, error = self.run_cli("--action", "generate-missing")
         self.assertEqual(code, 0, error)
         self.assertTrue(all(row["selected"] is not None for row in session.data))
@@ -654,8 +654,8 @@ class CastingCLITests(unittest.TestCase):
         session = SharedSessionDouble()
         originals = {voice_id: deepcopy(session.row(voice_id)["selected"])
                      for voice_id in ("v1", "v2")}
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, output, error = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 0, error)
         self.assertEqual([event for event in session.events if event[0] == "regenerate"],
@@ -711,7 +711,7 @@ class CastingCLITests(unittest.TestCase):
             return regenerate(voice_id)
 
         session.regenerate = check_warning_then_regenerate
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
                 patch("builtins.input") as user_input, \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = main(["cast", str(self.bundle), "--config", str(self.config_path),
@@ -723,7 +723,7 @@ class CastingCLITests(unittest.TestCase):
     def test_regenerate_all_warns_about_series_scope_without_local_aliases(self):
         session = SessionDouble()
         session.close = Mock()
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session):
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session):
             code, output, error = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 0, error)
         self.assertIn("WARNING: regenerate-all", error)
@@ -738,8 +738,8 @@ class CastingCLITests(unittest.TestCase):
         session = SharedSessionDouble()
         original = deepcopy(session.row("v1"))
         session.generation_error = RuntimeError("Transcript mismatch.\x1b[2J")
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, output, error = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 2)
         self.assertIn("1 voices failed regeneration", error)
@@ -764,8 +764,8 @@ class CastingCLITests(unittest.TestCase):
         session.generation_error = RuntimeError("Replacement was rejected")
         with self.assertRaises(RuntimeError):
             session.regenerate("v1")
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, _, error = self.run_cli("--action", "play", "--voice-id", "vn")
         self.assertEqual(code, 2)
         self.assertIn("regenerat", error.lower())
@@ -775,8 +775,8 @@ class CastingCLITests(unittest.TestCase):
     def test_regenerate_all_interrupt_stops_batch_and_closes_resources(self):
         session = SharedSessionDouble()
         session.generation_error = KeyboardInterrupt()
-        with patch("audiobook_renderer.casting.CastingSession", return_value=session), \
-                patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, _, _ = self.run_cli("--action", "regenerate-all")
         self.assertEqual(code, 130)
         for row in session.rows():
@@ -802,8 +802,8 @@ class CastingCLITests(unittest.TestCase):
             (["--action", "regenerate-all", "--prompt-file", "missing.txt"], "--prompt-file"),
         ]
         for args, message in cases:
-            with self.subTest(args=args), patch("audiobook_renderer.casting.CastingSession") as session, \
-                    patch("epub_audiobook.audition_scripts.ensure_bundle_scripts",
+            with self.subTest(args=args), patch("epub_tts_narrator.renderer.casting.CastingSession") as session, \
+                    patch("epub_tts_narrator.audition_scripts.ensure_bundle_scripts",
                           side_effect=AssertionError("Invalid arguments must not prepare audition scripts")):
                 code, _, error = self.run_cli(*args)
                 self.assertEqual(code, 2)
@@ -811,8 +811,8 @@ class CastingCLITests(unittest.TestCase):
                 session.assert_not_called()
 
     def test_unknown_voice_fails_without_loading_models(self):
-        with patch("audiobook_renderer.engines.create_engine") as engine, \
-                patch("audiobook_renderer.verification.create_verifier") as verifier:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
+                patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier:
             code, _, error = self.run_cli("--action", "play", "--voice-id", "unknown")
         self.assertEqual(code, 2)
         self.assertIn("Voice ID is not in the bundle cast", error)
@@ -821,7 +821,7 @@ class CastingCLITests(unittest.TestCase):
 
     def test_unknown_candidate_is_not_played(self):
         self.publish_fixture()
-        with patch("audiobook_renderer.audition.AudioPlayer") as player:
+        with patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player:
             code, _, error = self.run_cli(
                 "--action", "play", "--voice-id", "v1", "--candidate-id", "f" * 32,
             )
@@ -845,9 +845,9 @@ class CastingCLITests(unittest.TestCase):
         self.assertEqual(config["casting"]["player"], ["custom-player", "--quiet"])
 
     def test_cli_interrupt_closes_session_and_player(self):
-        with patch("audiobook_renderer.casting.CastingSession") as session, \
-                patch("audiobook_renderer.audition.AudioPlayer") as player, \
-                patch("audiobook_renderer.audition.run_casting", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.renderer.casting.CastingSession") as session, \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer") as player, \
+                patch("epub_tts_narrator.renderer.audition.run_casting", side_effect=KeyboardInterrupt):
             session.return_value.rows.return_value = []
             code, _, _ = self.run_cli()
         self.assertEqual(code, 130)
@@ -872,8 +872,8 @@ class AudioPlayerTests(unittest.TestCase):
     def test_playback_passes_literal_argv_and_never_uses_a_shell(self):
         process = self.process()
         player = AudioPlayer(["afplay", "--rate", "1"])
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.subprocess.Popen", return_value=process) as popen:
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", return_value=process) as popen:
             player.start(self.sample)
         args, kwargs = popen.call_args
         self.assertEqual(args[0], ["/usr/bin/afplay", "--rate", "1", str(self.sample.resolve())])
@@ -895,8 +895,8 @@ class AudioPlayerTests(unittest.TestCase):
             events.append("start")
             return first if len(events) == 1 else second
 
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.subprocess.Popen", side_effect=launch):
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", side_effect=launch):
             player.start(self.sample)
             player.start(self.sample)
         self.assertEqual(events, ["start", "stop-first", "start"])
@@ -908,8 +908,8 @@ class AudioPlayerTests(unittest.TestCase):
         process = self.process()
         process.wait.side_effect = [subprocess.TimeoutExpired("afplay", 2), 0]
         player = AudioPlayer(["afplay"])
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.subprocess.Popen", return_value=process):
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", return_value=process):
             player.start(self.sample)
         errors = player.errors
         player.stop()
@@ -923,8 +923,8 @@ class AudioPlayerTests(unittest.TestCase):
 
     def test_missing_player_fails_with_configuration_help(self):
         player = AudioPlayer(["missing-player"])
-        with patch("audiobook_renderer.audition.shutil.which", return_value=None), \
-                patch("audiobook_renderer.audition.subprocess.Popen") as popen:
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value=None), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen") as popen:
             with self.assertRaisesRegex(ValueError, "casting.player"):
                 player.start(self.sample)
         popen.assert_not_called()
@@ -933,9 +933,9 @@ class AudioPlayerTests(unittest.TestCase):
     def test_process_launch_error_closes_error_stream(self):
         errors = io.BytesIO()
         player = AudioPlayer(["afplay"])
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.tempfile.TemporaryFile", return_value=errors), \
-                patch("audiobook_renderer.audition.subprocess.Popen", side_effect=OSError("launch failed")):
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.tempfile.TemporaryFile", return_value=errors), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", side_effect=OSError("launch failed")):
             with self.assertRaisesRegex(OSError, "launch failed"):
                 player.start(self.sample)
         self.assertTrue(errors.closed)
@@ -945,8 +945,8 @@ class AudioPlayerTests(unittest.TestCase):
     def test_playback_failure_reports_sanitized_error_and_releases_process(self):
         process = self.process(status=3)
         player = AudioPlayer(["afplay"])
-        with patch("audiobook_renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
-                patch("audiobook_renderer.audition.subprocess.Popen", return_value=process):
+        with patch("epub_tts_narrator.renderer.audition.shutil.which", return_value="/usr/bin/afplay"), \
+                patch("epub_tts_narrator.renderer.audition.subprocess.Popen", return_value=process):
             player.start(self.sample)
         errors = player.errors
         errors.write(b"bad audio \x1b[2J")

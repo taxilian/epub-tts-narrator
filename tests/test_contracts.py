@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from epub_audiobook.contracts import readiness, review_items, validate_document
+from epub_tts_narrator.contracts import readiness, review_items, validate_document
 
 
 def valid_document():

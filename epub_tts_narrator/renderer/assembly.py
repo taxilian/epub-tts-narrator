@@ -22,7 +22,7 @@ from typing import Sequence
 import wave
 import zipfile
 
-from epub_audiobook.epub import (
+from epub_tts_narrator.epub import (
     MAX_ARCHIVE_BYTES, _Archive, _parse_xml, _resolve_href, _tag,
 )
 from .pacing import audio_edges, punctuation_pause

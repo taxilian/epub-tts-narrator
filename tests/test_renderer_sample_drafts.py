@@ -7,11 +7,11 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession
-from audiobook_renderer.common import digest, read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.voice_prompts import default_voice_prompt
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession
+from epub_tts_narrator.renderer.common import digest, read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.voice_prompts import default_voice_prompt
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -46,7 +46,7 @@ class SampleDraftTests(unittest.TestCase):
             },
         }
         self.selector = self.enterContext(patch(
-            "audiobook_renderer.samples.select_sample", return_value=self.sample))
+            "epub_tts_narrator.renderer.samples.select_sample", return_value=self.sample))
         self.session = self.new_session()
         self.voice_id = self.bundle["cast"]["voices"][0]["id"]
 
@@ -294,7 +294,7 @@ class SampleDraftTests(unittest.TestCase):
         self.assert_no_models()
 
     def test_unprepared_listing_does_not_fall_back_to_generic_generation(self):
-        from audiobook_renderer.samples import MissingSampleScript
+        from epub_tts_narrator.renderer.samples import MissingSampleScript
         self.selector.side_effect = MissingSampleScript(self.voice_id)
         rows = self.session.rows()
         self.assertEqual(rows[0]["reference_text"], "")

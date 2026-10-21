@@ -5,12 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.attribution_review import (
+from epub_tts_narrator.attribution_review import (
     _accept_scan, _assignment_signature, _batches, _compact_segments, audit_attribution,
 )
-from epub_audiobook.contracts import has_assigned_speakers, readiness, review_items, validate_document
-from epub_audiobook.pipeline import align_units, apply_edits, fingerprint, segment
-from epub_audiobook.series import link_analysis, load_registry, save_registry
+from epub_tts_narrator.contracts import has_assigned_speakers, readiness, review_items, validate_document
+from epub_tts_narrator.pipeline import align_units, apply_edits, fingerprint, segment
+from epub_tts_narrator.series import link_analysis, load_registry, save_registry
 from test_contracts import valid_document
 
 

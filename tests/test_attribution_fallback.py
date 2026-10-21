@@ -8,17 +8,17 @@ import tempfile
 from threading import Barrier, Event, Lock, get_ident
 import unittest
 
-from epub_audiobook.attribution_fallback import (
+from epub_tts_narrator.attribution_fallback import (
     MAX_ATTRIBUTION_SPLIT_DEPTH, TRUNCATED_OUTPUT, attribute_with_subdivision,
     record_attribution_truncation,
 )
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import (
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import (
     CachedRequests, DEFAULT_POLICY, align_attribution_response, analyze, base_document,
     fingerprint, make_units, seed_cast,
 )
-from epub_audiobook.prompts import ATTRIBUTE, PROMPT_VERSION
-from epub_audiobook.provider import ProviderError
+from epub_tts_narrator.prompts import ATTRIBUTE, PROMPT_VERSION
+from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from test_pipeline import FakeClient
 from test_simultaneous_attribution import group_correction, simultaneous_fixture

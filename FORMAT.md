@@ -1,6 +1,6 @@
 # Audiobook analysis version 1 and bundle version 2
 
-The executable contract validator is `epub_audiobook/contracts.py`. Validate before consuming a file; a saved `readiness` value is informational and must be recomputed after edits. Fields may gain optional metadata, but incompatible changes require a new integer `version`.
+The executable contract validator is `epub_tts_narrator/contracts.py`. Validate before consuming a file; a saved `readiness` value is informational and must be recomputed after edits. Fields may gain optional metadata, but incompatible changes require a new integer `version`.
 
 ## Analysis document
 

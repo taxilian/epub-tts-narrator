@@ -7,12 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer.config import load_config as load_renderer_config
-from epub_audiobook.cli import main, parser
-from epub_audiobook.config import (
+from epub_tts_narrator.renderer.config import load_config as load_renderer_config
+from epub_tts_narrator.cli import main, parser
+from epub_tts_narrator.config import (
     DEFAULT_FILENAME, LEGACY_FILENAME, load_config, resolve_config_path,
 )
-from epub_audiobook.pipeline import write_json
+from epub_tts_narrator.pipeline import write_json
 from test_contracts import valid_document
 
 
@@ -102,7 +102,7 @@ class ProjectNamingTests(unittest.TestCase):
                 arguments = ["--config", path] if name == "explicit.json" else []
                 for command, input_path in (("extract", source), ("analyze", source),
                                             ("review-attribution", analysis)):
-                    with self.subTest(command=command), patch("epub_audiobook.cli.OpenAICompatibleClient") as client:
+                    with self.subTest(command=command), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as client:
                         status, error = self.run_cli(command, input_path, "-o", path, "--force", *arguments)
                         self.assertEqual(status, 1)
                         # analyze rejects --force for a non-JSON directory target

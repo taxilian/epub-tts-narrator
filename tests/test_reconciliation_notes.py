@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import analyze
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import analyze
 from test_contracts import valid_document
 from test_reconciliation_rounds import CumulativeClient
 
@@ -86,7 +86,7 @@ class ReconciliationNotesTests(unittest.TestCase):
             seen.append((deepcopy(cast), deepcopy(kwargs), len(client.calls)))
             return cast, [], {"cases": []}
 
-        with patch("epub_audiobook.identity.audit_identities", side_effect=identity) as audit:
+        with patch("epub_tts_narrator.identity.audit_identities", side_effect=identity) as audit:
             document = self.run_analysis(client, self.root / "routing", identity_consensus=True,
                                         cast_reconciliation_rounds=3, cast_reconciliation_notes=notes)
         audit.assert_called_once()

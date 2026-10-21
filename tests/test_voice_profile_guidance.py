@@ -9,9 +9,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.identity import audit_identities
-from epub_audiobook.pipeline import analyze, check_cast, make_units, seed_cast
-from epub_audiobook.prompts import VOICE_PROFILE_GUIDANCE, VOICE_PROFILE_RECONCILIATION
+from epub_tts_narrator.identity import audit_identities
+from epub_tts_narrator.pipeline import analyze, check_cast, make_units, seed_cast
+from epub_tts_narrator.prompts import VOICE_PROFILE_GUIDANCE, VOICE_PROFILE_RECONCILIATION
 from test_contracts import valid_document
 from test_identity import Requests, case, fixture, split_patch
 from test_pipeline import FakeClient

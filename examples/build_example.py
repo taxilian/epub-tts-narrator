@@ -7,10 +7,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from epub_audiobook.cli import export_bundle
-from epub_audiobook.contracts import readiness
-from epub_audiobook.epub import extract_epub
-from epub_audiobook.pipeline import apply_edits, base_document, fingerprint, segment, write_json
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.contracts import readiness
+from epub_tts_narrator.epub import extract_epub
+from epub_tts_narrator.pipeline import apply_edits, base_document, fingerprint, segment, write_json
 
 
 def build(output):

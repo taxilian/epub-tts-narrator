@@ -11,14 +11,14 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from audiobook_renderer.bundle import load_bundle
-from audiobook_renderer.casting import CastingSession, MAX_PROMPT_CHARACTERS
-from audiobook_renderer.common import read_json, write_json
-from audiobook_renderer.config import DEFAULTS
-from audiobook_renderer.quality import validate_policy
-from audiobook_renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
-from audiobook_renderer.workflow import RenderBlocked, ensure_voice, render
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer.casting import CastingSession, MAX_PROMPT_CHARACTERS
+from epub_tts_narrator.renderer.common import read_json, write_json
+from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
+from epub_tts_narrator.renderer.workflow import RenderBlocked, ensure_voice, render
+from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
 
 

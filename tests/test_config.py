@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.config import load_config
-from epub_audiobook.jev import DEFAULTS as JEV_DEFAULTS
-from epub_audiobook.pipeline import DEFAULT_POLICY
+from epub_tts_narrator.config import load_config
+from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS
+from epub_tts_narrator.pipeline import DEFAULT_POLICY
 
 
 class ConfigTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class ConfigTests(unittest.TestCase):
         return load_config(self.path)
 
     def test_missing_default_file_returns_all_defaults(self):
-        with patch("epub_audiobook.config.Path.cwd", return_value=self.root):
+        with patch("epub_tts_narrator.config.Path.cwd", return_value=self.root):
             configuration = load_config()
         self.assertEqual(configuration, {
             "provider": {"model": None, "base_url": "https://api.openai.com/v1", "api_key": None,
@@ -45,7 +45,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_default_file_is_loaded_from_current_directory(self):
         (self.root / "epub-audiobook.toml").write_text('[provider]\nmodel = "local-model"\n')
-        with patch("epub_audiobook.config.Path.cwd", return_value=self.root):
+        with patch("epub_tts_narrator.config.Path.cwd", return_value=self.root):
             configuration = load_config()
         self.assertEqual(configuration["provider"]["model"], "local-model")
 
@@ -178,7 +178,7 @@ headings_and_nonstory_text = "The narrator reads headings."
                        "OPENAI_BASE_URL": "https://environment.invalid/v1", "EPUB_AUDIOBOOK_MODEL": "also-wrong",
                        "EPUB_AUDIOBOOK_CONFIG": str(self.root / "other.toml"),
                        "EPUB_AUDIOBOOK_CACHE_DIR": "/environment-cache"}
-        with patch.dict(os.environ, environment, clear=True), patch("epub_audiobook.config.Path.cwd", return_value=self.root):
+        with patch.dict(os.environ, environment, clear=True), patch("epub_tts_narrator.config.Path.cwd", return_value=self.root):
             defaults = load_config()
             configured = self.load_text('[provider]\nmodel = "file-model"\napi_key = "file-secret"\n')
         self.assertIsNone(defaults["provider"]["model"])

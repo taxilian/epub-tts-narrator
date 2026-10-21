@@ -5,8 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_audiobook.pipeline import CachedRequests, check_cast, check_evidence, merge_patch
-from epub_audiobook.series import validate_series_proposals
+from epub_tts_narrator.pipeline import CachedRequests, check_cast, check_evidence, merge_patch
+from epub_tts_narrator.series import validate_series_proposals
 from test_contracts import valid_document
 from test_series_identity_scan import fixture
 

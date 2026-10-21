@@ -8,9 +8,9 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer import assembly, chapter_cache
-from audiobook_renderer.chapter_cache import load_chapter, prepare_chapter
-from audiobook_renderer.common import digest, file_hash, read_json, write_json
+from epub_tts_narrator.renderer import assembly, chapter_cache
+from epub_tts_narrator.renderer.chapter_cache import load_chapter, prepare_chapter
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from test_renderer_assembly import clip, make_wav
 from test_renderer_loudness import signal
 

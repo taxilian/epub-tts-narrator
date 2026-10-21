@@ -9,8 +9,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from epub_audiobook.contracts import readiness, review_items
-from epub_audiobook.pipeline import fingerprint
+from epub_tts_narrator.contracts import readiness, review_items
+from epub_tts_narrator.pipeline import fingerprint
 
 FIXED_FILES = ("source.json", "cast.json", "review.json")
 CREDENTIAL_KEYS = {"apikey", "authorization", "password", "accesstoken", "refreshtoken",
@@ -153,7 +153,7 @@ def validate_native_bundle(entries, prefix, document):
         files["script"] = "script.jsonl"
         expected_scripts = [("script.jsonl", rows)]
     else:
-        from epub_audiobook.cli import script_partitions
+        from epub_tts_narrator.cli import script_partitions
         partitions = script_partitions(document)
         require([block_id for part in partitions for block_id in part["block_ids"]] ==
                 [block["id"] for block in document["source"]["blocks"]],

@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from audiobook_renderer import terminal
+from epub_tts_narrator.renderer import terminal
 
 try:
     import pty
@@ -25,8 +25,8 @@ import fcntl
 import json
 import sys
 import termios
-from audiobook_renderer.audition import run_casting
-from audiobook_renderer import terminal
+from epub_tts_narrator.renderer.audition import run_casting
+from epub_tts_narrator.renderer import terminal
 
 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 

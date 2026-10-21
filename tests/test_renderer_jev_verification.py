@@ -6,8 +6,8 @@ from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.quality import normalize_words, validation_key
-from audiobook_renderer.verification import ReferenceTextJudgingVerifier, create_verifier
+from epub_tts_narrator.renderer.quality import normalize_words, validation_key
+from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier, create_verifier
 import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import EXPECTED, IndependentVerifier, PrimaryVerifier
 from test_renderer_verification_factory import fake_primary, fake_reference
@@ -96,14 +96,14 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE", json.dumps(report, allow_nan=False))
 
     def judge_report(self, judge, *, secondary=ALTERNATE):
-        from audiobook_renderer.quality import _judge_reference
+        from epub_tts_narrator.renderer.quality import _judge_reference
         verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(SPLIT), judge)
         report = {"expected_text": SCRIPT, "transcript": SPLIT, "purpose": "reference"}
         report["passed"] = _judge_reference(verifier, report, secondary)
         return report
 
     def test_one_confirmed_whole_transcript_can_establish_equivalence(self):
-        from epub_audiobook.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev import JevTranscriptJudge
         for scores, passed in (((.47, .92), True), ((.47, .60), False)):
             with self.subTest(scores=scores):
                 judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
@@ -127,7 +127,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 self.assertNotIn("fixture-private-key", json.dumps(audit, allow_nan=False))
 
     def test_approved_primary_needs_only_one_whole_passage_judgment(self):
-        from epub_audiobook.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         verifier, recognizer = self.wrapped(judge=judge)
         result = {"model": "jev-fixture", "usage": {"input_tokens": 40, "output_tokens": 2},
@@ -153,7 +153,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertEqual(report["text_judge"]["error_code"], "invalid_judge_record")
 
     def test_later_judge_outage_retains_successful_partial_audit_and_safe_cause(self):
-        from epub_audiobook.jev import JevTranscriptJudge, QUESTIONS
+        from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
         from test_jev import Opener, response
         secret = "PRIVATE_API_KEY_MUST_NOT_APPEAR"
         judge = JevTranscriptJudge({"enabled": True, "api_key": secret})
@@ -177,7 +177,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(report, allow_nan=False))
 
     def test_later_judge_model_change_retains_both_audits_without_approving(self):
-        from epub_audiobook.jev import JevTranscriptJudge, QUESTIONS
+        from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
         from test_jev import Opener, response
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         first = response(QUESTIONS)
@@ -300,7 +300,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertEqual(recognizer.calls, [("reference", self.audio)])
 
     def test_secondary_confirmation_rescues_uncertain_primary_and_keeps_both_audits(self):
-        from epub_audiobook.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         verifier, recognizer = self.wrapped("Chessed!", "Jase!", judge)
         def evaluate(state, questions):
@@ -322,7 +322,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
                          ["Chessed!", "Jase!"])
 
     def test_identical_uncertain_secondary_does_not_repeat_the_same_judgment(self):
-        from epub_audiobook.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         verifier, recognizer = self.wrapped("Chessed!", "Chessed!", judge)
         response = {"model": "jev-fixture", "usage": {"input_tokens": 20, "output_tokens": 2},
@@ -368,8 +368,8 @@ class JevVerifierFactoryTests(unittest.TestCase):
     def test_actual_judge_identity_redacts_credentials_and_factory_never_calls_api(self):
         settings = {"model": "/local/whisper", "language": "en"}
         secret = "fixture-private-jev-key"
-        with patch("audiobook_renderer.verification.MlxWhisperVerifier", side_effect=lambda *a, **kw: fake_primary()), \
-                patch("epub_audiobook.jev.JevClient._request",
+        with patch("epub_tts_narrator.renderer.verification.MlxWhisperVerifier", side_effect=lambda *a, **kw: fake_primary()), \
+                patch("epub_tts_narrator.jev.JevClient._request",
                       side_effect=AssertionError("Factory construction cannot make a JEV request")) as request:
             verifier = create_verifier(settings, {"enabled": True, "api_key": secret})
             rotated = create_verifier(settings, {"enabled": True, "api_key": "fixture-new-key"})
@@ -377,20 +377,20 @@ class JevVerifierFactoryTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(verifier.reference_judge_identity))
         self.assertNotIn("api_key", json.dumps(verifier.reference_judge_identity))
         self.assertEqual(verifier.reference_judge_identity["model"], "jev-latest")
-        from epub_audiobook.jev import POLICY_VERSION
+        from epub_tts_narrator.jev import POLICY_VERSION
         self.assertEqual(verifier.reference_judge_identity["policy_version"], POLICY_VERSION)
         self.assertEqual(verifier.reference_judge_identity["threshold"], .75)
         self.assertEqual(validation_key(SCRIPT, verifier, purpose="reference"),
                          validation_key(SCRIPT, rotated, purpose="reference"))
 
     def test_factory_is_lazy_and_disabled_jev_keeps_existing_verifier(self):
-        module = ModuleType("epub_audiobook.jev")
+        module = ModuleType("epub_tts_narrator.jev")
         module.JevTranscriptJudge = Mock(return_value=Judge())
         primary, secondary = fake_primary(), fake_reference()
         settings = {"model": "/local/whisper", "language": "en", "reference_model": "/local/parakeet"}
-        with patch.dict("sys.modules", {"epub_audiobook.jev": module}), \
-                patch("audiobook_renderer.verification.MlxWhisperVerifier", return_value=primary), \
-                patch("audiobook_renderer.reference_asr.MlxParakeetVerifier", return_value=secondary):
+        with patch.dict("sys.modules", {"epub_tts_narrator.jev": module}), \
+                patch("epub_tts_narrator.renderer.verification.MlxWhisperVerifier", return_value=primary), \
+                patch("epub_tts_narrator.renderer.reference_asr.MlxParakeetVerifier", return_value=secondary):
             disabled = create_verifier(settings, {"enabled": False, "api_key": "PRIVATE_KEY"})
             module.JevTranscriptJudge.assert_not_called()
             enabled = create_verifier(settings, {"enabled": True, "api_key": "PRIVATE_KEY"})

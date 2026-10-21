@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from epub_audiobook.provider import (
+from epub_tts_narrator.provider import (
     MAX_RESPONSE_BYTES,
     MAX_ERROR_BYTES,
     OpenAICompatibleClient,
@@ -41,7 +41,7 @@ def completion(content='{"characters": []}', finish_reason="stop", **message_fie
 class ProviderTests(unittest.TestCase):
     def setUp(self):
         self.opener = Mock()
-        self.opener_patch = patch("epub_audiobook.provider.build_opener", return_value=self.opener)
+        self.opener_patch = patch("epub_tts_narrator.provider.build_opener", return_value=self.opener)
         self.build_opener = self.opener_patch.start()
         self.addCleanup(self.opener_patch.stop)
 
@@ -208,7 +208,7 @@ class ProviderTests(unittest.TestCase):
         self.opener.open.side_effect = failures + [FakeResponse(json.dumps(completion()).encode())]
         client = OpenAICompatibleClient("model", api_key="private-key", max_retries=2)
         self.assertEqual(client.identity, OpenAICompatibleClient("model").identity)
-        with patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), self.assertLogs("epub_audiobook.provider") as logs:
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs:
             self.assertEqual(client.complete("private-source", {"text": "private-book"}), {"characters": []})
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [5.0, 10.0])
         requests = [call.args[0] for call in self.opener.open.call_args_list]
@@ -220,7 +220,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_retry_exhaustion_is_bounded_and_exposes_only_safe_metadata(self):
         self.opener.open.side_effect = [self.http_error(details={"code": "tpm_uncached_exceeded", "message": "private-key private-book"}) for _ in range(4)]
-        with patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), patch("epub_audiobook.provider._LOGGER"), self.assertRaises(ProviderError) as caught:
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), patch("epub_tts_narrator.provider._LOGGER"), self.assertRaises(ProviderError) as caught:
             OpenAICompatibleClient("model", max_retries=3, retry_initial_delay=30, retry_max_delay=40).complete("Analyze", {})
         self.assertEqual(self.opener.open.call_count, 4)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [30.0, 40.0, 40.0])
@@ -239,7 +239,7 @@ class ProviderTests(unittest.TestCase):
         ):
             self.opener.open.reset_mock()
             self.opener.open.side_effect = self.http_error(status, details)
-            with self.subTest(status=status, details=details), patch("epub_audiobook.provider.time.sleep") as sleep, self.assertRaises(ProviderError) as caught:
+            with self.subTest(status=status, details=details), patch("epub_tts_narrator.provider.time.sleep") as sleep, self.assertRaises(ProviderError) as caught:
                 OpenAICompatibleClient("model", max_retries=5).complete("Analyze", {})
             self.opener.open.assert_called_once()
             sleep.assert_not_called()
@@ -250,13 +250,13 @@ class ProviderTests(unittest.TestCase):
         for header in ("25", "Thu, 01 Jan 1970 00:17:05 GMT"):
             self.opener.open.reset_mock()
             self.opener.open.side_effect = [self.http_error(retry_after=header), FakeResponse(json.dumps(completion()).encode())]
-            with self.subTest(header=header), patch("epub_audiobook.provider.time.time", return_value=1000), patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), patch("epub_audiobook.provider._LOGGER"):
+            with self.subTest(header=header), patch("epub_tts_narrator.provider.time.time", return_value=1000), patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), patch("epub_tts_narrator.provider._LOGGER"):
                 OpenAICompatibleClient("model", max_retries=1).complete("Analyze", {})
             sleep.assert_called_once_with(25.0)
 
     def test_retry_after_beyond_bound_stops_without_retrying_too_early(self):
         self.opener.open.side_effect = self.http_error(retry_after="120")
-        with patch("epub_audiobook.provider.time.sleep") as sleep, self.assertRaises(ProviderError) as caught:
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, self.assertRaises(ProviderError) as caught:
             OpenAICompatibleClient("model", max_retries=5).complete("Analyze", {})
         self.opener.open.assert_called_once()
         sleep.assert_not_called()
@@ -266,7 +266,7 @@ class ProviderTests(unittest.TestCase):
         for header in ("private-secret", "-1", "nan", "inf"):
             self.opener.open.reset_mock()
             self.opener.open.side_effect = [self.http_error(details={"code": "private-secret"}, retry_after=header), self.http_error(details={"code": "private-secret"})]
-            with self.subTest(header=header), patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), self.assertLogs("epub_audiobook.provider") as logs, self.assertRaises(ProviderError) as caught:
+            with self.subTest(header=header), patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs, self.assertRaises(ProviderError) as caught:
                 OpenAICompatibleClient("model", max_retries=1).complete("Analyze", {})
             sleep.assert_called_once_with(5.0)
             self.assertIsNone(caught.exception.code)
@@ -274,7 +274,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_enabling_retries_does_not_repeat_unknown_transport_or_model_failures(self):
         self.opener.open.side_effect = URLError("private-secret")
-        with patch("epub_audiobook.provider.time.sleep") as sleep, self.assertRaises(ProviderError):
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, self.assertRaises(ProviderError):
             OpenAICompatibleClient("model", max_retries=5).complete("Analyze", {})
         self.opener.open.assert_called_once()
         sleep.assert_not_called()
@@ -305,7 +305,7 @@ class ProviderTests(unittest.TestCase):
                     self.opener.open.side_effect = open_request
                     client = OpenAICompatibleClient("model", api_key="private-key", max_retries=1)
                     self.assertEqual(client.identity, OpenAICompatibleClient("model").identity)
-                    with patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), self.assertLogs("epub_audiobook.provider") as logs:
+                    with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs:
                         self.assertEqual(client.complete("private-source", {"text": "private-book"}), {"characters": []})
                     self.assertEqual(len(attempts), 2)
                     self.assertEqual(attempts[0].data, attempts[1].data)
@@ -322,7 +322,7 @@ class ProviderTests(unittest.TestCase):
                 raise IncompleteRead(b"private-source", 100)
         partial = PartialResponse(b"")
         self.opener.open.side_effect = [partial, FakeResponse(json.dumps(completion()).encode())]
-        with patch("epub_audiobook.provider.time.sleep"), patch("epub_audiobook.provider._LOGGER"):
+        with patch("epub_tts_narrator.provider.time.sleep"), patch("epub_tts_narrator.provider._LOGGER"):
             self.assertEqual(OpenAICompatibleClient("model", max_retries=1).complete("Analyze", {}), {"characters": []})
         self.assertTrue(partial.closed)
         self.assertEqual(self.opener.open.call_count, 2)
@@ -330,7 +330,7 @@ class ProviderTests(unittest.TestCase):
     def test_transport_and_http_failures_share_one_bounded_retry_budget(self):
         self.opener.open.side_effect = [TimeoutError("private-key"), self.http_error(status=503),
                                       URLError(ConnectionResetError("private-url"))]
-        with patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider.random.uniform", return_value=0), self.assertLogs("epub_audiobook.provider") as logs, self.assertRaises(ProviderError) as caught:
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs, self.assertRaises(ProviderError) as caught:
             OpenAICompatibleClient("model", max_retries=2, retry_initial_delay=30, retry_max_delay=40).complete("private-book", {})
         self.assertEqual(self.opener.open.call_count, 3)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [30.0, 40.0])
@@ -356,7 +356,7 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 self.opener.open.reset_mock()
                 self.opener.open.side_effect = error
-                with patch("epub_audiobook.provider.time.sleep") as sleep, patch("epub_audiobook.provider._LOGGER") as logger, self.assertRaises(ProviderError) as caught:
+                with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider._LOGGER") as logger, self.assertRaises(ProviderError) as caught:
                     OpenAICompatibleClient("model", max_retries=5).complete("Analyze", {})
                 self.opener.open.assert_called_once()
                 sleep.assert_not_called()
@@ -377,7 +377,7 @@ class ProviderTests(unittest.TestCase):
         }.items():
             error.headers[key] = value
         self.opener.open.side_effect = [error, self.http_error()]
-        with patch("epub_audiobook.provider.time.sleep"), patch("epub_audiobook.provider.random.uniform", return_value=0), self.assertLogs("epub_audiobook.provider") as logs, self.assertRaises(ProviderError):
+        with patch("epub_tts_narrator.provider.time.sleep"), patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs, self.assertRaises(ProviderError):
             OpenAICompatibleClient("model", max_retries=1).complete("Analyze", {})
         output = " ".join(logs.output)
         self.assertIn("tpm_tokens=210000, tpm_max=200000", output)

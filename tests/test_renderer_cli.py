@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from audiobook_renderer.cli import chapter_numbers, doctor, main
-from audiobook_renderer.config import load_config
-from epub_audiobook.cli import export_bundle
+from epub_tts_narrator.renderer.cli import chapter_numbers, doctor, main
+from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.cli import export_bundle
 from test_contracts import valid_document
 from audition_fixtures import prepare_document
 
@@ -34,7 +34,7 @@ class RendererCLITests(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_plan_never_initializes_model(self):
-        with patch("audiobook_renderer.engines.create_engine") as factory:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as factory:
             status, output, error = self.run_cli("plan", self.bundle, "--config", self.config)
         self.assertEqual(status, 0, error)
         factory.assert_not_called()
@@ -56,7 +56,7 @@ class RendererCLITests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), before)
 
     def test_invalid_chapter_selection_stops_before_loading_models(self):
-        with patch("audiobook_renderer.engines.create_engine") as engine:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as engine:
             status, _, error = self.run_cli("render", self.bundle, "--config", self.config,
                                              "--chapters", "2")
         self.assertEqual(status, 2)
@@ -65,9 +65,9 @@ class RendererCLITests(unittest.TestCase):
 
     def test_chapters_only_passes_per_run_options_and_closes_models(self):
         engine, verifier = Mock(), Mock()
-        with (patch("audiobook_renderer.engines.create_engine", return_value=engine),
-              patch("audiobook_renderer.verification.create_verifier", return_value=verifier),
-              patch("audiobook_renderer.workflow.render") as render):
+        with (patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render") as render):
             render.return_value = {"status": "chapters_complete", "chapter_count": 1,
                                    "chapters": [{"number": 1, "title": "Chapter One",
                                                  "audio_file": "/fixture/chapter.mp3"}]}
@@ -85,9 +85,9 @@ class RendererCLITests(unittest.TestCase):
         verifier.close.assert_called_once()
 
     def test_assemble_does_not_create_any_model(self):
-        with (patch("audiobook_renderer.engines.create_engine") as engine,
-              patch("audiobook_renderer.verification.create_verifier") as verifier,
-              patch("audiobook_renderer.workflow.assemble", create=True) as assemble):
+        with (patch("epub_tts_narrator.renderer.engines.create_engine") as engine,
+              patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier,
+              patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble):
             status, output, error = self.run_cli("assemble", self.bundle, "--config", self.config,
                                                "--chapters", "1", "--chapter-format", "mp3")
         self.assertEqual(status, 0, error)
@@ -101,7 +101,7 @@ class RendererCLITests(unittest.TestCase):
         document["segments"][1]["attribution"]["review_required"] = True
         flagged = self.root / "flagged"
         export_bundle(document, flagged, allow_review=True)
-        with patch("audiobook_renderer.workflow.assemble", create=True) as assemble:
+        with patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble:
             status, _, error = self.run_cli("assemble", flagged, "--config", self.config)
             self.assertEqual(status, 0, error)
             assemble.assert_called_once()
@@ -111,7 +111,7 @@ class RendererCLITests(unittest.TestCase):
         document["segments"][1]["attribution"].update(basis="unresolved")
         unassigned = self.root / "unassigned"
         export_bundle(document, unassigned, allow_review=True)
-        with patch("audiobook_renderer.workflow.assemble", create=True) as assemble:
+        with patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble:
             status, _, error = self.run_cli("assemble", unassigned, "--config", self.config, "--allow-review")
         self.assertEqual(status, 2)
         self.assertIn("Missing voice", error)
@@ -120,7 +120,7 @@ class RendererCLITests(unittest.TestCase):
     def test_omitted_review_flag_preserves_global_setting(self):
         with self.config.open("a") as stream:
             stream.write('[render]\nallow_review=true\n')
-        with patch("audiobook_renderer.workflow.assemble", create=True) as assemble:
+        with patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble:
             status, _, error = self.run_cli("assemble", self.bundle, "--config", self.config)
         self.assertEqual(status, 0, error)
         self.assertIs(assemble.call_args.args[1]["render"]["allow_review"], True)
@@ -128,9 +128,9 @@ class RendererCLITests(unittest.TestCase):
     def test_failed_render_closes_verifier_and_engine_even_if_cleanup_fails(self):
         engine, verifier = Mock(), Mock()
         verifier.close.side_effect = RuntimeError("cleanup fixture")
-        with (patch("audiobook_renderer.engines.create_engine", return_value=engine),
-              patch("audiobook_renderer.verification.create_verifier", return_value=verifier),
-              patch("audiobook_renderer.workflow.render", side_effect=RuntimeError("render fixture"))):
+        with (patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=RuntimeError("render fixture"))):
             status, _, error = self.run_cli("render", self.bundle, "--config", self.config)
         self.assertEqual(status, 2)
         self.assertIn("render fixture", error)
@@ -164,7 +164,7 @@ class RendererCLITests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         manifest["provenance"]["series"] = {"series_id": "another-series"}
         manifest_path.write_text(json.dumps(manifest))
-        with patch("audiobook_renderer.engines.create_engine") as factory:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as factory:
             status, output, error = self.run_cli("create-voices", self.bundle, "--config", self.config)
         self.assertEqual(status, 2)
         self.assertIn("series", error)
@@ -196,7 +196,7 @@ class RendererCLITests(unittest.TestCase):
         self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (300, 0))
         # These controls also remain valid in the one shared global file when
         # the analyzer reads it; no book-specific configuration is required.
-        from epub_audiobook.config import load_config as load_analyzer_config
+        from epub_tts_narrator.config import load_config as load_analyzer_config
         load_analyzer_config(self.config)
 
     def test_config_paths_are_relative_to_file_not_cwd_or_environment(self):
@@ -212,7 +212,7 @@ class RendererCLITests(unittest.TestCase):
             load_config(self.config)
 
     def test_both_tools_reject_global_voice_aliases_including_empty_table(self):
-        from epub_audiobook.config import load_config as load_analyzer_config
+        from epub_tts_narrator.config import load_config as load_analyzer_config
         original = self.config.read_text()
         for policy in ('[voices.aliases]\n', '[voices.aliases]\nsource="target"\n'):
             self.config.write_text(original + policy)
@@ -228,7 +228,7 @@ class RendererCLITests(unittest.TestCase):
             load_config(self.config)
 
     def test_doctor_reports_missing_models_without_loading_them(self):
-        with patch("audiobook_renderer.engines.create_engine") as factory:
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as factory:
             status, output, _ = self.run_cli("doctor", "--config", self.config)
         self.assertEqual(status, 2)
         self.assertFalse(json.loads(output)["ready"])
@@ -275,9 +275,9 @@ class RendererCLITests(unittest.TestCase):
     def test_doctor_reports_optional_reference_model_files_without_loading_models(self):
         self.set_reference_model('"./parakeet-model"')
         config = load_config(self.config)
-        with (patch("audiobook_renderer.engines.create_engine") as engine,
-              patch("audiobook_renderer.cli.metadata.version", return_value="test"),
-              patch("audiobook_renderer.cli.shutil.which", return_value="/usr/bin/fixture")):
+        with (patch("epub_tts_narrator.renderer.engines.create_engine") as engine,
+              patch("epub_tts_narrator.renderer.cli.metadata.version", return_value="test"),
+              patch("epub_tts_narrator.renderer.cli.shutil.which", return_value="/usr/bin/fixture")):
             missing = doctor(config)
             reference = self.root / "parakeet-model"
             reference.mkdir()

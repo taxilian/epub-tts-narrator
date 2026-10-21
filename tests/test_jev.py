@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 import unittest
 
-from epub_audiobook.jev import (
+from epub_tts_narrator.jev import (
     DEFAULTS, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, POLICY_VERSION, QUESTIONS,
     JevClient, JevError, JevTranscriptJudge, _NoRedirect, validate_settings,
 )
@@ -131,7 +131,7 @@ class JevClientTests(unittest.TestCase):
 
     def test_timeouts_retry_bounded_with_identical_body_and_key_safe_logs(self):
         client = self.client(URLError(TimeoutError(SECRET)), TimeoutError(SECRET), response())
-        with patch("epub_audiobook.jev.time.sleep") as sleep, self.assertLogs("epub_audiobook.jev", level="WARNING") as logs:
+        with patch("epub_tts_narrator.jev.time.sleep") as sleep, self.assertLogs("epub_tts_narrator.jev", level="WARNING") as logs:
             result = client.evaluate({"private": SECRET}, QUESTION)
         self.assertEqual(result["model"], "jev-2026-10-21")
         self.assertEqual(len(client._opener.calls), 3)
@@ -166,7 +166,7 @@ class JevClientTests(unittest.TestCase):
         for cooldown, count in (("1", 2), ("120", 1)):
             error = HTTPError(ENDPOINT, 429, SECRET, {"Retry-After": cooldown}, BytesIO(SECRET.encode()))
             client = self.client(error, response())
-            with patch("epub_audiobook.jev.time.sleep") as sleep:
+            with patch("epub_tts_narrator.jev.time.sleep") as sleep:
                 if count == 2:
                     client.evaluate({}, QUESTION)
                     sleep.assert_called_once_with(1.0)
@@ -424,8 +424,8 @@ class JevConfigTests(unittest.TestCase):
                 validate_settings({key: 10**400})
 
     def test_one_global_file_is_accepted_by_renderer_and_analyzer_without_env_override(self):
-        from audiobook_renderer.config import load_config as renderer_config
-        from epub_audiobook.config import load_config as analyzer_config
+        from epub_tts_narrator.renderer.config import load_config as renderer_config
+        from epub_tts_narrator.config import load_config as analyzer_config
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "epub-audiobook.toml"
             path.write_text('[provider]\nmodel="fixture"\n[engine]\ncheckpoint="models/drama"\n'

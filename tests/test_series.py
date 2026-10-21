@@ -9,12 +9,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_audiobook.cli import main
-from epub_audiobook.config import load_config
-from epub_audiobook.contracts import validate_document
-from epub_audiobook.pipeline import analyze, fingerprint, write_json
-from epub_audiobook.identity import LENSES
-from epub_audiobook.series import (link_analysis, load_registry, reconcile_series_cast,
+from epub_tts_narrator.cli import main
+from epub_tts_narrator.config import load_config
+from epub_tts_narrator.contracts import validate_document
+from epub_tts_narrator.pipeline import analyze, fingerprint, write_json
+from epub_tts_narrator.identity import LENSES
+from epub_tts_narrator.series import (link_analysis, load_registry, reconcile_series_cast,
                                    save_registry, series_context, validate_registry, validate_series_proposals)
 from test_contracts import valid_document
 from test_pipeline import FakeClient
@@ -249,8 +249,8 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
 
     def test_uncertain_series_scan_retains_nameless_candidates_without_voice_reuse(self):
-        from epub_audiobook.identity import audit_identities
-        from epub_audiobook.pipeline import make_units
+        from epub_tts_narrator.identity import audit_identities
+        from epub_tts_narrator.pipeline import make_units
         from test_series_identity_scan import fixture as scan_fixture, ScanRequests, decision
         source, cast, registry = scan_fixture()
         cast["characters"][0].update(name="An unnamed visitor", aliases=[])
@@ -584,7 +584,7 @@ class SeriesTests(unittest.TestCase):
         output = self.root / "linked.json"
         write_json(original, fixture())
         original_bytes = original.read_bytes()
-        with patch("epub_audiobook.cli.OpenAICompatibleClient") as provider, contextlib.redirect_stdout(io.StringIO()):
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["series-import", str(original), "--series", str(self.path), "-o", str(output)]), 0)
             self.assertEqual(main(["series-import", str(original), "--series", str(self.path)]), 0)
         provider.assert_not_called()
