@@ -95,7 +95,8 @@ class DeliveryDefaultTests(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertEqual(cached, response)
         self.assertEqual(first[0]["delivery"], {"direction": "", "evidence": []})
-        self.assertEqual(progress, [])
+        self.assertTrue(any("Cache reuse:" in message for message in progress))
+        self.assertFalse(any("Repairing validation" in message for message in progress))
 
     def test_published_document_and_user_edit_schema_remain_strict(self):
         document = base_document(self.source, self.cast, self.accept(self.response))

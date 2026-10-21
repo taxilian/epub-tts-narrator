@@ -636,7 +636,7 @@ def _issue(case, reason):
             "reason": f"{case['id']}: {reason}"}
 
 
-def _votes(requests, source, cast, cases, workers):
+def _votes(requests, source, cast, cases, workers, *, progress=lambda message: None, label="Identity jury"):
     """The immutable request snapshot prevents peer votes or earlier edits leaking in."""
     tasks = [(case, reviewer, lens) for case in cases for reviewer, lens in LENSES]
     cancelled, failure_lock, failures = Event(), Lock(), []
@@ -721,7 +721,7 @@ def _votes(requests, source, cast, cases, workers):
         # requests already in flight to finish and preserve their cache entries.
         pool = ThreadPoolExecutor(max_workers=workers)
         pending, completed = {}, [None] * len(tasks)
-        next_index = 0
+        next_index = finished = 0
         try:
             while next_index < min(workers, len(tasks)) and not cancelled.is_set():
                 pending[pool.submit(run, tasks[next_index])] = next_index
@@ -733,6 +733,9 @@ def _votes(requests, source, cast, cases, workers):
                 for future in done:
                     index = pending.pop(future)
                     completed[index] = future.result()
+                    finished += 1
+                    if finished == 1 or finished % 5 == 0 or finished == len(tasks):
+                        progress(f"{label}: {finished}/{len(tasks)} reviewer responses complete")
                 while next_index < len(tasks) and len(pending) < workers and not cancelled.is_set():
                     pending[pool.submit(run, tasks[next_index])] = next_index
                     next_index += 1
@@ -849,7 +852,7 @@ applied only for disjoint, source-valid candidates with unanimous approval.
             record.update(status="invalid_proposal", error=str(exc))
             issues.append(_issue(case, "Proposal failed deterministic validation: " + str(exc)))
     progress(f"Independently reviewing {len(prepared)} identity decisions with three reviewers each")
-    votes = _votes(requests, source, initial, prepared, workers)
+    votes = _votes(requests, source, initial, prepared, workers, progress=progress)
     # No ordering of pairwise approvals can authorize an unreviewed transitive
     # merge. Overlapping mutations, or contradictory separation findings, wait.
     mutations = [case for case in cases if case["kind"] in {"merge", "split"}]
@@ -913,7 +916,8 @@ applied only for disjoint, source-valid candidates with unanimous approval.
                 series_prepared.append(candidate)
             if series_prepared:
                 progress(f"Independently reviewing {len(series_prepared)} series identity matches (round {review_round}/2)")
-            series_votes = _votes(requests, source, series_initial, series_prepared, min(workers, 5))
+            series_votes = _votes(requests, source, series_initial, series_prepared, min(workers, 5),
+                                  progress=progress, label=f"Series identity jury (round {review_round}/2)")
             by_id = {row["id"]: row for row in updated["characters"]}
             for candidate in series_prepared:
                 case, record = candidate["case"], candidate["record"]

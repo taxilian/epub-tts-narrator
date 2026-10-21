@@ -410,7 +410,13 @@ class IdentityTests(unittest.TestCase):
                      "source_units": units, "prior_series": deepcopy(cast),
                      "series_registry_fingerprint": "existing-series-fingerprint"}
         requests = Requests()
-        expected = _votes(requests, source, cast, [candidate], workers=1)
+        progress = []
+        expected = _votes(requests, source, cast, [candidate], workers=1,
+                          progress=progress.append, label="Series identity jury (round 1/2)")
+        self.assertEqual(progress, [
+            "Series identity jury (round 1/2): 1/3 reviewer responses complete",
+            "Series identity jury (round 1/2): 3/3 reviewer responses complete",
+        ])
         self.assertEqual(len(requests.calls), 3)
         self.assertTrue(all(list(payload)[:3] == ["source_units", "original_cast", "prior_series"] for payload in requests.calls))
         serialized = [json.dumps(payload, ensure_ascii=False, allow_nan=False) for payload in requests.calls]
@@ -435,7 +441,10 @@ class IdentityTests(unittest.TestCase):
                                    "system": SERIES_VOTE, "payload": legacy})
                 Path(directory, key + ".json").write_text(json.dumps(requests.response(payload)), encoding="utf-8")
             cached = CachedRequests(client, directory, repair_attempts=0)
-            self.assertEqual(_votes(cached, source, cast, [candidate], workers=1), expected)
+            replay_progress = []
+            self.assertEqual(_votes(cached, source, cast, [candidate], workers=1,
+                                    progress=replay_progress.append), expected)
+            self.assertEqual(replay_progress[-1], "Identity jury: 3/3 reviewer responses complete")
 
     def test_series_match_disagreement_withholds_reuse_and_preserves_original(self):
         source, cast = fixture(("Mara",))

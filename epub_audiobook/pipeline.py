@@ -685,6 +685,7 @@ class CachedRequests:
         self.max_request_chars = max_request_chars
         self.progress = progress
         self.progress_lock = Lock()
+        self.cache_hits = 0
 
     def _repair_payload(self, system, payload, result, error):
         # Repair hints do not change the original request identity or its source.
@@ -802,9 +803,21 @@ class CachedRequests:
         path = self.cache_dir / f"{key}.json"
         if path.exists():
             try:
-                return validate(json.loads(path.read_text(encoding="utf-8")))
+                accepted = validate(json.loads(path.read_text(encoding="utf-8")))
             except (ValueError, TypeError, KeyError):
-                pass  # A corrupted/incompatible cache is never trusted.
+                # Distinguish a genuine cache rejection from normal replay;
+                # never echo private response text or raw validator exceptions.
+                with self.progress_lock:
+                    self.progress("Cached response failed current validation; requesting a replacement.")
+            else:
+                with self.progress_lock:
+                    self.cache_hits += 1
+                    # Whole-book replays may validate hundreds of responses.
+                    # Make reuse visible without one extra line per cached vote.
+                    if self.cache_hits == 1 or self.cache_hits % 25 == 0:
+                        self.progress(f"Cache reuse: {self.cache_hits} validated response(s) restored; "
+                                      "no API calls for these responses.")
+                return accepted
         current = payload
         failed = self._latest_failed_response(key)
         if failed is not None:

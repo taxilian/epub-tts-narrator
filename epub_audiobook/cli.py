@@ -261,6 +261,22 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    model_cache = None
+
+    def announce_cache(path):
+        resolved = Path(path).resolve()
+        print(f"Request cache: {resolved}", file=sys.stderr)
+        print("Completed, validated responses are reused automatically; cached stages are replayed and revalidated locally.",
+              file=sys.stderr)
+        return resolved
+
+    def resume_guidance():
+        if model_cache is not None:
+            print(f"Resume cache: {model_cache}", file=sys.stderr)
+            print("Completed, validated responses remain cached. After resolving the error or interruption, "
+                  "rerun the same command with the same input, output, and configuration; "
+                  "incomplete requests will be retried.", file=sys.stderr)
+
     try:
         directory_mode = (args.command == "analyze" and
                           (args.output is None or args.output.suffix.lower() != ".json"))
@@ -379,7 +395,8 @@ def main(argv=None):
             print(f"Analyzing with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
             settings = config["analysis"]
             cache = settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache"
-            document = analyze(source, client, cache, chunk_chars=settings["chunk_chars"],
+            model_cache = announce_cache(cache)
+            document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
                 repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
                 whole_book_discovery=settings["whole_book_discovery"], attribution_workers=settings["attribution_workers"],
                 identity_consensus=settings["identity_consensus"],
@@ -424,7 +441,8 @@ def main(argv=None):
                 raise ValueError("The reviewed analysis must use a separate path from configuration and series registry")
             client = OpenAICompatibleClient(**config["provider"])
             print(f"Reviewing attribution with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
-            requests = CachedRequests(client, settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache",
+            model_cache = announce_cache(settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache")
+            requests = CachedRequests(client, model_cache,
                                       repair_attempts=settings["repair_attempts"],
                                       max_request_chars=settings["max_request_chars"],
                                       progress=lambda message: print(message, file=sys.stderr))
@@ -463,7 +481,9 @@ def main(argv=None):
         return 0
     except (ValueError, OSError, ProviderError, KeyError, TypeError, IndexError, RecursionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        resume_guidance()
         return 1
     except KeyboardInterrupt:
         print("Interrupted. Completed model requests remain cached; rerun the same command to resume.", file=sys.stderr)
+        resume_guidance()
         return 130
