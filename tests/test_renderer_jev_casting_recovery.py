@@ -100,8 +100,8 @@ class JevCastingRecoveryTests(unittest.TestCase):
         normalize.start()
         self.addCleanup(normalize.stop)
 
-    def test_restart_ensure_ready_and_regenerate_reuse_pending_bytes_and_nonce(self):
-        for action in ("ensure_ready", "regenerate"):
+    def test_restart_ensure_ready_and_generate_reuse_pending_bytes_and_nonce(self):
+        for action in ("ensure_ready", "generate"):
             with self.subTest(action=action):
                 fixture = Fixture(self)
                 path, record = fixture.pending(action=action)
@@ -121,6 +121,20 @@ class JevCastingRecoveryTests(unittest.TestCase):
                 replacement = fixture.run(resumed, "regenerate")
                 self.assertEqual(len(fixture.engine.calls), 2)
                 self.assertNotEqual(replacement["candidate_id"], selected["candidate_id"])
+
+    def test_explicit_regeneration_leaves_pending_verification_take_and_creates_new_candidate(self):
+        fixture = Fixture(self)
+        path, record = fixture.pending()
+        wav = path.parent / record["audio_file"]
+        original = wav.read_bytes()
+        fixture.verdict = "passed"
+        replacement = fixture.run(fixture.new_session(), "regenerate")
+        self.assertEqual(len(fixture.engine.calls), 2)
+        self.assertNotEqual(replacement["candidate_id"], record["request"]["nonce"])
+        self.assertEqual(read_json(path), record)
+        self.assertEqual(wav.read_bytes(), original)
+        self.assertEqual(fixture.session.store.load(fixture.voice)["candidate_id"],
+                         replacement["candidate_id"])
 
     def test_repeated_outage_preserves_pending_take_without_generation(self):
         fixture = Fixture(self)

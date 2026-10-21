@@ -16,6 +16,7 @@ from audiobook_renderer.casting import CastingSession, MAX_PROMPT_CHARACTERS, _d
 from audiobook_renderer.common import read_json, write_json
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
+from audiobook_renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
 from audiobook_renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_audiobook.cli import export_bundle
 from audition_fixtures import prepare_bundle
@@ -154,8 +155,9 @@ class CastingTests(unittest.TestCase):
         ]
         session = self.new_session()
         self.addCleanup(session.close)
-        expected = ("A calm young man.\nVoice traits: pitch: young adult male, slightly husky; "
-                    "delivery: calm and measured")
+        expected = audiobook_voice_prompt(
+            "A calm young man.\nVoice traits: pitch: young adult male, slightly husky; "
+            "delivery: calm and measured")
         self.assertEqual(session.rows()[0]["prompt"], expected)
         session.generate(self.voice_id)
         self.assertEqual(self.engine.calls[0]["prompt"], expected)
@@ -172,6 +174,20 @@ class CastingTests(unittest.TestCase):
         resumed = self.new_session(bundle=next_book)
         self.addCleanup(resumed.close)
         self.assertEqual(resumed.rows()[0]["prompt"], custom)
+        script = resumed.rows()[0]["reference_text"]
+        draft_before = resumed._draft_path(self.voice_id).read_bytes()
+        selected = resumed.regenerate(self.voice_id)
+        self.assertEqual(self.engine.calls[-1]["prompt"], audiobook_voice_prompt(custom))
+        self.assertEqual(self.engine.calls[-1]["text"], script)
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(custom))
+        self.assertEqual(resumed._draft_path(self.voice_id).read_bytes(), draft_before)
+        self.assertEqual(resumed.rows()[0]["prompt"], custom)
+        requests = list((self.root / "work" / "casting-candidates").glob("*/accepted.json"))
+        self.assertEqual(len(requests), 1)
+        request = read_json(requests[0])["request"]
+        self.assertEqual(request["prompt"], audiobook_voice_prompt(custom))
+        self.assertEqual(request["text"], script)
+        self.assertEqual(request["prompt"].count(AUDIOBOOK_VOICE_CONTEXT), 1)
 
     def test_established_creation_prompt_is_preserved_without_a_draft(self):
         custom = "  Established voice.\nKeep this wording.  "
@@ -229,14 +245,27 @@ class CastingTests(unittest.TestCase):
                     self.session.update_prompt(self.voice_id, **fields)
         self.assertFalse((self.root / "voices").exists())
 
+    def test_context_length_limit_stops_generation_without_trimming_custom_draft(self):
+        prompt = "x" * MAX_PROMPT_CHARACTERS
+        self.session.update_prompt(self.voice_id, prompt)
+        before = self.session._draft_path(self.voice_id).read_bytes()
+        with self.assertRaisesRegex(ValueError, "4000"):
+            self.session.generate(self.voice_id)
+        self.assertEqual(self.engine.calls, [])
+        self.assertIsNone(self.session.store.load(self.voice_id))
+        self.assertEqual(self.engine_factories, [])
+        self.assertEqual(self.verifier_factories, [])
+        self.assertEqual(self.session._draft_path(self.voice_id).read_bytes(), before)
+        self.assertEqual(self.session.rows()[0]["prompt"], prompt)
+
     def test_prompt_and_text_edits_reach_engine_without_mutating_cast_profile(self):
         original = deepcopy(self.bundle["cast"]["voices"][0])
         self.session.update_prompt(self.voice_id, "Warm and low.", "Listen to this sentence.")
         candidate = self.session.generate(self.voice_id)
-        self.assertEqual(self.engine.calls[0]["prompt"], "Warm and low.")
+        self.assertEqual(self.engine.calls[0]["prompt"], audiobook_voice_prompt("Warm and low."))
         self.assertEqual(self.engine.calls[0]["text"], "Listen to this sentence.")
         self.assertEqual(candidate["profile"], original)
-        self.assertEqual(candidate["creation"]["requested_description"], "Warm and low.")
+        self.assertEqual(candidate["creation"]["requested_description"], audiobook_voice_prompt("Warm and low."))
         self.assertTrue(candidate["description_applied"])
         self.assertIsNone(self.session.store.load(self.voice_id))
         self.assertEqual(len(self.session.rows()[0]["candidates"]), 1)
@@ -349,7 +378,7 @@ class CastingTests(unittest.TestCase):
         replacement = self.session.regenerate(self.voice_id)
         self.assertNotEqual(replacement["asset_hash"], first["asset_hash"])
         self.assertEqual(self.session.store.load(self.voice_id)["asset_hash"], replacement["asset_hash"])
-        self.assertEqual(self.engine.calls[-1]["prompt"], "Soft and measured.")
+        self.assertEqual(self.engine.calls[-1]["prompt"], audiobook_voice_prompt("Soft and measured."))
         self.assertEqual(self.engine.calls[-1]["text"], "The next sample is ready.")
         self.assertEqual(self.session.store.load_candidate(self.voice_id, first["candidate_id"])["asset_hash"],
                          first["asset_hash"])

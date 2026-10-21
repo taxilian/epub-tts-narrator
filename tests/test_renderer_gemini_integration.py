@@ -18,6 +18,7 @@ from audiobook_renderer.cli import main, parser
 from audiobook_renderer.common import read_json, write_json
 from audiobook_renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
 from audiobook_renderer.quality import validate_policy
+from audiobook_renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
 from audiobook_renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
 from epub_audiobook.cli import export_bundle
 from epub_audiobook.config import load_config as load_analyzer_config
@@ -220,7 +221,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         session.update_prompt("voice_mara", prompt, text)
         selected = session.regenerate("voice_mara")
         self.assertEqual(len(self.designer.calls), 1)
-        self.assertEqual(self.designer.calls[0]["prompt"], prompt)
+        self.assertEqual(self.designer.calls[0]["prompt"], audiobook_voice_prompt(prompt))
         self.assertEqual(self.designer.calls[0]["text"], text)
         self.assertEqual(self.factory_calls, [self.config["voice_design"]])
         self.assertEqual(self.engine.calls, [])
@@ -238,7 +239,11 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
 
     def test_existing_gemini_reference_is_reused_in_later_book_without_remote_designer(self):
         first = self.session()
-        selected = first.ensure_ready("voice_mara")
+        legacy_prompt = "An established voice from the earlier book."
+        first.update_prompt("voice_mara", legacy_prompt)
+        with patch("audiobook_renderer.casting.audiobook_voice_prompt", side_effect=lambda prompt: prompt):
+            selected = first.ensure_ready("voice_mara")
+        self.assertEqual(selected["creation"]["requested_description"], legacy_prompt)
         before = Path(selected["reference_audio"]).read_bytes()
         later_bundle = self.make_bundle("book-two")
         local = select_voice_designer(self.config, "local")
@@ -252,6 +257,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(reused["asset_hash"], selected["asset_hash"])
         self.assertEqual(reused["reference_audio"], selected["reference_audio"])
         self.assertTrue(reused["inherited"])
+        self.assertEqual(reused["creation"], selected["creation"])
         self.assertEqual(Path(reused["reference_audio"]).read_bytes(), before)
         self.assertEqual(len(self.designer.calls), 1)
         self.assertEqual(self.engine.calls, [])
@@ -295,7 +301,23 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         return paths[0], calls
 
-    def test_restarted_cast_does_not_duplicate_ambiguous_remote_creation(self):
+    def test_context_is_sent_in_voice_creation_but_not_in_spoken_sample(self):
+        calls = []
+        designer = self.remote_designer([{"id": "voice_context_fixture"}], calls)
+        session = self.session(designer_factory=lambda _: designer)
+        prompt = "A thin, high rasp with a rapid, urgent pace."
+        script = "I will meet you at the gate."
+        session.update_prompt("voice_mara", prompt, script)
+        selected = session.regenerate("voice_mara")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
+        self.assertEqual(calls[0][1]["voice"]["prompted"]["input"],
+                         AUDIOBOOK_VOICE_CONTEXT + " " + prompt)
+        self.assertEqual(calls[1][1]["input"][0]["content"][0]["text"], script)
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(prompt))
+        self.assertEqual(selected["reference_text"], script)
+        self.assertEqual(session.rows()[0]["prompt"], prompt)
+
+    def test_restart_missing_voice_preparation_does_not_duplicate_ambiguous_remote_creation(self):
         pending, calls = self.pending_remote_voice()
         designer = self.remote_designer([], calls)
         restarted = self.session(designer_factory=lambda _: designer)
@@ -315,7 +337,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
             restarted.ensure_ready("voice_mara")
         self.assertEqual(len(calls), 1)
 
-    def test_repaired_remote_id_survives_restart_and_is_used_without_new_creation(self):
+    def test_missing_voice_preparation_recovers_repaired_remote_id_without_new_creation(self):
         pending, calls = self.pending_remote_voice()
         value = read_json(pending)
         value["voice_id"] = "voice_repaired"
@@ -354,7 +376,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertTrue(pending.exists())
         self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/voices", "/interactions"])
 
-    def test_corrupt_pending_association_blocks_new_remote_creation(self):
+    def test_corrupt_pending_association_blocks_automatic_missing_voice_preparation(self):
         pending, calls = self.pending_remote_voice()
         path = pending.parent / "casting-request.json"
         request = read_json(path)

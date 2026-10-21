@@ -17,7 +17,7 @@ from audiobook_renderer.common import digest, read_json, write_json
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
 from audiobook_renderer.voices import VoiceStore
-from audiobook_renderer.voice_prompts import default_voice_prompt
+from audiobook_renderer.voice_prompts import audiobook_voice_prompt, default_voice_prompt
 from audiobook_renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_audiobook.cli import export_bundle
 
@@ -173,7 +173,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         session.update_prompt(self.voice_id, prompt, text)
         selected = session.regenerate(self.voice_id)
         self.assertEqual(len(self.designer.calls), 1)
-        self.assertEqual(self.designer.calls[0]["prompt"], prompt)
+        self.assertEqual(self.designer.calls[0]["prompt"], audiobook_voice_prompt(prompt))
         self.assertEqual(self.designer.calls[0]["text"], text)
         self.assertEqual(self.engine.calls, [])
         self.assertEqual(self.factory_calls, [self.config["voice_design"]])
@@ -214,7 +214,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
             {"name": "timbre", "value": "slightly husky",
              "basis": "casting", "evidence": [{"quote": "Do not speak this evidence."}]},
         ])
-        expected = "A reserved speaker.\nVoice traits: timbre: slightly husky"
+        expected = audiobook_voice_prompt("A reserved speaker.\nVoice traits: timbre: slightly husky")
         selected = ensure_voice(
             session.store, self.voice_id, profile, self.engine, self.verifier,
             self.config, self.config["render"]["work_dir"], designer=self.designer,
@@ -293,7 +293,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         self.assertNotEqual(replacement["asset_hash"], original["asset_hash"])
         for voice_id in (self.voice_id, self.alias_id):
             self.assertEqual(session.store.load(voice_id)["asset_hash"], replacement["asset_hash"])
-        self.assertEqual(self.designer.calls[-1]["prompt"], prompt)
+        self.assertEqual(self.designer.calls[-1]["prompt"], audiobook_voice_prompt(prompt))
         self.assertEqual(self.designer.calls[-1]["text"], text)
         self.assertTrue(Path(original["reference_audio"]).exists())
 

@@ -11,6 +11,7 @@ from audiobook_renderer.casting import CastingSession
 from audiobook_renderer.common import read_json
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy
+from audiobook_renderer.voice_prompts import audiobook_voice_prompt
 from epub_audiobook.cli import export_bundle
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, TranscriptVerifier,
@@ -87,7 +88,7 @@ class CastingDesignerSwitchTests(unittest.TestCase):
         remote = session.regenerate("voice_mara_narration", voice_designer="gemini")
 
         self.assertEqual(self.factory_calls[0], {"type": "gemini", **self.config["gemini"]})
-        self.assertEqual(self.remote_designers[0].calls[0]["prompt"], prompt)
+        self.assertEqual(self.remote_designers[0].calls[0]["prompt"], audiobook_voice_prompt(prompt))
         self.assertEqual(self.remote_designers[0].calls[0]["text"], script)
         self.assertEqual(remote["created_with"], self.engine.identity)
         self.assertEqual(remote["creation"]["designer"], GeminiDesigner.identity)
@@ -101,6 +102,8 @@ class CastingDesignerSwitchTests(unittest.TestCase):
         # A later G action is local, even after this character was made remotely.
         local = session.regenerate("voice_mara", voice_designer="local")
         self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(self.engine.calls[0]["prompt"], audiobook_voice_prompt(prompt))
+        self.assertEqual(self.engine.calls[0]["text"], script)
         self.assertEqual(len(self.factory_calls), 1)
         self.assertEqual(local["creation"]["designer"], self.engine.identity)
         self.assertEqual(session.store.load("voice_mara_narration")["asset_hash"], local["asset_hash"])

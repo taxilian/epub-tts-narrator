@@ -22,6 +22,7 @@ from audiobook_renderer.common import digest, file_hash, read_json, write_json
 from audiobook_renderer.config import DEFAULTS
 from audiobook_renderer.quality import validate_policy, validation_key
 from audiobook_renderer.workflow import RenderBlocked
+from audiobook_renderer.voice_prompts import audiobook_voice_prompt
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -146,6 +147,18 @@ class CastingRecoveryTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original_bytes)
         self.assertEqual(file_hash(path.parent / original["audio_file"]), original["audio_sha256"])
         self.assertEqual(len(self.verifier.calls), 1)
+        self.engine.create_voice.assert_not_called()
+        self.designer_factory.assert_not_called()
+
+    def test_legacy_attempt_recovers_with_contextualized_draft_without_rewriting_provenance(self):
+        path = self.attempt()
+        original = path.read_bytes()
+        prompt = self.profile["description"]
+        self.session.update_prompt(self.voice_id, audiobook_voice_prompt(prompt))
+        recovered = self.session.recover_attempt(self.voice_id, path)
+        self.assertEqual(recovered["creation"]["requested_description"], prompt)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.session.rows()[0]["prompt"], audiobook_voice_prompt(prompt))
         self.engine.create_voice.assert_not_called()
         self.designer_factory.assert_not_called()
 

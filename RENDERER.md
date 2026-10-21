@@ -191,7 +191,7 @@ While a sample is playing, any key stops playback and returns to the menu.
 
 Sample scripts contain 25–60 words and at most 650 characters, normally aiming for 35–50 words. Casting prefers clearly attributed ordinary speech and can join several actual statements by the same canonical voice to provide a useful audition. Every excerpt keeps its own chapter, segment, exact source ranges, and position in the joined script; a montage is not represented as one contiguous quotation. Narrators can use narration, and identified participants in simultaneous dialogue can each audition those words alone. Shared roles use one script and one saved reference voice.
 
-For a new voice, the default prompt includes both its description and structured voice traits, such as pitch, timbre, and delivery. Book quotations used as evidence are excluded. Existing edited prompts and established voice prompts are preserved. This applies to both the casting menu and automatic voice creation during rendering. Speech verification checks the recording and transcript; listening determines whether the performance suits the character.
+Every new voice-design request starts with `audiobook narrator portraying a character in a book:` followed by the voice description. This context applies to Gemini and local generation, including edited and older saved drafts, and is added only once. It is not part of the spoken sample script. For a new voice, the default prompt also includes structured voice traits, such as pitch, timbre, and delivery. Book quotations used as evidence are excluded. Custom draft wording and existing recordings are preserved; new request records contain the actual prefixed prompt. This applies to both the casting menu and automatic voice creation during rendering. Speech verification checks the recording and transcript; listening determines whether the performance suits the character.
 
 Fresh CLI analysis prepares the audition text automatically. If a character has too little suitable speech, the configured analysis model writes an original audition fitting the character, setting, and speech style. Generated text is explicitly marked as a casting script, never a source quotation or audiobook content. The book's `provenance.voice_samples` retains the prepared scripts and selection provenance.
 
@@ -275,10 +275,15 @@ Drama 3 renders the audiobook locally by cloning the verified recording; Gemini
 is not needed to render that saved voice. Normalized audition copies work for
 both sources.
 
-The remote voice ID is recorded in candidate metadata and reused when a sample
-needs a verification retry. An uncertain creation timeout blocks new creation for
-that character, including after restarting casting. Follow the reported pending-file
-instructions to reconnect an existing remote voice before retrying. Credentials are read only
+The remote voice ID is recorded in candidate metadata and reused when the same
+sample needs a synthesis or verification retry. Explicit `GG` regeneration and
+bulk regeneration request a fresh Gemini voice, even when an earlier creation
+failed or is awaiting verification. Prior pending records are preserved and do
+not block explicit regeneration. After success, casting prints the selected
+Gemini `voice_...` ID; the character's `series_voice_...` ID remains stable.
+Startup recovery still protects an uncertain creation outcome: follow its
+pending-file instructions to recover that voice, or use `GG` to deliberately
+create a new one. Credentials are read only
 from the configuration file and are excluded from candidate metadata and cache
 identities. No Google SDK is required.
 

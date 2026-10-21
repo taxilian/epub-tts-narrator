@@ -17,7 +17,8 @@ import uuid
 from .common import digest, file_hash, read_json, write_json
 from .quality import validate_audio, validation_key
 from .voice_bindings import design_voice, designer_identity, require_designer
-from .voice_prompts import MAX_PROMPT_CHARACTERS, default_voice_prompt as _default_voice_prompt
+from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
+                           default_voice_prompt as _default_voice_prompt, voice_prompt_description)
 from .workflow import RenderBlocked, VerificationUnavailable, _seed, verified_take
 
 
@@ -336,13 +337,12 @@ class CastingSession:
         with self._locked():
             return self._generate_locked(voice_id)
 
-    def _prepare_gemini_request(self, request, directory):
-        """Reconnect ambiguous remote creation before starting another candidate.
+    def _prepare_gemini_request(self, request, directory, *, fresh=False):
+        """Reconnect interrupted work, or deliberately start a fresh voice.
 
-        Casting deliberately uses a fresh candidate for each regeneration. A
-        lost creation response is different: its pending marker must follow
-        the character across invocations until the user identifies the remote
-        voice or confirms that creation failed.
+        Startup recovery retains an ambiguous creation's marker. Explicit
+        regeneration requests a new voice and preserves earlier attempt files
+        without reusing or requiring manual repair of their remote identities.
         """
         from .gemini_voice_design import (
             GeminiVoiceDesigner, _read_state, _write_state, _VOICE_ID,
@@ -352,7 +352,8 @@ class CastingSession:
         if root.is_symlink():
             raise RenderBlocked("The casting candidate directory must not be a symlink")
         recoveries = []
-        for pending_path in sorted(root.glob("*/gemini-voice-pending.json")):
+        recovery_prompt = None
+        for pending_path in (() if fresh else sorted(root.glob("*/gemini-voice-pending.json"))):
             previous_directory = pending_path.parent
             request_path = previous_directory / "casting-request.json"
             try:
@@ -398,24 +399,33 @@ class CastingSession:
                 display_name = "Audiobook voice " + digest(str(previous_directory.resolve()))[:16]
                 raise RenderBlocked(GeminiVoiceDesigner._pending_message(pending_path, display_name))
             if (previous.get("designer") != request["designer"]
-                    or previous.get("prompt") != request["prompt"]):
+                    or not isinstance(previous.get("prompt"), str)
+                    or voice_prompt_description(previous["prompt"]) != voice_prompt_description(request["prompt"])):
                 raise RenderBlocked(
                     f"The repaired Gemini creation at {pending_path} belongs to a different "
                     "voice prompt or Gemini configuration. Restore those settings to finish "
                     "this recovery before requesting a new voice."
                 )
+            if recovery_prompt is not None and recovery_prompt != previous["prompt"]:
+                raise RenderBlocked("Multiple repaired Gemini voices have different original prompts; inspect their pending files")
+            recovery_prompt = previous["prompt"]
             recoveries.append((pending_path, remote_id, fingerprint, previous_directory.name))
         if len({item[1] for item in recoveries}) > 1:
             raise RenderBlocked(
                 "Multiple different repaired Gemini voices exist for this character. "
                 "Inspect the pending files before choosing which remote voice to recover."
             )
+        if recoveries and recovery_prompt != request["prompt"]:
+            # Reconnecting an existing remote voice must retain the exact
+            # description that created it, not claim newly added context.
+            request = dict(request, prompt=recovery_prompt)
+            directory = directory.parent / digest(request)
         if directory.exists() or directory.is_symlink():
             raise RenderBlocked("Casting candidate directory already exists")
         directory.mkdir(parents=True)
         write_json(directory / "casting-request.json", request)
         if not recoveries:
-            return
+            return request, directory
         pending_path, remote_id, fingerprint, previous_hash = recoveries[0]
         recovered = {
             "version": 1, "request_fingerprint": fingerprint, "voice_id": remote_id,
@@ -433,6 +443,7 @@ class CastingSession:
                 })
             pending_path.unlink()
         self.notify("Recovered the existing Gemini voice; no new remote voice will be created.")
+        return request, directory
 
     def _pending_confirmation(self, request, root):
         """Find one unpublished, intact take awaiting only external verification."""
@@ -520,15 +531,15 @@ class CastingSession:
             raise RenderBlocked("Multiple matching voice samples await verification; inspect the casting candidates before choosing one")
         return matches[0] if matches else None
 
-    def _generate_locked(self, voice_id):
+    def _generate_locked(self, voice_id, *, fresh=False):
         profile = self._profile(voice_id)
         draft = self._draft(voice_id, self.store.load(voice_id))
+        prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
+        text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         engine, designer = self._get_engine(), self._get_designer()
         verifier = self._get_verifier()
         self._save_draft(voice_id, draft)
         voice_id = self.store.canonical_id(voice_id)
-        prompt = _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)
-        text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         nonce = uuid.uuid4().hex
         request = {
             "kind": "casting_candidate", "nonce": nonce, "engine": engine.identity,
@@ -539,7 +550,12 @@ class CastingSession:
             "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
         }
         directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
-        pending = self._pending_confirmation(request, directory.parent)
+        pending = None if fresh else self._pending_confirmation(request, directory.parent)
+        if not fresh and pending is None and voice_prompt_description(prompt) != prompt:
+            # A pre-context sample awaiting verification keeps its actual
+            # request and recording; this is recovery, not a new design.
+            legacy_request = dict(request, prompt=voice_prompt_description(prompt))
+            pending = self._pending_confirmation(legacy_request, directory.parent)
         if pending is not None:
             directory, request, resume_attempt = pending
             nonce = request["nonce"]
@@ -547,7 +563,8 @@ class CastingSession:
         else:
             resume_attempt = None
         if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
-            self._prepare_gemini_request(request, directory)
+            request, directory = self._prepare_gemini_request(request, directory, fresh=fresh)
+        prompt = request["prompt"]
         if pending is None:
             self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
         wav, accepted = verified_take(
@@ -622,11 +639,15 @@ class CastingSession:
                     close()
 
     def regenerate(self, voice_id, *, voice_designer=None):
-        """Generate and immediately select a verified replacement under one lock."""
+        """Create a fresh voice and select its verified reference under one lock."""
         self._profile(voice_id)
         with self._locked(), self._using_voice_designer(voice_designer):
-            candidate = self._generate_locked(voice_id)
-            return self._accept_locked(voice_id, candidate["candidate_id"])
+            candidate = self._generate_locked(voice_id, fresh=True)
+            selected = self._accept_locked(voice_id, candidate["candidate_id"])
+            remote_id = selected.get("creation", {}).get("remote_voice_id")
+            if remote_id:
+                self.notify(f"Selected Gemini voice ID: {remote_id}")
+            return selected
 
     def recover_attempt(self, voice_id, attempt_path, *, select=True):
         """Recheck and preserve a saved casting take without synthesizing again.
@@ -681,7 +702,7 @@ class CastingSession:
                 draft = self._draft(voice_id, self.store.load(voice_id))
                 script_matches = (draft["reference_text"] == text or
                                   draft["sample_source"].get("replaces_reference_text") == text)
-                if draft["prompt"] != prompt or not script_matches:
+                if voice_prompt_description(draft["prompt"]) != voice_prompt_description(prompt) or not script_matches:
                     raise RenderBlocked("Casting attempt does not match the current prompt and sample text")
             engine, verifier = self._get_engine(), self._get_verifier()
             self._check_engine(request.get("engine", {}), engine.identity)
