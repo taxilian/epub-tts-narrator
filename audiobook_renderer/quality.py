@@ -30,6 +30,7 @@ QUALITY_DEFAULTS = {
     "max_wer": 0.0,
 }
 QUALITY_VERSION = 4
+REFERENCE_VARIATION_VERSION = 2
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -91,13 +92,16 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
     """Bind cached verification to its purpose, settings and expected words."""
     if not isinstance(expected_text, str):
         raise ValueError("expected_text must be a string")
-    return digest({
+    identity = {
         "policy_version": QUALITY_VERSION,
         "purpose": _validate_purpose(purpose),
         "quality": validate_policy(policy),
         "verifier": verifier.identity,
         "expected_text": expected_text,
-    })
+    }
+    if purpose == "reference":
+        identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
+    return digest(identity)
 
 
 _SMALL = (
@@ -412,6 +416,66 @@ def _checked_transcript(result, duration: float) -> tuple[str, list[dict], list[
     return result["text"], words, diagnostics
 
 
+def _reference_variation_eligibility(metrics: dict) -> dict | None:
+    """Bound reference edits without declaring word splits equivalent speech.
+
+    A closed word and 2–3 adjacent alphabetic words with exactly the same
+    letters may qualify for another recognizer. Each boundary change consumes
+    one of the four allowed variations, and the original 10% WER ceiling still
+    applies. Actual insertions/deletions have no permitted alignment edge.
+    The final consensus comparisons never use these candidate boundary rules.
+    """
+    if metrics["wer"] > .10:
+        return None
+    expected = [word for edit in metrics["alignment"] for word in edit["expected"]]
+    actual = [word for edit in metrics["alignment"] for word in edit["actual"]]
+    limit = min(4, len(expected) // 10)
+
+    def boundary(one, parts):
+        return (one.isalpha() and "".join(parts) == one
+                and all(part.isalpha() and len(part) >= 2
+                        and part not in _NUMBER_COMPONENTS for part in parts))
+
+    # At most four 1↔3 changes can move the alignment eight tokens off its
+    # diagonal. A bounded dynamic program handles adjacent edits and repeats
+    # without depending on arbitrary ties in the ordinary WER alignment.
+    states = {(0, 0): (0, None, None)}
+
+    def add(i, j, end_i, end_j, operation):
+        cost = states[(i, j)][0] + (operation != "equal")
+        if cost <= limit and ((end_i, end_j) not in states
+                              or cost < states[(end_i, end_j)][0]):
+            states[(end_i, end_j)] = (cost, (i, j), operation)
+
+    for i in range(len(expected) + 1):
+        for j in range(max(0, i - 2 * limit), min(len(actual), i + 2 * limit) + 1):
+            if (i, j) not in states or i == len(expected) or j == len(actual):
+                continue
+            add(i, j, i + 1, j + 1, "equal" if expected[i] == actual[j] else "substitute")
+            for size in (2, 3):
+                if j + size <= len(actual) and boundary(expected[i], actual[j:j + size]):
+                    add(i, j, i + 1, j + size, "split")
+                if i + size <= len(expected) and boundary(actual[j], expected[i:i + size]):
+                    add(i, j, i + size, j + 1, "join")
+    position = (len(expected), len(actual))
+    if position not in states:
+        return None
+    changes = []
+    while position != (0, 0):
+        _, previous, operation = states[position]
+        if operation != "equal":
+            i, j = previous
+            end_i, end_j = position
+            changes.append({"operation": operation, "expected_start": i, "expected_end": end_i,
+                            "actual_start": j, "actual_end": end_j,
+                            "expected": expected[i:end_i], "actual": actual[j:end_j]})
+        position = previous
+    changes.reverse()
+    return {"substitutions": sum(edit["operation"] == "substitute" for edit in changes),
+            "boundary_changes": sum(edit["operation"] in {"split", "join"} for edit in changes),
+            "variation_count": len(changes), "alignment": changes}
+
+
 def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
     """Resolve a small reference-script variation with an independent decoder.
 
@@ -428,10 +492,10 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
         "transcript": None,
     }
     report["corroboration"] = corroboration
-    if (metrics["insertions"] or metrics["deletions"]
-            or not 0 <= metrics["substitutions"] <= 4
-            or metrics["wer"] > 0.10):
+    eligibility = _reference_variation_eligibility(metrics)
+    if eligibility is None:
         return False
+    corroboration["eligibility"] = eligibility
     decode = getattr(verifier, "corroborate_reference", None)
     if not callable(decode):
         corroboration["decision"] = "unavailable"
@@ -479,7 +543,7 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     transcription failures and content mismatches produce a JSON-safe failure
     report, which can be retained alongside a rejected synthesis attempt.
     References require the same acoustic checks, but do not require alignment
-    that cloning never consumes. Small reference-script substitutions require
+    that cloning never consumes. Bounded reference-script variations require
     either independent agreement on the actual words or an independent exact
     match to the requested script. Speech chunks always retain their lexical
     gate.
