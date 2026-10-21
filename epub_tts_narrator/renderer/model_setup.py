@@ -8,9 +8,10 @@ saved chapters does not require speech checkpoints or network access.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
+import re
 import shlex
 import sys
 
@@ -42,6 +43,24 @@ PARAKEET = _Model("parakeet", "mlx-community/parakeet-tdt-0.6b-v3",
 QWEN = _Model("qwen", "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
               "7d3824abff87e49756bb0f83fb5411de75d160c4",
               "Qwen3 voice design", "about 4.5 GB")
+
+
+def _snapshot_target(path, model):
+    """Recognize the Hub's repository cache layout without guessing a new model."""
+    if path.parent.name != "snapshots" or not path.parent.parent.name.startswith("models--"):
+        return model, None
+    repository = path.parent.parent.name
+    if repository != "models--" + model.repo.replace("/", "--"):
+        raise ModelSetupError(
+            f"The Hugging Face cache path {path} belongs to a different repository. "
+            f"It will not be filled with {model.repo}; choose the correct model directory in the global config.")
+    if re.fullmatch(r"[0-9a-f]{40}", path.name) is None:
+        raise ModelSetupError(
+            f"The Hugging Face snapshot path {path} needs a full 40-character commit revision. "
+            "Choose the snapshot directory or use a local model directory in the global config.")
+    # Snapshot names identify immutable commits. Keep the requested revision,
+    # and let the Hub manage shared blobs/symlinks instead of using local_dir.
+    return replace(model, revision=path.name), path.parents[2]
 
 
 def _file(path):
@@ -165,17 +184,19 @@ class ModelSetup:
             missing = _missing(path, model)
             if not missing:
                 continue
-            if not identifiable and path.name != model.repo.rsplit("/", 1)[-1]:
+            model, cache_dir = _snapshot_target(path, model)
+            if cache_dir is None and not identifiable and path.name != model.repo.rsplit("/", 1)[-1]:
                 raise ModelSetupError(
                     f"Local model is incomplete at {path}: {', '.join(missing)}. "
                     f"The repository for custom {setting} cannot be inferred safely. "
                     "Restore that model manually, or use the documented "
                     f"{model.repo.rsplit('/', 1)[-1]} directory for automatic download.")
-            self._ensure(path, model, missing)
+            self._ensure(path, model, missing, cache_dir=cache_dir)
 
-    def _manual(self, path, model):
+    def _manual(self, path, model, *, cache_dir=None):
+        destination = ["--cache-dir", str(cache_dir)] if cache_dir is not None else ["--local-dir", str(path)]
         command = shlex.join([".venv-renderer/bin/hf", "download", model.repo,
-                              "--revision", model.revision, "--local-dir", str(path)])
+                              "--revision", model.revision, *destination])
         return ("Rerun the same audiobook command from an interactive terminal to retry, "
                 "or download manually:\n" + command)
 
@@ -197,7 +218,8 @@ class ModelSetup:
                 return False, "No interactive terminal is available"
             print(self._message(
                 f"\n{model.label} is missing or incomplete.\n"
-                f"Repository: {model.repo}\nDownload: {model.size}\nDirectory: {path}\n"
+                f"Repository: {model.repo}\nRevision: {model.revision}\n"
+                f"Download: {model.size}\nDirectory: {path}\n"
                 f"Missing: {', '.join(missing)}\n"
                 "Completed download files will be reused if you rerun this command."), file=output, flush=True)
             print("Download this model now? [y/N] ", end="", file=output, flush=True)
@@ -207,11 +229,11 @@ class ModelSetup:
                 answer = ""
             return answer.strip().casefold() in {"y", "yes"}, "Model download declined"
 
-    def _ensure(self, path, model, missing):
+    def _ensure(self, path, model, missing, *, cache_dir=None):
         key = (str(path), model.repo, model.revision)
         if key in self._stopped:
             raise ModelSetupError(self._stopped[key])
-        manual = self._manual(path, model)
+        manual = self._manual(path, model, cache_dir=cache_dir)
         try:
             accepted, reason = self._confirm(path, model, missing)
             if not accepted:
@@ -228,8 +250,9 @@ class ModelSetup:
             token = self.config.get("huggingface", {}).get("api_key") or False
             print(self._message(f"Downloading {model.repo} to {path}…"),
                   file=self.output_stream if self.output_stream is not None else sys.stderr, flush=True)
-            downloader(repo_id=model.repo, revision=model.revision, local_dir=str(path),
-                       token=token, max_workers=5)
+            destination = {"cache_dir": str(cache_dir)} if cache_dir is not None else {"local_dir": str(path)}
+            downloader(repo_id=model.repo, revision=model.revision,
+                       token=token, max_workers=5, **destination)
             remaining = _missing(path, model)
             if remaining:
                 raise ModelSetupError(f"Download returned but the checkpoint is still incomplete: {', '.join(remaining)}")

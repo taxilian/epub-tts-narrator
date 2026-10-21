@@ -3,6 +3,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from io import StringIO
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,9 +15,10 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.casting import CastingSession
 from epub_tts_narrator.renderer.cli import main
 from epub_tts_narrator.renderer.config import DEFAULTS
-from epub_tts_narrator.renderer.model_setup import ModelSetupError
+from epub_tts_narrator.renderer.model_setup import ModelSetup, ModelSetupError, WHISPER
 from audition_fixtures import prepare_document
 from test_contracts import valid_document
+from test_renderer_model_setup import Terminal, complete
 
 
 class ModelSetupIntegrationTests(unittest.TestCase):
@@ -74,6 +76,35 @@ class ModelSetupIntegrationTests(unittest.TestCase):
         scripts.assert_not_called()
         engine.assert_not_called()
         verifier.assert_not_called()
+
+    def test_render_downloads_missing_whisper_cache_snapshot_without_changing_config(self):
+        cache = (self.root / "huggingface" / "hub").resolve()
+        snapshot = cache / "models--mlx-community--whisper-large-v3-turbo" / "snapshots" / WHISPER.revision
+        self.config_path.write_text(
+            '[engine]\ncheckpoint="./models/drama-3"\n'
+            f'[verification]\nmodel={json.dumps(str(snapshot))}\n'
+            '[voices]\nseries_id="fixture"\n'
+            '[huggingface]\napi_key="hf_fixture"\n')
+        before = self.config_path.read_bytes()
+        complete(self.root / "models" / "drama-3")
+        prompts = StringIO()
+        download = Mock(side_effect=lambda **kwargs: complete(snapshot, "whisper"))
+        def setup(config):
+            return ModelSetup(config, input_stream=Terminal("yes\n"), output_stream=prompts,
+                              downloader=download)
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup", side_effect=setup),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()) as verifier,
+              patch("epub_tts_narrator.renderer.workflow.render", return_value={}) as render):
+            status, _, error = self.run_cli("render")
+        self.assertEqual(status, 0, error)
+        download.assert_called_once_with(repo_id=WHISPER.repo, revision=WHISPER.revision,
+                                         cache_dir=str(cache), token="hf_fixture", max_workers=5)
+        self.assertIn("Download this model now?", prompts.getvalue())
+        self.assertNotIn("hf_fixture", prompts.getvalue())
+        self.assertEqual(verifier.call_args.args[0]["model"], str(snapshot))
+        render.assert_called_once()
+        self.assertEqual(self.config_path.read_bytes(), before)
 
     def test_read_only_and_assembly_commands_never_prepare_models(self):
         with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,

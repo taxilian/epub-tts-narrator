@@ -1,6 +1,7 @@
 import io
 import json
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -252,6 +253,153 @@ class ModelSetupTests(unittest.TestCase):
         complete(custom, "whisper")
         self.setup().ensure("verification")
         self.downloader.assert_not_called()
+
+    def cache_snapshot(self, model=WHISPER, revision=None, *, repo=None):
+        hub = self.root / "huggingface hub"
+        return (hub / ("models--" + (repo or model.repo).replace("/", "--"))
+                / "snapshots" / (revision or model.revision))
+
+    def configure_snapshot(self, model, path):
+        if model == DRAMA:
+            self.config["engine"]["checkpoint"] = str(path)
+            return "engine"
+        if model == QWEN:
+            self.config["voice_design"] = {"type": "qwen3_mlx", "checkpoint": str(path)}
+            return "voice_design"
+        if model == PARAKEET:
+            primary = self.root / "existing-whisper"
+            complete(primary, "whisper")
+            self.config["verification"]["model"] = str(primary)
+            self.config["verification"]["reference_model"] = str(path)
+        else:
+            self.config["verification"]["model"] = str(path)
+        return "verification"
+
+    def download_snapshot(self, **kwargs):
+        model = next(m for m in (DRAMA, WHISPER, PARAKEET, QWEN) if m.repo == kwargs["repo_id"])
+        path = (Path(kwargs["cache_dir"]) / ("models--" + model.repo.replace("/", "--"))
+                / "snapshots" / kwargs["revision"])
+        complete(path, model.kind)
+        return str(path)
+
+    def test_missing_known_hub_snapshots_are_downloaded_through_cache(self):
+        self.downloader.side_effect = self.download_snapshot
+        for model in (WHISPER, DRAMA, PARAKEET, QWEN):
+            with self.subTest(model=model.repo):
+                path = self.cache_snapshot(model)
+                component = self.configure_snapshot(model, path)
+                self.downloader.reset_mock()
+                self.setup().ensure(component)
+                self.downloader.assert_called_once_with(
+                    repo_id=model.repo, revision=model.revision,
+                    cache_dir=str(path.parents[2]), token=False, max_workers=5)
+                self.assertTrue((path / "config.json").is_file())
+                self.assertFalse((path / ".cache").exists())
+                self.assertIn(str(path), self.output.getvalue())
+
+    def test_snapshot_uses_explicit_commit_and_file_configured_token(self):
+        revision = "b" * 40
+        self.assertNotEqual(revision, WHISPER.revision)
+        path = self.cache_snapshot(revision=revision)
+        self.configure_snapshot(WHISPER, path)
+        self.config["huggingface"] = {"api_key": "hf_snapshot_private_key"}
+        self.downloader.side_effect = self.download_snapshot
+        self.setup().ensure("verification")
+        self.downloader.assert_called_once_with(
+            repo_id=WHISPER.repo, revision=revision,
+            cache_dir=str(path.parents[2]), token="hf_snapshot_private_key", max_workers=5)
+        self.assertFalse(self.cache_snapshot().exists())
+        self.assertNotIn("hf_snapshot_private_key", self.output.getvalue())
+
+    def test_missing_hub_blobs_are_repaired_without_replacing_snapshot_symlinks(self):
+        path = self.cache_snapshot()
+        self.configure_snapshot(WHISPER, path)
+        path.mkdir(parents=True)
+        (path / "config.json").symlink_to("../../blobs/config-blob")
+        (path / "weights.safetensors").symlink_to("../../blobs/weights-blob")
+        self.assertFalse((path / "config.json").exists())
+
+        def repair_blobs(**kwargs):
+            self.assertEqual(kwargs["cache_dir"], str(path.parents[2]))
+            self.assertNotIn("local_dir", kwargs)
+            files(path.parents[1] / "blobs", {
+                "config-blob": {"model_type": "whisper"}, "weights-blob": "weights"})
+            return str(path)
+
+        self.downloader.side_effect = repair_blobs
+        self.setup().ensure("verification")
+        self.downloader.assert_called_once()
+        self.assertTrue((path / "config.json").is_symlink())
+        self.assertEqual((path / "weights.safetensors").read_text(), "weights")
+
+    def test_complete_hub_snapshot_never_prompts_downloads_or_writes(self):
+        path = self.cache_snapshot(revision="c" * 40)
+        self.configure_snapshot(WHISPER, path)
+        complete(path, "whisper")
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in path.iterdir()}
+        self.setup().ensure("verification")
+        after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in path.iterdir()}
+        self.assertEqual(before, after)
+        self.assertEqual(self.output.getvalue(), "")
+        self.downloader.assert_not_called()
+
+    def test_declining_hub_download_preserves_exact_manual_cache_command(self):
+        revision = "d" * 40
+        path = self.cache_snapshot(revision=revision)
+        self.configure_snapshot(WHISPER, path)
+        with self.assertRaisesRegex(ModelSetupError, "declined") as error:
+            self.setup("n\n").ensure("verification")
+        command = shlex.split(str(error.exception).splitlines()[-1])
+        self.assertEqual(command, [".venv-renderer/bin/hf", "download", WHISPER.repo,
+                                   "--revision", revision, "--cache-dir", str(path.parents[2])])
+        self.assertFalse(path.parents[2].exists())
+        self.downloader.assert_not_called()
+
+    def test_wrong_hub_repository_is_never_guessed_or_written(self):
+        for model in (WHISPER, DRAMA, PARAKEET, QWEN):
+            with self.subTest(model=model.repo):
+                path = self.cache_snapshot(model, repo="another-owner/" + model.repo.split("/")[-1])
+                component = self.configure_snapshot(model, path)
+                with self.assertRaises(ModelSetupError):
+                    self.setup().ensure(component)
+                self.assertFalse(path.parents[2].exists())
+        self.assertNotIn("[y/N]", self.output.getvalue())
+        self.downloader.assert_not_called()
+
+    def test_malformed_hub_snapshot_revision_is_never_guessed_or_written(self):
+        for model in (WHISPER, DRAMA, PARAKEET, QWEN):
+            for revision in ("main", "a" * 39, "A" * 40, "g" * 40):
+                with self.subTest(model=model.repo, revision=revision):
+                    path = self.cache_snapshot(model, revision)
+                    component = self.configure_snapshot(model, path)
+                    with self.assertRaises(ModelSetupError):
+                        self.setup().ensure(component)
+                    self.assertFalse(path.parents[2].exists())
+        self.assertNotIn("[y/N]", self.output.getvalue())
+        self.downloader.assert_not_called()
+
+    def test_hub_snapshot_download_failure_retains_files_and_uses_cache_on_retry(self):
+        path = self.cache_snapshot()
+        self.configure_snapshot(WHISPER, path)
+
+        def interrupted(**kwargs):
+            self.assertNotIn("local_dir", kwargs)
+            files(path, {"config.json": {"model_type": "whisper"}})
+            raise RuntimeError("connection reset downloading cached weights")
+
+        self.downloader.side_effect = interrupted
+        setup = self.setup()
+        with self.assertRaisesRegex(ModelSetupError, "connection reset") as error:
+            setup.ensure("verification")
+        self.assertIn("--cache-dir", str(error.exception))
+        self.assertTrue((path / "config.json").is_file())
+        with self.assertRaises(ModelSetupError):
+            setup.ensure("verification")
+        self.downloader.assert_called_once()
+        self.downloader.side_effect = self.download_snapshot
+        self.setup().ensure("verification")
+        self.assertEqual(self.downloader.call_count, 2)
+        self.assertTrue((path / "weights.safetensors").is_file())
 
     def test_temporary_designer_settings_are_respected(self):
         setup = self.setup()
