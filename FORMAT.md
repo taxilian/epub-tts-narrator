@@ -72,6 +72,8 @@ For unresolved text, `role_id` and `voice_id` are both null, `basis` is `unresol
 
 Local `delivery` is optional in meaning but always present structurally. Empty direction means no special instruction. Model-produced nonempty directions require evidence. User-authored block replacements can specify creative direction without textual evidence. Delivery never creates a new persistent voice by itself.
 
+At model ingestion only, empty partial delivery objects (`{}`, `{"direction":""}`, or `{"evidence":[]}`) are expanded to the complete empty default. Nonempty or malformed partial objects are rejected. This structural completion changes no source text, speaker, evidence, or delivery cue; the raw model response is retained in the cache. Published files and explicit user edits still require the complete delivery schema above.
+
 All source blocks must be covered exactly once and in order, without gaps or overlaps. For each segment:
 
 ```text

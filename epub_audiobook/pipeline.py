@@ -319,6 +319,20 @@ def merge_patch(source, cast, response, available, *, defer_merges=False, protec
     return updated, issues, summary
 
 
+def complete_empty_delivery(value):
+    """Complete omitted empty model defaults without changing an asserted cue.
+
+    Only an object containing a subset of the two empty default fields qualifies.
+    Malformed values, unknown fields, and any nonempty direction/evidence are
+    left untouched for strict validation. Raw model responses are never mutated.
+    """
+    if (isinstance(value, dict) and set(value) < {"direction", "evidence"}
+            and ("direction" not in value or isinstance(value["direction"], str) and value["direction"] == "")
+            and ("evidence" not in value or isinstance(value["evidence"], list) and value["evidence"] == [])):
+        return {"direction": "", "evidence": []}
+    return value
+
+
 def align_units(source, cast, units, response, *, allow_user=False):
     if not isinstance(response, dict) or not isinstance(response.get("units"), list):
         raise ValueError("Attribution must return a units array")
@@ -459,7 +473,7 @@ def align_units(source, cast, units, response, *, allow_user=False):
                 raise ValueError(f"{location} ({context}): Evidence and candidates must be arrays")
             if type(piece["review_required"]) is not bool:
                 raise ValueError("review_required must be a boolean")
-            delivery = piece["delivery"]
+            delivery = piece["delivery"] if allow_user else complete_empty_delivery(piece["delivery"])
             if not isinstance(delivery, dict) or not isinstance(delivery.get("direction"), str) or not isinstance(delivery.get("evidence"), list):
                 raise ValueError(f"{location}.delivery ({context}): Delivery must have direction string and evidence array")
             if delivery["direction"] and not allow_user and not delivery["evidence"]:
@@ -470,7 +484,7 @@ def align_units(source, cast, units, response, *, allow_user=False):
                                   roles.get(role_id), kind=piece["kind"], basis=piece["basis"],
                                   reason=piece["reason"], evidence=piece["evidence"],
                                   candidates=piece["candidates"], review_required=piece["review_required"],
-                                  delivery=piece["delivery"]))
+                                  delivery=delivery))
             locations[id(output[-1])] = (location, context, piece)
             cursor += len(text)
         if cursor != len(unit["text"]):
@@ -673,12 +687,84 @@ class CachedRequests:
         self.progress_lock = Lock()
 
     def _repair_payload(self, system, payload, result, error):
-        correction = {"validator_error": str(error)[:2000],
-                      "instruction": "Return a corrected complete response to the original task."}
+        # Repair hints do not change the original request identity or its source.
+        # Discovery uses upserts and semantic review uses proposals/votes, so only
+        # ordinary attribution may be instructed to replace the entire units array.
+        attribution = ("mode" not in payload and isinstance(payload.get("final_cast"), dict)
+                       and isinstance(payload.get("target_units"), list)
+                       and all(isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
+                               for unit in payload["target_units"]))
+        correction = {
+            "validator_error": str(error)[:2000],
+            "instruction": ("Return one corrected JSON response using the original schema and scope; "
+                            "keep any original upsert contract."),
+        }
+        guidance = []
+        if attribution:
+            correction.update(
+                instruction=("Return one complete replacement JSON object with the entire units array, "
+                             "not a patch or only corrected units. Include EVERY target unit exactly once "
+                             "in target_units order, including unaffected units, with complete segment arrays. "
+                             "Do not emit context_units or prior_segments."),
+                target_unit_count=len(payload["target_units"]),
+                target_unit_ids=[unit["unit_id"] for unit in payload["target_units"]],
+            )
+            guidance.extend([
+                "Concatenated segment text must reproduce each target unit verbatim, including straight/curly "
+                "quotes, punctuation, whitespace, unusual spelling, and repeated letters. Do not edit source text.",
+                'Check EVERY delivery object. The default is {"direction":"","evidence":[]}; a nonempty '
+                "direction needs exact supporting evidence. Keep unsupported directions empty.",
+            ])
+        if attribution or any(word in str(error).casefold() for word in ("evidence", "quote", "substring")):
+            guidance.append(
+                "Copy evidence verbatim from the referenced visible block. Prefer a short, sufficient exact "
+                "substring; preserve typography and spelling. Do not paraphrase, add ellipses, or invent block IDs."
+            )
+        if guidance:
+            correction["guidance"] = guidance
+
+        def fits(candidate):
+            return len(system) + len(json.dumps(candidate, ensure_ascii=False)) <= self.max_request_chars
+
         current = dict(payload, correction=dict(correction, previous_response=result))
-        if len(system) + len(json.dumps(current, ensure_ascii=False)) > self.max_request_chars:
-            current = dict(payload, correction=correction)
-        return current
+        if fits(current):
+            return current
+        # Drop redundant hints before shortening feedback. Never trim the base
+        # source, cast, or task; a smaller request budget is not permission to
+        # ask for only the faulty unit or to accept a partial result.
+        current = dict(payload, correction=correction)
+        if fits(current):
+            return current
+        for optional in ("target_unit_ids", "guidance"):
+            correction.pop(optional, None)
+            if fits(current):
+                return current
+        correction["instruction"] = (
+            "Return ALL target units once in input order, with complete exact text, including unaffected units; no patches."
+            if attribution else "Return a corrected complete response within the original schema and scope."
+        )
+        if fits(current):
+            return current
+        correction.pop("target_unit_count", None)
+        if fits(current):
+            return current
+        error_text = correction["validator_error"]
+        minimum = min(32, len(error_text))
+        lower, upper, best = minimum, len(error_text), None
+        while lower <= upper:
+            length = (lower + upper) // 2
+            correction["validator_error"] = error_text[:length] + ("…" if length < len(error_text) else "")
+            if fits(current):
+                best = correction["validator_error"]
+                lower = length + 1
+            else:
+                upper = length - 1
+        if best is not None:
+            correction["validator_error"] = best
+            return current
+        # No useful correction fits. Retrying the intact original task is safer
+        # than dropping source data or exceeding the configured request limit.
+        return payload
 
     def _latest_failed_response(self, key):
         """Read only this request's latest bounded, regular failure file."""
@@ -730,7 +816,7 @@ class CachedRequests:
                     validate(copy.deepcopy(failed))
                 except (ValueError, TypeError, KeyError, IndexError) as error:
                     repaired = self._repair_payload(system, payload, failed, error)
-                    if len(system) + len(json.dumps(repaired, ensure_ascii=False)) <= self.max_request_chars:
+                    if "correction" in repaired and len(system) + len(json.dumps(repaired, ensure_ascii=False)) <= self.max_request_chars:
                         current = repaired
                         with self.progress_lock:
                             detail = "" if "previous_response" in current["correction"] else " Previous response omitted to fit the request budget."

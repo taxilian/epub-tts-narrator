@@ -15,7 +15,7 @@ from threading import Event, Lock
 
 from .contracts import readiness, validate_document
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
-from .pipeline import DEFAULT_POLICY, align_units, fingerprint, write_json
+from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE, PROMPT_VERSION
 from .provider import ProviderError
 
@@ -353,8 +353,9 @@ def _accept_scan(response, document, batch, originals):
             piece_path = f"{path}.segments[{piece_index}]"
             _object(piece, piece_keys, piece_path)
             _evidence(piece["evidence"], visible, label=piece_path + ".evidence")
-            _object(piece["delivery"], ("direction", "evidence"), piece_path + ".delivery")
-            _evidence(piece["delivery"]["evidence"], visible, label=piece_path + ".delivery.evidence")
+            delivery = complete_empty_delivery(piece["delivery"])
+            _object(delivery, ("direction", "evidence"), piece_path + ".delivery")
+            _evidence(delivery["evidence"], visible, label=piece_path + ".delivery.evidence")
         proposed = align_units(document["source"], document["cast"], [units[block_id]],
                                {"units": [{"unit_id": units[block_id]["unit_id"], "segments": correction["segments"]}]})
         if any(item["attribution"]["basis"] == "user" for item in originals[block_id]):
