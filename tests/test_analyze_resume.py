@@ -19,7 +19,7 @@ from epub_audiobook.cli import export_bundle, main, source_from
 from epub_audiobook.pipeline import CachedRequests, analyze, fingerprint, write_json
 from epub_audiobook.provider import ProviderError
 from epub_audiobook.series import link_analysis
-from epub_audiobook.speaker_completion import unassigned_segments
+from epub_audiobook.speaker_completion import complete_speakers, unassigned_segments
 import test_directory_cli as directory_fixtures
 from test_pipeline import FakeClient
 
@@ -60,6 +60,21 @@ class CompletionClient:
                 "evidence": evidence, "segments": pieces}
 
 
+class TruncatedCompletionClient(CompletionClient):
+    """Two complete reviewers cannot outvote a reviewer with no usable answer."""
+
+    def __init__(self, *, failed_block=None):
+        super().__init__()
+        self.failed_block = failed_block
+
+    def complete(self, system, payload):
+        if (payload["reviewer_id"] == "speaker_completion_3"
+                and (self.failed_block is None or payload["target_units"][0]["block_id"] == self.failed_block)):
+            self.calls.append(deepcopy(payload))
+            raise ProviderError("The model output was truncated. Increase the output token limit or reduce the input.")
+        return super().complete(system, payload)
+
+
 class AnalyzeResumeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -69,7 +84,8 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.config.write_text('[provider]\nmodel="fixture"\nbase_url="http://offline.invalid/v1"\n'
                                '[analysis]\nattribution_workers=1\nrepair_attempts=0\n')
 
-    def seed(self, number=1, *, missing=True, parent=None, prepared=False, advisory=False):
+    def seed(self, number=1, *, missing=True, missing_all=False, parent=None, prepared=False,
+             advisory=False, completed_jury=False):
         epub = directory_fixtures.DirectoryCLITests.make_epub(self, number)
         source = source_from(epub)
         document = analyze(source, FakeClient(), self.root / "seed-cache", identity_consensus=False,
@@ -78,26 +94,31 @@ class AnalyzeResumeTests(unittest.TestCase):
         registry = continuation_registry(parent, source) if parent else fresh_registry(path)
         document = link_analysis(document, registry)
         if missing:
-            row = next(item for item in document["segments"] if item["kind"] == "dialogue")
-            row.update(role_id=None, voice_id=None)
-            row["attribution"].update(basis="unresolved", review_required=True, candidates=[], reason="No consensus.")
+            rows = (document["segments"] if missing_all else
+                    [next(item for item in document["segments"] if item["kind"] == "dialogue")])
+            for row in rows:
+                row.update(role_id=None, voice_id=None)
+                row["attribution"].update(basis="unresolved", review_required=True, candidates=[], reason="No consensus.")
         if advisory:
             document["issues"].append({"id": "optional-note", "kind": "casting", "target": document["cast"]["voices"][0]["id"],
                                        "reason": "Optional performance nuance.", "resolved": False})
         if prepared:
             document = prepare_document_samples(document, CachedRequests(FakeClient(), self.root / "audition-cache"))
+        if completed_jury:
+            document = complete_speakers(document, CachedRequests(
+                CompletionClient(uncertain=True), self.root / "completed-jury-cache", repair_attempts=0), workers=1)
         publish_directory(document, registry, path, export_bundle, continue_from=parent)
         (path / "voices").mkdir()
         (path / "voices" / "reference.wav").write_bytes(b"Existing voice remains unchanged")
         return epub, path, document
 
-    def run_cli(self, *args, answers="", client=None):
+    def run_cli(self, *args, answers="", client=None, command="analyze"):
         output, error = StringIO(), StringIO()
         with (patch("sys.stdin", Terminal(answers)), contextlib.redirect_stdout(output),
               contextlib.redirect_stderr(error),
               patch("epub_audiobook.cli.analyze", side_effect=AssertionError("Must reuse saved analysis")),
               patch("epub_audiobook.cli.OpenAICompatibleClient", return_value=client or CompletionClient()) as provider):
-            status = main(["analyze", *map(str, args), "--config", str(self.config)])
+            status = main([command, *map(str, args), "--config", str(self.config)])
         return status, output.getvalue(), error.getvalue(), provider
 
     def snapshot(self, path):
@@ -212,6 +233,95 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual(status, 2, error)
         self.assertIn("Speaker selection incomplete", error)
         self.assertEqual(len(unassigned_segments(_completed_directory(path)[0])), 1)
+
+    def test_completed_unresolved_jury_prompts_immediately_without_provider_or_configured_model(self):
+        _, path, original = self.seed(completed_jury=True)
+        self.config.write_text('[analysis]\nattribution_workers=1\n')
+        status, _, error, provider = self.run_cli(path, answers="2\n")
+        self.assertEqual(status, 0, error)
+        provider.assert_not_called()
+        self.assertIn("Speaker number(s)", error)
+        updated = _completed_directory(path)[0]
+        self.assertFalse(unassigned_segments(updated))
+        self.assertEqual(updated["source"], original["source"])
+        self.assertEqual(updated["cast"], original["cast"])
+
+    def test_resolve_speakers_reuses_completed_jury_without_provider_or_configured_model(self):
+        _, path, _ = self.seed(completed_jury=True)
+        self.config.write_text('[analysis]\nattribution_workers=1\n')
+        status, _, error, provider = self.run_cli(path, answers="2\n", command="resolve-speakers")
+        self.assertEqual(status, 0, error)
+        provider.assert_not_called()
+        self.assertIn("Speaker number(s)", error)
+        self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
+
+    def test_partial_manual_answers_do_not_restart_completed_juries_for_remaining_blocks(self):
+        _, path, original = self.seed(missing_all=True, completed_jury=True)
+        self.assertGreater(len(unassigned_segments(original)), 2)
+        status, _, error, provider = self.run_cli(path, answers="1\n1\nq\n")
+        self.assertEqual(status, 2, error)
+        provider.assert_not_called()
+        intermediate = _completed_directory(path)[0]
+        choices = {row["id"]: row for row in intermediate["segments"] if row["attribution"]["basis"] == "user"}
+        self.assertEqual(len(unassigned_segments(intermediate)), len(unassigned_segments(original)) - 2)
+        self.assertTrue({row["block_id"] for row in choices.values()} &
+                        {row["block_id"] for row in unassigned_segments(intermediate)},
+                        "A saved choice and a remaining passage must share one source block")
+        answers = "1\n" * len(unassigned_segments(intermediate))
+        status, _, error, provider = self.run_cli(path, answers=answers)
+        self.assertEqual(status, 0, error)
+        provider.assert_not_called()
+        updated = _completed_directory(path)[0]
+        self.assertFalse(unassigned_segments(updated))
+        self.assertEqual({row["id"]: row for row in updated["segments"] if row["id"] in choices}, choices)
+        self.assertEqual(updated["source"], original["source"])
+        self.assertEqual(updated["cast"], original["cast"])
+
+    def test_exhausted_truncation_reaches_manual_prompt_without_accepting_two_votes(self):
+        _, path, original = self.seed()
+        client = TruncatedCompletionClient()
+        status, _, error, _ = self.run_cli(path, answers="1\n", client=client)
+        self.assertEqual(status, 0, error)
+        self.assertIn("truncated", error)
+        self.assertIn("Speaker number(s)", error)
+        self.assertEqual(len(client.calls), 4, "One truncated vote gets just one identical retry")
+        self.assertEqual({payload["round"] for payload in client.calls}, {1})
+        updated = _completed_directory(path)[0]
+        self.assertFalse(unassigned_segments(updated))
+        chosen = next(row for row in updated["segments"] if row["attribution"]["basis"] == "user")
+        narrator = next(role for role in original["cast"]["roles"] if role["kind"] == "narration")
+        self.assertEqual(chosen["role_id"], narrator["id"], "Only the human, not two reviewers, chose this performer")
+        previous_assigned = {row["id"]: row for row in original["segments"] if row["role_id"] is not None}
+        self.assertEqual({row["id"]: row for row in updated["segments"] if row["id"] in previous_assigned},
+                         previous_assigned)
+
+    def test_quitting_after_truncation_saves_manual_fallback_and_resume_makes_no_api_calls(self):
+        _, path, _ = self.seed()
+        client = TruncatedCompletionClient()
+        status, _, error, _ = self.run_cli(path, answers="q\n", client=client)
+        self.assertEqual(status, 2, error)
+        self.assertIn("Speaker number(s)", error)
+        self.assertEqual(len(client.calls), 4)
+        saved = _completed_directory(path)[0]
+        self.assertEqual(len(unassigned_segments(saved)), 1)
+        status, _, error, provider = self.run_cli(path, answers="2\n")
+        self.assertEqual(status, 0, error)
+        provider.assert_not_called()
+        self.assertIn("Speaker number(s)", error)
+        self.assertFalse(unassigned_segments(_completed_directory(path)[0]))
+
+    def test_truncated_block_keeps_other_automatic_assignments_when_manual_selection_quits(self):
+        _, path, original = self.seed(missing_all=True)
+        last_block = unassigned_segments(original)[-1]["block_id"]
+        client = TruncatedCompletionClient(failed_block=last_block)
+        status, _, error, _ = self.run_cli(path, answers="q\n", client=client)
+        self.assertEqual(status, 2, error)
+        self.assertIn("Speaker number(s)", error)
+        saved = _completed_directory(path)[0]
+        self.assertEqual({row["block_id"] for row in unassigned_segments(saved)}, {last_block})
+        self.assertTrue(all(row["role_id"] is not None for row in saved["segments"] if row["block_id"] != last_block))
+        self.assertEqual(saved["source"], original["source"])
+        self.assertEqual(saved["cast"], original["cast"])
 
     def test_source_bound_attribution_edits_apply_without_model_calls(self):
         _, path, document = self.seed()

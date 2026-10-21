@@ -18,7 +18,6 @@ except ImportError:
 @unittest.skipUnless(pty is not None and hasattr(os, "fork"), "POSIX terminal required")
 class SpeakerTerminalTests(unittest.TestCase):
     def test_redirected_stdin_prompts_waits_and_reads_the_controlling_terminal(self):
-        root = Path(__file__).resolve().parents[1]
         program = """
 import os, sys
 sys.path[:0] = [sys.argv[1], sys.argv[1] + '/tests']
@@ -39,6 +38,47 @@ assert not unassigned_segments(result)
 assert result['segments'][1]['role_id'] == 'mara'
 print('TERMINAL_SELECTION_SAVED', flush=True)
 """
+        self.run_terminal_program(program, reprompt=True)
+
+    def test_saved_analysis_with_truncated_jury_reaches_controlling_terminal(self):
+        program = """
+import os, sys
+sys.path[:0] = [sys.argv[1], sys.argv[1] + '/tests']
+from unittest.mock import patch
+from test_analyze_resume import AnalyzeResumeTests, TruncatedCompletionClient
+from epub_audiobook.analysis_directory import _completed_directory
+from epub_audiobook.cli import main
+from epub_audiobook.speaker_completion import unassigned_segments
+try:
+    with open('/dev/tty', 'r'), open('/dev/tty', 'w'):
+        pass
+except PermissionError:
+    print('TERMINAL_ACCESS_BLOCKED', flush=True)
+    sys.exit(77)
+fixture = AnalyzeResumeTests()
+fixture.setUp()
+try:
+    _, path, original = fixture.seed()
+    with open(os.devnull, 'r') as redirected:
+        os.dup2(redirected.fileno(), 0)
+    assert not sys.stdin.isatty()
+    client = TruncatedCompletionClient()
+    with patch('epub_audiobook.cli.OpenAICompatibleClient', return_value=client):
+        status = main(['analyze', str(path), '--config', str(fixture.config)])
+    assert status == 0, status
+    assert len(client.calls) == 4, len(client.calls)
+    result = _completed_directory(path)[0]
+    assert not unassigned_segments(result)
+    assert any(row['attribution']['basis'] == 'user' for row in result['segments'])
+    assert result['source'] == original['source']
+    print('TERMINAL_SELECTION_SAVED', flush=True)
+finally:
+    fixture.doCleanups()
+"""
+        self.run_terminal_program(program)
+
+    def run_terminal_program(self, program, *, reprompt=False):
+        root = Path(__file__).resolve().parents[1]
         pid, descriptor = pty.fork()
         if pid == 0:
             os.execv(sys.executable, [sys.executable, "-u", "-c", program, str(root)])
@@ -71,8 +111,9 @@ print('TERMINAL_SELECTION_SAVED', flush=True)
             until(prompt)
             finished, _ = os.waitpid(pid, os.WNOHANG)
             self.assertEqual(finished, 0, "The child must wait for a speaker choice")
-            os.write(descriptor, b"\n")
-            self.assertIn(b"blank answer does not skip", until(prompt))
+            if reprompt:
+                os.write(descriptor, b"\n")
+                self.assertIn(b"blank answer does not skip", until(prompt))
             os.write(descriptor, b"2\n")
             until(b"TERMINAL_SELECTION_SAVED")
             _, status = os.waitpid(pid, 0)

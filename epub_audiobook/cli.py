@@ -298,7 +298,7 @@ def main(argv=None):
         from .analysis_directory import _completed_directory
         from .analysis_revision import related_directories, revise_directories
         from .audition_scripts import prepare_document_samples
-        from .speaker_completion import complete_speakers, unassigned_segments
+        from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         original = _completed_directory(directory)[0]
@@ -332,7 +332,12 @@ def main(argv=None):
         if hashes[str(directory)] != original_manifest_hash:
             raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
         settings = config["analysis"]
-        if remaining:
+        targets = automatic_completion_targets(revised) if remaining else []
+        already_checked = len({item["block_id"] for item in remaining}) - len(targets)
+        if already_checked:
+            print(f"Reusing completed speaker checks for {already_checked} block(s); "
+                  "remaining choices will be requested in the terminal.", file=sys.stderr, flush=True)
+        if targets:
             cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
@@ -345,6 +350,7 @@ def main(argv=None):
                                       max_request_chars=settings["max_request_chars"],
                                       progress=lambda message: print(message, file=sys.stderr))
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
+                                        target_block_ids=targets,
                                         progress=lambda message: print(message, file=sys.stderr))
         revised = prompt_speaker_decisions(revised, book_path=directory)
         if revised != original:
@@ -364,7 +370,7 @@ def main(argv=None):
         if args.command == "resolve-speakers":
             from .analysis_directory import _completed_directory
             from .analysis_revision import related_directories, revise_directories
-            from .speaker_completion import complete_speakers, unassigned_segments
+            from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
             config = load_config(args.config)
             settings = config["analysis"]
             selected = {path.resolve() for path in args.directories}
@@ -372,24 +378,38 @@ def main(argv=None):
             hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
                       for path in directories}
             documents = {path: _completed_directory(path)[0] for path in selected}
-            model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
-            client = OpenAICompatibleClient(**config["provider"])
-            print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
-            requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
-                                      max_request_chars=settings["max_request_chars"],
-                                      progress=lambda message: print(message, file=sys.stderr))
-            revised = {}
+            revised, requests = {}, None
             for directory in directories:
                 if directory not in selected:
                     continue
+                targets = automatic_completion_targets(documents[directory])
+                revised[directory] = documents[directory]
+                already_checked = len({row["block_id"] for row in unassigned_segments(documents[directory])}) - len(targets)
+                if already_checked:
+                    print(f"Reusing completed speaker checks for {already_checked} block(s) in {directory}; "
+                          "remaining choices will be requested in the terminal.", file=sys.stderr, flush=True)
+                if not targets:
+                    continue
+                if requests is None:
+                    model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
+                    client = OpenAICompatibleClient(**config["provider"])
+                    print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
+                    requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                              max_request_chars=settings["max_request_chars"],
+                                              progress=lambda message: print(message, file=sys.stderr))
                 print(f"Resolving unassigned passages: {directory}", file=sys.stderr)
                 revised[directory] = complete_speakers(
                     documents[directory], requests, workers=min(5, settings["attribution_workers"]),
+                    target_block_ids=targets,
                     progress=lambda message: print(message, file=sys.stderr))
             for directory in revised:
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory)
-            result = revise_directories(revised, directories=directories, expected_manifest_hashes=hashes)
-            print(f"Original analysis files and revision journal: {result['backup_directory']}")
+            changed = {path: document for path, document in revised.items() if document != documents[path]}
+            if changed:
+                result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes)
+                print(f"Original analysis files and revision journal: {result['backup_directory']}")
+            else:
+                print("No speaker decisions changed; saved files are unchanged.")
             remaining = sum(len(unassigned_segments(document)) for document in revised.values())
             print(f"Speaker completion finished: {remaining} unassigned spoken passage(s) remain.")
             return 2 if remaining else 0

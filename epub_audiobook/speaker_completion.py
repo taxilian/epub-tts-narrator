@@ -16,9 +16,11 @@ from .contracts import has_assigned_speakers, readiness, validate_document
 from .performance import apply_bracket_delivery
 from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE
+from .provider import ProviderError
 
 COMPLETION_VERSION = "1"
 CONTEXT_CHARS = (12000, 100000, 160000)
+OUTPUT_TRUNCATED_MESSAGE = "The model output was truncated. Increase the output token limit or reduce the input."
 REVIEWERS = (
     ("speaker_completion_1", "Trace explicit speech tags and the speaker of continuing quotations."),
     ("speaker_completion_2", "Distinguish the actual speaker from mentioned people, listeners, and narrative actions."),
@@ -86,6 +88,115 @@ def _spoken(item):
 def unassigned_segments(document):
     """Return all unassigned spans containing speakable letters or numbers."""
     return [item for item in document["segments"] if _spoken(item) and not has_assigned_speakers(item)]
+
+
+def _finished_case(case):
+    """Recognize an exhausted jury, never an interrupted or incomplete one."""
+    status = case.get("status")
+    rounds = case.get("rounds")
+    if status not in ("partial", "unresolved", "needs_user") or not isinstance(rounds, list):
+        return False
+    if not 1 <= len(rounds) <= len(CONTEXT_CHARS):
+        return False
+    if status != "needs_user" and len(rounds) != len(CONTEXT_CHARS):
+        return False
+    reviewer_ids = {row[0] for row in REVIEWERS}
+    for number, turn in enumerate(rounds, 1):
+        if not isinstance(turn, dict) or type(turn.get("round")) is not int or turn["round"] != number:
+            return False
+        votes = turn.get("votes")
+        if (not isinstance(votes, list) or len(votes) != len(REVIEWERS)
+                or any(not isinstance(vote, dict) or not isinstance(vote.get("reviewer_id"), str)
+                       or vote.get("status") not in ("valid", "error") for vote in votes)
+                or {vote["reviewer_id"] for vote in votes} != reviewer_ids):
+            return False
+    return status != "needs_user" or any(
+        vote.get("status") == "error" and vote.get("output_truncated") is True
+        for vote in rounds[-1]["votes"])
+
+
+def _manual_script_ancestors(document, source_hash, cast_hash):
+    """Trace only recorded, source-bound manual decisions back from this script."""
+    provenance = document["provenance"]
+    history = provenance.get("speaker_decision_history", [])
+    audits = [provenance.get("speaker_decisions"), *(history if isinstance(history, list) else [])]
+    edges = []
+    for audit in audits:
+        if (isinstance(audit, dict) and type(audit.get("version")) is int and audit["version"] == 1
+                and audit.get("source_fingerprint") == source_hash
+                and audit.get("cast_fingerprint") == cast_hash
+                and isinstance(audit.get("decisions"), list) and audit["decisions"]
+                and isinstance(audit.get("input_script_fingerprint"), str)
+                and isinstance(audit.get("output_script_fingerprint"), str)):
+            edges.append((audit["input_script_fingerprint"], audit["output_script_fingerprint"]))
+    ancestors = {fingerprint(document["segments"])}
+    while True:
+        parents = {before for before, after in edges if after in ancestors}
+        if parents <= ancestors:
+            return ancestors
+        ancestors.update(parents)
+
+
+def _only_manual_assignments(before, after):
+    """Allow assigned user spans without overlooking edits to unresolved text."""
+    if not isinstance(before, list) or len(before) != len(after):
+        return False
+    changed = {"role_id", "voice_id", "kind", "attribution", "simultaneous_speakers"}
+    for old, current in zip(before, after):
+        if old == current:
+            continue
+        if (not isinstance(old, dict) or has_assigned_speakers(old)
+                or current.get("attribution", {}).get("basis") != "user"
+                or not has_assigned_speakers(current)
+                or {key: value for key, value in old.items() if key not in changed}
+                != {key: value for key, value in current.items() if key not in changed}):
+            return False
+    return True
+
+
+def automatic_completion_targets(document):
+    """Return unassigned blocks that have not already exhausted their saved jury.
+
+    Reuse requires the same source, cast, and complete block records, allowing
+    recorded user assignments to replace formerly unassigned spans. Decisions
+    elsewhere therefore do not restart an exhausted jury. This only selects work
+    for the CLI; saved audits never supply new speaker assignments here.
+    """
+    missing = {item["block_id"] for item in unassigned_segments(document)}
+    if not missing:
+        return []
+    current = {block_id: [] for block_id in missing}
+    for item in document["segments"]:
+        if item["block_id"] in current:
+            current[item["block_id"]].append(item)
+    provenance = document["provenance"]
+    history = provenance.get("speaker_completion_history", [])
+    audits = [provenance.get("speaker_completion"), *(history if isinstance(history, list) else [])]
+    source_hash, cast_hash = fingerprint(document["source"]), fingerprint(document["cast"])
+    manual_ancestors = _manual_script_ancestors(document, source_hash, cast_hash)
+    exhausted = set()
+    for audit in audits:
+        if (not isinstance(audit, dict) or audit.get("version") != COMPLETION_VERSION
+                or audit.get("status") != "blocked"
+                or audit.get("source_fingerprint") != source_hash
+                or audit.get("cast_fingerprint") != cast_hash
+                or audit.get("context_chars") != list(CONTEXT_CHARS)
+                or not isinstance(audit.get("cases"), list)):
+            continue
+        for case in audit["cases"]:
+            if not isinstance(case, dict) or not isinstance(case.get("block_id"), str):
+                continue
+            block_id = case["block_id"]
+            if block_id not in missing or not _finished_case(case):
+                continue
+            saved = case.get("applied_segments", case.get("original_segments"))
+            audited_manual_change = (isinstance(audit.get("output_script_fingerprint"), str)
+                                     and audit["output_script_fingerprint"] in manual_ancestors
+                                     and _only_manual_assignments(saved, current[block_id]))
+            if saved == current[block_id] or audited_manual_change:
+                exhausted.add(block_id)
+    return [block["id"] for block in document["source"]["blocks"]
+            if block["id"] in missing - exhausted]
 
 
 def _performers(item):
@@ -373,8 +484,10 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
 
     Three bounded rounds widen chapter and identity-evidence context. Transport failures
     propagate while successful votes remain in CachedRequests; a separate audit
-    checkpoint records every case, including those not yet dispatched. A null or
-    invalid response is never an approval. Disagreement remains visibly blocked.
+    checkpoint records every case, including those not yet dispatched. Exhausted
+    output truncation goes to manual selection without discarding other results.
+    A null or invalid response is never an approval. Disagreement remains visibly
+    blocked.
     """
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("workers must be an integer from 1 to 5")
@@ -432,7 +545,7 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
     replacements, retained_reviews = {}, {}
     try:
         for round_index, context_limit in enumerate(CONTEXT_CHARS, 1):
-            pending = [case for case in cases if case["status"] != "resolved"]
+            pending = [case for case in cases if case["status"] not in {"resolved", "needs_user"}]
             if not pending:
                 break
             report(f"Completing unassigned speakers: {len(pending)} block(s), three independent reviewers each, round {round_index}/{len(CONTEXT_CHARS)}")
@@ -472,11 +585,15 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                 except ValueError as error:
                     record.update(status="error", resolved=False, reason=str(error), raw_response=last_response)
                 except BaseException as error:
-                    record.update(status="interrupted", resolved=False, error_type=type(error).__name__, raw_response=last_response)
-                    with lock:
-                        round_record["votes"].append(record)
-                        save()
-                    raise
+                    if isinstance(error, ProviderError) and str(error) == OUTPUT_TRUNCATED_MESSAGE:
+                        record.update(status="error", resolved=False, reason=str(error),
+                                      output_truncated=True, raw_response=last_response)
+                    else:
+                        record.update(status="interrupted", resolved=False, error_type=type(error).__name__, raw_response=last_response)
+                        with lock:
+                            round_record["votes"].append(record)
+                            save()
+                        raise
                 with lock:
                     round_record["votes"].append(record)
                     save()
@@ -498,6 +615,10 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
                 current = replacements.get(case["block_id"], originals[case["block_id"]])
                 if not any(_spoken(item) and not has_assigned_speakers(item) for item in current):
                     case.update(status="resolved", resolution_round=round_index)
+                elif any(vote.get("output_truncated") is True for vote in record["votes"]):
+                    case["status"] = "needs_user"
+                    report(f"Speaker completion {case['block_id']}: the model could not return a complete answer. "
+                           "Keeping validated assignments; remaining passages will be offered for speaker selection.")
                 else:
                     case["status"] = "partial" if case["block_id"] in replacements else "unresolved"
             save()

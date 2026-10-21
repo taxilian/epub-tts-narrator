@@ -144,7 +144,9 @@ To resume a saved book, rerun the original `analyze` command with the same outpu
 .venv-renderer/bin/epub-audiobook analyze runs/book-06
 ```
 
-The saved cast, assigned passages, and cached model responses are reused. Only remaining speaker assignments are attempted, followed by interactive choices for unresolved passages. A fully assigned book needs no model calls or rewrite. Supplying an EPUB with an existing output requires it to match the saved source; an unrelated book cannot overwrite that directory. Updates preserve voices and refresh linked descendant metadata.
+The saved cast, assigned passages, and cached model responses are reused. Passages that already exhausted their saved speaker checks go straight to the terminal choices, without repeating model calls. Answering some passages and quitting retains that behavior for the remaining ones. Only passages still needing automatic checks use the model. A fully assigned book needs no model calls or rewrite. Supplying an EPUB with an existing output requires it to match the saved source; an unrelated book cannot overwrite that directory. Updates preserve voices and refresh linked descendant metadata.
+
+If a speaker-completion response is truncated twice, that reviewer cannot approve an assignment. The affected block stops automatic retries and is presented for your choice; completed agreements for other passages are retained. Repeated truncation no longer prevents the speaker prompt. Transport failures still stop the run with its validated requests cached for resumption.
 
 To resolve several existing book directories in one command:
 

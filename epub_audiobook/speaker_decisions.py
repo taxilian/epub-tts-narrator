@@ -42,7 +42,7 @@ def _findings(document, segment, labels):
                         names.append(label)
         response = vote.get("raw_response")
         response = response if isinstance(response, dict) else {}
-        reason = response.get("reason", "No valid source-bound decision.")
+        reason = response.get("reason", vote.get("reason", "No valid source-bound decision."))
         rows.append(f"{vote['reviewer_id']}: {', '.join(names) or 'no valid decision'} — {str(reason)[:280]}")
     return rows
 

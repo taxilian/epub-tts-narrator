@@ -30,6 +30,10 @@ class AnalysisRevisionTests(unittest.TestCase):
             path = self.root / f"book-{number}"
             document = fixture(sequel=number > 1)
             document["source"]["book"]["id"] = f"revision-book-{number}"
+            # Speaker completion targets missing performers, not advisory notes.
+            document["segments"][0].update(role_id=None, voice_id=None)
+            document["segments"][0]["attribution"].update(
+                basis="unresolved", review_required=True, reason="Uncertain speaker")
             if number == 1:
                 registry = fresh_registry(path)
                 document["issues"].append({"id": "attribution-test", "kind": "attribution",
@@ -51,6 +55,10 @@ class AnalysisRevisionTests(unittest.TestCase):
 
     def revision(self):
         document = deepcopy(self.documents[0])
+        role = next(role for role in document["cast"]["roles"] if role["kind"] == "dialogue")
+        document["segments"][0].update(role_id=role["id"], voice_id=role["voice_id"])
+        document["segments"][0]["attribution"].update(
+            basis="explicit", review_required=False, reason="The source identifies this speaker")
         document["issues"][0]["resolved"] = True
         document["provenance"]["speaker_completion"] = {"fixture": True}
         document["readiness"] = readiness(document)
