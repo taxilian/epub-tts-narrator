@@ -17,8 +17,10 @@ model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
 name = "cuda-local"
 type = "fish_http"
 url = "http://127.0.0.1:8080/v1/tts"
+# Official native Fish Speech profile. Use fish_inline for older compatible APIs.
+protocol = "fish_native_drama3"
 api_key = ""
-concurrency = 2
+concurrency = 1
 multi_speaker = true
 timeout_seconds = 300
 

@@ -1,0 +1,13 @@
+**
+!pyproject.toml
+!README.md
+!epub_tts_narrator/
+!epub_tts_narrator/**/*.py
+!deploy/
+!deploy/runpod/
+!deploy/runpod/worker.py
+!deploy/runpod/install.sh
+!deploy/runpod/requirements.txt
+!deploy/runpod/epub-tts-narrator.example.toml
+!deploy/runpod/Dockerfile
+!deploy/runpod/Dockerfile.dockerignore

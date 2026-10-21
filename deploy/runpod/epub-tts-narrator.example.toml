@@ -1,0 +1,68 @@
+# Copy to /workspace/epub-tts-narrator.toml on the Pod, chmod 600, then edit.
+# One global file for this machine; no book-specific settings or environment keys.
+
+[engine]
+type = "drama3_mlx" # Shared sampling contract; the HTTP pool bypasses MLX entirely.
+checkpoint = "/workspace/models/drama-3"
+temperature = 1.0
+top_p = 0.9
+top_k = 30
+max_new_tokens = 2048
+
+[render_pool]
+model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+
+[[render_pool.workers]]
+name = "drama3-cuda"
+type = "fish_http"
+protocol = "fish_native_drama3"
+url = "http://127.0.0.1:8080/v1/tts"
+concurrency = 1
+multi_speaker = true
+timeout_seconds = 600
+
+[verification]
+type = "faster_whisper"
+model = "/workspace/models/whisper-ct2"
+language = "en"
+device = "cpu"
+compute_type = "int8"
+cpu_threads = 4
+
+[chapter_server]
+host = "0.0.0.0"
+port = 8081
+api_key = "REPLACE-WITH-A-RANDOM-APPLICATION-KEY"
+data_dir = "/workspace/chapter-server-data"
+assembly_workers = 2
+max_pending_jobs = 256
+idle_timeout_seconds = 600
+# Change to runpod_stop after filling in Runpod/Ceph details and mounting storage.
+# none does not stop GPU billing: stop the Pod yourself during initial setup.
+idle_action = "none"
+persistent_data = false
+runpod_pod_id = ""
+runpod_api_key = ""
+
+[chapter_storage]
+# Ceph RGW endpoint reachable from both the Pod and your client, with valid HTTPS.
+bucket = ""
+endpoint_url = ""
+region = ""
+access_key_id = ""
+secret_access_key = ""
+prefix = "epub-tts-narrator"
+download_expiry_seconds = 3600
+
+[render]
+chapter_format = "m4a"
+normalize_loudness = true
+target_lufs = -20.0
+true_peak_db = -1.5
+aac_bitrate = "128k"
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
+
+# Copy your existing [jev] settings here to keep the same tolerant speech check.
+# No Gemini/ElevenLabs/analyzer keys are needed when voices are created locally.
+# The pinned models are public; [huggingface].api_key is optional.

@@ -120,6 +120,9 @@ class FishHTTPEngine:
         self.api_key = settings.get("api_key", "")
         self.timeout = settings.get("timeout_seconds", 600)
         self.multi_speaker = settings.get("multi_speaker", True)
+        self.protocol = settings.get("protocol", "fish_inline")
+        if not isinstance(self.protocol, str) or self.protocol not in {"fish_inline", "fish_native_drama3"}:
+            raise EngineError("Fish HTTP protocol must be fish_inline or fish_native_drama3")
         for name, value in (("name", self.name), ("model", self.model), ("api_key", self.api_key)):
             if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 raise EngineError(f"Fish HTTP {name} must be plain text")
@@ -131,12 +134,31 @@ class FishHTTPEngine:
         self.sampling = {key: values.get(key, default) for key, default in (
             ("temperature", 1.0), ("top_p", 0.9), ("top_k", 30), ("max_new_tokens", 2048),
         )}
+        if self.protocol == "fish_native_drama3":
+            # Fish Speech 5415669 accepts these fields in the body, has a fixed
+            # top-k of 30, and seeds its one shared inference queue globally.
+            if type(settings.get("concurrency", 1)) is not int or settings.get("concurrency", 1) != 1:
+                raise EngineError("fish_native_drama3 requires concurrency = 1")
+            if type(self.sampling["top_k"]) is not int or self.sampling["top_k"] != 30:
+                raise EngineError("fish_native_drama3 requires top_k = 30; the native server fixes this value")
+            for key in ("temperature", "top_p"):
+                value = self.sampling[key]
+                if type(value) not in (int, float) or not math.isfinite(value) or not 0.1 <= value <= 1:
+                    raise EngineError(f"fish_native_drama3 {key} must be from 0.1 through 1")
+            if (type(self.sampling["max_new_tokens"]) is not int
+                    or not 1 <= self.sampling["max_new_tokens"] <= 2048):
+                raise EngineError("fish_native_drama3 max_new_tokens must be from 1 through 2048")
 
     @property
     def identity(self) -> dict[str, Any]:
-        return {"engine": "fish_http", "model": self.model,
-                "protocol": "fish-inline-reference-wav-v1", "sampling": dict(self.sampling),
-                "multi_speaker": self.multi_speaker}
+        identity = {"engine": "fish_http", "model": self.model,
+                    "protocol": "fish-inline-reference-wav-v1", "sampling": dict(self.sampling),
+                    "multi_speaker": self.multi_speaker}
+        if self.protocol == "fish_native_drama3":
+            identity.update(protocol="fish-native-drama3-wav-v1",
+                            request_options={"single_chunk": True, "use_memory_cache": "on",
+                                             "seed_transport": "body", "fixed_top_k": 30})
+        return identity
 
     @property
     def voice_binding_identity(self) -> dict[str, Any]:
@@ -182,11 +204,17 @@ class FishHTTPEngine:
             raise FishHTTPError("Fish HTTP requires msgpack; install renderer.requirements.txt", retryable=False) from exc
         body = {"text": text, "references": references, "format": "wav", "normalize": False,
                 **{key: value for key, value in self.sampling.items() if key != "top_k"}}
+        if self.protocol == "fish_native_drama3":
+            # Preserve the paragraph as one take and reuse native encoded voice
+            # references. The chapter API already registers the FLAC bytes once;
+            # this cache prevents re-encoding them on each loopback request.
+            body.update(seed=seed, single_chunk=True, use_memory_cache="on")
         payload = msgpack.packb(body, use_bin_type=True)
         if len(payload) > MAX_AUDIO_BYTES:
             raise EngineError("Fish HTTP request is larger than 100 MiB")
-        headers = {"Content-Type": "application/msgpack", "Accept": "audio/wav", "model": self.model,
-                   "X-Audiobook-Seed": str(seed), "X-Audiobook-Top-K": str(self.sampling["top_k"])}
+        headers = {"Content-Type": "application/msgpack", "Accept": "audio/wav", "model": self.model}
+        if self.protocol == "fish_inline":
+            headers.update({"X-Audiobook-Seed": str(seed), "X-Audiobook-Top-K": str(self.sampling["top_k"])})
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = Request(self.url, data=payload, headers=headers, method="POST")

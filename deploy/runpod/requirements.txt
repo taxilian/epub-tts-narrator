@@ -1,0 +1,4 @@
+# Linux-only worker dependencies. Do not install the Apple MLX requirements here.
+numpy>=2.2,<3
+soundfile>=0.13,<0.14
+huggingface-hub>=0.34,<1

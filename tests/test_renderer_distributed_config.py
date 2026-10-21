@@ -54,9 +54,32 @@ class DistributedConfigTests(unittest.TestCase):
         self.assertEqual(workers[1]["model"], "drama-3")
         self.assertEqual(workers[1]["timeout_seconds"], 300.0)
         self.assertIs(workers[1]["multi_speaker"], True)
+        self.assertEqual(workers[1]["protocol"], "fish_inline")
         self.assertEqual(self.path.read_bytes(), before)
         # Both commands read this same file, without analyzer-specific copies.
         load_analyzer_config(self.path)
+
+    def test_native_drama3_profile_is_file_configured_and_keeps_pool_cache_identity(self):
+        from epub_tts_narrator.renderer.pool import RenderPool
+
+        self.write(worker_table())
+        original = load_config(self.path)
+        self.write(worker_table(protocol="fish_native_drama3"))
+        native = load_config(self.path)
+        self.assertEqual(native["render_pool"]["workers"][0]["protocol"], "fish_native_drama3")
+        self.assertEqual(RenderPool(original).identity, RenderPool(native).identity)
+        load_analyzer_config(self.path)
+
+    def test_native_drama3_constraints_fail_before_loading_workers(self):
+        self.write(worker_table(protocol="fish_native_drama3", concurrency=2))
+        with self.assertRaisesRegex(ValueError, "concurrency = 1"):
+            load_config(self.path)
+        for key, value in (("top_k", 20), ("temperature", 1.1), ("top_p", 0.01)):
+            with self.subTest(key=key):
+                self.write('[engine]\n' + f'{key}={value}\n'
+                           + worker_table(protocol="fish_native_drama3"), checkpoint=False)
+                with self.assertRaisesRegex(ValueError, f"engine.{key}"):
+                    load_config(self.path)
 
     def test_remote_only_does_not_require_local_checkpoint(self):
         self.write(worker_table(), checkpoint=False)
@@ -92,6 +115,9 @@ class DistributedConfigTests(unittest.TestCase):
             worker_table(concurrency=0),
             worker_table(concurrency=17),
             worker_table(multi_speaker="true"),
+            worker_table(protocol=[]),
+            worker_table(protocol="unsupported"),
+            worker_table("local", "local", protocol="fish_native_drama3"),
             worker_table(timeout_seconds=0),
             worker_table(unknown="private-value"),
             worker_table("bad name"),

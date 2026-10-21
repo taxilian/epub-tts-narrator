@@ -130,6 +130,103 @@ class FishHTTPErrorBodyTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("msgpack") and importlib.util.find_spec("soundfile"),
                      "requires renderer HTTP dependencies")
+class NativeDrama3TransportTests(unittest.TestCase):
+    """Exercise the native wire contract without downloading a model or using a GPU."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        reference = self.root / "reference.wav"
+        reference.write_bytes(wav_bytes())
+        self.voice = {"kind": "reference", "reference_audio": str(reference),
+                      "reference_text": "Reference words.", "voice_id": "one"}
+        self.requests = []
+        opener = Mock()
+
+        def respond(request, **kwargs):
+            self.requests.append(request)
+            response = io.BytesIO(wav_bytes())
+            response.status = 200
+            response.headers = {"Content-Length": str(len(wav_bytes()))}
+            return response
+
+        opener.open.side_effect = respond
+        patcher = patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def client(self, **settings):
+        return FishHTTPEngine({"url": "http://127.0.0.1:8080/v1/tts", **settings})
+
+    def payload(self):
+        import msgpack
+        request = self.requests[-1]
+        return msgpack.unpackb(request.data, raw=False), dict(request.header_items())
+
+    def test_native_profile_preserves_paragraph_enables_cache_and_sends_seed(self):
+        client = self.client(protocol="fish_native_drama3")
+        result = client.synthesize("One sentence. Another sentence.", self.voice,
+                                   self.root / "native.wav", seed=19)
+        payload, headers = self.payload()
+        self.assertEqual(payload, {
+            "text": "One sentence. Another sentence.",
+            "references": [{"audio": wav_bytes(), "text": "Reference words."}],
+            "format": "wav", "normalize": False, "temperature": 1.0, "top_p": 0.9,
+            "max_new_tokens": 2048, "seed": 19, "single_chunk": True, "use_memory_cache": "on",
+        })
+        self.assertNotIn("top_k", payload)  # Native schema fixes it at 30.
+        self.assertNotIn("X-audiobook-top-k", headers)
+        self.assertNotIn("X-audiobook-seed", headers)
+        self.assertEqual(result["seed_requested"], 19)
+        # Native Fish does not acknowledge the seed; do not claim verification.
+        self.assertFalse(result["seed_applied"])
+        self.assertEqual((self.root / "native.wav").read_bytes(), wav_bytes())
+        self.assertEqual(client.identity["protocol"], "fish-native-drama3-wav-v1")
+        self.assertEqual(client.identity["request_options"]["fixed_top_k"], 30)
+
+    def test_native_dialogue_keeps_individual_reference_speaker_bindings(self):
+        client = self.client(protocol="fish_native_drama3")
+        other = {**self.voice, "voice_id": "two", "reference_text": "Another voice."}
+        client.synthesize_dialogue([
+            {"text": "First speaker.", "voice": self.voice},
+            {"text": "Second speaker.", "voice": other},
+            {"text": "First again.", "voice": self.voice},
+        ], self.root / "dialogue.wav", seed=7)
+        payload, _ = self.payload()
+        self.assertEqual([reference["text"] for reference in payload["references"]],
+                         ["<|speaker:0|> Reference words.", "<|speaker:1|> Another voice."])
+        self.assertEqual(payload["text"],
+                         "<|speaker:0|> First speaker.\n<|speaker:1|> Second speaker.\n<|speaker:0|> First again.")
+        self.assertTrue(payload["single_chunk"])
+
+    def test_default_profile_retains_existing_wire_and_identity(self):
+        client = self.client()
+        client.synthesize("Hello.", self.voice, self.root / "default.wav", seed=3)
+        payload, headers = self.payload()
+        self.assertFalse({"seed", "single_chunk", "use_memory_cache"}.intersection(payload))
+        self.assertEqual(headers["X-audiobook-seed"], "3")
+        self.assertEqual(headers["X-audiobook-top-k"], "30")
+        self.assertEqual(client.identity, {
+            "engine": "fish_http", "model": "drama-3", "protocol": "fish-inline-reference-wav-v1",
+            "sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
+            "multi_speaker": True,
+        })
+        self.assertEqual(client.identity, self.client(protocol="fish_inline").identity)
+        self.assertNotEqual(client.identity, self.client(protocol="fish_native_drama3").identity)
+
+    def test_native_contract_rejects_unsupported_settings_without_sending(self):
+        for settings in ({"protocol": []}, {"protocol": "unknown"},
+                         {"concurrency": 2}, {"concurrency": True}, {"top_k": 20},
+                         {"top_k": 30.0}, {"temperature": 1.1}, {"temperature": 0},
+                         {"top_p": 0.01}, {"top_p": True}, {"max_new_tokens": 2049}):
+            with self.subTest(settings=settings), self.assertRaises(EngineError):
+                self.client(**{"protocol": "fish_native_drama3", **settings})
+        self.assertFalse(self.requests)
+
+
+@unittest.skipUnless(importlib.util.find_spec("msgpack") and importlib.util.find_spec("soundfile"),
+                     "requires renderer HTTP dependencies")
 class FishHTTPTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

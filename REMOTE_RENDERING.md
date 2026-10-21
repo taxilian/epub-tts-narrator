@@ -65,6 +65,10 @@ files are removed when packaging finishes or fails.
 
 ## Server setup
 
+For Runpod, use the [project-owned worker deployment](deploy/runpod/README.md).
+It prepares pinned models and supervises the chapter service plus one private,
+unmodified Fish CUDA process. Ceph can hold the compressed completed exports.
+
 Install this project and FFmpeg/ffprobe on the worker. Python 3.11 or newer is
 required. The HTTP service and Linux verification dependencies are optional:
 
@@ -77,12 +81,19 @@ See [chapter-server.example.toml](chapter-server.example.toml) for server settin
 The service can use a local MLX engine on Apple Silicon or configured Fish HTTP
 workers. On a Linux GPU host, run a CUDA-capable Drama 3 backend separately and
 point a `render_pool` worker at its compatible `/v1/tts` endpoint. The chapter
-service does not install, modify, or launch another inference library. The
+service itself does not install, modify, or launch another inference library;
+the optional Runpod launcher handles that process lifecycle. The
 existing Fish adapter requires the inline-reference contract documented in
 [RENDERER.md](RENDERER.md); compatibility with a particular CUDA backend still
 needs a real deployment test. Keep that backend on the same host when avoiding
 uncompressed audio between machines: its internal synthesis endpoint uses WAV,
 while this chapter service exposes compressed artifacts to the client.
+
+For the pinned official native Fish server, set the worker's
+`protocol = "fish_native_drama3"` and `concurrency = 1`. This enables reference
+memory caching, preserves our paragraph boundaries, and puts the seed in the
+native request body. The default `fish_inline` profile remains available for
+existing compatible workers. The native profile requires `engine.top_k = 30`.
 
 For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and

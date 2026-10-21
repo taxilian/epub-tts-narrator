@@ -181,7 +181,7 @@ def validate_distributed_settings(config):
             raise ValueError(f"{label}.type must be local or fish_http")
         allowed = {"name", "type", "concurrency"}
         if kind == "fish_http":
-            allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker"}
+            allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker", "protocol"}
         if set(supplied) - allowed:
             raise ValueError(f"Unknown configuration key in {label}")
         worker = {"concurrency": 1, **supplied}
@@ -193,7 +193,12 @@ def validate_distributed_settings(config):
                 raise ValueError("Use at most one local renderer, with concurrency = 1")
         else:
             worker = {"api_key": "", "model": "drama-3", "timeout_seconds": 300.0,
-                      "multi_speaker": True, **worker}
+                      "multi_speaker": True, "protocol": "fish_inline", **worker}
+            if (not isinstance(worker["protocol"], str)
+                    or worker["protocol"] not in {"fish_inline", "fish_native_drama3"}):
+                raise ValueError(f"{label}.protocol must be fish_inline or fish_native_drama3")
+            if worker["protocol"] == "fish_native_drama3" and concurrency != 1:
+                raise ValueError(f"{label}: fish_native_drama3 requires concurrency = 1")
             _credential(worker["api_key"], f"{label}.api_key")
             url = worker.get("url")
             try:
@@ -236,6 +241,12 @@ def validate_distributed_settings(config):
             raise ValueError("engine.experts must be q8, q4, fp8, or bf16")
         if engine["options"]:
             raise ValueError("Drama 3 settings belong directly in the engine table")
+        if any(worker.get("protocol") == "fish_native_drama3" for worker in normalized):
+            if engine["top_k"] != 30:
+                raise ValueError("engine.top_k must be 30 for fish_native_drama3; the native server fixes this value")
+            for key in ("temperature", "top_p"):
+                if not 0.1 <= engine[key] <= 1:
+                    raise ValueError(f"engine.{key} must be from 0.1 through 1 for fish_native_drama3")
     pool["workers"] = normalized
     server = config["server"]
     if (not isinstance(server["host"], str) or not server["host"].strip()
