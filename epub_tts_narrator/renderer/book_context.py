@@ -69,12 +69,12 @@ def validate_book_paths(bundle, config):
     protected.extend(Path(path).resolve() for path in config.get("_voice_parents", []))
     for section, key in (("engine", "checkpoint"), ("verification", "model"),
                          ("verification", "reference_model"), ("voice_design", "checkpoint"),
-                         ("render", "epub")):
+                         ("render", "epub"), ("chapter_server", "data_dir")):
         if config.get(section, {}).get(key):
             protected.append(Path(config[section][key]).resolve())
     for store in stores:
         if store == directory or store in directory.parents or any(overlaps(store, path) for path in protected):
-            raise ValueError("Voice/work/output directories must not overlap source, ancestor books, or model inputs")
+            raise ValueError("Voice/work/output directories must not overlap source, ancestor books, model inputs, or chapter server data")
     # Resolving a symlink must not turn the local voice directory into a write to
     # an ancestor or a shared library, including before its first generation.
     if config.get("_book_local_voices"):

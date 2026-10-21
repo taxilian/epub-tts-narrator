@@ -49,6 +49,7 @@ models/
 audition-scripts.json
 voices/
 render-work/
+/chapter-server-data/
 audiobook/
 audiobooks/
 *.epub

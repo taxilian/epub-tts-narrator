@@ -20,6 +20,7 @@ DEFAULTS = {
     "verification": {
         "type": "mlx_whisper", "model": None, "language": "en",
         "reference_model": None,
+        "device": "cpu", "compute_type": "int8", "cpu_threads": 4,
     },
     "voice_design": {
         "type": "auto", "checkpoint": None, "language": "English",
@@ -43,6 +44,22 @@ DEFAULTS = {
         "host": "127.0.0.1", "port": 8080, "api_key": "",
         "max_request_bytes": 100 * 1024 * 1024,
         "max_pending_requests": 4, "request_timeout_seconds": 300.0,
+    },
+    "remote_chapters": {
+        "url": "", "api_key": "", "timeout_seconds": 60.0,
+        "poll_seconds": 2.0, "websocket": True,
+    },
+    "chapter_server": {
+        "data_dir": "./chapter-server-data", "host": "127.0.0.1", "port": 8081,
+        "api_key": "", "idle_timeout_seconds": 600.0, "assembly_workers": 2,
+        "max_pending_jobs": 256, "max_request_bytes": 100 * 1024 * 1024,
+        "request_timeout_seconds": 60.0, "idle_action": "none",
+        "persistent_data": False, "runpod_pod_id": "", "runpod_api_key": "",
+    },
+    "chapter_storage": {
+        "bucket": "", "endpoint_url": "", "region": "", "access_key_id": "",
+        "secret_access_key": "", "prefix": "epub-tts-narrator",
+        "download_expiry_seconds": 3600,
     },
     "voices": {
         "directory": None, "series_id": None,
@@ -75,6 +92,70 @@ DEFAULTS = {
 def _credential(value, label):
     if not isinstance(value, str) or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError(f"{label} must be a string without whitespace or control characters")
+
+
+def _http_url(value, label, *, optional=False):
+    if optional and value == "":
+        return
+    try:
+        parsed = urlsplit(value) if isinstance(value, str) else None
+        valid = (parsed is not None and parsed.scheme in {"http", "https"}
+                 and bool(parsed.hostname) and not parsed.username and not parsed.password
+                 and not parsed.query and not parsed.fragment
+                 and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value))
+        if parsed is not None:
+            parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{label} must be an HTTP(S) URL without credentials, query or fragment")
+
+
+def validate_chapter_settings(config):
+    """Validate chapter jobs without reading environment settings or model files."""
+    remote, server, storage = (config[key] for key in
+                               ("remote_chapters", "chapter_server", "chapter_storage"))
+    _http_url(remote["url"], "remote_chapters.url", optional=True)
+    _credential(remote["api_key"], "remote_chapters.api_key")
+    if type(remote["websocket"]) is not bool:
+        raise ValueError("remote_chapters.websocket must be boolean")
+    for table, key, low, high in (
+        ("remote_chapters", "timeout_seconds", 1, 3600),
+        ("remote_chapters", "poll_seconds", 0.1, 60),
+        ("chapter_server", "request_timeout_seconds", 1, 3600),
+        ("chapter_server", "idle_timeout_seconds", 1, 86400),
+    ):
+        value = config[table][key]
+        if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+            raise ValueError(f"{table}.{key} must be from {low} through {high}")
+    for key, low, high in (("port", 1, 65535), ("assembly_workers", 1, 16),
+                          ("max_pending_jobs", 1, 10000),
+                          ("max_request_bytes", 1024, 512 * 1024 * 1024)):
+        if type(server[key]) is not int or not low <= server[key] <= high:
+            raise ValueError(f"chapter_server.{key} must be an integer from {low} through {high}")
+    for key in ("data_dir", "host"):
+        if (not isinstance(server[key], str) or not server[key].strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in server[key])):
+            raise ValueError(f"chapter_server.{key} must be a nonempty string without control characters")
+    if any(char.isspace() for char in server["host"]):
+        raise ValueError("chapter_server.host must be a hostname or IP address")
+    for key in ("api_key", "runpod_api_key", "runpod_pod_id"):
+        _credential(server[key], f"chapter_server.{key}")
+    if server["idle_action"] not in ("none", "runpod_stop"):
+        raise ValueError("chapter_server.idle_action must be none or runpod_stop")
+    if type(server["persistent_data"]) is not bool:
+        raise ValueError("chapter_server.persistent_data must be boolean")
+    _http_url(storage["endpoint_url"], "chapter_storage.endpoint_url", optional=True)
+    for key in ("bucket", "region", "access_key_id", "secret_access_key", "prefix"):
+        _credential(storage[key], f"chapter_storage.{key}")
+    if (type(storage["download_expiry_seconds"]) is not int
+            or not 60 <= storage["download_expiry_seconds"] <= 604800):
+        raise ValueError("chapter_storage.download_expiry_seconds must be from 60 through 604800")
+    if server["idle_action"] == "runpod_stop" and not (
+            server["persistent_data"] and storage["bucket"]
+            and server["runpod_pod_id"] and server["runpod_api_key"]):
+        raise ValueError("Runpod idle shutdown requires persistent_data, a chapter_storage.bucket, "
+                         "runpod_pod_id and runpod_api_key")
 
 
 def validate_distributed_settings(config):
@@ -207,6 +288,8 @@ def load_config(path=None, *, require_verifier=True):
     result["jev"] = validate_jev_settings(result["jev"])
     result["huggingface"] = validate_huggingface_settings(result["huggingface"])
     validate_distributed_settings(result)
+    validate_chapter_settings(result)
+    remote_chapters = bool(result["remote_chapters"]["url"])
     for section, keys in {
         "engine": ("type", "experts"),
         "verification": ("type", "model", "language"),
@@ -218,7 +301,8 @@ def load_config(path=None, *, require_verifier=True):
     }.items():
         for key in keys:
             value = result[section][key]
-            if section == "verification" and key == "model" and value is None and not require_verifier:
+            if (section == "verification" and key == "model" and value is None
+                    and (not require_verifier or remote_chapters)):
                 continue
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{section}.{key} must be a nonempty string")
@@ -262,8 +346,15 @@ def load_config(path=None, *, require_verifier=True):
         raise ValueError("render.chapter_numbers must contain distinct positive integers")
     if render["chapter_format"] not in {"m4a", "mp3"}:
         raise ValueError("render.chapter_format must be m4a or mp3")
-    if result["verification"]["type"] != "mlx_whisper":
+    if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
+    verification = result["verification"]
+    if verification["device"] not in {"cpu", "cuda"}:
+        raise ValueError("verification.device must be cpu or cuda")
+    if verification["compute_type"] not in {"default", "auto", "int8", "int8_float16", "int8_float32", "float16", "float32", "bfloat16", "int8_bfloat16"}:
+        raise ValueError("Unsupported verification.compute_type")
+    if type(verification["cpu_threads"]) is not int or not 1 <= verification["cpu_threads"] <= 128:
+        raise ValueError("verification.cpu_threads must be an integer from 1 through 128")
     reference_model = result["verification"]["reference_model"]
     if reference_model is not None and (
             not isinstance(reference_model, str) or not reference_model.strip()):
@@ -310,7 +401,7 @@ def load_config(path=None, *, require_verifier=True):
                 or not math.isfinite(value) or not low <= value <= high):
             raise ValueError(f"casting.{key} must be a finite number from {low} to {high}")
     workers = result["render_pool"]["workers"]
-    needs_local_engine = not workers or any(worker["type"] == "local" for worker in workers)
+    needs_local_engine = not remote_chapters and (not workers or any(worker["type"] == "local" for worker in workers))
     if (result["engine"]["type"] == "drama3_mlx" and needs_local_engine
             and not result["engine"]["checkpoint"]):
         raise ValueError("engine.checkpoint is required for Drama 3")
@@ -318,6 +409,7 @@ def load_config(path=None, *, require_verifier=True):
         ("engine", "checkpoint"), ("verification", "model"), ("verification", "reference_model"),
         ("voice_design", "checkpoint"), ("voices", "directory"),
         ("render", "work_dir"), ("render", "output_dir"), ("render", "epub"),
+        ("chapter_server", "data_dir"),
     ):
         value = result[section][key]
         if value is not None:
@@ -329,16 +421,17 @@ def load_config(path=None, *, require_verifier=True):
                     ("verification", "reference_model"), ("voice_design", "checkpoint"))
                    if result[s][k] is not None]
     stores = [Path(result[s][k]) for s, k in
-              (("voices", "directory"), ("render", "work_dir"), ("render", "output_dir"))
+              (("voices", "directory"), ("render", "work_dir"), ("render", "output_dir"),
+               ("chapter_server", "data_dir"))
               if result[s][k] is not None]
     protected = model_paths + stores
     if len(set(protected)) != len(protected):
-        raise ValueError("Model, voice, work, and output directories must be distinct")
+        raise ValueError("Model, voice, work, output, and chapter server data directories must be distinct")
     # Work directories must not contain other writable stores (or vice versa).
     if any(a in b.parents or b in a.parents for i, a in enumerate(stores) for b in stores[i + 1:]):
-        raise ValueError("Voice, work, and output directories must not be nested")
+        raise ValueError("Voice, work, output, and chapter server data directories must not be nested")
     if any(a in b.parents or b in a.parents for a in model_paths for b in stores):
-        raise ValueError("Model directories must not overlap voice, work, or output stores")
+        raise ValueError("Model directories must not overlap voice, work, output, or chapter server data stores")
     return result
 
 

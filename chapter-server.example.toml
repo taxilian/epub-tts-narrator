@@ -1,0 +1,68 @@
+# Server-side global configuration. Replace placeholders in an ignored local
+# epub-tts-narrator.toml. This example does not start or provision a CUDA backend.
+
+[engine]
+# Shared Drama 3 sampling contract. The remote-only pool below does not load MLX.
+type = "drama3_mlx"
+temperature = 1.0
+top_p = 0.9
+top_k = 30
+max_new_tokens = 2048
+
+[render_pool]
+# Pin this to the actual weights/version served by your backend.
+model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+
+[[render_pool.workers]]
+name = "cuda-local"
+type = "fish_http"
+url = "http://127.0.0.1:8080/v1/tts"
+api_key = ""
+concurrency = 2
+multi_speaker = true
+timeout_seconds = 300
+
+[verification]
+type = "faster_whisper"
+model = "/workspace/models/whisper-ct2"
+language = "en"
+device = "cpu"
+compute_type = "int8"
+cpu_threads = 4
+
+[chapter_server]
+host = "0.0.0.0"
+port = 8081
+api_key = "REPLACE-WITH-YOUR-APPLICATION-KEY"
+data_dir = "/workspace/chapter-server-data"
+assembly_workers = 2
+max_pending_jobs = 256
+idle_timeout_seconds = 600
+# Enable runpod_stop only after independent artifact storage and a persistent
+# data mount are configured. An idle process alone does not release a paid GPU.
+idle_action = "none"
+persistent_data = false
+runpod_pod_id = ""
+runpod_api_key = ""
+
+[chapter_storage]
+# Optional S3-compatible storage; required for automatic Runpod shutdown.
+bucket = ""
+endpoint_url = ""
+region = ""
+access_key_id = ""
+secret_access_key = ""
+prefix = "epub-tts-narrator"
+download_expiry_seconds = 3600
+
+[render]
+chapter_format = "m4a"
+normalize_loudness = true
+target_lufs = -20.0
+true_peak_db = -1.5
+aac_bitrate = "128k"
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
+
+# Add your existing [jev] settings to this machine's private configuration to
+# retain pronunciation-equivalence judgment. Keys are never copied from jobs.

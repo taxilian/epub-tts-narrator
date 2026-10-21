@@ -55,6 +55,14 @@ class ReferenceTextJudgingVerifier:
 
 
 def create_verifier(settings, jev_settings=None):
+    kind = settings.get("type", "mlx_whisper")
+    if kind == "faster_whisper":
+        # Casting, imports, and ordinary local rendering use this same factory.
+        # Keep the configured backend when they share the server's global file.
+        from .chapter_verification import create_chapter_verifier
+        return create_chapter_verifier(settings, jev_settings)
+    if kind != "mlx_whisper":
+        raise ValueError("Unsupported verifier type")
     primary = MlxWhisperVerifier(settings["model"], language=settings["language"])
     verifier = primary
     if settings.get("reference_model"):

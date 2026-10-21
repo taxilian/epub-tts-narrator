@@ -77,6 +77,20 @@ def _json(path):
     return value if isinstance(value, dict) else None
 
 
+def faster_whisper_model_files(path):
+    """Inspect an offline CTranslate2 directory without loading ASR or the Hub.
+
+    A local tokenizer is mandatory: faster-whisper otherwise falls back to a
+    Hub tokenizer even when the supplied weights are already on disk.
+    """
+    path = Path(path)
+    return {
+        "config": _json(path / "config.json") is not None,
+        "weights": _file(path / "model.bin"),
+        "tokenizer": _json(path / "tokenizer.json") is not None,
+    }
+
+
 def _weight_files(path, *, index_required=False):
     """List missing weight assets, including every shard in an existing index."""
     index_path = path / "model.safetensors.index.json"
@@ -175,6 +189,24 @@ class ModelSetup:
             requested.append((settings.get("model"), WHISPER, False, "verification.model"))
             if settings.get("reference_model"):
                 requested.append((settings["reference_model"], PARAKEET, False, "verification.reference_model"))
+        elif component == "verification" and settings.get("type") == "faster_whisper":
+            for key in ("model", "reference_model"):
+                value = settings.get(key)
+                if key == "reference_model" and value is None:
+                    continue
+                if not isinstance(value, (str, Path)) or not str(value).strip():
+                    raise ModelSetupError(f"Set verification.{key} to a local CTranslate2 Whisper directory in the global config.")
+                path = Path(value).expanduser().absolute()
+                files = faster_whisper_model_files(path)
+                names = {"config": "config.json (valid JSON)", "weights": "model.bin (nonempty)",
+                         "tokenizer": "tokenizer.json (valid JSON)"}
+                missing = [names[name] for name, present in files.items() if not present]
+                if missing:
+                    raise ModelSetupError(
+                        f"Local faster-whisper model is incomplete at {path}: {', '.join(missing)}. "
+                        f"Set verification.{key} to an existing CTranslate2 Whisper model directory. "
+                        "No model or tokenizer will be downloaded automatically.")
+            return
         elif component == "voice_design" and settings.get("type") == "qwen3_mlx":
             requested.append((settings.get("checkpoint"), QWEN, True, "voice_design.checkpoint"))
         for value, model, identifiable, setting in requested:

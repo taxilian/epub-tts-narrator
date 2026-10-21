@@ -72,6 +72,8 @@ def parser():
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
     serve.add_argument("--config", type=Path, help="Global TOML file containing [engine] and [server] settings")
+    chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
+    chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
     return root
 
 
@@ -91,8 +93,22 @@ def chapter_numbers(value, maximum):
 
 
 def doctor(config):
+    if config.get("remote_chapters", {}).get("url"):
+        checks = {key: shutil.which(config["render"][key]) for key in ("ffmpeg", "ffprobe")}
+        return {"ready": all(checks.values()), "checks": checks, "packages": {},
+                "note": "Remote chapter mode needs no local synthesis or ASR model. Service connectivity is checked when rendering."}
+    workers = config.get("render_pool", {}).get("workers", [])
+    remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+    faster_whisper = config["verification"].get("type", "mlx_whisper") == "faster_whisper"
+    packages = ["drama3-mlx", "mlx", "mlx-whisper", "mlx-audio"]
+    if faster_whisper:
+        packages = ["faster-whisper", "ctranslate2", "tokenizers", "av"]
+        if not remote_only and config["engine"]["type"] == "drama3_mlx":
+            packages += ["drama3-mlx", "mlx"]
+        if config.get("voice_design", {}).get("type") == "qwen3_mlx":
+            packages += ["mlx", "mlx-audio"]
     dependencies = {}
-    for name in ("drama3-mlx", "mlx", "mlx-whisper", "mlx-audio"):
+    for name in dict.fromkeys(packages):
         try:
             dependencies[name] = metadata.version(name)
         except metadata.PackageNotFoundError:
@@ -108,6 +124,10 @@ def doctor(config):
         "whisper_config": (verifier / "config.json").is_file(),
         "whisper_weights": bool(list(verifier.glob("*.safetensors"))) or (verifier / "weights.npz").is_file(),
     }
+    if faster_whisper:
+        from .model_setup import faster_whisper_model_files
+        checks.update({"whisper_" + name: present
+                       for name, present in faster_whisper_model_files(verifier).items()})
     reference_model = config["verification"].get("reference_model")
     reference_verification = {"configured": reference_model is not None,
                               "model": reference_model, "available": None}
@@ -118,6 +138,10 @@ def doctor(config):
             candidate.is_file() for candidate in reference.glob("*.safetensors"))
         reference_verification["available"] = (
             checks["reference_asr_config"] and checks["reference_asr_weights"])
+        if faster_whisper:
+            reference_files = faster_whisper_model_files(reference)
+            checks.update({"reference_asr_" + name: present for name, present in reference_files.items()})
+            reference_verification["available"] = all(reference_files.values())
     if config.get("voice_design", {}).get("type") == "qwen3_mlx":
         designer = Path(config["voice_design"]["checkpoint"])
         checks["voice_design_weights"] = bool(list(designer.glob("*.safetensors")))
@@ -138,16 +162,14 @@ def doctor(config):
             checks["drama_shards"] = False
     else:
         checks["drama_shards"] = False
-    workers = config.get("render_pool", {}).get("workers", [])
-    remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
     if remote_only:
         checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
-        dependencies.pop("drama3-mlx")
+        dependencies.pop("drama3-mlx", None)
     elif config["engine"]["type"] != "drama3_mlx":
         from .engines import engine_entry_points
 
         checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
-        dependencies.pop("drama3-mlx")
+        dependencies.pop("drama3-mlx", None)
         matches = engine_entry_points(config["engine"]["type"])
         checks["tts_plugin_installed"] = len(matches) == 1
     if any(worker["type"] == "fish_http" for worker in workers):
@@ -158,7 +180,8 @@ def doctor(config):
     return {"ready": all(checks.values()) and all(dependencies.values()),
             "checks": checks, "packages": dependencies,
             "reference_verification": reference_verification,
-            "note": "Checks installed files; a real generation test is still needed to exercise Metal."}
+            "note": ("Checks installed files; a real generation test is still needed to exercise the configured inference backends."
+                     if faster_whisper else "Checks installed files; a real generation test is still needed to exercise Metal.")}
 
 
 def main(argv=None):
@@ -173,6 +196,10 @@ def main(argv=None):
             from .model_setup import ModelSetup
             from .server import serve
             ModelSetup(config).ensure("engine")
+            serve(config)
+            return 0
+        if args.command == "serve-chapters":
+            from .chapter_server import serve
             serve(config)
             return 0
         if args.command == "doctor":
@@ -242,9 +269,23 @@ def main(argv=None):
         if args.command in {"render", "assemble"} and plan["errors"]:
             raise ValueError("\n".join(plan["errors"]))
         if args.command == "assemble":
-            from .workflow import assemble
-            assemble(bundle, config)
+            from .chapter_client import assemble_remote, has_remote_chapters
+            if has_remote_chapters(config):
+                assemble_remote(bundle, config)
+            else:
+                from .workflow import assemble
+                assemble(bundle, config)
             print(f"Completed audiobook: {config['render']['output_dir']}")
+            return 0
+        if args.command == "render" and config.get("remote_chapters", {}).get("url"):
+            from .chapter_client import render_remote
+            result = render_remote(bundle, config, chapters_only=args.chapters_only)
+            if args.chapters_only:
+                for chapter in result.get("chapters", []):
+                    print(f"Completed chapter {chapter['number']} / {len(bundle['chapters'])}: "
+                          f"{chapter.get('audio_file') or 'empty chapter (no speech)'}")
+            else:
+                print(f"Completed audiobook: {config['render']['output_dir']}")
             return 0
         store = voice_store(bundle, config)
         if args.command == "voices":
