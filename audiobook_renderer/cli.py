@@ -36,7 +36,7 @@ def parser():
                                  help="UTF-8 file containing the exact reference recording transcript")
         if name == "cast":
             command.add_argument("--action", default="interactive",
-                                 choices=("interactive", "list", "prepare-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
+                                 choices=("interactive", "list", "prepare-samples", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
                                  help="Default: interactive voice casting; other actions support scripting")
             command.add_argument("--voice-id")
             command.add_argument("--candidate-id")

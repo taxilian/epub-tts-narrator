@@ -34,6 +34,10 @@ reference_text = "The morning light fell across the quiet room. I opened the doo
 # Executable and arguments; the sample's absolute path is appended. No shell.
 player = ["/usr/bin/afplay"]
 # For another platform: ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
+# Match perceived loudness for auditions; immutable cloning references stay untouched.
+normalize_samples = true
+sample_loudness_lufs = -20.0
+sample_true_peak_db = -1.5
 
 [render]
 # Defaults: <book-directory>/render-work and <book-directory>/audiobook.

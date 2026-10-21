@@ -156,6 +156,15 @@ Open the interactive casting tool:
 
 Startup automatically prepares all voices: it reuses existing selections, selects previously saved verified samples, and generates missing ones. New voices and successful regenerations are selected automatically. There is no acceptance step. Missing samples show generation progress; an individual failure leaves the other voices available.
 
+Voice playback matches perceived loudness automatically, with a default target of -20 LUFS and a -1.5 dB true-peak ceiling. Startup prepares cached playback copies of the selected samples before showing the menu; regenerated samples are prepared before playback. Existing, inherited, imported, and newly generated voices all use the same settings. No reanalysis or voice regeneration is needed.
+
+These are playback copies in the current book's `render-work/voice-previews` directory. The saved cloning references, their transcripts and checksums, voice selections, parent books, and already rendered audio stay unchanged. This setting controls auditions; it does not normalize the final audiobook. To prepare all saved candidates as well as selected voices without loading TTS or transcription models:
+
+```sh
+.venv-renderer/bin/audiobook-render cast runs/book-01 \
+  --action normalize-samples
+```
+
 There is one menu. Type a number or command and press Enter:
 
 | Input | Action |
@@ -193,9 +202,14 @@ Playback uses macOS `afplay` by default. Configure another player in the TOML fi
 ```toml
 [casting]
 player = ["/usr/bin/afplay"]
+normalize_samples = true
+sample_loudness_lufs = -20.0
+sample_true_peak_db = -1.5
 # Example alternative:
 # player = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
 ```
+
+Set `normalize_samples = false` to audition the original levels. Loudness targets accept -40 through -10 LUFS; the true-peak ceiling accepts -9 through 0 dB. Changing either setting creates new cached playback copies automatically. Normalization uses the configured `render.ffmpeg` executable and never starts a speech model.
 
 With `[voice_design] type = "engine"`, the character description conditions Drama 3's scene system prompt and the sample script supplies its single named line. Several sentences may occupy that line. No reference recording is required to create the initial voice; later synthesis clones the saved recording. State vocal presentation, age range, accent, pitch, and a few stable traits clearly. Keep the reference at an ordinary speaking pace with one clean, dry voice, and avoid conflicting performances in one description. Word verification cannot judge whether every vocal trait sounds right; use the audition menu for that.
 

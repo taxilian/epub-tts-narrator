@@ -16,14 +16,20 @@ def display(value):
 
 
 class AudioPlayer:
-    def __init__(self, command):
+    def __init__(self, command, *, normalizer=None):
         self.command = list(command)
+        self.normalizer = normalizer
         self.process = None
         self.errors = None
 
+    def prepare(self, path):
+        """Prepare a playback copy without changing the saved clone reference."""
+        source = Path(path).resolve()
+        return self.normalizer.prepare(source) if self.normalizer is not None else source
+
     def start(self, path):
         self.stop()
-        path = Path(path).resolve()
+        path = self.prepare(path)
         if not path.is_file():
             raise ValueError("The voice sample is missing")
         executable = shutil.which(self.command[0])
@@ -80,6 +86,34 @@ def _label(row):
         return row["label"]
     names = row["characters"]
     return ", ".join(names) if names else ", ".join(row["roles"]) or row["voice_id"]
+
+
+def _prepare_playback_samples(player, rows, output, *, include_candidates=False):
+    """Warm reusable playback copies, deduplicating aliases and active takes."""
+    prepare = getattr(player, "prepare", None)
+    if not callable(prepare):
+        return 0, 0
+    samples, seen = [], set()
+    for row in rows:
+        voices = ([row["selected"]] if row["selected"] is not None else [])
+        if include_candidates:
+            voices.extend(row["candidates"])
+        for voice in voices:
+            source = str(Path(voice["reference_audio"]).resolve())
+            if source not in seen:
+                seen.add(source)
+                samples.append((row, source))
+    if samples:
+        output(f"Preparing voice playback: {len(samples)} sample(s).")
+    failed = 0
+    for index, (row, source) in enumerate(samples, 1):
+        output(f"[{index}/{len(samples)}] Preparing {_label(row)}…")
+        try:
+            prepare(source)
+        except (ValueError, RuntimeError, OSError) as exc:
+            failed += 1
+            output(f"Could not prepare playback for {_label(row)}: {exc}")
+    return len(samples) - failed, failed
 
 
 def _warn_regenerate_all(rows, *, book_local=False):
@@ -157,6 +191,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 session.ensure_ready(row["voice_id"])
             except (ValueError, RuntimeError, OSError) as exc:
                 say(f"Could not prepare {_label(row)}: {exc}")
+        _prepare_playback_samples(player, session.rows(), say)
         while True:
             rows = session.rows()
             ready = sum(row["selected"] is not None for row in rows)
@@ -246,7 +281,7 @@ def casting_command(args, bundle, config):
         raise ValueError("--prompt-file and --text-file are used with --action generate or edit")
     if action == "edit" and not (args.prompt_file or args.text_file):
         raise ValueError("Provide --prompt-file or --text-file to save casting edits")
-    if args.voice_id and action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples"}:
+    if args.voice_id and action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "normalize-samples"}:
         raise ValueError("--voice-id is not used with this action")
     if action == "recover" and not attempt_file:
         raise ValueError("--attempt-file is required for --action recover")
@@ -254,8 +289,23 @@ def casting_command(args, bundle, config):
         raise ValueError("--attempt-file is used with --action recover")
     if keep_unselected and action != "recover":
         raise ValueError("--keep-unselected is used with --action recover")
+    settings = config.get("casting", {})
+    enabled = settings.get("normalize_samples", True)
+    if action == "normalize-samples" and not enabled:
+        raise ValueError("Sample normalization is disabled; set casting.normalize_samples = true")
+    normalizer = None
+    if enabled and action in {"interactive", "play", "normalize-samples"}:
+        from .loudness import SampleNormalizer
+        render = config.get("render", {})
+        work = render.get("work_dir") or Path(bundle["directory"]) / "render-work"
+        normalizer = SampleNormalizer(
+            Path(work) / "voice-previews",
+            target_lufs=settings.get("sample_loudness_lufs", -20.0),
+            true_peak_db=settings.get("sample_true_peak_db", -1.5),
+            ffmpeg=render.get("ffmpeg", "ffmpeg"),
+        )
     session = CastingSession(bundle, config)
-    player = AudioPlayer(config["casting"]["player"])
+    player = AudioPlayer(settings.get("player", ["/usr/bin/afplay"]), normalizer=normalizer)
     try:
         rows = session.rows()
         row = next((r for r in rows if r["voice_id"] == args.voice_id), None)
@@ -278,6 +328,12 @@ def casting_command(args, bundle, config):
             print(f"Prepared {len(session.generate_missing())} voices for use.")
         elif action == "prepare-samples":
             print(json.dumps(session.prepare_samples(), ensure_ascii=False, indent=2))
+        elif action == "normalize-samples":
+            prepared, failed = _prepare_playback_samples(
+                player, rows, lambda text: print(display(text)), include_candidates=True)
+            if failed:
+                raise ValueError(f"Could not normalize {failed} sample(s); {prepared} playback copies are ready.")
+            print(f"Normalized playback copies are ready for {prepared} sample(s).")
         elif action == "regenerate-all":
             _warn_regenerate_all(rows, book_local=getattr(session, "config", config).get("_book_local_voices", False))
             seen, failed = set(), []

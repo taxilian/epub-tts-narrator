@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
 import tomllib
 
@@ -28,7 +29,10 @@ DEFAULTS = {
             "There was still time to decide what to do next."
         ),
     },
-    "casting": {"player": ["/usr/bin/afplay"]},
+    "casting": {
+        "player": ["/usr/bin/afplay"], "normalize_samples": True,
+        "sample_loudness_lufs": -20.0, "sample_true_peak_db": -1.5,
+    },
     "render": {
         "work_dir": None, "output_dir": None,
         "chapter_format": "m4a", "max_chunk_chars": 320, "max_attempts": 3,
@@ -128,6 +132,13 @@ def load_config(path=None):
     if (not isinstance(player, list) or not player or
             any(not isinstance(item, str) or not item.strip() or "\0" in item for item in player)):
         raise ValueError("casting.player must be a nonempty array of executable and argument strings")
+    if type(result["casting"]["normalize_samples"]) is not bool:
+        raise ValueError("casting.normalize_samples must be boolean")
+    for key, low, high in (("sample_loudness_lufs", -40, -10), ("sample_true_peak_db", -9, 0)):
+        value = result["casting"][key]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not low <= value <= high):
+            raise ValueError(f"casting.{key} must be a finite number from {low} to {high}")
     if result["engine"]["type"] == "drama3_mlx" and not result["engine"]["checkpoint"]:
         raise ValueError("engine.checkpoint is required for Drama 3")
     for section, key in (
