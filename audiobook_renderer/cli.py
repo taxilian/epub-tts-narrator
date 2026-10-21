@@ -51,6 +51,8 @@ def parser():
             command.add_argument("--action", default="interactive",
                                  choices=("interactive", "list", "prepare-samples", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),
                                  help="Default: interactive voice casting; other actions support scripting")
+            command.add_argument("--include-inherited", action="store_true",
+                                 help="Also replace inherited voices with book-local overrides (--action regenerate-all)")
             command.add_argument("--voice-id")
             command.add_argument("--candidate-id")
             command.add_argument("--prompt-file", type=Path, help="UTF-8 voice description for the next generation")

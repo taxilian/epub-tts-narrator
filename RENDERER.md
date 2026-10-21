@@ -247,7 +247,7 @@ timeout_seconds = 180.0
 # Optional: require Gemini even if voice_design.type selects another designer.
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer gemini
 
-# Replace all voices in this book with Gemini-created voices.
+# Replace local or missing voices with Gemini-created voices; keep inherited ones.
 .venv-renderer/bin/audiobook-render cast runs/book-01 \
   --voice-designer gemini --action regenerate-all
 
@@ -301,7 +301,7 @@ Changing the designer affects future creations and regenerations. Existing voice
 
 Description conditioning is not proof that every audible trait was followed. Whisper checks the spoken words; it does not assess gender presentation, age, accent, timbre, or the suitability of a performance. Use the menu to audition and regenerate a voice when needed.
 
-For scripts, `cast --action list` prints the cast and sample history as JSON without loading a model. `generate` immediately selects its verified result; `generate-missing` prepares all unselected voices, reusing existing samples first. `regenerate-all` creates and selects a new reference for each distinct canonical voice, so shared narration and dialogue are generated once. Before generation, it prints a warning to stderr describing the scope and linked roles known within the bundle. In the directory workflow, replacements are local to the current book and may be inherited by its descendants; earlier books and sibling branches are unchanged. Legacy shared-library mode warns that replacements affect every book using that library and voice ID. Previous samples remain available, and existing audiobook audio is not rewritten. The command continues without a confirmation prompt, retains prior references after individual failures, and reports failure at the end. Run it in the book where you want the replacement voices to start applying. `edit` saves prompt changes without generation, and `play` plays the selected voice. Replace the voice ID below with an ID from the listing:
+For scripts, `cast --action list` prints the cast and sample history as JSON without loading a model. `generate` immediately selects its verified result; `generate-missing` prepares all unselected voices, reusing existing samples first. `regenerate-all` creates and selects a new reference for each distinct canonical voice that is local or missing, skipping voices currently inherited from earlier books. Add `--include-inherited` to explicitly replace inherited voices too. Shared narration and dialogue are generated once. Skipped voices need no new sample scripts or generation calls; if every voice is inherited, the default command does nothing. Before generation, it prints a warning to stderr describing the targeted voices and linked roles known within the bundle. In the directory workflow, replacements are local to the current book and may be inherited by its descendants; earlier books and sibling branches are unchanged, including with `--include-inherited`. Legacy shared-library mode warns that replacements affect every book using that library and voice ID. Previous samples remain available, and existing audiobook audio is not rewritten. The command continues without a confirmation prompt, retains prior references after individual failures, and reports failure at the end. Run it in the book where you want the replacement voices to start applying. `edit` saves prompt changes without generation, and `play` plays the selected voice. Replace the voice ID below with an ID from the listing:
 
 ```sh
 .venv-renderer/bin/audiobook-render cast runs/book-01 \
@@ -314,6 +314,10 @@ For scripts, `cast --action list` prints the cast and sample history as JSON wit
 
 .venv-renderer/bin/audiobook-render cast runs/book-02 \
   --action regenerate-all
+
+# Also create local replacements for voices inherited from earlier books:
+.venv-renderer/bin/audiobook-render cast runs/book-02 \
+  --action regenerate-all --include-inherited
 ```
 
 The two UTF-8 files are optional for `generate`; omit them to reuse the saved description and sample text. Browsing, editing, and playback do not initialize TTS or transcription models. For advanced recovery, `--action accept --voice-id VOICE_ID --candidate-id CANDIDATE_ID` restores a previous saved sample listed by `--action list`; normal casting never requires this command. `--action play --candidate-id CANDIDATE_ID` can audition a specific earlier sample.

@@ -273,6 +273,9 @@ def casting_command(args, bundle, config):
     action = args.action
     attempt_file = getattr(args, "attempt_file", None)
     keep_unselected = getattr(args, "keep_unselected", False)
+    include_inherited = getattr(args, "include_inherited", False)
+    if include_inherited and action != "regenerate-all":
+        raise ValueError("--include-inherited is used with --action regenerate-all")
     if action in {"generate", "edit", "play", "accept", "recover"} and not args.voice_id:
         raise ValueError(f"--voice-id is required for --action {action}")
     if args.candidate_id and action not in {"play", "accept"}:
@@ -301,8 +304,14 @@ def casting_command(args, bundle, config):
         from epub_audiobook.audition_scripts import ensure_bundle_scripts
         from .book_context import voice_store
         store = voice_store(bundle, config)
-        bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
-                                       voice_ids=[args.voice_id] if args.voice_id else None)
+        voice_ids = [args.voice_id] if args.voice_id else None
+        if action == "regenerate-all" and not include_inherited:
+            # Ignored references do not need new scripts or any analyzer calls.
+            voice_ids = [voice["id"] for voice in bundle["cast"]["voices"]
+                         if not (store.load(voice["id"]) or {}).get("inherited", False)]
+        if voice_ids is None or voice_ids:
+            bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
+                                           voice_ids=voice_ids)
     normalizer = None
     if enabled and action in {"interactive", "play", "normalize-samples"}:
         from .loudness import SampleNormalizer
@@ -345,6 +354,15 @@ def casting_command(args, bundle, config):
                 raise ValueError(f"Could not normalize {failed} sample(s); {prepared} playback copies are ready.")
             print(f"Normalized playback copies are ready for {prepared} sample(s).")
         elif action == "regenerate-all":
+            if not include_inherited:
+                skipped = {row.get("canonical_voice_id", row["voice_id"]) for row in rows
+                           if (row["selected"] or {}).get("inherited", False)}
+                rows = [row for row in rows if row.get("canonical_voice_id", row["voice_id"]) not in skipped]
+                if skipped:
+                    print(f"Skipped {len(skipped)} inherited voice(s). Use --include-inherited to replace them in this book.")
+            if not rows:
+                print("No voices to regenerate.")
+                return 0
             _warn_regenerate_all(rows, book_local=getattr(session, "config", config).get("_book_local_voices", False))
             seen, failed = set(), []
             for row in rows:
