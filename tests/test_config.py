@@ -1,5 +1,7 @@
-"""File configuration is strict, deterministic, and keeps secrets out of errors."""
+"""File settings validate known values and safely warn about unrecognized keys."""
 
+from contextlib import redirect_stderr
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -218,13 +220,9 @@ cache_dir = "${CACHE_ROOT}/~/cache"
             load_config(self.path)
         self.assertNotIn("sk-secret", str(captured.exception))
 
-    def test_unknown_sections_keys_and_non_tables_are_rejected_without_echoing_keys(self):
+    def test_unknown_sections_and_non_tables_are_rejected_without_echoing_contents(self):
         for text, message in [
             ('[secret_unknown_section]\nvalue="secret-value"', "Unknown configuration section"),
-            ('[provider]\nsecret_unknown_key="secret-value"', "Unknown key in configuration provider"),
-            ('[analysis]\nsecret_unknown_key="secret-value"', "Unknown key in configuration analysis"),
-            ('[extraction]\nsecret_unknown_key="secret-value"', "Unknown key in configuration extraction"),
-            ('[performance_policy]\nsecret_unknown_key="secret-value"', "Unknown key in configuration performance_policy"),
             ('provider="secret-value"', "provider must be a table"),
             ('analysis=[]', "analysis must be a table"),
             ('extraction=true', "extraction must be a table"),
@@ -233,6 +231,59 @@ cache_dir = "${CACHE_ROOT}/~/cache"
             with self.subTest(text=text), self.assertRaisesRegex(ValueError, message) as captured:
                 self.load_text(text)
             self.assertNotIn("secret", str(captured.exception))
+
+    def test_unknown_keys_warn_without_values_and_preserve_known_settings(self):
+        for section, key, literal, expected in [
+            ("provider", "model", '"test-model"', "test-model"),
+            ("analysis", "chunk_chars", "1024", 1024),
+            ("extraction", "include_auxiliary", "true", True),
+            ("performance_policy", "thoughts", '"Use the thinker voice."', "Use the thinker voice."),
+            ("jev", "threshold", "0.8", 0.8),
+            ("huggingface", "api_key", '"file-only-key"', "file-only-key"),
+        ]:
+            with self.subTest(section=section):
+                diagnostic = io.StringIO()
+                with redirect_stderr(diagnostic):
+                    result = self.load_text(f'[{section}]\n{key}={literal}\n'
+                                            'legacy_option="private-secret-value"\n')
+                self.assertEqual(result[section][key], expected)
+                self.assertNotIn("legacy_option", result[section])
+                self.assertEqual(diagnostic.getvalue(),
+                                 f"Warning: ignoring unknown configuration key {section}.legacy_option.\n")
+                self.assertNotIn("private-secret-value", diagnostic.getvalue())
+
+    def test_renderer_table_unknown_keys_warn_during_analysis(self):
+        diagnostic = io.StringIO()
+        with redirect_stderr(diagnostic):
+            result = self.load_text('''
+[provider]
+model = "test-model"
+[engine]
+temperature = 0.8
+legacy_option = "private-secret-value"
+[engine.options]
+arbitrary_plugin_option = "custom"
+[voice_design.options]
+arbitrary_design_option = "custom"
+[quality]
+max_wer = 0.1
+old_limit = "private-secret-value"
+''')
+        self.assertEqual(result["provider"]["model"], "test-model")
+        self.assertEqual(diagnostic.getvalue().splitlines(), [
+            "Warning: ignoring unknown configuration key engine.legacy_option.",
+            "Warning: ignoring unknown configuration key quality.old_limit.",
+        ])
+
+    def test_unknown_keys_do_not_hide_invalid_known_settings(self):
+        for text, message in [
+            ('[provider]\ntimeout=0\nlegacy_option=true\n', "provider.timeout"),
+            ('[jev]\nthreshold=0\nlegacy_option=true\n', "jev.threshold"),
+            ('[huggingface]\napi_key="spaces not allowed"\nlegacy_option=true\n', "huggingface.api_key"),
+            ('[voices]\naliases={ narrator="character" }\nlegacy_option=true\n', "voices.aliases"),
+        ]:
+            with self.subTest(message=message), redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, message):
+                self.load_text(text)
 
     def test_known_fields_reject_wrong_types_empty_strings_and_invalid_limits(self):
         cases = {

@@ -12,6 +12,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
+from .config_warnings import known_settings
 from .pipeline import DEFAULT_POLICY
 from .jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
@@ -162,7 +163,7 @@ def _validate(section: str, key: str, value: Any) -> None:
 
 
 def load_config(path: Path | str | None = None) -> dict[str, Any]:
-    """Return defaults merged with a strictly validated TOML configuration.
+    """Merge validated TOML settings, warning and ignoring unrecognized keys.
 
     With no path, read ``epub-tts-narrator.toml`` in the current directory, falling
     back to ``epub-audiobook.toml`` when absent. Explicit paths must exist.
@@ -185,6 +186,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
 
     result = deepcopy(DEFAULTS)
     from epub_tts_narrator.renderer.config import DEFAULTS as RENDERER_DEFAULTS
+    from epub_tts_narrator.renderer.quality import QUALITY_DEFAULTS
     if any(section not in DEFAULTS and section not in RENDERER_DEFAULTS for section in supplied):
         raise ValueError("Unknown configuration section.")
     for section, settings in supplied.items():
@@ -193,20 +195,20 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         if section == "jev":
             # This optional evaluator serves both speech verification and the
             # analyzer's interactive speaker shortlist from the same file.
-            result[section] = validate_jev_settings(settings)
+            result[section] = validate_jev_settings(known_settings(settings, JEV_DEFAULTS, section=section))
             continue
         if section == "huggingface":
-            result[section] = validate_huggingface_settings(settings)
+            result[section] = validate_huggingface_settings(
+                known_settings(settings, DEFAULTS[section], section=section))
             continue
         if section in RENDERER_DEFAULTS:
             if section == "voices" and "aliases" in settings:
                 raise ValueError("voices.aliases is book-specific and cannot be in global configuration; "
                                  "use audiobook-render voice-aliases BOOK --set SOURCE TARGET")
-            if section != "quality" and any(key not in RENDERER_DEFAULTS[section] for key in settings):
-                raise ValueError("Unknown key in renderer configuration section.")
+            allowed = QUALITY_DEFAULTS if section == "quality" else RENDERER_DEFAULTS[section]
+            known_settings(settings, allowed, section=section)
             continue
-        if any(key not in DEFAULTS[section] for key in settings):
-            raise ValueError(f"Unknown key in configuration {section} section.")
+        settings = known_settings(settings, DEFAULTS[section], section=section)
         for key, value in settings.items():
             _validate(section, key, value)
             result[section][key] = value

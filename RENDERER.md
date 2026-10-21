@@ -31,6 +31,8 @@ uv pip install --python .venv-renderer/bin/python -e .
 
 FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
 
+Unknown configuration keys warn and are ignored, so an obsolete field such as `engine.model` does not stop rendering. Engine selection uses `engine.type` and `engine.checkpoint`; plugin-specific settings belong in `engine.options`. Invalid recognized values and unknown configuration sections still stop with an error. Ignored fields do not participate in audio cache identity.
+
 The requirements pin the Drama 3 port to commit `3b76bf84714d3766d7872f3409639a438e296cc8` and MLX Whisper to version `0.4.3`. When casting or rendering first needs a missing supported model, it shows the model and destination and asks before downloading the pinned files. Complete local models are reused. `doctor`, `plan`, listing voices, playback, and assembly do not download models. If a download is interrupted, rerun the same command to reuse its saved download progress.
 
 Existing Hugging Face cache snapshot paths are also recognized, such as `~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo/snapshots/<commit>`. Missing files or broken links are downloaded through that cache, keeping the repository and commit identified by the path. You do not need to rename the directory or change the config to a project-local model folder.

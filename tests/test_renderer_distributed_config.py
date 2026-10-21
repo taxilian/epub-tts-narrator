@@ -117,9 +117,7 @@ class DistributedConfigTests(unittest.TestCase):
             worker_table(multi_speaker="true"),
             worker_table(protocol=[]),
             worker_table(protocol="unsupported"),
-            worker_table("local", "local", protocol="fish_native_drama3"),
             worker_table(timeout_seconds=0),
-            worker_table(unknown="private-value"),
             worker_table("bad name"),
         )
         for value in invalid:
@@ -180,7 +178,7 @@ class DistributedConfigTests(unittest.TestCase):
             load_config(self.path)
         for setting in ('port=true', 'port=65536', 'max_pending_requests=0',
                         'max_request_bytes=1', 'request_timeout_seconds=nan',
-                        'host="bad host"', 'api_key="secret key"', 'unknown="private-value"'):
+                        'host="bad host"', 'api_key="secret key"'):
             with self.subTest(setting=setting):
                 self.write("[server]\n" + setting + "\n")
                 with self.assertRaises(ValueError) as caught:

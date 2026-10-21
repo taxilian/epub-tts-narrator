@@ -9,6 +9,7 @@ import re
 import tomllib
 from urllib.parse import urlsplit
 
+from epub_tts_narrator.config_warnings import known_settings
 from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
 
@@ -182,8 +183,7 @@ def validate_distributed_settings(config):
         allowed = {"name", "type", "concurrency"}
         if kind == "fish_http":
             allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker", "protocol"}
-        if set(supplied) - allowed:
-            raise ValueError(f"Unknown configuration key in {label}")
+        supplied = known_settings(supplied, allowed, section=label)
         worker = {"concurrency": 1, **supplied}
         concurrency = worker["concurrency"]
         if type(concurrency) is not int or not 1 <= concurrency <= 16:
@@ -263,7 +263,7 @@ def validate_distributed_settings(config):
 
 
 def load_config(path=None, *, require_verifier=True):
-    from .quality import validate_policy
+    from .quality import QUALITY_DEFAULTS, validate_policy
     from epub_tts_narrator.config import (
         DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path, validate_huggingface_settings,
     )
@@ -279,14 +279,14 @@ def load_config(path=None, *, require_verifier=True):
             raise ValueError("voices.aliases is book-specific and cannot be in global configuration; "
                              "use audiobook-render voice-aliases BOOK --set SOURCE TARGET")
         if section in ANALYZER_DEFAULTS and section not in DEFAULTS:
-            if not isinstance(values, dict) or set(values) - set(ANALYZER_DEFAULTS[section]):
-                raise ValueError("Invalid analyzer configuration section or keys")
+            if not isinstance(values, dict):
+                raise ValueError("Invalid analyzer configuration section; expected a table")
+            known_settings(values, ANALYZER_DEFAULTS[section], section=section)
             continue
         if section not in result or not isinstance(values, dict):
             raise ValueError("Unknown configuration section or invalid table")
-        if section != "quality" and set(values) - set(result[section]):
-            raise ValueError(f"Unknown configuration key in {section}")
-        result[section].update(values)
+        allowed = QUALITY_DEFAULTS if section == "quality" else result[section]
+        result[section].update(known_settings(values, allowed, section=section))
     # Preserve explicit legacy shared-library configurations. New configurations
     # leave book locations unset until the input bundle is known.
     if result["voices"]["series_id"] is not None:

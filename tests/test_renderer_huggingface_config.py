@@ -1,5 +1,7 @@
 """Hugging Face download credentials come only from the shared config file."""
 
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -61,14 +63,16 @@ class HuggingFaceConfigurationTests(unittest.TestCase):
                         loader(self.path)
                     self.assertNotIn("hf_fixture", str(caught.exception))
 
-    def test_unknown_key_rejected_without_exposing_key_or_token(self):
+    def test_unknown_key_warns_without_exposing_token(self):
         self.write(f'[huggingface]\napi_key="{SECRET}"\nsecret_unknown_key="{SECRET}"\n')
         for loader in (load_analyzer_config, load_renderer_config):
             with self.subTest(loader=loader.__module__):
-                with self.assertRaises(ValueError) as caught:
-                    loader(self.path)
-                self.assertNotIn(SECRET, str(caught.exception))
-                self.assertNotIn("secret_unknown_key", str(caught.exception))
+                diagnostic = io.StringIO()
+                with redirect_stderr(diagnostic):
+                    config = loader(self.path)
+                self.assertEqual(config["huggingface"], {"api_key": SECRET})
+                self.assertIn("huggingface.secret_unknown_key", diagnostic.getvalue())
+                self.assertNotIn(SECRET, diagnostic.getvalue())
 
     def test_huggingface_token_is_masked_without_hiding_download_error(self):
         self.write(f'[huggingface]\napi_key="{SECRET}"\n')

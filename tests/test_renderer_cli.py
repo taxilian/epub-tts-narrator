@@ -40,6 +40,33 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(json.loads(output)["voices"], 2)
 
+    def test_unknown_engine_key_warns_and_plan_continues_with_same_configuration(self):
+        expected = load_config(self.config)
+        self.config.write_text(self.config.read_text().replace(
+            '[engine]\n', '[engine]\nmodel="unused-model-setting"\n'))
+        before = self.config.read_bytes()
+        with patch("epub_tts_narrator.renderer.engines.create_engine") as factory:
+            status, output, error = self.run_cli("plan", self.bundle, "--config", self.config)
+        self.assertEqual(status, 0, error)
+        self.assertIn("Warning: ignoring unknown configuration key engine.model.", error)
+        self.assertNotIn("unused-model-setting", error)
+        self.assertEqual(json.loads(output)["voices"], 2)
+        factory.assert_not_called()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(load_config(self.config), expected)
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_unknown_quality_fields_warn_without_dropping_known_thresholds(self):
+        self.config.write_text(self.config.read_text()
+                               + '[quality]\nmax_wer=0.1\nobsolete_threshold="private-value"\n')
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            config = load_config(self.config)
+        self.assertEqual(config["quality"]["max_wer"], 0.1)
+        self.assertNotIn("obsolete_threshold", config["quality"])
+        self.assertIn("quality.obsolete_threshold", error.getvalue())
+        self.assertNotIn("private-value", error.getvalue())
+
     def test_chapter_ranges_are_deduplicated_in_source_order(self):
         self.assertEqual(chapter_numbers("5, 1-3,3,2-4", 5), [1, 2, 3, 4, 5])
         self.assertEqual(chapter_numbers(" 3 ", 5), [3])

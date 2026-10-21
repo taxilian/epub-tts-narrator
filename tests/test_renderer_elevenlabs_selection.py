@@ -81,7 +81,7 @@ class ElevenLabsSelectionTests(unittest.TestCase):
                       'timeout_seconds=601', 'timeout_seconds=nan',
                       'guidance_scale=-1', 'guidance_scale=101', 'guidance_scale=true',
                       'guidance_scale=inf', 'loudness=-1.1', 'loudness=1.1',
-                      'loudness=false', 'unknown_setting=1'):
+                      'loudness=false'):
             with self.subTest(field=field):
                 self.write_provider(f'api_key="{SECRET}"\n{field}\n')
                 with self.assertRaises(ValueError) as raised:
@@ -92,6 +92,17 @@ class ElevenLabsSelectionTests(unittest.TestCase):
                 self.write_provider(field)
                 with self.assertRaisesRegex(ValueError, r"elevenlabs\.api_key"):
                     load_config(self.path)
+
+    def test_unknown_provider_field_warns_and_preserves_provider_credentials(self):
+        self.write_provider(f'api_key="{SECRET}"\nunknown_setting="private-value"\n')
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic):
+            config = load_config(self.path)
+        self.assertEqual(config["elevenlabs"]["api_key"], SECRET)
+        self.assertNotIn("unknown_setting", config["elevenlabs"])
+        self.assertIn("elevenlabs.unknown_setting", diagnostic.getvalue())
+        self.assertNotIn(SECRET, diagnostic.getvalue())
+        self.assertNotIn("private-value", diagnostic.getvalue())
 
     def test_parser_exposes_designer_on_cast(self):
         for choice in ("local", "gemini", "elevenlabs"):
