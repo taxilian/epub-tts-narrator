@@ -108,10 +108,10 @@ def _terminal_width(output_stream):
 
 def _resume_command(book_path):
     if book_path is None:
-        return "epub-audiobook resolve-speakers BOOK_DIRECTORY"
+        return "epub-tts-narrator resolve-speakers BOOK_DIRECTORY"
     path = Path(book_path)
     command = "review" if path.suffix.lower() == ".json" else "resolve-speakers"
-    return shlex.join(["epub-audiobook", command, str(path)])
+    return shlex.join(["epub-tts-narrator", command, str(path)])
 
 
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,

@@ -1,4 +1,5 @@
 # Local configuration and credentials. Commit the *.example.toml templates.
+epub-tts-narrator.toml
 epub-audiobook.toml
 *.local.toml
 .env

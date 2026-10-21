@@ -1,6 +1,6 @@
-# EPUB audiobook analyzer
+# epub-tts-narrator
 
-A Python CLI that turns an EPUB into a **cast and voice roster** and a **text-preserving performance script**. Its output is independent of the TTS engine. A separate renderer can consume the exported bundle, choose actual engine voices, synthesize audio, and assemble an `.m4b`.
+A Python project that turns an EPUB into a **cast and voice roster**, a **text-preserving performance script**, and a verified multi-voice audiobook. Analysis output is independent of the TTS engine. The included renderer casts reusable character voices, synthesizes chapter audio, and assembles a chapterized `.m4b`.
 
 The separate **`audiobook-render` CLI** provides local Drama 3 inference through MLX, interactive voice casting with playback and regeneration, persistent reference voices, speech verification, loudness-normalized M4A chapters, and chapterized M4B assembly. New voice references default to Gemini when its API key is configured; Drama 3 uses those saved references to synthesize the audiobook locally. `render BOOK` runs the full pipeline; `render BOOK --chapters-only` saves playable chapter checkpoints, and `assemble BOOK` packages completed chapters without loading speech models. Use `--chapters 3-5,7` for a per-book selection. See [RENDERER.md](RENDERER.md) for installation, file-based configuration, commands, and current validation limits.
 
@@ -10,25 +10,32 @@ This is a first working implementation. Extraction, validation, API handling, ca
 
 ## Run
 
-Requires **Python 3.11 or newer**. There are no third-party runtime dependencies. Run from this directory:
+Requires **Python 3.11 or newer** for analysis; local audio rendering has additional dependencies described in [RENDERER.md](RENDERER.md). Clone the project:
+
+```sh
+git clone https://github.com/taxilian/epub-tts-narrator.git
+cd epub-tts-narrator
+```
+
+Analysis has no third-party runtime dependencies. Run from this directory:
 
 ```sh
 python3.11 -m epub_audiobook --help
 ```
 
-Optionally install the command into your own virtual environment with `python3.11 -m pip install -e .`; the installed command is `epub-audiobook`.
+Install into your virtual environment with `python3.11 -m pip install -e .`; the primary command is `epub-tts-narrator`. For example, `epub-tts-narrator analyze book.epub -o runs/book-01`. The previous `epub-audiobook` command remains an alias, and `python -m epub_audiobook` remains supported. Audio generation uses the separate `audiobook-render` command.
 
 On a new checkout, create one global configuration file and set your model and credentials once:
 
 ```sh
-cp epub-audiobook.example.toml epub-audiobook.toml
+cp epub-tts-narrator.example.toml epub-tts-narrator.toml
 ```
 
-Set `provider.model` to your chosen model. If the endpoint requires authentication, uncomment `provider.api_key` and put its key in that file. No default model is chosen. Keys are read directly from the configuration file and are never written into analysis files or caches. The template is tracked; `epub-audiobook.toml` and `*.local.toml` are ignored by Git.
+Set `provider.model` to your chosen model. If the endpoint requires authentication, uncomment `provider.api_key` and put its key in that file. No default model is chosen. Keys are read directly from the configuration file and are never written into analysis files or caches. The template is tracked; `epub-tts-narrator.toml` and `*.local.toml` are ignored by Git.
 
-If you already have a configured `epub-audiobook.toml`, keep it rather than replacing it with the template. Run both commands from the project directory and omit `--config`. From another working directory, pass `--config /path/to/epub-audiobook.toml` to use the same file. Book-specific configuration files are not needed for the directory workflow.
+Keep your existing configured file rather than replacing it with the template. Both commands prefer `epub-tts-narrator.toml` and fall back to the previous `epub-audiobook.toml` when the new filename is absent. Existing installations need no config migration. If both files exist, the new name takes precedence; settings are not merged. Both filenames are ignored by Git. Run from the project directory and omit `--config`, or pass `--config /path/to/your-config.toml` from another working directory. Book-specific configuration files are not needed for the directory workflow.
 
-`extract`, `plan`, `analyze`, `review-attribution`, and `resolve-speakers` load `epub-audiobook.toml` from the current working directory when it exists. Each also accepts `--config PATH` to select another file. Extraction and planning work with built-in defaults when no configuration file exists; model calls require a configured model. Keep global provider, analysis, extraction, and performance settings in that one TOML file. Add the renderer sections from [audiobook-render.example.toml](audiobook-render.example.toml) to the same file when setting up audio generation; `audiobook-render` also loads it automatically. Choose the book, output directory, and optional previous-book directory on each command; no book or series needs its own configuration file. See [epub-audiobook.example.toml](epub-audiobook.example.toml) for the global settings and their defaults.
+`extract`, `plan`, `analyze`, `review-attribution`, and `resolve-speakers` load `epub-tts-narrator.toml` from the current working directory when it exists. Each also accepts `--config PATH` to select another file. Extraction and planning work with built-in defaults when no configuration file exists; model calls require a configured model. Keep global provider, analysis, extraction, and performance settings in that one TOML file. Add the renderer sections from [audiobook-render.example.toml](audiobook-render.example.toml) to the same file when setting up audio generation; `audiobook-render` also loads it automatically. Choose the book, output directory, and optional previous-book directory on each command; no book or series needs its own configuration file. See [epub-tts-narrator.example.toml](epub-tts-narrator.example.toml) for the global settings and their defaults.
 
 ```sh
 # Inspect extraction and request counts without model calls or file writes.
@@ -54,7 +61,7 @@ Git tracks the application, tests, documentation, configuration templates, and o
 
 Use a new output directory for a new analysis. An existing completed output is refused, and directory analysis does not accept `--force`. After a failed analysis, repeat the command to reuse successful cached requests. `plan` accepts the same `-o DIRECTORY` and `--continue-from DIRECTORY` options to inspect the intended run without changing files or calling the model.
 
-The same configuration applies to every command. If it lives elsewhere, pass `--config /path/to/epub-audiobook.toml`; this selects a global settings file, not a book-specific setup. To use a local compatible server, change the provider section in that file:
+The same configuration applies to every command. If it lives elsewhere, pass `--config /path/to/epub-tts-narrator.toml`; this selects a global settings file, not a book-specific setup. To use a local compatible server, change the provider section in that file:
 
 ```toml
 [provider]
@@ -143,7 +150,7 @@ The shortlist uses existing candidate speakers, the latest automatic reviewers, 
 To resume a saved book, rerun the original `analyze` command with the same output directory, or pass that directory directly:
 
 ```sh
-.venv-renderer/bin/epub-audiobook analyze runs/book-06
+.venv-renderer/bin/epub-tts-narrator analyze runs/book-06
 ```
 
 Each explicit rerun automatically reconsiders every remaining unassigned block before asking for manual choices, including cases whose earlier checks ended without an answer. Three independent reviewers reconsider narration versus speech and split sequential speakers or narration into separate segments when supported by the source. For unassigned spans, retry requests omit earlier inferred labels and speaker guesses so reviewers start from the source. Existing segment boundaries are not treated as authoritative for unassigned text. Exact text coverage and three-way agreement remain required; unresolved passages are never filled by guessing. Saved cast identities and already-assigned spans are preserved.
@@ -373,7 +380,7 @@ Tests use synthetic EPUBs and mocked/deterministic model responses. They cover E
 To run the small identity regression suite against your configured model, choose a new report path:
 
 ```sh
-python3.11 scripts/validate_identity.py --config epub-audiobook.toml \
+python3.11 scripts/validate_identity.py --config epub-tts-narrator.toml \
   -o runs/identity-check/results.json
 ```
 

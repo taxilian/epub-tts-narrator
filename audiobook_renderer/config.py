@@ -62,8 +62,8 @@ DEFAULTS = {
 
 def load_config(path=None):
     from .quality import validate_policy
-    from epub_audiobook.config import DEFAULTS as ANALYZER_DEFAULTS, DEFAULT_FILENAME
-    path = Path(path or Path.cwd() / DEFAULT_FILENAME).resolve()
+    from epub_audiobook.config import DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path
+    path = resolve_config_path(path).resolve()
     try:
         with path.open("rb") as stream:
             supplied = tomllib.load(stream)

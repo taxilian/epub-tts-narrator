@@ -310,7 +310,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(result["segments"][1]["attribution"]["basis"], "user")
         self.assertEqual(output.count("Speaker number(s),"), 2)
         self.assertIn("Enter accepts the best guess", output)
-        self.assertIn("epub-audiobook resolve-speakers 'books/A Book'", output)
+        self.assertIn("epub-tts-narrator resolve-speakers 'books/A Book'", output)
         self.assertFalse(result["readiness"]["ready"])
 
     def test_enter_in_full_cast_does_not_select_and_back_restores_shortlist_mapping(self):
@@ -407,7 +407,7 @@ class SpeakerDecisionTests(unittest.TestCase):
         rank.assert_not_called()
         self.assertEqual(result, document)
         self.assertIn("Speaker selection incomplete", output.getvalue())
-        self.assertIn("epub-audiobook resolve-speakers book-01", output.getvalue())
+        self.assertIn("epub-tts-narrator resolve-speakers book-01", output.getvalue())
 
     def test_redirected_stdin_asks_on_controlling_terminal_for_input_and_output(self):
         class Unreadable(StringIO):
@@ -445,7 +445,7 @@ class SpeakerDecisionTests(unittest.TestCase):
             result = prompt_speaker_decisions(document, book_path="book-01")
         self.assertEqual(result, document)
         self.assertIn("no interactive terminal is available", output.getvalue())
-        self.assertIn("epub-audiobook resolve-speakers book-01", output.getvalue())
+        self.assertIn("epub-tts-narrator resolve-speakers book-01", output.getvalue())
         self.assertNotIn("Speaker number(s)", output.getvalue())
 
     def test_terminal_output_open_failure_closes_input_and_leaves_passage_unassigned(self):

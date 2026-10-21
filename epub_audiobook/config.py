@@ -16,7 +16,32 @@ from .pipeline import DEFAULT_POLICY
 from .jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
 
-DEFAULT_FILENAME = "epub-audiobook.toml"
+DEFAULT_FILENAME = "epub-tts-narrator.toml"
+LEGACY_FILENAME = "epub-audiobook.toml"
+
+
+def resolve_config_path(path: Path | str | None = None) -> Path:
+    """Select one global file, retaining the original filename as a fallback.
+
+    An explicit path always wins. A present canonical file, including a broken
+    symlink or invalid TOML, must report its own error instead of silently using
+    a different configuration.
+    """
+    if path is not None:
+        if not isinstance(path, (str, Path)):
+            raise ValueError("Configuration path must be a string or Path.")
+        return Path(path)
+    directory = Path.cwd()
+    for name in (DEFAULT_FILENAME, LEGACY_FILENAME):
+        candidate = directory / name
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        return candidate
+    return directory / DEFAULT_FILENAME
+
+
 DEFAULTS = {
     "provider": {
         "model": None,
@@ -126,19 +151,18 @@ def _validate(section: str, key: str, value: Any) -> None:
 def load_config(path: Path | str | None = None) -> dict[str, Any]:
     """Return defaults merged with a strictly validated TOML configuration.
 
-    With no path, read ``epub-audiobook.toml`` in the current directory if it
-    exists. Explicit paths must exist. Relative cache and series paths are based on
+    With no path, read ``epub-tts-narrator.toml`` in the current directory, falling
+    back to ``epub-audiobook.toml`` when absent. Explicit paths must exist.
+    Relative cache and series paths are based on
     the configuration file's directory; strings are never interpolated or read
     from environment variables. Returned dictionaries can be edited independently.
     """
-    if path is not None and not isinstance(path, (str, Path)):
-        raise ValueError("Configuration path must be a string or Path.")
-    configuration_path = Path.cwd() / DEFAULT_FILENAME if path is None else Path(path)
+    configuration_path = resolve_config_path(path)
     try:
         with configuration_path.open("rb") as stream:
             supplied = tomllib.load(stream)
     except FileNotFoundError:
-        if path is None:
+        if path is None and not configuration_path.is_symlink():
             return deepcopy(DEFAULTS)
         raise ValueError("The requested configuration file does not exist.") from None
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):

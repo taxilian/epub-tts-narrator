@@ -23,7 +23,7 @@ def parser():
     for name in ("plan", "render", "assemble", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
-        command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
+        command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
         command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
         command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
         command.add_argument("--epub", type=Path, help="Original EPUB for audiobook cover extraction")
@@ -64,7 +64,7 @@ def parser():
             command.add_argument("--keep-unselected", action="store_true",
                                  help="Save a recovered take without changing the active voice (--action recover)")
     doctor = commands.add_parser("doctor")
-    doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
+    doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     return root
 
 

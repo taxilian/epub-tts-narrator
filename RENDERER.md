@@ -1,6 +1,6 @@
-# Local audiobook renderer
+# epub-tts-narrator: audiobook rendering
 
-`audiobook-render` consumes a version-2 analyzer bundle, creates or reuses persistent character voices, verifies each generated chunk, and produces chapter audio plus a chaptered `.m4b`. The analyzer and renderer read the same global `epub-audiobook.toml`, while the book directory and optional path overrides are command arguments. They remain separate commands.
+`audiobook-render` consumes a version-2 analyzer bundle, creates or reuses persistent character voices, verifies each generated chunk, and produces chapter audio plus a chaptered `.m4b`. The analyzer and renderer read the same global `epub-tts-narrator.toml`, while the book directory and optional path overrides are command arguments. They remain separate commands.
 
 Voice creation prefers Gemini when its API key is configured. Fish Audio Drama 3 renders the book locally through the **unofficial Sogni MLX port** on Apple Silicon, cloning the saved character recordings. Drama 3 can also create references locally from scene prompts, and Qwen3 VoiceDesign remains an optional alternative. The port reports 48–55 GB peak memory for `q8` on an M5 Max; Drama 3's download is about 41.5 GB. Allow additional disk space for Whisper, dependencies, voice references, and retained attempts. These are upstream memory figures, not combined-memory guarantees for this renderer. [Sogni port](https://github.com/Sogni-AI/drama3-mlx), [scene casting format](https://arxiv.org/html/2610.18010v1#A2)
 
@@ -23,7 +23,7 @@ Native Drama 3 casting is now implemented and exercised locally. The investigati
 Run these commands from the project directory. They create a dedicated Python 3.12 environment without activating it or setting environment variables:
 
 ```sh
-cd /path/to/epub-audiobook
+cd /path/to/epub-tts-narrator
 uv venv --python 3.12 .venv-renderer
 uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
@@ -47,15 +47,17 @@ The renderer uses local paths and does not download missing models during infere
 
 ## Configure once
 
-Both analysis and rendering use one global `epub-audiobook.toml`. Once configured, run the commands below from the project directory and omit `--config`. From another working directory, pass `--config /path/to/epub-audiobook.toml` to use that same file. Per-book and per-series configuration files are not needed.
+Both analysis and rendering use one global `epub-tts-narrator.toml`. Once configured, run the commands below from the project directory and omit `--config`. From another working directory, pass `--config /path/to/epub-tts-narrator.toml` to use that same file. Per-book and per-series configuration files are not needed.
 
-For a new setup only, add the sections from [audiobook-render.example.toml](audiobook-render.example.toml) to the existing global `epub-audiobook.toml` alongside the analyzer sections. If you have not added renderer settings yet:
+Existing `epub-audiobook.toml` files still work when `epub-tts-narrator.toml` is absent. Keep using that file or rename it; do not create a second partial config, because the new filename takes precedence and the two files are not merged. If retaining the old filename, use it in the append command below.
+
+For a new setup only, add the sections from [audiobook-render.example.toml](audiobook-render.example.toml) to the existing global `epub-tts-narrator.toml` alongside the analyzer sections. If you have not added renderer settings yet:
 
 ```sh
-cat audiobook-render.example.toml >> epub-audiobook.toml
+cat audiobook-render.example.toml >> epub-tts-narrator.toml
 ```
 
-Do this once: TOML does not allow duplicate sections. Both commands load `epub-audiobook.toml` from the current working directory; `--config PATH` selects the same global file from elsewhere. Each command validates the recognized sections for the other command, then uses its own settings. No book or series needs a separate configuration file.
+Do this once: TOML does not allow duplicate sections. Both commands load `epub-tts-narrator.toml` from the current working directory; `--config PATH` selects the same global file from elsewhere. Each command validates the recognized sections for the other command, then uses its own settings. No book or series needs a separate configuration file.
 
 Edit the model paths before running. Configured paths are literal strings, resolved relative to the configuration file; shell variables and environment variables are not substituted. `~` is expanded for configured filesystem paths. The main settings are:
 
@@ -107,7 +109,7 @@ max_wer = 0.0
 
 The example file includes the remaining quality thresholds. Character auditions use prepared source excerpts or character-specific creative scripts; the legacy `voices.reference_text` setting is not used as a generic fallback by the book workflow.
 
-For a directory produced by `epub-audiobook analyze`, the renderer obtains the series ID and continuation link from the book itself. Voices are stored in `<book-directory>/voices/<series-hash>/`; work files default to `<book-directory>/render-work/`, and the finished audiobook defaults to `<book-directory>/audiobook/`. Use `--work-dir PATH`, `-o PATH` (or `--output PATH`), and `--epub PATH` for per-run overrides.
+For a directory produced by `epub-tts-narrator analyze`, the renderer obtains the series ID and continuation link from the book itself. Voices are stored in `<book-directory>/voices/<series-hash>/`; work files default to `<book-directory>/render-work/`, and the finished audiobook defaults to `<book-directory>/audiobook/`. Use `--work-dir PATH`, `-o PATH` (or `--output PATH`), and `--epub PATH` for per-run overrides.
 
 Voice lookup checks the current book first, then its parent from `--continue-from`, then that parent's parent, continuing until it finds the voice. This lookup happens when casting or rendering, so analyzing all books before generating voices works. The saved relative parent links include identity and integrity checks; a missing or changed parent fails explicitly instead of silently casting a replacement. Moving the whole series together preserves the relative links.
 
@@ -133,7 +135,7 @@ Aliases follow the same continuation chain as recordings. A mapping in book 1 is
 
 Choose chapters per book with `--chapters 3` or `--chapters 3-5,7` on `plan`, `render`, or `assemble`. Numbers use the **one-based order of script entries in the bundle manifest**, including front matter. Ranges are inclusive, duplicate numbers are ignored, and chapters always stay in source order. Omit the option to use all entries. `plan` lists the corresponding titles. The legacy global `chapter_numbers` setting remains supported, but book-specific selections belong on the command line. A selected subset produces a partial audiobook and records `partial_book: true`.
 
-Analysis notes are advisory and do not require a review or acceptance step. `--allow-review` and the global `allow_review` setting remain accepted for compatibility but are unnecessary. Rendering requires a valid script and assigned voices for every spoken passage in the selected chapters; missing speakers still block those chapters. Rerun `epub-audiobook analyze BOOK_DIRECTORY` to complete remaining assignments using the saved book. There is no implicit narrator substitution.
+Analysis notes are advisory and do not require a review or acceptance step. `--allow-review` and the global `allow_review` setting remain accepted for compatibility but are unnecessary. Rendering requires a valid script and assigned voices for every spoken passage in the selected chapters; missing speakers still block those chapters. Rerun `epub-tts-narrator analyze BOOK_DIRECTORY` to complete remaining assignments using the saved book. There is no implicit narrator substitution.
 
 ## Inspect, cast, and render
 
@@ -251,7 +253,7 @@ With `[voice_design] type = "engine"`, the character description conditions Dram
 For a fresh analysis, the analyzer now supplies stable acoustic directions in both the voice description and traits, including voices added during identity reconciliation. Casting uses these automatically together with the selected book excerpt; no prompt-preparation or repair command is needed. Existing edited drafts and selected references retain precedence, so this change does not rewrite older casting work. Speech verification checks the words and audio quality, not whether vocal gender, character fit, or every requested texture sounds right.
 
 To configure Gemini voice creation, put the following in the same global
-`epub-audiobook.toml` file. The default `[voice_design] type = "auto"` prefers Gemini
+`epub-tts-narrator.toml` file. The default `[voice_design] type = "auto"` prefers Gemini
 when its API key is present; with no key, it uses the local engine. Existing files
 that set `type = "engine"` explicitly keep local creation until changed to `auto`.
 These settings also supply credentials for `GG` in the casting menu.
@@ -286,7 +288,7 @@ Automatic selection does not silently switch providers after a failure.
 Use `G` in the menu for an explicit local replacement, `GG` for Gemini, or `G11` for ElevenLabs.
 
 To enable `G11`, add an ElevenLabs key to the same ignored global
-`epub-audiobook.toml` file. ElevenLabs requires a paid plan for voice design
+`epub-tts-narrator.toml` file. ElevenLabs requires a paid plan for voice design
 through its API; a free account returns `feature_not_available`:
 
 ```toml
@@ -512,7 +514,7 @@ The primary transcript is judged first. If it passes, verification finishes with
 
 There are no character-distance, word-error-percentage, substring, or short-name gates before JEV. Every nonexact usable transcript reaches it; exact normalized text needs no model call. Acoustic failures and malformed/empty recognition still fail directly. Whisper uses scalar temperature zero and greedy decoding, so repeatedly decoding identical audio with unchanged settings normally repeats the result; independent recognition is the fallback instead.
 
-Enable it once in the global `epub-audiobook.toml`; no book or series settings are needed:
+Enable it once in the global `epub-tts-narrator.toml`; no book or series settings are needed:
 
 ```toml
 [jev]

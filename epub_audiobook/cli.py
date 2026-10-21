@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 from . import __version__
-from .config import load_config
+from .config import load_config, resolve_config_path
 from .contracts import readiness, review_items, validate_document
 from .epub import extract_epub
 from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerprint,
@@ -226,7 +226,7 @@ def export_bundle(document, output, *, allow_review=False):
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Analyze an EPUB into a portable multi-voice audiobook script.")
+    root = argparse.ArgumentParser(prog="epub-tts-narrator", description="Analyze an EPUB into a portable multi-voice audiobook script.")
     root.add_argument("--version", action="version", version=__version__)
     commands = root.add_subparsers(dest="command", required=True)
 
@@ -234,7 +234,7 @@ def parser():
         command = commands.add_parser(name, help=help_text)
         command.add_argument("input", type=Path)
         command.add_argument("--config", type=Path,
-                             help="TOML configuration file; defaults to ./epub-audiobook.toml")
+                             help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
         return command
 
     def output_options(command):
@@ -256,7 +256,7 @@ def parser():
     output_options(passage_review)
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
     speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
-    speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-audiobook.toml)")
+    speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -350,7 +350,7 @@ def main(argv=None):
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
             if not config["provider"]["model"]:
-                raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
+                raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             model_cache = announce_cache(cache)
             client = OpenAICompatibleClient(**config["provider"])
             print(f"Resolving speakers with {client.model} at {client.base_url}; unfinished book passages will be sent to this endpoint.", file=sys.stderr)
@@ -396,7 +396,7 @@ def main(argv=None):
                     continue
                 if requests is None:
                     if not config["provider"]["model"]:
-                        raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
+                        raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
                     model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
                     client = OpenAICompatibleClient(**config["provider"])
                     print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
@@ -437,6 +437,9 @@ def main(argv=None):
                 args.output = output.resolve()
                 return resume_book(args.output, load_config(args.config))
             args.output = validate_output(output)
+        if (args.command in {"extract", "analyze", "review-attribution"}
+                and args.output.resolve() == resolve_config_path(args.config).resolve()):
+            raise ValueError("The output must use a separate path from configuration")
         if (args.command in {"extract", "analyze", "apply", "review-attribution"}
                 and not directory_mode and args.output.exists() and not args.force):
             raise FileExistsError(f"Output already exists: {args.output}; choose another path or use --force")
@@ -485,7 +488,7 @@ def main(argv=None):
                 raise ValueError("--continue-from requires directory output, not a legacy .json output file")
             elif series_path is not None:
                 series_path = Path(series_path)
-                protected = [args.input, args.config or Path("epub-audiobook.toml")]
+                protected = [args.input, resolve_config_path(args.config)]
                 if args.command == "analyze":
                     protected.append(args.output)
                 if any(series_path.resolve() == path.resolve() for path in protected):
@@ -543,7 +546,7 @@ def main(argv=None):
                 print(json.dumps(planned, indent=2, ensure_ascii=False))
                 return 0
             if not config["provider"]["model"]:
-                raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
+                raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             client = OpenAICompatibleClient(**config["provider"])
             print(f"Analyzing with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
             settings = config["analysis"]
@@ -596,9 +599,9 @@ def main(argv=None):
         if args.command == "review-attribution":
             config = load_config(args.config)
             if not config["provider"]["model"]:
-                raise ValueError("Set provider.model in epub-audiobook.toml, or select a TOML file with --config")
+                raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             settings = config["analysis"]
-            protected = [args.config or Path("epub-audiobook.toml")]
+            protected = [resolve_config_path(args.config)]
             if settings["series_registry"] is not None:
                 protected.append(Path(settings["series_registry"]))
             if any(args.output.resolve() == path.resolve() for path in protected):

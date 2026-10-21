@@ -1,4 +1,4 @@
-# Copy this file to epub-audiobook.toml and set your global model and API key once.
+# Copy this file to epub-tts-narrator.toml and set your global model and API key once.
 # Reuse it for every book and series. Choose run-specific paths on the command:
 #   analyze book.epub [-o OUTPUT_DIRECTORY] [--continue-from PREVIOUS_OUTPUT_DIRECTORY]
 # No output path or series path belongs in this configuration.
