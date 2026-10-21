@@ -14,7 +14,7 @@ max_new_tokens = 2048
 [voice_design]
 # Prefer Gemini when its API key is configured; otherwise create voices locally.
 # Drama 3 still synthesizes audiobook speech by cloning the saved recordings.
-# Use "engine" to force local creation, or "gemini" to require Gemini.
+# Use "engine" for local creation, "gemini" for Gemini, or "elevenlabs" for ElevenLabs.
 type = "auto"
 
 [verification]
@@ -53,6 +53,16 @@ api_key = ""
 model = "gemini-3.8-flash-tts"
 language_code = "en-US"
 timeout_seconds = 180.0
+
+# Optional alternate designer, selected with G11 in the menu.
+# Adding its key does not change automatic voice creation; set
+# [voice_design] type = "elevenlabs" to use it for all new voices.
+[elevenlabs]
+api_key = ""
+model = "eleven_ttv_v3"
+timeout_seconds = 180.0
+guidance_scale = 5.0
+loudness = 0.0
 
 [casting]
 # Executable and arguments; the sample's absolute path is appended. No shell.

@@ -48,7 +48,7 @@ def parser():
             command.add_argument("--transcript", type=Path, required=True,
                                  help="UTF-8 file containing the exact reference recording transcript")
         if name == "cast":
-            command.add_argument("--voice-designer", choices=("local", "gemini"),
+            command.add_argument("--voice-designer", choices=("local", "gemini", "elevenlabs"),
                                  help="Override voice creation (default: Gemini when configured, otherwise local)")
             command.add_argument("--action", default="interactive",
                                  choices=("interactive", "list", "prepare-samples", "refresh-prompts", "normalize-samples", "generate", "generate-missing", "regenerate-all", "edit", "play", "accept", "recover"),

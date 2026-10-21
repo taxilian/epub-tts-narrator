@@ -186,9 +186,11 @@ There is one menu. Type a number or command and press Enter:
 | `G 5` or `G5` | Edit and regenerate voice 5 with the local speech engine. |
 | `GG 5` or `GG5` | Edit and regenerate voice 5 with Gemini. No command-line flag is needed. |
 | `GG` | Use Gemini for the last voice played, or ask for a voice number. |
+| `G11 5` or `G115` | Edit and regenerate voice 5 with ElevenLabs. |
+| `G11` | Use ElevenLabs for the last voice played, or ask for a voice number. |
 | `Q` | Quit. |
 
-Both regeneration commands offer two fields: the voice prompt and the spoken sample script. Press Enter to keep either value. The new voice is verified, saved, selected, and played immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` always chooses the local speech engine and `GG` chooses Gemini for that action; neither changes the session's startup setting or global configuration.
+All regeneration commands offer two fields: the voice prompt and the spoken sample script. Press Enter to keep either value. The new voice is verified, saved, selected, and played immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` chooses the local speech engine, `GG` chooses Gemini, and `G11` chooses ElevenLabs for that action; none changes the session's startup setting or global configuration. Use `G 11` with a space to regenerate voice 11 locally, since `G11` is the ElevenLabs command.
 
 Menu and text entry use the terminal's standard line editor: arrow keys,
 Ctrl+A/E, Ctrl+K/U, and session history follow your readline/libedit bindings.
@@ -196,7 +198,7 @@ While a sample is playing, any key stops playback and returns to the menu.
 
 Sample scripts contain 25–60 words and at most 650 characters, normally aiming for 35–50 words. Casting prefers clearly attributed ordinary speech and can join several actual statements by the same canonical voice to provide a useful audition. Balanced outer dialogue quotation marks are removed before joining excerpts; embedded quotations and apostrophes are retained. Every excerpt keeps its own chapter, segment, exact source ranges, and position in the joined script; a montage is not represented as one contiguous quotation. Narrators can use narration, and identified participants in simultaneous dialogue can each audition those words alone. Shared roles use one script and one saved reference voice.
 
-Every new voice-design request starts with `audiobook narrator portraying a character in a book:` followed by the voice description. This context applies to Gemini and local generation, including edited and older saved drafts, and is added only once. It is not part of the spoken sample script. Custom draft wording, selected recordings, and inherited voices are preserved; new request records contain the actual prefixed prompt. This applies to both the casting menu and automatic voice creation during rendering.
+Every new voice-design request starts with `audiobook narrator portraying a character in a book:` followed by the voice description. This context applies to all designers, including edited and older saved drafts, and is added only once. It is not part of the spoken sample script. Custom draft wording, selected recordings, and inherited voices are preserved; new request records contain the actual prefixed prompt. This applies to both the casting menu and automatic voice creation during rendering.
 
 For a creation prompt, describe the voice's lasting identity in one or two concise sentences using a few compatible audible traits: typical pitch, resonance, vocal weight, texture, accent, articulation, and natural cadence. Include age, gender presentation, or fictional context when they help establish the sound. Translate personality into vocal choices: precise consonants and measured phrasing for a meticulous character, or a thin, reedy tone and dry rasp for an abrasive creature. Preserve essential harsh or unusual qualities. Put temporary emotions, urgency, whispering, shouting, and changes of pace in individual passages' delivery directions. The voice generator knows nothing about the book: make the prompt self-contained, translating character names, fictional species, and lore into explicit audible characteristics.
 
@@ -226,7 +228,7 @@ To rewrite existing voice descriptions and rebuild sample scripts using the late
   --action refresh-prompts
 ```
 
-Add `--voice-id ID` to refresh one voice. This uses the configured analysis model to rewrite descriptions, retaining useful edited casting directions as context. It selects fresh book excerpts or prepares creative fallback scripts as needed. It replaces local casting drafts, including custom wording, and saves previous drafts and refresh details under the book's voice directory in `casting-refreshes/`. Shared roles receive one draft. Recorded voices and ancestor books stay unchanged; use `G`/`GG` or `regenerate-all` afterward to create recordings from the refreshed drafts. Inherited voices still require `--include-inherited` with `regenerate-all` to replace their recordings locally.
+Add `--voice-id ID` to refresh one voice. This uses the configured analysis model to rewrite descriptions, retaining useful edited casting directions as context. It selects fresh book excerpts or prepares creative fallback scripts as needed. It replaces local casting drafts, including custom wording, and saves previous drafts and refresh details under the book's voice directory in `casting-refreshes/`. Shared roles receive one draft. Recorded voices and ancestor books stay unchanged; use `G`/`GG`/`G11` or `regenerate-all` afterward to create recordings from the refreshed drafts. Inherited voices still require `--include-inherited` with `regenerate-all` to replace their recordings locally.
 
 Edits, samples, and selections persist across sessions in the current book and are available to descendants through the continuation chain. Earlier samples remain on disk for recovery, but history controls are outside the interactive menu. Already published audiobooks are unchanged. To rebuild a finished book, choose a new output directory; retained work caches reuse unaffected characters' clips. A render in progress keeps the voices it loaded at the start.
 
@@ -277,14 +279,57 @@ timeout_seconds = 180.0
 .venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer local
 ```
 
-An API error or failed Gemini verification is reported. Individual `G`/`GG`
+An API error or failed verification is reported. Individual `G`/`GG`/`G11`
 replacements preserve any existing selection on failure; `regenerate-all` clears
 its target selections first, so failed replacements have no active voice.
 Automatic selection does not silently switch providers after a failure.
-Use `G` in the menu for an explicit local replacement, or `GG` for Gemini.
+Use `G` in the menu for an explicit local replacement, `GG` for Gemini, or `G11` for ElevenLabs.
 
-Casting prints the complete API error message and response details, including the
-HTTP status, endpoint, model, and any field validation errors. Network errors
+To enable `G11`, add an ElevenLabs key to the same ignored global
+`epub-audiobook.toml` file. ElevenLabs requires a paid plan for voice design
+through its API; a free account returns `feature_not_available`:
+
+```toml
+[elevenlabs]
+api_key = "YOUR_ELEVENLABS_API_KEY"
+model = "eleven_ttv_v3"
+timeout_seconds = 180.0
+guidance_scale = 5.0
+loudness = 0.0
+```
+
+Open casting normally and enter `G11 5` to replace voice 5, or `G11` to
+replace the last voice played. To use ElevenLabs for missing voices in this
+session as well:
+
+```sh
+.venv-renderer/bin/audiobook-render cast runs/book-01 --voice-designer elevenlabs
+```
+
+For a persistent default, change the existing `[voice_design]` table to
+`type = "elevenlabs"`. Adding the ElevenLabs key alone leaves `auto` selection
+unchanged: Gemini when configured, otherwise local. Credentials are read from
+the file, never environment variables. Missing credentials fail before casting
+can replace a selected recording.
+
+ElevenLabs receives the voice description and sample script to design preview
+audio. The preview passes the same transcription and audio verification as
+other designers, then is saved locally for Drama 3 to clone. This does not add
+a permanent voice to the ElevenLabs account or require ElevenLabs during book
+rendering. Shared roles and later books reuse the saved reference as usual.
+Returned alternatives are cached for verification retries. If casting is
+interrupted while preparing a missing ElevenLabs voice, reopening casting
+resumes the newest unfinished request with matching text, prompt, book, and
+voice settings, reusing downloaded previews. Explicit `G11` always starts a
+fresh design. Corrupt request records stop recovery with an inspection path.
+The description sent to ElevenLabs must contain 20–1000 characters including
+the audiobook context prefix; the sample script must contain 100–1000
+characters. Unsupported lengths produce an actionable error without truncating
+or rewriting your script. `eleven_multilingual_ttv_v2` is also supported;
+`guidance_scale` accepts 0–100 and `loudness` accepts -1–1.
+
+Casting prints the API error message and response details, including the
+HTTP status, model, and any field validation errors. Network errors
 include their underlying reason. These diagnostics are also saved in each
 `attempt-*.json` report. Messages are not shortened; configured credentials are
 masked and terminal control sequences are removed. The final failure includes
@@ -341,7 +386,7 @@ For scripts, `cast --action list` prints the cast and sample history as JSON wit
 
 `regenerate-all` clears all targeted active selections before generating replacements. It targets each distinct canonical voice that is local or missing, skipping voices inherited from earlier books. Add `--include-inherited` to explicitly replace inherited voices too. Shared narration and dialogue are generated once. Skipped voices need no new sample scripts or generation calls; if every voice is inherited, the default command does nothing.
 
-Failed replacements stay unassigned and appear as `FAILED — no active voice` in the casting menu, with their saved error details. Targets not attempted before an interruption appear as `needs regeneration — no active voice`. Reopening casting preserves these states without adopting old samples or retrying automatically. Use `G number` or `GG number` to fix them; a successful replacement clears the failure. Rendering cannot use an old reference or fall back to an ancestor for a cleared voice. Original recordings remain as explicit recovery history only, and existing audiobook audio is not rewritten.
+Failed replacements stay unassigned and appear as `FAILED — no active voice` in the casting menu, with their saved error details. Targets not attempted before an interruption appear as `needs regeneration — no active voice`. Reopening casting preserves these states without adopting old samples or retrying automatically. Use `G number`, `GG number`, or `G11 number` to fix them; a successful replacement clears the failure. Rendering cannot use an old reference or fall back to an ancestor for a cleared voice. Original recordings remain as explicit recovery history only, and existing audiobook audio is not rewritten.
 
 Before generation, the command warns about the targeted voices and linked roles, then continues without confirmation. In the directory workflow, replacements and failure states belong to the current book and may be inherited by its descendants; earlier books and sibling branches are unchanged, including with `--include-inherited`. Legacy shared-library mode warns that changes affect every book using that library and voice ID. The command continues after individual generation failures and reports them at the end. Run it in the book where you want replacement voices to start applying. Replace the voice ID below with an ID from the listing:
 

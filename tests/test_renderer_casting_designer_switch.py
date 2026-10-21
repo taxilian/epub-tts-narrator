@@ -27,6 +27,11 @@ class GeminiDesigner(ReferenceDesigner):
     capabilities = {"voice_design": True}
 
 
+class ElevenLabsDesigner(ReferenceDesigner):
+    identity = {"engine": "elevenlabs_voice_design", "model": "eleven_ttv_v3"}
+    capabilities = {"voice_design": True}
+
+
 @unittest.skipUnless(FFMPEG, "FFmpeg is required for casting integration")
 class CastingDesignerSwitchTests(unittest.TestCase):
     def setUp(self):
@@ -49,6 +54,7 @@ class CastingDesignerSwitchTests(unittest.TestCase):
         self.config["engine"]["checkpoint"] = str(self.root / "drama-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")
         self.config["gemini"]["api_key"] = "test-only-api-key"
+        self.config["elevenlabs"]["api_key"] = "test-only-elevenlabs-key"
         self.config["render"].update(max_attempts=1, ffmpeg=FFMPEG, ffprobe=FFPROBE or "ffprobe")
         self.config["quality"] = validate_policy({})
         self.transcripts = {}
@@ -62,9 +68,10 @@ class CastingDesignerSwitchTests(unittest.TestCase):
     def session(self):
         def factory(settings):
             self.factory_calls.append(deepcopy(settings))
-            if settings["type"] != "gemini":
+            if settings["type"] not in {"gemini", "elevenlabs"}:
                 return self.configured_designer
-            designer = GeminiDesigner(self.transcripts)
+            designer_class = GeminiDesigner if settings["type"] == "gemini" else ElevenLabsDesigner
+            designer = designer_class(self.transcripts)
             designer.error = self.remote_error
             self.remote_designers.append(designer)
             return designer
@@ -131,6 +138,45 @@ class CastingDesignerSwitchTests(unittest.TestCase):
         session.regenerate("voice_mara")
         self.assertEqual(len(self.configured_designer.calls), 2)
         self.assertEqual(len(self.factory_calls), 2)
+
+    def test_elevenlabs_replaces_shared_character_and_restores_configured_designer(self):
+        self.config["voice_design"]["type"] = "qwen3_mlx"
+        self.config["voice_design"]["checkpoint"] = str(self.root / "other-local-model")
+        session = self.session()
+        session.regenerate("voice_mara")
+        original_config = deepcopy(session.config)
+        remote = session.regenerate("voice_mara_narration", voice_designer="elevenlabs")
+        self.assertEqual(self.factory_calls[-1], {"type": "elevenlabs", **self.config["elevenlabs"]})
+        self.assertEqual(remote["creation"]["designer"], ElevenLabsDesigner.identity)
+        self.assertEqual(remote["created_with"], self.engine.identity)
+        for voice_id in ("voice_mara", "voice_mara_narration"):
+            self.assertEqual(session.store.load(voice_id)["asset_hash"], remote["asset_hash"])
+        self.assertEqual(session.config, original_config)
+        self.assertIs(session._designer, self.configured_designer)
+        self.assertFalse(self.configured_designer.closed)
+        self.assertTrue(self.remote_designers[-1].closed)
+        session.regenerate("voice_mara", voice_designer="local")
+        self.assertEqual(len(self.engine.calls), 1)
+
+    def test_elevenlabs_failure_preserves_existing_selection(self):
+        session = self.session()
+        original = session.regenerate("voice_mara", voice_designer="local")
+        original_config = deepcopy(session.config)
+        self.remote_error = RuntimeError("ElevenLabs request failed")
+        with self.assertRaises((ValueError, RuntimeError)):
+            session.regenerate("voice_mara_narration", voice_designer="elevenlabs")
+        self.assertEqual(session.store.load("voice_mara")["asset_hash"], original["asset_hash"])
+        self.assertEqual(session.config, original_config)
+        self.assertTrue(self.remote_designers[-1].closed)
+
+    def test_missing_elevenlabs_key_does_not_change_selected_voice(self):
+        self.config["elevenlabs"]["api_key"] = None
+        session = self.session()
+        original = session.regenerate("voice_mara", voice_designer="local")
+        with self.assertRaisesRegex(ValueError, r"elevenlabs\.api_key"):
+            session.regenerate("voice_mara", voice_designer="elevenlabs")
+        self.assertEqual(session.store.load("voice_mara")["asset_hash"], original["asset_hash"])
+        self.assertEqual(self.factory_calls, [])
 
     def test_failed_or_interrupted_remote_replacement_preserves_selection_and_state(self):
         self.config["voice_design"]["type"] = "qwen3_mlx"

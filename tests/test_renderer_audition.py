@@ -304,6 +304,57 @@ class CastingTerminalTests(unittest.TestCase):
                          [("designer", "gemini"), ("designer", "local")])
         self.assertEqual(self.player.played, ["/fixtures/v1-2.wav", "/fixtures/v1-3.wav"])
 
+    def test_g11_edits_generates_and_plays_without_changing_default(self):
+        self.ready()
+        original_config = deepcopy(self.session.config)
+        self.run_ui("G11 1", "A warm, clear voice.", "A different sample.", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "elevenlabs")])
+        self.assertEqual(self.session.row("v1")["selected"]["reference_text"], "A different sample.")
+        self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
+        self.assertEqual(self.session.config, original_config)
+        self.assertTrue(any("G11 [number]" in line and "ElevenLabs" in line for line in self.output))
+
+    def test_plain_g11_uses_last_voice_and_does_not_parse_as_local_voice_eleven(self):
+        self.ready()
+        self.run_ui("2", "G11", "", "", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "elevenlabs")])
+        self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/vn-2.wav"])
+
+    def test_g11_without_last_voice_asks_for_number(self):
+        self.ready()
+        self.run_ui("g11", "2", "", "", "q")
+        self.assertEqual(self.player.played, ["/fixtures/vn-2.wav"])
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "elevenlabs")])
+
+    def test_compact_g11_and_existing_g_commands_choose_each_provider(self):
+        self.ready()
+        self.run_ui("g111", "", "", "gg1", "", "", "g1", "", "", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "elevenlabs"), ("designer", "gemini"), ("designer", "local")])
+
+    def test_local_voice_eleven_uses_space_and_invalid_g11_number_never_generates(self):
+        self.ready()
+        for number in range(3, 12):
+            row = deepcopy(self.session.data[0])
+            row["voice_id"] = f"v{number}"
+            self.session.data.append(row)
+        self.run_ui("G11 0", "G11 99", "G 11", "", "", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "designer"],
+                         [("designer", "local")])
+        self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
+                         [("regenerate", "v11")])
+
+    def test_failed_g11_preserves_existing_voice(self):
+        self.ready()
+        self.session.generation_error = RuntimeError("ElevenLabs API request failed")
+        self.run_ui("G11 1", "", "", "1", "q")
+        self.assertTrue(any("ElevenLabs API request failed" in line for line in self.output))
+        self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
+        self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
+
     def test_plain_gg_defaults_to_last_played_character(self):
         self.ready()
         self.run_ui("2", "GG", "", "", "q")

@@ -75,6 +75,10 @@ class CastingSession:
 
     @property
     def notice(self):
+        if self.config.get("voice_design", {}).get("type") == "elevenlabs":
+            return ("ElevenLabs designs a voice preview remotely from the description and sample script; "
+                    "the verified recording is saved and reused locally by the audiobook engine. "
+                    "No permanent ElevenLabs voice is created.")
         if self.config.get("voice_design", {}).get("type") == "gemini":
             return ("Gemini creates new voices remotely from the description and sample script; "
                     "the audiobook engine reuses their verified saved recordings locally.")
@@ -614,6 +618,64 @@ class CastingSession:
             raise RenderBlocked("Multiple matching voice samples await verification; inspect the casting candidates before choosing one")
         return matches[0] if matches else None
 
+    def _unfinished_elevenlabs_request(self, request, root):
+        """Resume an unpublished preview request after interruption, never recast it.
+
+        A new explicit regeneration gets a new nonce. Startup may recover the
+        newest unfinished request only when every other request field matches.
+        This includes the exact script, prompt, source book, and voice identity.
+        """
+        root = Path(root).absolute()
+        if any(path.is_symlink() for path in (root, *root.parents)):
+            raise RenderBlocked("ElevenLabs casting recovery cannot follow symlink directories")
+        if not root.exists():
+            return None
+        if not root.is_dir():
+            raise RenderBlocked("The casting candidate directory must be a directory")
+        published = self.store.list_candidates(request["voice_id"])
+        published_ids = {candidate["candidate_id"] for candidate in published}
+        published_hashes = {candidate.get("creation", {}).get("request_hash") for candidate in published}
+        current = {key: value for key, value in request.items() if key != "nonce"}
+        matches = []
+        for directory in root.iterdir():
+            if directory.is_symlink():
+                raise RenderBlocked("ElevenLabs casting recovery cannot follow symlink directories")
+            if (not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", directory.name)
+                    or directory.name in published_hashes):
+                continue
+            path = directory / "casting-request.json"
+            if not path.exists() and not path.is_symlink():
+                continue
+            try:
+                if (path.is_symlink() or not path.is_file()
+                        or path.stat().st_size > MAX_PENDING_RECORD_BYTES):
+                    raise ValueError("unsafe request")
+                previous = read_json(path)
+                if not isinstance(previous, dict):
+                    raise ValueError("invalid request")
+                if previous.get("designer", {}).get("engine") != "elevenlabs_voice_design":
+                    continue
+                if (previous.get("kind") != "casting_candidate"
+                        or digest(previous) != directory.name
+                        or not isinstance(previous.get("nonce"), str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", previous["nonce"])):
+                    raise ValueError("request identity")
+                if (previous["nonce"] in published_ids
+                        or {key: value for key, value in previous.items() if key != "nonce"} != current):
+                    continue
+                matches.append((path.stat().st_mtime_ns, directory.name, directory, previous))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                raise RenderBlocked(
+                    f"Cannot safely resume ElevenLabs casting at {path}; "
+                    "inspect its request and preview cache before generating another voice."
+                ) from None
+        if not matches:
+            return None
+        # An explicit later G11 supersedes earlier unfinished requests with the
+        # same inputs. A stable tie-breaker handles coarse filesystem clocks.
+        _, _, directory, previous = max(matches, key=lambda item: item[:2])
+        return directory, previous
+
     def _generate_locked(self, voice_id, *, fresh=False):
         profile = self._profile(voice_id)
         draft = self._draft(voice_id, self.store.load(voice_id))
@@ -645,8 +707,23 @@ class CastingSession:
             self.notify(f"Retrying verification of the saved voice sample for {voice_id}; no new voice is being generated.")
         else:
             resume_attempt = None
+            if not fresh and self.config.get("voice_design", {}).get("type") == "elevenlabs":
+                unfinished = self._unfinished_elevenlabs_request(request, directory.parent)
+                if unfinished is not None:
+                    directory, request = unfinished
+                    nonce = request["nonce"]
+                    self.notify(f"Resuming the saved ElevenLabs voice request for {voice_id}.")
         if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
             request, directory = self._prepare_gemini_request(request, directory, fresh=fresh)
+        if self.config.get("voice_design", {}).get("type") == "elevenlabs":
+            durable_request = directory / "casting-request.json"
+            if durable_request.exists() or durable_request.is_symlink():
+                if (durable_request.is_symlink() or not durable_request.is_file()
+                        or durable_request.stat().st_size > MAX_PENDING_RECORD_BYTES
+                        or read_json(durable_request) != request):
+                    raise RenderBlocked("Saved ElevenLabs casting request changed")
+            else:
+                write_json(durable_request, request)
         prompt = request["prompt"]
         if pending is None:
             self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
@@ -697,7 +774,7 @@ class CastingSession:
             if regeneration is not None:
                 raise RenderBlocked(
                     f"Voice {voice_id} regeneration is {regeneration['state']}; no active voice. "
-                    "Use G or GG in the casting menu to retry."
+                    "Use G, GG, or G11 in the casting menu to retry."
                 )
             candidates = self.store.list_candidates(voice_id)
             designed = [candidate for candidate in candidates if candidate.get("description_applied") is True]

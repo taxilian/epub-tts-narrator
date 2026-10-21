@@ -28,6 +28,10 @@ DEFAULTS = {
         "api_key": None, "model": "gemini-3.8-flash-tts",
         "language_code": "en-US", "timeout_seconds": 180.0,
     },
+    "elevenlabs": {
+        "api_key": None, "model": "eleven_ttv_v3", "timeout_seconds": 180.0,
+        "guidance_scale": 5.0, "loudness": 0.0,
+    },
     "jev": deepcopy(JEV_DEFAULTS),
     "voices": {
         "directory": None, "series_id": None,
@@ -94,6 +98,7 @@ def load_config(path=None):
         "verification": ("type", "model", "language"),
         "voice_design": ("type", "language"),
         "gemini": ("model", "language_code"),
+        "elevenlabs": ("model",),
         "voices": ("reference_text",),
         "render": ("chapter_format", "ffmpeg", "ffprobe"),
     }.items():
@@ -148,15 +153,23 @@ def load_config(path=None):
     if not isinstance(result["engine"]["options"], dict):
         raise ValueError("engine.options must be a table")
     design = result["voice_design"]
-    gemini = result["gemini"]
-    if gemini["api_key"] is not None and (
-            not isinstance(gemini["api_key"], str)
-            or any(ord(char) < 32 or ord(char) == 127 for char in gemini["api_key"])):
-        raise ValueError("gemini.api_key must be a string without control characters")
-    timeout = gemini["timeout_seconds"]
-    if (type(timeout) not in (int, float) or not math.isfinite(timeout)
-            or not 1 <= timeout <= 600):
-        raise ValueError("gemini.timeout_seconds must be a finite number from 1 to 600")
+    for provider in ("gemini", "elevenlabs"):
+        remote = result[provider]
+        if remote["api_key"] is not None and (
+                not isinstance(remote["api_key"], str)
+                or any(ord(char) < 32 or ord(char) == 127 for char in remote["api_key"])):
+            raise ValueError(f"{provider}.api_key must be a string without control characters")
+        timeout = remote["timeout_seconds"]
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                or not 1 <= timeout <= 600):
+            raise ValueError(f"{provider}.timeout_seconds must be a finite number from 1 to 600")
+    for key, low, high in (("guidance_scale", 0, 100), ("loudness", -1, 1)):
+        value = result["elevenlabs"][key]
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or not low <= value <= high):
+            raise ValueError(f"elevenlabs.{key} must be a finite number from {low} to {high}")
+    if result["elevenlabs"]["model"] not in {"eleven_ttv_v3", "eleven_multilingual_ttv_v2"}:
+        raise ValueError("elevenlabs.model must be eleven_ttv_v3 or eleven_multilingual_ttv_v2")
     if not isinstance(design["options"], dict):
         raise ValueError("voice_design.options must be a table")
     if (isinstance(design["temperature"], bool)
@@ -222,11 +235,16 @@ def resolve_voice_design(config):
         if not isinstance(key, str) or not key.strip():
             return {"type": "engine"}
         return {"type": "gemini", **gemini}
-    if kind == "gemini":
+    if kind in {"gemini", "elevenlabs"}:
         # Explicit per-action settings already include credentials. A persisted
-        # type=gemini setting instead reads them from the global [gemini] table.
-        return {"type": "gemini", **gemini,
-                **{key: settings[key] for key in gemini if key in settings}}
+        # provider choice instead reads them from its global provider table.
+        provider = {**DEFAULTS[kind], **config.get(kind, {})}
+        resolved = {"type": kind, **provider,
+                    **{key: settings[key] for key in provider if key in settings}}
+        if kind == "elevenlabs" and (
+                not isinstance(resolved["api_key"], str) or not resolved["api_key"].strip()):
+            raise ValueError("ElevenLabs casting requires elevenlabs.api_key in your global TOML configuration")
+        return resolved
     return settings
 
 
@@ -237,12 +255,13 @@ def select_voice_designer(config, choice):
         return result
     if choice == "local":
         result["voice_design"] = {"type": "engine"}
-    elif choice == "gemini":
-        settings = {**DEFAULTS["gemini"], **result.get("gemini", {})}
+    elif choice in {"gemini", "elevenlabs"}:
+        settings = {**DEFAULTS[choice], **result.get(choice, {})}
         key = settings["api_key"]
         if not isinstance(key, str) or not key.strip():
-            raise ValueError("Gemini casting requires gemini.api_key in your global TOML configuration")
-        result["voice_design"] = {"type": "gemini", **settings}
+            name = {"gemini": "Gemini", "elevenlabs": "ElevenLabs"}[choice]
+            raise ValueError(f"{name} casting requires {choice}.api_key in your global TOML configuration")
+        result["voice_design"] = {"type": choice, **settings}
     else:
-        raise ValueError("Voice designer must be local or gemini")
+        raise ValueError("Voice designer must be local, gemini, or elevenlabs")
     return result

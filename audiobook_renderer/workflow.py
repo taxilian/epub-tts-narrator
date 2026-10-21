@@ -103,6 +103,43 @@ def _verification_failure_detail(report):
     return "; ".join(details)
 
 
+def _save_elevenlabs_generation(path, payload):
+    write_json(path, {**payload, "record_sha256": digest(payload)})
+
+
+def _load_elevenlabs_generation(path, request, attempt, seed):
+    """Recover creation provenance only with its exact original audio and request."""
+    try:
+        if regular_file(path).stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("oversized generation record")
+        payload = read_json(path)
+        checksum = payload.pop("record_sha256")
+        if (checksum != digest(payload) or payload.get("version") != 1
+                or payload.get("request_hash") != digest(request)
+                or payload.get("attempt") != attempt or payload.get("seed") != seed):
+            raise ValueError("generation identity")
+        raw_name = payload["raw_file"]
+        if (not isinstance(raw_name, str) or not re.fullmatch(
+                rf"attempt-{attempt:03d}-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav", raw_name)):
+            raise ValueError("generation audio path")
+        raw = path.parent / raw_name
+        if file_hash(regular_file(raw)) != payload["raw_sha256"]:
+            raise ValueError("generation audio checksum")
+        metadata = payload["engine_metadata"]
+        if (not isinstance(metadata, dict) or metadata.get("description_applied") is not True
+                or metadata.get("designer") != request["designer"]
+                or metadata.get("reference_text") != request["text"]
+                or metadata.get("requested_description") != request["prompt"]):
+            raise ValueError("generation description")
+        normalized_hash = payload.get("normalized_sha256")
+        if normalized_hash is not None and (not isinstance(normalized_hash, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", normalized_hash)):
+            raise ValueError("normalized audio checksum")
+        return raw, metadata, payload
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        raise RenderBlocked(f"Saved ElevenLabs generation metadata or audio changed; inspect {path}") from None
+
+
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
@@ -195,6 +232,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         seed = _seed(config["render"]["seed"], request, attempt)
         report = None
         metadata = {}
+        elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
+        generation_path = directory / (prefix + "-generation.json")
+        generation = None
         # Completed rejected attempts remain reviewable; interrupted raw outputs
         # never count as accepted. Recover a normalized candidate by revalidating.
         if result_path.exists():
@@ -208,22 +248,52 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 continue
             metadata = previous.get("engine_metadata", {})
         try:
+            if (elevenlabs and attempt != missing_accepted_attempt
+                    and (generation_path.exists() or generation_path.is_symlink())):
+                raw, metadata, generation = _load_elevenlabs_generation(
+                    generation_path, request, attempt, seed)
             if wav.exists():
                 if result_path.exists():
                     expected_hash = read_json(result_path).get("audio_sha256")
                     if expected_hash and file_hash(wav) != expected_hash:
                         raise RenderBlocked("Candidate audio changed on disk")
+                if generation is not None:
+                    checksum = file_hash(regular_file(wav))
+                    if generation.get("normalized_sha256") is None:
+                        # A crash may occur between normalization and recording
+                        # its checksum. Recreate privately and compare, retaining
+                        # the original rather than trusting an unbound WAV.
+                        with tempfile.TemporaryDirectory(prefix=".verify-normalized-", dir=directory) as stage:
+                            expected = Path(stage) / "audio.wav"
+                            normalize_clip(raw, expected, sample_rate=config["render"]["sample_rate"],
+                                           ffmpeg=config["render"]["ffmpeg"])
+                            if checksum != file_hash(expected):
+                                raise RenderBlocked("Candidate audio does not match the saved ElevenLabs generation")
+                    elif checksum != generation["normalized_sha256"]:
+                        raise RenderBlocked("Candidate audio changed after ElevenLabs generation")
+                    generation["normalized_sha256"] = checksum
+                    _save_elevenlabs_generation(generation_path, generation)
             else:
                 # Orphans from interruption are retained; choose another raw name.
                 if attempt == missing_accepted_attempt:
                     raw = directory / (prefix + "-regenerated-" + os.urandom(8).hex() + ".wav")
-                elif raw.exists():
+                elif raw.exists() and generation is None:
                     raw = directory / (prefix + "-recovery-raw.wav")
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
-                metadata = generate(raw, seed)
+                if generation is None:
+                    metadata = generate(raw, seed)
+                    if elevenlabs:
+                        generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
+                                      "seed": seed, "raw_file": raw.name,
+                                      "raw_sha256": file_hash(regular_file(raw)),
+                                      "engine_metadata": metadata, "normalized_sha256": None}
+                        _save_elevenlabs_generation(generation_path, generation)
                 normalize_clip(raw, wav, sample_rate=config["render"]["sample_rate"],
                                ffmpeg=config["render"]["ffmpeg"])
+                if generation is not None:
+                    generation["normalized_sha256"] = file_hash(regular_file(wav))
+                    _save_elevenlabs_generation(generation_path, generation)
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
         except RenderBlocked:
             raise
@@ -232,8 +302,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             report = {"passed": False, "reasons": ["generation_or_verification_error"],
                       "error": error, "error_type": type(exc).__name__}
             from .gemini_voice_design import GeminiVoiceError
-            if isinstance(exc, GeminiVoiceError):
+            from .elevenlabs_voice_design import ElevenLabsVoiceError
+            if isinstance(exc, (GeminiVoiceError, ElevenLabsVoiceError)):
                 report["provider_error"] = error
+            if getattr(exc, "retryable", True) is False:
+                report["retryable"] = False
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -250,6 +323,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             return wav, record
         if pending_confirmation(report):
             stop_for_confirmation()
+        if report.get("retryable") is False:
+            raise RenderBlocked(report["provider_error"] if "provider_error" in report else report["error"])
         detail = _verification_failure_detail(report)
         suffix = f" ({detail})" if detail else ""
         notify(f"  Attempt {attempt}/{attempts} rejected: {', '.join(report.get('reasons', []))}{suffix}")
@@ -275,7 +350,7 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
     if regeneration is not None:
         raise RenderBlocked(
             f"Voice {voice_id} regeneration is {regeneration['state']}; no active reference. "
-            "Use G or GG in the casting menu to retry before rendering."
+            "Use G, GG, or G11 in the casting menu to retry before rendering."
         )
     draft = store.directory / "casting-drafts" / (digest(voice_id)[:24] + ".json")
     if store.list_candidates(voice_id) or draft.exists() or draft.is_symlink():

@@ -165,6 +165,12 @@ class Qwen3VoiceDesigner:
 
 def create_designer(config):
     """Resolve an explicit reference designer without unconditioned fallback."""
+    if config.get("type") == "elevenlabs":
+        from .elevenlabs_voice_design import ElevenLabsVoiceDesigner
+        allowed = {"type", "api_key", "model", "timeout_seconds", "guidance_scale", "loudness"}
+        if set(config) - allowed:
+            raise EngineError("Unknown ElevenLabs voice-design settings")
+        return ElevenLabsVoiceDesigner(**{key: value for key, value in config.items() if key != "type"})
     if config.get("type") == "gemini":
         from .gemini_voice_design import GeminiVoiceDesigner
         allowed = {"type", "api_key", "model", "language_code", "timeout_seconds"}

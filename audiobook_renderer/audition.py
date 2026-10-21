@@ -152,7 +152,7 @@ def _warn_regenerate_all(rows, *, book_local=False):
 
 
 def run_casting(session, player, *, input_fn=None, output=print, playback_fn=None):
-    """One menu: a number plays, G regenerates locally, GG uses Gemini, Q quits."""
+    """One menu: a number plays; G, GG, and G11 choose a designer; Q quits."""
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -222,19 +222,24 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 if regeneration and regeneration.get("error"):
                     for line in regeneration["error"].splitlines():
                         say("     " + line)
-            say("Number: play   G [number]: regenerate locally   GG [number]: regenerate with Gemini   Q: quit")
+            say("Number: play   G [number]: regenerate locally   GG [number]: regenerate with Gemini   G11 [number]: regenerate with ElevenLabs   Q: quit")
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
                 if last:
-                    say(f"Without a number, G and GG regenerate {_label(last)}.")
+                    say(f"Without a number, G, GG, and G11 regenerate {_label(last)}.")
             action = ask("> ").lower()
             try:
                 if action == "q":
                     return
                 if action.startswith("g"):
-                    gemini = action.startswith("gg")
-                    voice_designer = "gemini" if gemini else "local"
-                    value = action[2 if gemini else 1:].strip()
+                    # G11 is a provider command, not the compact local G 11.
+                    if action.startswith("g11"):
+                        voice_designer, prefix, location = "elevenlabs", 3, "with ElevenLabs"
+                    elif action.startswith("gg"):
+                        voice_designer, prefix, location = "gemini", 2, "with Gemini"
+                    else:
+                        voice_designer, prefix, location = "local", 1, "locally"
+                    value = action[prefix:].strip()
                     if value:
                         row = choose(rows, value)
                     elif last_voice_id is not None:
@@ -244,7 +249,10 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                         if not value:
                             continue
                         row = choose(rows, value)
-                    say(f"\nRegenerate {_label(row)} {'with Gemini' if gemini else 'locally'}")
+                    say(f"\nRegenerate {_label(row)} {location}")
+                    if voice_designer == "elevenlabs":
+                        say("ElevenLabs receives this voice prompt and sample script; the verified preview is saved locally for cloning.")
+                        say("ElevenLabs requires a 20–1000 character voice description and a 100–1000 character sample script.")
                     if row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]:
                         say("This role shares its character's voice. Regeneration updates every linked role.")
                     say("Voice prompt: " + row["prompt"])
@@ -271,7 +279,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 else:
                     row = choose(rows, action)
                     if row["selected"] is None:
-                        raise ValueError("No verified sample is available; use G or GG followed by this voice number to retry")
+                        raise ValueError("No verified sample is available; use G, GG, or G11 followed by this voice number to retry")
                     last_voice_id = row["voice_id"]
                     play(row, row["selected"])
             except (ValueError, RuntimeError, OSError) as exc:
@@ -406,7 +414,7 @@ def casting_command(args, bundle, config):
             if failed:
                 raise ValueError(
                     f"{len(failed)} voices failed regeneration and have no active voice: {', '.join(failed)}. "
-                    "Open casting and use G or GG to retry them."
+                    "Open casting and use G, GG, or G11 to retry them."
                 )
             print(f"Regenerated {len(seen)} shared character voices.")
         elif action == "edit":
@@ -420,7 +428,7 @@ def casting_command(args, bundle, config):
             print(f"Recovered voice {status}: {candidate['candidate_id']}\n{candidate['reference_audio']}")
         elif action == "play":
             if row.get("regeneration") and not args.candidate_id:
-                raise ValueError("No active voice after bulk regeneration; use G or GG in casting to retry")
+                raise ValueError("No active voice after bulk regeneration; use G, GG, or G11 in casting to retry")
             candidate = (next((c for c in row["candidates"] if c["candidate_id"] == args.candidate_id), None)
                          if args.candidate_id else row["selected"] or
                          (row["candidates"][-1] if row["candidates"] else None))
