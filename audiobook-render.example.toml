@@ -16,6 +16,37 @@ top_p = 0.9
 top_k = 30
 max_new_tokens = 2048
 
+# Optional distributed speech generation. With no workers, use [engine] normally.
+# All configured workers receive the same saved voice recordings and transcripts.
+# Keep these worker tables commented until the corresponding servers are running.
+# [render_pool]
+# model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+# [[render_pool.workers]]
+# name = "local"
+# type = "local"
+# concurrency = 1
+# [[render_pool.workers]]
+# name = "second-mac"
+# type = "fish_http"
+# url = "http://second-mac.local:8080/v1/tts"
+# api_key = "YOUR_SHARED_SERVER_KEY"
+# model = "drama-3"
+# concurrency = 1
+# timeout_seconds = 300
+# multi_speaker = true
+# Add more fish_http tables for compatible HTTPS cloud endpoints.
+# Set multi_speaker=false if an endpoint lacks Drama 3 speaker-tag support.
+
+# Only used by `audiobook-render serve`, on a Mac providing local Drama 3.
+# Bind to 0.0.0.0 for LAN access and set a shared key in this file and its clients.
+[server]
+host = "127.0.0.1"
+port = 8080
+api_key = ""
+max_pending_requests = 4
+request_timeout_seconds = 300
+max_request_bytes = 104857600
+
 [voice_design]
 # Prefer Gemini when its API key is configured; otherwise create voices locally.
 # Drama 3 still synthesizes audiobook speech by cloning the saved recordings.

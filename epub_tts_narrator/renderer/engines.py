@@ -317,6 +317,10 @@ class Drama3MLXEngine:
                 return
             mx.clear_cache()
 
+    def warmup(self) -> None:
+        """Load the model before a server begins accepting rendering jobs."""
+        self._load()
+
     def _load(self) -> Any:
         if self._model is None:
             details = _runtime_details()
@@ -523,79 +527,106 @@ class Drama3MLXEngine:
             raise EngineError("dialogue turns must be a nonempty list")
         if Path(output_path).exists():
             raise EngineError(f"Audio output already exists: {output_path}")
-        voices: list[dict[str, Any]] = []
-        speaker_keys: dict[tuple[Any, ...], int] = {}
-        speaker_mapping: list[dict[str, Any]] = []
-        turn_directions: list[dict[str, Any]] = []
-        rendered_turns: list[dict[str, Any]] = []
-        # Validate the entire paragraph before loading or encoding any voice.
-        for index, turn in enumerate(turns):
-            if not isinstance(turn, dict) or not isinstance(turn.get("voice"), dict):
-                raise EngineError(f"dialogue turn {index + 1} must contain a saved voice")
-            text = _text(turn.get("text"), f"dialogue turn {index + 1} text")
-            _, delivery = _directed_text(text, turn.get("direction", ""))
-            voice = turn["voice"]
-            if voice.get("kind") != "reference":
-                raise EngineError("Drama 3 dialogue requires saved reference voices")
-            transcript = _text(voice.get("reference_text"), "reference_text")
-            reference_path = voice.get("reference_audio")
-            if not isinstance(reference_path, str) or not Path(reference_path).is_absolute():
-                raise EngineError("reference_audio must be an absolute local file path")
-            asset_hash = voice.get("asset_hash")
-            checksum = voice.get("reference_sha256", voice.get("reference_audio_sha256"))
-            if any(value is not None and not isinstance(value, str)
-                   for value in (asset_hash, checksum)):
-                raise EngineError("saved voice reference identifiers must be text")
-            # A saved asset identifies a voice across aliases. Include its
-            # content binding so inconsistent external records cannot silently
-            # merge different references under one speaker tag.
-            key = (asset_hash, checksum or reference_path, transcript)
-            if key not in speaker_keys:
-                if len(voices) >= DRAMA3_MAX_SPEAKERS:
-                    raise EngineError("Drama 3 dialogue supports at most 16 distinct voices per request")
-                speaker_id = speaker_keys[key] = len(voices)
-                voices.append(voice)
-                speaker_mapping.append({
-                    "speaker_id": speaker_id,
-                    "voice_id": voice.get("voice_id"),
-                    "asset_hash": asset_hash,
-                })
-            speaker_id = speaker_keys[key]
-            turn_directions.append({"speaker_id": speaker_id, **delivery})
-            # Segment boundaries often separate narration from quotations by
-            # the same character. Preserve a single natural performance unless
-            # the actual voice or supported delivery control changes. Append
-            # source text exactly, without inventing or stripping whitespace.
-            if (rendered_turns
-                    and rendered_turns[-1]["speaker_id"] == speaker_id
-                    and rendered_turns[-1]["applied_control"] == delivery["applied_control"]):
-                rendered_turns[-1]["text"] += text
-            else:
-                rendered_turns.append({"speaker_id": speaker_id, "text": text, **delivery})
-        lines = []
-        for turn in rendered_turns:
-            # Adjacent literal fragments must not form a control tag when
-            # concatenated, even if neither fragment contained a full tag.
-            text = _text(turn["text"], "dialogue rendered turn text")
-            directed, _ = _directed_text(text, turn["direction"])
-            lines.append(f"<|speaker:{turn['speaker_id']}|> {directed}")
+        engine_text, voices, metadata = format_dialogue(turns)
         references = []
         for speaker_id, voice in enumerate(voices):
             reference = self._reference(voice)
-            # Reference is a runtime dataclass. replace creates a new instance
-            # sharing the encoded codec codes, leaving the cached transcript
-            # untouched for later single-voice requests or different tag orders.
             references.append(replace(
                 reference, text=f"<|speaker:{speaker_id}|> {reference.text}",
             ))
         return {
-            **self._generate_audio("\n".join(lines), output_path, seed=seed, references=references),
-            "speaker_mapping": speaker_mapping,
-            "speaker_count": len(voices),
-            "turn_count": len(turns),
-            "rendered_turn_count": len(rendered_turns),
-            "turn_directions": turn_directions,
+            **self._generate_audio(engine_text, output_path, seed=seed, references=references),
+            **metadata,
         }
+
+    def synthesize_fish(
+        self, text: str, voices: list[dict[str, Any]], output_path: Path, *, seed: int,
+    ) -> dict[str, Any]:
+        """Serve the validated Fish inline-reference rendering subset.
+
+        Only the HTTP adapter uses this entry point. It validates the limited
+        control vocabulary before allowing request text into the model.
+        """
+        from .fish_http import validate_wire_text
+        _seed(seed)
+        validate_wire_text(text, {voice.get("speaker") for voice in voices})
+        references = []
+        for voice in voices:
+            reference = self._reference(voice)
+            speaker = voice.get("speaker")
+            if speaker is not None:
+                reference = replace(reference, text=f"<|speaker:{speaker}|> {reference.text}")
+            references.append(reference)
+        return self._generate_audio(text, output_path, seed=seed, references=references)
+
+
+def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Build identical request-local speaker tags for local and HTTP rendering."""
+    if not isinstance(turns, list) or not turns:
+        raise EngineError("dialogue turns must be a nonempty list")
+    voices: list[dict[str, Any]] = []
+    speaker_keys: dict[tuple[Any, ...], int] = {}
+    speaker_mapping: list[dict[str, Any]] = []
+    turn_directions: list[dict[str, Any]] = []
+    rendered_turns: list[dict[str, Any]] = []
+    # Validate the entire paragraph before loading or encoding any voice.
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict) or not isinstance(turn.get("voice"), dict):
+            raise EngineError(f"dialogue turn {index + 1} must contain a saved voice")
+        text = _text(turn.get("text"), f"dialogue turn {index + 1} text")
+        _, delivery = _directed_text(text, turn.get("direction", ""))
+        voice = turn["voice"]
+        if voice.get("kind") != "reference":
+            raise EngineError("Drama 3 dialogue requires saved reference voices")
+        transcript = _text(voice.get("reference_text"), "reference_text")
+        reference_path = voice.get("reference_audio")
+        if not isinstance(reference_path, str) or not Path(reference_path).is_absolute():
+            raise EngineError("reference_audio must be an absolute local file path")
+        asset_hash = voice.get("asset_hash")
+        checksum = voice.get("reference_sha256", voice.get("reference_audio_sha256"))
+        if any(value is not None and not isinstance(value, str)
+               for value in (asset_hash, checksum)):
+            raise EngineError("saved voice reference identifiers must be text")
+        # A saved asset identifies a voice across aliases. Include its
+        # content binding so inconsistent external records cannot silently
+        # merge different references under one speaker tag.
+        key = (asset_hash, checksum or reference_path, transcript)
+        if key not in speaker_keys:
+            if len(voices) >= DRAMA3_MAX_SPEAKERS:
+                raise EngineError("Drama 3 dialogue supports at most 16 distinct voices per request")
+            speaker_id = speaker_keys[key] = len(voices)
+            voices.append(voice)
+            speaker_mapping.append({
+                "speaker_id": speaker_id,
+                "voice_id": voice.get("voice_id"),
+                "asset_hash": asset_hash,
+            })
+        speaker_id = speaker_keys[key]
+        turn_directions.append({"speaker_id": speaker_id, **delivery})
+        # Segment boundaries often separate narration from quotations by
+        # the same character. Preserve a single natural performance unless
+        # the actual voice or supported delivery control changes. Append
+        # source text exactly, without inventing or stripping whitespace.
+        if (rendered_turns
+                and rendered_turns[-1]["speaker_id"] == speaker_id
+                and rendered_turns[-1]["applied_control"] == delivery["applied_control"]):
+            rendered_turns[-1]["text"] += text
+        else:
+            rendered_turns.append({"speaker_id": speaker_id, "text": text, **delivery})
+    lines = []
+    for turn in rendered_turns:
+        # Adjacent literal fragments must not form a control tag when
+        # concatenated, even if neither fragment contained a full tag.
+        text = _text(turn["text"], "dialogue rendered turn text")
+        directed, _ = _directed_text(text, turn["direction"])
+        lines.append(f"<|speaker:{turn['speaker_id']}|> {directed}")
+    return "\n".join(lines), voices, {
+        "speaker_mapping": speaker_mapping,
+        "speaker_count": len(voices),
+        "turn_count": len(turns),
+        "rendered_turn_count": len(rendered_turns),
+        "turn_directions": turn_directions,
+    }
 
 
 def engine_entry_points(name: str) -> list[importlib.metadata.EntryPoint]:

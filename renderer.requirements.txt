@@ -1,3 +1,4 @@
 # Apple Silicon runtime; install into a separate Python 3.12 virtual environment.
 drama3-mlx @ git+https://github.com/Sogni-AI/drama3-mlx@3b76bf84714d3766d7872f3409639a438e296cc8
 mlx-whisper==0.4.3
+msgpack>=1.1,<2

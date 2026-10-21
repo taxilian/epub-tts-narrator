@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+remote = ["msgpack>=1.1,<2"]
+
 [project.scripts]
 epub-tts-narrator = "epub_tts_narrator.cli:main"
 # Compatibility with existing commands and scripts.

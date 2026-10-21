@@ -150,6 +150,66 @@ Choose chapters per book with `--chapters 3` or `--chapters 3-5,7` on `plan`, `r
 
 Analysis notes are advisory and do not require a review or acceptance step. `--allow-review` and the global `allow_review` setting remain accepted for compatibility but are unnecessary. Rendering requires a valid script and assigned voices for every spoken passage in the selected chapters; missing speakers still block those chapters. Rerun `epub-tts-narrator analyze BOOK_DIRECTORY` to complete remaining assignments using the saved book. There is no implicit narrator substitution.
 
+## Render across multiple machines
+
+The main machine can distribute speech generation across its local Drama 3 model and multiple HTTP workers. Each request includes the selected immutable voice recording and its exact transcript; you do not copy the book or voice library to the workers. The main machine verifies every returned take, retains resumable clips, and assembles the chapters in source order. Casting still uses the configured voice designer.
+
+On the second Apple Silicon Mac, install this project and `renderer.requirements.txt` as above. In that Mac's global `epub-tts-narrator.toml`, configure its local model and server:
+
+```toml
+[engine]
+type = "drama3_mlx"
+checkpoint = "./models/drama-3"
+experts = "q8"
+
+[server]
+host = "0.0.0.0"
+port = 8080
+api_key = "YOUR_SHARED_SERVER_KEY"
+```
+
+Use a long random key and put the same value in the client's worker entry. These settings belong in each machine's existing global config; no book-specific config is needed. The server does not need Whisper, analyzer credentials, or a book directory. Start it from the project directory:
+
+```sh
+.venv-renderer/bin/audiobook-render serve
+```
+
+If the Drama 3 files are missing, startup offers the normal model download. Startup then loads the model before printing the listening address; cold loading and quantization can take several minutes. Wait for that ready message before starting rendering. The model stays loaded and one persistent inference thread owns its GPU work. Keep the command running while the main machine renders. The default host is `127.0.0.1`; binding to a LAN interface requires a configured key. For internet access, put the service behind HTTPS or a private network; the built-in server itself serves HTTP.
+
+On the main Mac, add these entries to its existing global config, replacing the hostname and key:
+
+```toml
+[[render_pool.workers]]
+name = "local"
+type = "local"
+concurrency = 1
+
+[[render_pool.workers]]
+name = "second-mac"
+type = "fish_http"
+url = "http://second-mac.local:8080/v1/tts"
+api_key = "YOUR_SHARED_SERVER_KEY"
+model = "drama-3"
+concurrency = 1
+timeout_seconds = 300
+```
+
+Then use the usual command:
+
+```sh
+.venv-renderer/bin/audiobook-render render out/longchills
+```
+
+The configured workers replace the default single renderer. Omit the `local` entry to generate all speech remotely; local Whisper verification is still required, but the coordinator will not download or load Drama 3. Missing voices can still be created with configured Gemini or ElevenLabs, or prepared with `cast` on a machine with the local model. There is at most one local inference slot; set each remote's concurrency to its server's capacity. One is appropriate for another Mac. Faster workers take more jobs as slots become free. Local inference and verification share a persistent execution thread to protect MLX; remote generation can continue while verification runs.
+
+For a compatible hosted deployment, add another `fish_http` worker with its full HTTPS TTS URL and key. For example, Fish's hosted API uses `https://api.fish.audio/v1/tts` with `model = "drama-3"`. The adapter sends the Fish MessagePack request format, bearer authentication, a `model` header, inline reference audio, and `format = "wav"`. It also supports Drama 3's tagged multi-speaker paragraphs. Set `multi_speaker = false` on a worker if its deployment only supports single-speaker requests; the planner then uses single-speaker chunks throughout the pool. [Fish HTTP API](https://github.com/fishaudio/fish-audio-python/blob/main/_autodocs/endpoints.md), [Drama 3 speaker tags](https://huggingface.co/fishaudio/drama-3)
+
+The built-in server implements this reference-based WAV rendering subset, including JSON/base64 requests. It does not implement Fish's voice-management API, saved remote `reference_id` lookup, or streaming PCM. A cloud deployment must accept this same wire format; merely having a route named `/v1/tts` is insufficient. Some SGLang/vLLM deployments use a different reference-audio schema and need an adapter. Saved character references remain local to the coordinator, and only the voice recordings and requested passages are sent to configured workers.
+
+Within pool mode, changing worker addresses, credentials, order, or concurrency retains compatible accepted clips. `render_pool.model_revision` identifies the deployed model version; change it when replacing the model behind an endpoint. Sampling or voice changes invalidate the affected requests. Pool mode has a distinct synthesis identity from the original single-local mode, so first enabling it changes the cache identity; start it at a new book or finish an existing single-local run first if you need to avoid regeneration. Remote endpoint models and settings are recorded as execution provenance, while acceptance remains attached to the returned audio bytes. A transport failure stops after bounded retries; rerunning retries incomplete requests and retains accepted work. Verification thresholds are unchanged.
+
+Validation includes two real HTTP requests to the local Drama 3 model using the existing demonstration voices: a 2.60-second single-voice passage and a 4.04-second two-character passage. Both passed strict Whisper text and acoustic checks, and the original reference checksums were unchanged. The report is `output/distributed-render-pilot-paoj0g29/report.json`. Automated tests additionally exercise two HTTP workers through chapter/M4B assembly and offline resume. The real-model pilot used loopback on one Mac; a second machine and hosted Fish service have not yet been exercised.
+
 ## Inspect, cast, and render
 
 Check installation and model files:
@@ -503,7 +563,7 @@ Changing pause settings rebuilds chapter audio from the accepted clips; it does 
 
 By default, completed chapters receive two-pass loudness normalization to -20 LUFS with a -1.5 dB true-peak ceiling. Normalization preserves the PCM frame count and timing data, and operates on the assembled chapter rather than flattening every short utterance to the same level. Voice references and verified speech clips remain unchanged. These controls are separate from casting playback: use `[render] normalize_loudness`, `target_lufs`, and `true_peak_db` for the audiobook. Empty chapters and chapters shorter than the loudness measurement window are explicitly recorded as skipped for normalization.
 
-`render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Speech generation is sequential to keep one shared model instance and bounded GPU memory use. Drama 3 synthesis and Whisper verification run locally; configured remote text or voice-design providers receive only their corresponding requests.
+`render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Without a worker pool, speech generation is sequential on the configured local model. With a pool, independent requests run across available workers; each local model and the coordinator's Whisper verifier remain serialized. Configured HTTP workers receive the requested passages and selected reference recordings.
 
 ## Audio storage and cleanup
 

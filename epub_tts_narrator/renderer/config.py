@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import re
 import tomllib
+from urllib.parse import urlsplit
 
 from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 
@@ -34,6 +35,15 @@ DEFAULTS = {
     },
     "jev": deepcopy(JEV_DEFAULTS),
     "huggingface": {"api_key": ""},
+    "render_pool": {
+        "workers": [],
+        "model_revision": "b2b5ee998034b2975720906c815e7fb0e9f007bd",
+    },
+    "server": {
+        "host": "127.0.0.1", "port": 8080, "api_key": "",
+        "max_request_bytes": 100 * 1024 * 1024,
+        "max_pending_requests": 4, "request_timeout_seconds": 300.0,
+    },
     "voices": {
         "directory": None, "series_id": None,
         "reference_text": (
@@ -62,7 +72,105 @@ DEFAULTS = {
 }
 
 
-def load_config(path=None):
+def _credential(value, label):
+    if not isinstance(value, str) or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{label} must be a string without whitespace or control characters")
+
+
+def validate_distributed_settings(config):
+    """Validate file-only worker/server settings without importing model packages."""
+    pool = config["render_pool"]
+    if not isinstance(pool["model_revision"], str) or not pool["model_revision"].strip():
+        raise ValueError("render_pool.model_revision must be a nonempty string")
+    workers = pool["workers"]
+    if not isinstance(workers, list) or len(workers) > 16:
+        raise ValueError("render_pool.workers must be an array of at most 16 worker tables")
+    names, normalized = set(), []
+    for index, supplied in enumerate(workers, 1):
+        label = f"render_pool.workers[{index}]"
+        if not isinstance(supplied, dict):
+            raise ValueError(f"{label} must be a table")
+        name, kind = supplied.get("name"), supplied.get("type")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+            raise ValueError(f"{label}.name must be a short name containing letters, numbers, dots, dashes or underscores")
+        if name in names:
+            raise ValueError("Renderer worker names must be unique")
+        names.add(name)
+        if not isinstance(kind, str) or kind not in {"local", "fish_http"}:
+            raise ValueError(f"{label}.type must be local or fish_http")
+        allowed = {"name", "type", "concurrency"}
+        if kind == "fish_http":
+            allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker"}
+        if set(supplied) - allowed:
+            raise ValueError(f"Unknown configuration key in {label}")
+        worker = {"concurrency": 1, **supplied}
+        concurrency = worker["concurrency"]
+        if type(concurrency) is not int or not 1 <= concurrency <= 16:
+            raise ValueError(f"{label}.concurrency must be an integer from 1 to 16")
+        if kind == "local":
+            if concurrency != 1 or any(item["type"] == "local" for item in normalized):
+                raise ValueError("Use at most one local renderer, with concurrency = 1")
+        else:
+            worker = {"api_key": "", "model": "drama-3", "timeout_seconds": 300.0,
+                      "multi_speaker": True, **worker}
+            _credential(worker["api_key"], f"{label}.api_key")
+            url = worker.get("url")
+            try:
+                parsed = urlsplit(url) if isinstance(url, str) else None
+                valid = (parsed is not None and parsed.scheme in {"http", "https"}
+                         and bool(parsed.hostname) and not parsed.username and not parsed.password
+                         and not parsed.query and not parsed.fragment and bool(parsed.path.strip("/"))
+                         and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url))
+                if parsed is not None:
+                    parsed.port  # Validate malformed/out-of-range ports without exposing the URL.
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError(f"{label}.url must be a full HTTP(S) TTS URL without credentials, query or fragment")
+            if (not isinstance(worker["model"], str)
+                    or worker["model"] not in {"drama-3", "fishaudio/drama-3"}):
+                raise ValueError(f"{label}.model must be drama-3 or fishaudio/drama-3")
+            timeout = worker["timeout_seconds"]
+            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:
+                raise ValueError(f"{label}.timeout_seconds must be from 1 through 3600")
+            if type(worker["multi_speaker"]) is not bool:
+                raise ValueError(f"{label}.multi_speaker must be boolean")
+        normalized.append(worker)
+    if sum(worker["concurrency"] for worker in normalized) > 32:
+        raise ValueError("Renderer worker concurrency must total at most 32")
+    if normalized and config["engine"]["type"] != "drama3_mlx":
+        raise ValueError("The render pool currently requires engine.type = drama3_mlx")
+    if normalized:
+        # Remote-only workers do not instantiate the local adapter, so validate
+        # its shared sampling contract here before any generation/API calls.
+        engine = config["engine"]
+        for key, maximum in (("temperature", 2), ("top_p", 1)):
+            value = engine[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= maximum:
+                raise ValueError(f"engine.{key} must be positive and at most {maximum} for the render pool")
+        for key, maximum in (("top_k", 1000), ("max_new_tokens", 2048)):
+            if type(engine[key]) is not int or not 1 <= engine[key] <= maximum:
+                raise ValueError(f"engine.{key} must be an integer from 1 through {maximum} for the render pool")
+        if not isinstance(engine["experts"], str) or engine["experts"] not in {"q8", "q4", "fp8", "bf16"}:
+            raise ValueError("engine.experts must be q8, q4, fp8, or bf16")
+        if engine["options"]:
+            raise ValueError("Drama 3 settings belong directly in the engine table")
+    pool["workers"] = normalized
+    server = config["server"]
+    if (not isinstance(server["host"], str) or not server["host"].strip()
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in server["host"])):
+        raise ValueError("server.host must be a hostname or IP address")
+    _credential(server["api_key"], "server.api_key")
+    for key, low, high in (("port", 1, 65535), ("max_request_bytes", 1024, 512 * 1024 * 1024),
+                           ("max_pending_requests", 1, 32)):
+        if type(server[key]) is not int or not low <= server[key] <= high:
+            raise ValueError(f"server.{key} must be an integer from {low} through {high}")
+    timeout = server["request_timeout_seconds"]
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:
+        raise ValueError("server.request_timeout_seconds must be from 1 through 3600")
+
+
+def load_config(path=None, *, require_verifier=True):
     from .quality import validate_policy
     from epub_tts_narrator.config import (
         DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path, validate_huggingface_settings,
@@ -98,6 +206,7 @@ def load_config(path=None):
     result["quality"] = validate_policy(result["quality"])
     result["jev"] = validate_jev_settings(result["jev"])
     result["huggingface"] = validate_huggingface_settings(result["huggingface"])
+    validate_distributed_settings(result)
     for section, keys in {
         "engine": ("type", "experts"),
         "verification": ("type", "model", "language"),
@@ -109,6 +218,8 @@ def load_config(path=None):
     }.items():
         for key in keys:
             value = result[section][key]
+            if section == "verification" and key == "model" and value is None and not require_verifier:
+                continue
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{section}.{key} must be a nonempty string")
     for section, key in (("voices", "directory"), ("voices", "series_id"),
@@ -198,7 +309,10 @@ def load_config(path=None):
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not low <= value <= high):
             raise ValueError(f"casting.{key} must be a finite number from {low} to {high}")
-    if result["engine"]["type"] == "drama3_mlx" and not result["engine"]["checkpoint"]:
+    workers = result["render_pool"]["workers"]
+    needs_local_engine = not workers or any(worker["type"] == "local" for worker in workers)
+    if (result["engine"]["type"] == "drama3_mlx" and needs_local_engine
+            and not result["engine"]["checkpoint"]):
         raise ValueError("engine.checkpoint is required for Drama 3")
     for section, key in (
         ("engine", "checkpoint"), ("verification", "model"), ("verification", "reference_model"),

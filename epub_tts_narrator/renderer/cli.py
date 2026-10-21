@@ -1,4 +1,4 @@
-"""A separate CLI for verified local audiobook rendering."""
+"""Verified audiobook rendering with local and remote speech workers."""
 
 from __future__ import annotations
 
@@ -70,6 +70,8 @@ def parser():
                                  help="Save a recovered take without changing the active voice (--action recover)")
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
+    serve.add_argument("--config", type=Path, help="Global TOML file containing [engine] and [server] settings")
     return root
 
 
@@ -136,13 +138,23 @@ def doctor(config):
             checks["drama_shards"] = False
     else:
         checks["drama_shards"] = False
-    if config["engine"]["type"] != "drama3_mlx":
+    workers = config.get("render_pool", {}).get("workers", [])
+    remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+    if remote_only:
+        checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
+        dependencies.pop("drama3-mlx")
+    elif config["engine"]["type"] != "drama3_mlx":
         from .engines import engine_entry_points
 
         checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
         dependencies.pop("drama3-mlx")
         matches = engine_entry_points(config["engine"]["type"])
         checks["tts_plugin_installed"] = len(matches) == 1
+    if any(worker["type"] == "fish_http" for worker in workers):
+        try:
+            dependencies["msgpack"] = metadata.version("msgpack")
+        except metadata.PackageNotFoundError:
+            dependencies["msgpack"] = None
     return {"ready": all(checks.values()) and all(dependencies.values()),
             "checks": checks, "packages": dependencies,
             "reference_verification": reference_verification,
@@ -153,7 +165,16 @@ def main(argv=None):
     args = parser().parse_args(argv)
     engine = verifier = None
     try:
-        config = load_config(args.config)
+        config = (load_config(args.config, require_verifier=False) if args.command == "serve"
+                  else load_config(args.config))
+        if args.command == "serve":
+            if config["engine"]["type"] != "drama3_mlx" or not config["engine"]["checkpoint"]:
+                raise ValueError("serve requires engine.type = drama3_mlx and a local engine.checkpoint")
+            from .model_setup import ModelSetup
+            from .server import serve
+            ModelSetup(config).ensure("engine")
+            serve(config)
+            return 0
         if args.command == "doctor":
             report = doctor(config)
             print(json.dumps(report, indent=2))
@@ -195,7 +216,10 @@ def main(argv=None):
         plan = make_plan(bundle, config)
         if args.command == "plan":
             from .workflow import make_render_plan
-            plan = make_render_plan(bundle, config, multi_speaker=config["engine"]["type"] == "drama3_mlx")
+            workers = config.get("render_pool", {}).get("workers", [])
+            multi_speaker = (all(worker.get("multi_speaker", True) for worker in workers)
+                             if workers else config["engine"]["type"] == "drama3_mlx")
+            plan = make_render_plan(bundle, config, multi_speaker=multi_speaker)
             print(json.dumps({
                 "book": plan["book"]["title"], "chapters": len(plan["chapters"]),
                 "chunks": sum(len(c["chunks"]) for c in plan["chapters"]),
@@ -207,6 +231,8 @@ def main(argv=None):
                                              *[str(Path(path) / "voices") for path in config["_voice_parents"]]],
                 "work_directory": config["render"]["work_dir"],
                 "output_directory": config["render"]["output_dir"],
+                "renderers": [{key: worker[key] for key in ("name", "type", "concurrency")}
+                              for worker in workers],
                 "chapter_titles": [{"number": c["number"], "title": c["title"]} for c in plan["chapters"]],
             }, ensure_ascii=False, indent=2))
             return 2 if plan["errors"] else 0
@@ -238,16 +264,32 @@ def main(argv=None):
         from .workflow import ensure_voice, import_voice, render
         from .model_setup import ModelSetup
         setup = ModelSetup(config)
-        setup.ensure("engine")
+        workers = config.get("render_pool", {}).get("workers", []) if args.command == "render" else []
+        remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+        if not remote_only:
+            setup.ensure("engine")
         setup.ensure("verification")
         if args.command in {"render", "create-voices"}:
             missing = [voice for voice in plan["voice_ids"] if store.load(voice) is None]
             if missing:
+                if remote_only:
+                    from .config import resolve_voice_design
+                    if resolve_voice_design(config)["type"] == "engine":
+                        raise ValueError("Missing voices need a voice designer: configure Gemini/ElevenLabs, "
+                                         "add a local renderer, or prepare the voices with cast first")
                 setup.ensure("voice_design")
                 from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
                 bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
-        engine = create_engine(config["engine"])
+        if workers:
+            from .pool import create_render_engine
+            engine = create_render_engine(config)
+            print("Rendering with " + ", ".join(
+                f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
+        else:
+            engine = create_engine(config["engine"])
         verifier = create_verifier(config["verification"], config.get("jev"))
+        if workers:
+            verifier = engine.wrap_verifier(verifier)
         if args.command == "import-voice":
             result = import_voice(bundle, args.voice_id, args.audio,
                                   args.transcript.read_text(encoding="utf-8"), config, engine, verifier)
