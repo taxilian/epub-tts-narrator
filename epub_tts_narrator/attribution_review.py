@@ -34,6 +34,10 @@ RUBRIC = PERFORMANCE_POLICY_GUIDANCE + """
 Audit the actual performer of every word, not just JSON validity. Narration and
 speech tags/actions belong to the applicable narrator; a character's directly
 communicated speech, thought, or letter follows performance_policy. A narrator's
+frame includes tags between two quotations by the SAME character: that pattern
+requires character/narrator/character spans, even when voices happen to match.
+Inspect each closing quotation and intervening text; continuing dialogue must
+not absorb narrative words such as 'she said' or 'he added with a shrug'. A narrator's
 frame must not absorb another speaker's words. A first-person narrator can have
 a separate dialogue role for explicit direct thought or speech. Typography alone
 does not prove thought or speaker. A glance, reaction, or mention of someone else

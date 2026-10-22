@@ -8,11 +8,14 @@ from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
-from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.paragraphs import group_paragraphs
 from epub_tts_narrator.renderer.voices import VoiceStore
-from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
+from epub_tts_narrator.renderer.workflow import (
+    RenderBlocked, _render_chapter_chunks, assemble, make_render_plan, render,
+)
 from epub_tts_narrator.cli import export_bundle
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
@@ -47,6 +50,12 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         export_bundle(read_json(EXAMPLE / "reviewed.json"), self.root / "bundle")
         self.bundle = prepare_bundle(load_bundle(self.root / "bundle"))
+        # Exercise a legitimate same-performer group. Role/voice changes are
+        # covered separately; a narrator portraying the same character must
+        # retain a separate request even when their saved voice is shared.
+        for row in self.bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
         self.config["verification"]["model"] = str(self.root / "unused-asr")
@@ -75,29 +84,28 @@ class ParagraphWorkflowTests(unittest.TestCase):
         return {path: record for path, record in self.accepted_clips().items()
                 if record["request"]["kind"] == "paragraph_speech"}
 
-    def test_fresh_paragraph_uses_one_performance_and_one_verification_with_source_sync(self):
+    def test_fresh_same_voice_paragraph_groups_but_mixed_voices_remain_separate(self):
         first = self.chapters()
         self.assertEqual(first["status"], "chapters_complete")
-        # Nine source segments become six performances: two grouped paragraphs
-        # (three Mara turns, then narrator/Lena) plus four standalone passages.
-        self.assertEqual(len(self.engine.dialogue_calls), 2)
-        self.assertEqual(len(self.engine.speech_calls), 4)
-        self.assertEqual(len(self.verifier.calls) - len(self.engine.voice_calls), 6)
+        # Three Mara turns form one performance. The narrator/Lena paragraph
+        # stays separate so a model cannot ignore its speaker-change tag.
+        self.assertEqual(len(self.engine.dialogue_calls), 1)
+        self.assertEqual(len(self.engine.speech_calls), 6)
+        self.assertEqual(len(self.verifier.calls) - len(self.engine.voice_calls), 7)
         multi = [call for call in self.engine.dialogue_calls
                  if len({turn["voice_id"] for turn in call["turns"]}) > 1]
-        self.assertEqual(len(multi), 1)
-        self.assertEqual([turn["voice_id"] for turn in multi[0]["turns"]], ["voice_mara", "voice_lena"])
-        rows = [row for row in self.bundle["chapters"][0]["rows"] if row["block_id"] == "b000004"]
+        self.assertEqual(multi, [])
+        rows = [row for row in self.bundle["chapters"][0]["rows"] if row["block_id"] == "b000003"]
         expected = "".join(row["text"] for row in rows)
-        self.assertEqual("".join(turn["text"] for turn in multi[0]["turns"]), expected)
+        self.assertEqual("".join(turn["text"] for turn in self.engine.dialogue_calls[0]["turns"]), expected)
         grouped = self.grouped_clips()
-        self.assertEqual(len(grouped), 2)
+        self.assertEqual(len(grouped), 1)
         path, accepted = next((path, record) for path, record in grouped.items()
-                              if record["request"]["chunk"]["segment"]["block_id"] == "b000004")
+                              if record["request"]["chunk"]["segment"]["block_id"] == "b000003")
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["request"]["chunk"]["spoken_text"], expected)
         self.assertEqual(len(list(path.parent.glob("attempt-*.json"))), 1)
-        self.assertEqual(set(accepted["request"]["voice_assets"]), {"voice_mara", "voice_lena"})
+        self.assertEqual(set(accepted["request"]["voice_assets"]), {"voice_mara"})
 
         # The completed chapter restores without TTS, ASR, or re-encoding.
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
@@ -108,7 +116,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual(first["chapters"], resumed["chapters"])
         self.assertEqual(counts, (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls)))
         sync = read_json(self.root / "output" / "sync.json")
-        paragraph = next(row for row in sync["segments"] if row["block_id"] == "b000004")
+        paragraph = next(row for row in sync["segments"] if row["block_id"] == "b000003")
         self.assertEqual(paragraph["precision"], "paragraph")
         self.assertEqual(paragraph["source_text"], expected)
         self.assertIsNone(paragraph["voice_id"])
@@ -119,13 +127,15 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual("".join(part["spoken_text"] for part in paragraph["source_segments"]), expected)
         self.assertTrue(all("book_start_frame" not in part for part in paragraph["source_segments"]))
         self.assertGreater(paragraph["book_end_frame"], paragraph["book_start_frame"])
+        mixed = [row for row in sync["segments"] if row["block_id"] == "b000004"]
+        self.assertEqual([row["voice_id"] for row in mixed], ["voice_mara", "voice_lena"])
+        self.assertTrue(all(row.get("precision") != "paragraph" for row in mixed))
 
-    def test_recast_one_character_invalidates_only_its_paragraph(self):
+    def test_recast_one_character_invalidates_only_its_own_passage(self):
         self.chapters()
         before = self.accepted_clips()
-        old_group = next(record for record in before.values()
-                         if record["request"]["kind"] == "paragraph_speech"
-                         and "voice_lena" in record["request"]["voice_assets"])
+        old_clip = next(record for record in before.values()
+                        if record["request"]["chunk"]["segment"]["voice_id"] == "voice_lena")
         store = VoiceStore(self.config["voices"]["directory"], self.config["voices"]["series_id"])
         old = store.load("voice_lena")
         reference = self.root / "replacement.wav"
@@ -138,18 +148,75 @@ class ParagraphWorkflowTests(unittest.TestCase):
             self.package()
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         self.chapters()
-        self.assertEqual(len(self.engine.dialogue_calls) - counts[0], 1)
-        self.assertEqual(len(self.engine.speech_calls), counts[1])
+        self.assertEqual(len(self.engine.dialogue_calls), counts[0])
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 1)
         self.assertEqual(len(self.verifier.calls) - counts[2], 1)
         after = self.accepted_clips()
         self.assertEqual(len(after), len(before) + 1)
         self.assertTrue(all(read_json(path) == record for path, record in before.items()))
-        new_group = next(record for path, record in after.items() if path not in before)
-        self.assertEqual(new_group["request"]["chunk"], old_group["request"]["chunk"])
-        self.assertNotEqual(new_group["request"]["voice_assets"]["voice_lena"],
-                            old_group["request"]["voice_assets"]["voice_lena"])
-        self.assertEqual(new_group["request"]["voice_assets"]["voice_mara"],
-                         old_group["request"]["voice_assets"]["voice_mara"])
+        new_clip = next(record for path, record in after.items() if path not in before)
+        self.assertEqual(new_clip["request"]["chunk"], old_clip["request"]["chunk"])
+        self.assertNotEqual(new_clip["request"]["voice_asset_hash"],
+                            old_clip["request"]["voice_asset_hash"])
+
+    def test_dialogue_narrator_dialogue_uses_three_separate_voice_requests(self):
+        from test_renderer_paragraphs import passages, plan
+        members = passages(['"Wow, this is amazing", ', 'she said, ',
+                            '"Why should we do that again?"'],
+                           voices=["voice_lena", "voice_mara", "voice_lena"])
+        grouped = group_paragraphs(plan(members))["chapters"][0]["chunks"]
+        chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=grouped)
+        voices = {voice_id: {"voice_id": voice_id, "asset_hash": digest(voice_id)}
+                  for voice_id in ("voice_lena", "voice_mara")}
+        clips, accepted = _render_chapter_chunks(
+            chapter, voices, self.engine, self.engine.identity, self.verifier,
+            self.config, self.root / "work", notify=self.messages.append,
+        )
+        self.assertEqual(self.engine.dialogue_calls, [])
+        self.assertEqual([call["text"] for call in self.engine.speech_calls],
+                         [member["spoken_text"] for member in members])
+        self.assertEqual([call["voice_hash"] for call in self.engine.speech_calls],
+                         [digest("voice_lena"), digest("voice_mara"), digest("voice_lena")])
+        self.assertEqual(len(accepted), 3)
+        self.assertEqual([clip["source_ranges"] for clip in clips],
+                         [member["source_ranges"] for member in members])
+
+    def test_migration_replaces_only_mixed_cached_paragraph_and_rebuilds_chapter(self):
+        def legacy_groups(*args, **kwargs):
+            return group_paragraphs(*args, **kwargs, multi_speaker=True)
+
+        # Reproduce a chapter made by the old planner, including accepted mixed
+        # speech. The production default must reject that group's saved anchor.
+        with patch("epub_tts_narrator.renderer.paragraphs.group_paragraphs", side_effect=legacy_groups):
+            self.chapters()
+        before = self.accepted_clips()
+        hashes = {path: file_hash(path.parent / record["audio_file"])
+                  for path, record in before.items()}
+        old_mixed = next(record for record in before.values()
+                         if record["request"]["kind"] == "paragraph_speech"
+                         and len(record["request"]["voice_assets"]) > 1)
+        checkpoint_path = next((self.root / "work" / "completed-chapters").glob("*.json"))
+        old_checkpoint = read_json(checkpoint_path)
+        with self.assertRaisesRegex(RenderBlocked, "is stale"):
+            self.package()
+        counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
+        self.chapters()
+        self.assertEqual(len(self.engine.dialogue_calls), counts[0])
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 2)
+        self.assertEqual(len(self.verifier.calls) - counts[2], 2)
+        new = {path: record for path, record in self.accepted_clips().items() if path not in before}
+        self.assertEqual(len(new), 2)
+        ordered = sorted(new.values(), key=lambda row: row["request"]["chunk"]["segment"]["start"])
+        self.assertEqual([record["request"]["chunk"] for record in ordered],
+                         old_mixed["request"]["chunk"]["paragraph_turns"])
+        for path, record in before.items():
+            self.assertEqual(read_json(path), record)
+            self.assertEqual(file_hash(path.parent / record["audio_file"]), hashes[path])
+        checkpoint = read_json(checkpoint_path)
+        self.assertNotEqual(checkpoint["context"]["chapter_hash"], old_checkpoint["context"]["chapter_hash"])
+        self.assertNotIn(old_mixed["request"]["chunk"]["chunk_id"],
+                         [entry["chunk_id"] for entry in checkpoint["acceptance"]])
+        self.assertEqual(self.package()["status"], "complete")
 
     def test_accepted_individual_clips_survive_enabling_paragraph_mode(self):
         self.config["render"]["paragraph_synthesis"] = False
@@ -166,8 +233,8 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual(self.engine.dialogue_calls, [])
 
     def test_interruption_reuses_the_complete_accepted_paragraph_on_resume(self):
-        self.engine.interrupt_dialogue_number = 2
-        with self.assertRaisesRegex(KeyboardInterrupt, "paragraph interruption"):
+        self.engine.interrupt_speech_number = 4
+        with self.assertRaisesRegex(KeyboardInterrupt, "test interruption"):
             self.chapters()
         grouped = self.grouped_clips()
         self.assertEqual(len(grouped), 1)
@@ -177,15 +244,15 @@ class ParagraphWorkflowTests(unittest.TestCase):
         old_hash = file_hash(wav)
         calls = len(self.verifier.calls)
         self.assertFalse((self.root / "work" / ".render.lock").exists())
-        self.engine.interrupt_dialogue_number = None
+        self.engine.interrupt_speech_number = None
         resumed = self.chapters()
         self.assertEqual(resumed["status"], "chapters_complete")
-        self.assertEqual(len(self.engine.dialogue_calls), 3)  # two successes plus interruption
-        self.assertEqual(len(self.engine.speech_calls), 4)
-        self.assertEqual(len(self.verifier.calls) - calls, 3)  # second paragraph and final two passages
+        self.assertEqual(len(self.engine.dialogue_calls), 1)
+        self.assertEqual(len(self.engine.speech_calls), 7)  # six successes plus interruption
+        self.assertEqual(len(self.verifier.calls) - calls, 3)  # interrupted and final two passages
         self.assertEqual(read_json(path), accepted)
         self.assertEqual(file_hash(wav), old_hash)
-        self.assertEqual(len(self.grouped_clips()), 2)
+        self.assertEqual(len(self.grouped_clips()), 1)
 
     def test_partially_rendered_legacy_paragraph_keeps_its_boundaries(self):
         self.config["render"]["paragraph_synthesis"] = False
@@ -195,21 +262,21 @@ class ParagraphWorkflowTests(unittest.TestCase):
         before = self.accepted_clips()
         self.assertEqual(len(before), 3)
         # The first short quotation in b000003 is accepted. Keep that entire
-        # paragraph as individual turns, while grouping the untouched b000004.
+        # paragraph as individual turns. b000004 remains split at its voice change.
         self.assertEqual(sum(record["request"]["chunk"]["segment"]["block_id"] == "b000003"
                              for record in before.values()), 1)
         self.config["render"]["paragraph_synthesis"] = True
         self.engine.interrupt_speech_number = None
         self.chapters()
-        self.assertEqual(len(self.engine.dialogue_calls), 1)
-        self.assertEqual(len(self.engine.speech_calls), 8)  # seven accepted plus the interrupted call
+        self.assertEqual(len(self.engine.dialogue_calls), 0)
+        self.assertEqual(len(self.engine.speech_calls), 10)  # nine accepted plus the interrupted call
         self.assertTrue(all(read_json(path) == record for path, record in before.items()))
         accepted = self.accepted_clips()
-        self.assertEqual(len(accepted), 8)
+        self.assertEqual(len(accepted), 9)
         self.assertEqual(sum(record["request"]["kind"] == "speech"
                              and record["request"]["chunk"]["segment"]["block_id"] == "b000003"
                              for record in accepted.values()), 3)
-        self.assertEqual(len(self.grouped_clips()), 1)
+        self.assertEqual(len(self.grouped_clips()), 0)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,15 @@ class TransportFailure(RuntimeError):
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required for paragraph recovery")
 class ParagraphFallbackWorkflowTests(unittest.TestCase):
     # Reuse only fixture setup/helpers, not the existing test methods.
-    setUp = paragraph_fixtures.ParagraphWorkflowTests.setUp
+    def setUp(self):
+        paragraph_fixtures.ParagraphWorkflowTests.setUp(self)
+        # Group recovery still applies to contiguous passages by one saved
+        # voice. Mixed voices now stay separate before synthesis is attempted.
+        for row in self.bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000004":
+                row["voice_id"] = "voice_lena"
+                row["role_id"] = "lena_dialogue"
+
     chapters = paragraph_fixtures.ParagraphWorkflowTests.chapters
     package = paragraph_fixtures.ParagraphWorkflowTests.package
     accepted_clips = paragraph_fixtures.ParagraphWorkflowTests.accepted_clips
@@ -33,8 +41,10 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
                     if chunk["segment"]["block_id"] == "b000004")
 
     def target_calls(self):
+        text = "".join(row["text"] for row in self.bundle["chapters"][0]["rows"]
+                       if row["block_id"] == "b000004")
         return [call for call in self.engine.dialogue_calls
-                if len({turn["voice_id"] for turn in call["turns"]}) > 1]
+                if "".join(turn["text"] for turn in call["turns"]) == text]
 
     def assert_individual_plan(self, original):
         chunks = [chunk for chunk in make_render_plan(self.bundle, self.config)["chapters"][0]["chunks"]

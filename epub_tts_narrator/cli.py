@@ -303,11 +303,12 @@ def main(argv=None):
                   "incomplete requests will be retried.", file=sys.stderr)
 
     def resume_book(directory, config):
-        """Reuse a saved cast/script and only resolve its remaining speakers."""
+        """Reuse the saved cast; repair narration boundaries and remaining speakers."""
         nonlocal model_cache
         from .analysis_directory import _completed_directory
         from .analysis_revision import related_directories, revise_directories
         from .audition_scripts import prepare_document_samples
+        from .narration_boundaries import repair_narration_boundaries
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
@@ -328,6 +329,7 @@ def main(argv=None):
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
                 or revised["provenance"].get("series") != original["provenance"].get("series")):
             raise ValueError("Resuming an existing book accepts attribution edits only; cast or series changes require a separate output")
+        revised = repair_narration_boundaries(revised, progress=print)
         remaining = unassigned_segments(revised)
         print(f"Resuming saved analysis in {directory}; {len(remaining)} unassigned spoken passage(s).")
         if not remaining and revised == original:
@@ -360,6 +362,7 @@ def main(argv=None):
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
                                         target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
+            revised = repair_narration_boundaries(revised, progress=print)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config))
         if revised != original:
             # Prepared books already have creative scripts. Newly assigned
@@ -379,6 +382,7 @@ def main(argv=None):
             from .analysis_directory import _completed_directory
             from .analysis_revision import related_directories, revise_directories
             from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
+            from .narration_boundaries import repair_narration_boundaries
             config = load_config(args.config)
             settings = config["analysis"]
             selected = {path.resolve() for path in args.directories}
@@ -390,8 +394,8 @@ def main(argv=None):
             for directory in directories:
                 if directory not in selected:
                     continue
-                targets = automatic_completion_targets(documents[directory], retry_exhausted=True)
-                revised[directory] = documents[directory]
+                revised[directory] = repair_narration_boundaries(documents[directory], progress=print)
+                targets = automatic_completion_targets(revised[directory], retry_exhausted=True)
                 if not targets:
                     continue
                 if requests is None:
@@ -406,9 +410,10 @@ def main(argv=None):
                 print(f"Checking remaining speakers in {len(targets)} source block(s): {directory}; "
                       "saved assignments will be retained.", file=sys.stderr, flush=True)
                 revised[directory] = complete_speakers(
-                    documents[directory], requests, workers=min(5, settings["attribution_workers"]),
+                    revised[directory], requests, workers=min(5, settings["attribution_workers"]),
                     target_block_ids=targets, retry_unresolved=True,
                     progress=lambda message: print(message, file=sys.stderr))
+                revised[directory] = repair_narration_boundaries(revised[directory], progress=print)
             judge = _speaker_judge(config)
             for directory in revised:
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory,
@@ -617,6 +622,8 @@ def main(argv=None):
                                        review_chunk_chars=settings["attribution_review_chunk_chars"],
                                        review_notes=settings["attribution_review_notes"] or settings["cast_review_notes"],
                                        progress=lambda message: print(message, file=sys.stderr))
+            from .narration_boundaries import repair_narration_boundaries
+            result = repair_narration_boundaries(result, progress=print)
             write_json(args.output, result, overwrite=args.force)
             print(f"Saved attribution review to {args.output}; {readiness(result)['review_count']} review items remain")
         elif args.command == "series-import":

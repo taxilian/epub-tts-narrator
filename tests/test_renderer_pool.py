@@ -266,6 +266,11 @@ class PoolWorkflowTests(unittest.TestCase):
         return {path: read_json(path) for path in (self.root / "work" / "clips").glob("*/accepted.json")}
 
     def test_parallel_paragraphs_verify_serially_preserve_order_and_resume(self):
+        # Keep one same-role paragraph to exercise grouped parallel work; the
+        # different-role/different-voice paragraph remains separate.
+        for row in self.bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
         counter, maximum = 0, 0
         guard = Lock()
         original = self.verifier.transcribe
@@ -285,10 +290,10 @@ class PoolWorkflowTests(unittest.TestCase):
             first = self.chapters()
         self.assertEqual(maximum, 1)
         self.assertEqual(sum(len(e.voice_calls) for e in self.engines), 0)
-        self.assertEqual(sum(len(e.dialogue_calls) for e in self.engines), 2)
-        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 4)
+        self.assertEqual(sum(len(e.dialogue_calls) for e in self.engines), 1)
+        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 6)
         reports = self.accepted()
-        self.assertEqual(len(reports), 6)
+        self.assertEqual(len(reports), 7)
         self.assertTrue(all(row["report"]["passed"] for row in reports.values()))
         self.assertTrue(all(row["engine_metadata"]["render_worker"] in {"first", "second"}
                             for row in reports.values()))

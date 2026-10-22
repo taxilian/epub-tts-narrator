@@ -225,6 +225,11 @@ quotation marks. Never rewrite, summarize, modernize, fix spelling, or omit text
 Split within a paragraph wherever the speaker changes. For example, a quotation,
 the words 'Mara said', and the continuation of the quotation require three spans.
 Narration such as 'she whispered' is voiced by the narrator, not the character.
+When the same character speaks before and after an intervening narration tag,
+keep THREE spans: character speech, kind=narration with the applicable narrator
+role, then character speech. Continuing dialogue does not include 'she said',
+'he added', or actions outside the quotation. This role/kind boundary still
+applies when the narrator and the speaking character share the same voice.
 Attribution confidence concerns who is speaking, not the completeness of their
 voice profile. Unspecified vocal age, gender, accent, and ordinary casting choices
 do not make a clearly named speech tag uncertain or require attribution review.

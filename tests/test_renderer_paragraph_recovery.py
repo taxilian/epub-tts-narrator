@@ -25,7 +25,8 @@ def request_fixture():
                         "silent_control": False})
         cursor += len(text)
     plan = {"chapters": [{"id": "ch1", "chunks": members}]}
-    grouped = group_paragraphs(plan)["chapters"][0]["chunks"][0]
+    # Recovery markers must remain readable for old mixed-speaker requests.
+    grouped = group_paragraphs(plan, multi_speaker=True)["chapters"][0]["chunks"][0]
     return {"kind": "paragraph_speech", "version": 1, "chunk": grouped,
             "engine": {"private_key": "must-never-be-copied"}}, plan
 
@@ -45,7 +46,7 @@ class ParagraphRecoveryTests(unittest.TestCase):
         path = record_paragraph_fallback(self.work, self.request)
         expected = {turn["chunk_id"] for turn in self.request["chunk"]["paragraph_turns"]}
         self.assertEqual(load_paragraph_fallbacks(self.work), expected)
-        self.assertEqual(group_paragraphs(self.plan, preserved_chunk_ids=expected), self.plan)
+        self.assertEqual(group_paragraphs(self.plan, preserved_chunk_ids=expected, multi_speaker=True), self.plan)
         record = read_json(path)
         self.assertEqual(path.name, digest(self.request) + ".json")
         self.assertEqual(record["request_hash"], digest(self.request))
@@ -72,7 +73,8 @@ class ParagraphRecoveryTests(unittest.TestCase):
         changed = deepcopy(self.plan)
         for member in changed["chapters"][0]["chunks"]:
             member["chunk_id"] = digest({"changed": member["chunk_id"]})[:32]
-        grouped = group_paragraphs(changed, preserved_chunk_ids=load_paragraph_fallbacks(self.work))
+        grouped = group_paragraphs(changed, preserved_chunk_ids=load_paragraph_fallbacks(self.work),
+                                  multi_speaker=True)
         self.assertEqual(len(grouped["chapters"][0]["chunks"]), 1)
 
     def test_tampered_marker_is_not_replaced(self):

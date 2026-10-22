@@ -17,6 +17,10 @@ from test_renderer_workflow import FFMPEG, FFPROBE
 class StandaloneChapterRetryTests(unittest.TestCase):
     def setUp(self):
         paragraph_fixtures.ParagraphWorkflowTests.setUp(self)
+        for row in self.bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000004":
+                row["voice_id"] = "voice_lena"
+                row["role_id"] = "lena_dialogue"
         plan = make_render_plan(self.bundle, self.config)
         target = next(chunk for chunk in plan["chapters"][0]["chunks"]
                       if chunk["segment"]["block_id"] == "b000004")

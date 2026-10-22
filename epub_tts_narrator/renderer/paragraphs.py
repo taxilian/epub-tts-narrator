@@ -73,12 +73,12 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
                    or chunk["segment"].get("simultaneous_speakers")
                    or chunk.get("paragraph_turns") for chunk in chunks)):
         return chunks
-    result, pending, voices, characters = [], [], set(), 0
+    result, pending, voices, performers, characters = [], [], set(), set(), 0
 
     def flush():
-        nonlocal pending, voices, characters
+        nonlocal pending, voices, performers, characters
         result.extend(_group(pending))
-        pending, voices, characters = [], set(), 0
+        pending, voices, performers, characters = [], set(), set(), 0
 
     for chunk in chunks:
         voice = chunk["segment"].get("voice_id")
@@ -88,13 +88,15 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
             result.append(chunk)
             continue
         proposed_voices = voices | {voice}
+        performer = (chunk["segment"]["role_id"], voice)
         if pending and (characters + len(chunk["spoken_text"]) > max_chars
                         or len(proposed_voices) > _MAX_SPEAKERS
-                        or (not multi_speaker and len(proposed_voices) > 1)
+                        or (not multi_speaker and performer not in performers)
                         or _source_piece(pending[-1])[1] != _source_piece(chunk)[0]):
             flush()
         pending.append(chunk)
         voices.add(voice)
+        performers.add(performer)
         characters += len(chunk["spoken_text"])
     flush()
     return result
@@ -119,7 +121,10 @@ def _paragraph(chunks, *, max_chars, preserved, multi_speaker, saved_groups):
             if identifiers[cursor:end] != list(members):
                 continue
             current = chunks[cursor:end]
-            if len({chunk["segment"].get("voice_id") for chunk in current}) > _MAX_SPEAKERS:
+            voice_count = len({chunk["segment"].get("voice_id") for chunk in current})
+            performer_count = len({(chunk["segment"].get("role_id"), chunk["segment"].get("voice_id"))
+                                   for chunk in current})
+            if voice_count > _MAX_SPEAKERS or (not multi_speaker and performer_count > 1):
                 continue
             if any(chunk.get("silent_control") or chunk.get("paragraph_turns")
                    or not chunk["segment"].get("voice_id")
@@ -145,10 +150,13 @@ def _paragraph(chunks, *, max_chars, preserved, multi_speaker, saved_groups):
 
 
 def group_paragraphs(plan, *, max_chars=1000, preserved_chunk_ids=frozenset(),
-                     preserved_groups=(), multi_speaker=True):
+                     preserved_groups=(), multi_speaker=False):
     """Return a detached plan with safe groups of two or more source chunks.
 
-    Source blocks and explicit blank-paragraph boundaries limit each paragraph.
+    Source blocks, role/voice changes, and explicit blank-paragraph boundaries limit
+    each performance by default. A model's speaker tags cannot guarantee an
+    audible switch, and transcript verification cannot detect the wrong voice.
+    ``multi_speaker=True`` remains available for interpreting legacy plans.
     Oversized paragraphs split only between existing chunks. Original chunk
     dictionaries remain in ``paragraph_turns`` for speaker/delivery/sync use.
     Existing single chunks, unsupported passages, and accepted original clips
@@ -158,6 +166,8 @@ def group_paragraphs(plan, *, max_chars=1000, preserved_chunk_ids=frozenset(),
     consecutive matches anchor their prior membership before individual-clip
     preservation is applied to the intervening gaps. This retains a saved group
     next to a saved leftover singleton, even after changing ``max_chars``.
+    Saved groups also obey the current role/voice boundary policy: an old mixed
+    performance cannot bypass separate synthesis after an upgrade.
     Overlapping candidates prefer the earliest source position and then the
     longest group at that position. Current source and metadata always win.
     """

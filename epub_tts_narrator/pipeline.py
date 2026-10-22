@@ -1247,8 +1247,11 @@ approve a merge, split, or series match.
                                      review_chunk_chars=attribution_review_chunk_chars,
                                      review_notes=attribution_review_notes or cast_review_notes,
                                      progress=progress)
+    from .narration_boundaries import repair_narration_boundaries
+    document = repair_narration_boundaries(document, progress=progress)
     from .speaker_completion import complete_speakers
     document = complete_speakers(document, requests, workers=min(5, attribution_workers), progress=progress)
+    document = repair_narration_boundaries(document, progress=progress)
     state = readiness(document)
     if state["errors"]:
         raise ValueError("; ".join(state["errors"][:12]))

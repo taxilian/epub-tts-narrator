@@ -333,6 +333,9 @@ class ChapterOrchestrationTests(unittest.TestCase):
     def test_paragraph_source_turns_must_match_the_submitted_script(self):
         from test_renderer_workflow import EXAMPLE
         bundle = load_bundle(EXAMPLE / "bundle")
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
         config = deepcopy(self.config)
         config["render"]["paragraph_synthesis"] = True
         plan = make_render_plan(bundle, config)

@@ -145,6 +145,13 @@ class RenderProgressWorkflowTests(unittest.TestCase):
 
     def test_interrupted_paragraph_counts_only_verified_work_and_resumes_exact_audio(self):
         bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
+        # Both targets have one role/voice so they still exercise grouped
+        # generation; ordinary narrator/dialogue changes stay separate.
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+            elif row["block_id"] == "b000004":
+                row.update(role_id="lena_dialogue", voice_id="voice_lena")
         self.config["render"].update(paragraph_synthesis=True, max_paragraph_chars=1000)
         self.engine = ParagraphFixtureEngine()
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)

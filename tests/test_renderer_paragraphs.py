@@ -35,12 +35,12 @@ def chunks_of(result, chapter=0):
 
 
 class ParagraphGroupingTests(unittest.TestCase):
-    def test_groups_exact_paragraph_with_original_speakers_and_directions(self):
+    def test_explicit_legacy_groups_preserve_original_speakers_and_directions(self):
         members = passages(['“Hello,” ', 'she said. ', '“Come inside.”'], offset=12,
                            voices=["v1", "v2", "v1"])
         source = plan(members)
         original = deepcopy(source)
-        grouped = group_paragraphs(source)
+        grouped = group_paragraphs(source, multi_speaker=True)
         self.assertEqual(len(chunks_of(grouped)), 1)
         chunk = chunks_of(grouped)[0]
         text = ''.join(member["spoken_text"] for member in members)
@@ -57,6 +57,35 @@ class ParagraphGroupingTests(unittest.TestCase):
         self.assertFalse(chunk["silent_control"])
         chunk["paragraph_turns"][0]["segment"]["text"] = "changed copy"
         self.assertEqual(source, original)
+
+    def test_default_keeps_dialogue_narrator_dialogue_as_three_performances(self):
+        members = passages(['"Wow, this is amazing", ', 'she said, ',
+                            '"Why should we do that again?"'],
+                           voices=["character", "narrator", "character"])
+        source = plan(members)
+        self.assertEqual(group_paragraphs(source), source)
+
+    def test_shared_voice_does_not_merge_character_delivery_into_narration(self):
+        members = passages(['"Wait," ', 'I said, ', '"come back."'])
+        members[0]["segment"].update(role_id="character", delivery={"direction": "whispered", "evidence": []})
+        members[1]["segment"].update(role_id="narrator", delivery={"direction": "", "evidence": []})
+        members[2]["segment"].update(role_id="character", delivery={"direction": "whispered", "evidence": []})
+        source = plan(members)
+        saved = [[member["chunk_id"] for member in members]]
+        self.assertEqual(group_paragraphs(source), source)
+        self.assertEqual(group_paragraphs(source, preserved_groups=saved), source)
+
+    def test_mixed_saved_group_cannot_override_default_voice_boundaries(self):
+        members = passages(["One. ", "Two. ", "Three. ", "Four. ", "Five."],
+                           voices=["character", "narrator", "character", "character", "character"])
+        saved = [[member["chunk_id"] for member in members[:3]],
+                 [member["chunk_id"] for member in members[3:]]]
+        grouped = chunks_of(group_paragraphs(plan(members), preserved_groups=saved,
+                                            preserved_chunk_ids={members[1]["chunk_id"]}))
+        self.assertEqual(grouped[:3], members[:3])
+        self.assertEqual(grouped[3]["paragraph_turns"], members[3:])
+        restored = [turn for chunk in grouped for turn in chunk.get("paragraph_turns", [chunk])]
+        self.assertEqual(restored, members)
 
     def test_source_blocks_chapters_and_explicit_blank_boundaries_never_join(self):
         first = passages(["One. ", "Two. "])
@@ -194,7 +223,7 @@ class ParagraphGroupingTests(unittest.TestCase):
 
     def test_speaker_limit_and_single_voice_engine_keep_valid_groups(self):
         members = passages([f"{i}. " for i in range(17)], voices=[f"v{i}" for i in range(17)])
-        groups = chunks_of(group_paragraphs(plan(members)))
+        groups = chunks_of(group_paragraphs(plan(members), multi_speaker=True))
         self.assertEqual(len(groups[0]["paragraph_turns"]), 16)
         self.assertEqual(groups[1], members[-1])
         members = passages(["One. ", "Two. ", "Three. ", "Four."], voices=["v1", "v1", "v2", "v2"])

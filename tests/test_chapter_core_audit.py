@@ -25,6 +25,9 @@ class ChapterProtocolAuditTests(unittest.TestCase):
     def setUp(self):
         config = deepcopy(DEFAULTS)
         bundle = load_bundle(EXAMPLE / "bundle")
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
         plan = make_render_plan(bundle, config)
         self.spec = {"version": 1, "book": bundle["source"]["book"],
                      "source_fingerprint": bundle["manifest"]["source_fingerprint"],

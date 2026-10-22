@@ -35,6 +35,11 @@ class ChapterExecutorTests(unittest.TestCase):
         self.executor = ChapterExecutor(self.config, engine=self.engine, verifier=self.verifier)
         self.addCleanup(self.executor.close)
         bundle = load_bundle(EXAMPLE / "bundle")
+        # A same-role paragraph still exercises remote grouped rendering and
+        # paragraph sync; mixed-role passages must travel as separate requests.
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
         plan = make_render_plan(bundle, self.config)
         self.spec = {
             "version": 1, "book": bundle["source"]["book"],
@@ -103,15 +108,15 @@ class ChapterExecutorTests(unittest.TestCase):
         self.assertNotEqual(read_json(first["chapter.json"])["frames"], read_json(second["chapter.json"])["frames"])
         self.assertEqual(counts, (len(self.engine.speech_calls), len(self.engine.dialogue_calls), len(self.verifier.calls)))
 
-    def test_changed_voice_regenerates_only_affected_paragraphs(self):
+    def test_changed_voice_regenerates_only_its_separate_passage(self):
         self.synthesize()
         before = len(self.engine.speech_calls), len(self.engine.dialogue_calls)
         changed = deepcopy(self.spec)
         changed["voice_bindings"]["voice_lena"] = digest("new-lena")
         self.voices["voice_lena"]["asset_hash"] = changed["voice_bindings"]["voice_lena"]
         self.synthesize(changed)
-        self.assertEqual(len(self.engine.speech_calls), before[0])
-        self.assertEqual(len(self.engine.dialogue_calls) - before[1], 1)
+        self.assertEqual(len(self.engine.speech_calls) - before[0], 1)
+        self.assertEqual(len(self.engine.dialogue_calls), before[1])
 
     def test_failed_verification_never_publishes_chapter(self):
         self.verifier.wrong_texts.add(self.spec["chapter"]["chunks"][0]["spoken_text"])

@@ -148,7 +148,11 @@ class ChapterPipelineTests(unittest.TestCase):
         verifier = FixtureVerifier(backend.fixture_transcripts)
         executor = ChapterExecutor(config, verifier=verifier)
         self.addCleanup(executor.close)
-        plan = make_render_plan(load_bundle(EXAMPLE / "bundle"), config)
+        bundle = load_bundle(EXAMPLE / "bundle")
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+        plan = make_render_plan(bundle, config)
         chunk = next(chunk for chunk in plan["chapters"][0]["chunks"] if "paragraph_turns" in chunk)
         first = chapter_spec(executor, 1, "unused", self.voice_hash)
         first["chapter"]["chunks"] = [chunk]
