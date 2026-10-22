@@ -5,7 +5,7 @@ WORKDIR /opt/epub-tts-narrator
 COPY pyproject.toml README.md ./
 COPY epub_tts_narrator/ ./epub_tts_narrator/
 COPY deploy/runpod/ ./deploy/runpod/
-RUN sh deploy/runpod/install.sh
+RUN sh deploy/runpod/install.sh /opt/epub-tts-narrator full /opt/epub-tts-runtime /opt/fish-speech
 
 EXPOSE 8081
 # First boot permits configuration upload and explicit model preparation.

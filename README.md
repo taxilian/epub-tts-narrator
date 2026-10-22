@@ -6,6 +6,11 @@ The separate **`audiobook-render` CLI** provides local Drama 3 inference through
 
 For whole-chapter remote jobs, `serve-chapters` registers compressed voice references once, retains resumable jobs, streams progress, and assembles M4A chapters on the server. The client downloads compressed audio and timing JSON. See [REMOTE_RENDERING.md](REMOTE_RENDERING.md) for configuration, final book assembly, persistent storage, and optional ten-minute Runpod idle shutdown.
 
+For a managed Runpod worker, use `audiobook-render runpod bootstrap`, `runpod update`,
+and `runpod encode BOOK --chapters 6 --chapters-only`. Each operation stops compute
+when done or on failure. Deployment settings layer over your normal local config;
+see the [Runpod setup and lifecycle commands](deploy/runpod/README.md).
+
 Verification first checks complete text coverage locally, allowing exact spacing differences and full Double Metaphone sound matches such as `Vandire` / `Van Dyer`. Every token must be accounted for in order; the phonetic check cannot skip missing or added words. Other differences reach optional JEV confirmation, which judges whether the complete requested passage and recognized speech would sound roughly the same aloud, for both voice samples and chapter audio. Acoustic failures such as silence still fail locally. JEV sees text, never audio. Accepted audio is reused across verification-policy changes; an outage retains unaccepted audio so the same command can retry verification. Configure JEV once in the global file as described in [RENDERER.md](RENDERER.md#optional-jev-confirmation).
 
 This is a first working implementation. Extraction, validation, API handling, caching, corrections, and export have offline tests. Live-model work has included a complete book and selected excerpts from another book, plus focused attribution regression cases. Identity consensus has also passed four small original-fiction regression scenarios using the configured Neuralwatt model: identical-name people, a nickname after a long absence, similar names, and one person whose role and voice change. These checks do not establish accuracy on a representative set of books. Ambiguities remain visible for review; structural validation does not prove a speaker assignment is semantically correct.

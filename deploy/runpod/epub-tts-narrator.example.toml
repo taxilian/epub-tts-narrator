@@ -1,4 +1,6 @@
-# Copy to /workspace/epub-tts-narrator.toml on the Pod, chmod 600, then edit.
+# Manual-server example only. `audiobook-render runpod` builds this automatically
+# from your normal local configuration plus runpod.local.toml overrides.
+# Manual destination: /workspace/epub-tts-narrator.remote.toml, chmod 600.
 # One global file for this machine; no book-specific settings or environment keys.
 
 [engine]
@@ -64,5 +66,6 @@ ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
 
 # Copy your existing [jev] settings here to keep the same tolerant speech check.
-# No Gemini/ElevenLabs/analyzer keys are needed when voices are created locally.
+# No Gemini/ElevenLabs keys are needed when voices are created locally.
+# Keep [provider] only when analysis-based pronunciation/recovery is enabled.
 # The pinned models are public; [huggingface].api_key is optional.

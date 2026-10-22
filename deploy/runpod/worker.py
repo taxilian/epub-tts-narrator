@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,22 +19,27 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from epub_tts_narrator.renderer.common import read_json, write_json
+from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
 
 
-FISH_SOURCE = Path("/opt/fish-speech")
-APPLICATION_PYTHON = Path("/opt/epub-tts-narrator/.venv/bin/python")
+APPLICATION_ROOT = Path(__file__).resolve().parents[2]
+FISH_SOURCE = APPLICATION_ROOT.parent / "fish-speech"
+APPLICATION_PYTHON = APPLICATION_ROOT / ".venv/bin/python"
 WHISPER_REPOSITORY = "Systran/faster-whisper-large-v3"
 WHISPER_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 RECEIPT = ".epub-tts-prepared.json"
 FISH_URL = "http://127.0.0.1:8080/v1/tts"
+SMOKE_TEXT = ("The little boat crossed the quiet lake. We reached the far shore before sunset, "
+              "then walked home together beneath the stars.")
 
 
 def validate_worker(config):
@@ -133,6 +139,14 @@ def prepare(config, *, downloader=None):
                 if (not isinstance(receipt, dict) or receipt.get("repository") != repo
                         or receipt.get("revision") != revision):
                     raise ValueError("Prepared model revision changed; configure a new model directory")
+                try:
+                    names = required_model_files(repo, directory)
+                    unchanged = receipt.get("files") == file_state(directory, names)
+                except (OSError, ValueError):
+                    unchanged = False
+                if unchanged:
+                    print(f"Prepared {repo} is unchanged; reusing local model files.", flush=True)
+                    continue
             print(f"Preparing {repo} at revision {revision} in {directory}", flush=True)
             try:
                 downloader(repo_id=repo, revision=revision, local_dir=str(directory),
@@ -165,15 +179,123 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _get_json(url):
+def _get_json(url, *, headers=None):
     with build_opener(ProxyHandler({}), _NoRedirect()).open(
-            Request(url, headers={"Accept": "application/json"}), timeout=3) as response:
+            Request(url, headers={"Accept": "application/json", **(headers or {})}), timeout=3) as response:
         if response.status != 200:
             raise ValueError("Unexpected health status")
         body = response.read(16385)
         if len(body) > 16384:
             raise ValueError("Oversized health response")
         return json.loads(body)
+
+
+def _download_hash(url, expected_size):
+    """Validate a presigned download without exposing its URL in diagnostics."""
+    try:
+        checksum, size = hashlib.sha256(), 0
+        with build_opener(ProxyHandler({}), _NoRedirect()).open(url, timeout=60) as response:
+            if response.status != 200:
+                raise ValueError("Unexpected artifact response")
+            while blob := response.read(min(1024 * 1024, expected_size - size + 1)):
+                size += len(blob)
+                if size > expected_size:
+                    raise ValueError("Oversized artifact response")
+                checksum.update(blob)
+        if size != expected_size:
+            raise ValueError("Truncated artifact response")
+        return checksum.hexdigest()
+    except Exception:
+        raise RuntimeError("The smoke artifact could not be downloaded and checked") from None
+
+
+def storage_smoke(config, path, *, publisher_factory=None, download=_download_hash):
+    """Round-trip only our unique temporary object; never touch book exports."""
+    if publisher_factory is None:
+        from epub_tts_narrator.renderer.chapter_storage import S3ArtifactPublisher
+        publisher_factory = S3ArtifactPublisher
+    settings = dict(config["chapter_storage"])
+    settings["prefix"] = "/".join(part for part in (
+        settings.get("prefix", "epub-tts-narrator").strip("/"), "deployment-smoke") if part)
+    publisher = publisher_factory(settings)
+    checksum = file_hash(path)
+    job_id = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+    # Compute the unique key before upload so a partially successful upload is
+    # cleaned up even when its HEAD verification fails.
+    name = "chapter" + path.suffix
+    key = "/".join((settings["prefix"], job_id, checksum, name))
+    try:
+        record = publisher.publish(job_id, name, path, checksum)
+        if download(publisher.url(record), record["size"]) != checksum:
+            raise RuntimeError("The smoke artifact download checksum does not match")
+    finally:
+        try:
+            publisher.client.delete_object(Bucket=publisher.bucket, Key=key)
+            try:
+                publisher.client.head_object(Bucket=publisher.bucket, Key=key)
+            except Exception as exc:
+                error = getattr(exc, "response", {}).get("Error", {}).get("Code")
+                if str(error) not in {"404", "NoSuchKey", "NotFound"}:
+                    raise
+            else:
+                raise RuntimeError("Temporary smoke artifact still exists")
+        except Exception:
+            raise RuntimeError("Could not confirm deletion of the temporary smoke artifact") from None
+
+
+def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None,
+          roundtrip=storage_smoke):
+    """Exercise synthesis, recognition, encoding and Ceph using invented text."""
+    from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
+    from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
+    from epub_tts_narrator.renderer.quality import validate_audio
+    from epub_tts_narrator.renderer.verification import create_verifier
+    import soundfile as sf
+
+    check(config)
+    service = config["chapter_server"]
+    capabilities = fetch(f"http://127.0.0.1:{service['port']}/v1/capabilities",
+                         headers={"Authorization": f"Bearer {service['api_key']}"})
+    if not isinstance(capabilities, dict) or capabilities.get("protocol") != PROTOCOL:
+        raise RuntimeError("The authenticated chapter service is not ready")
+    print("Smoke test: authenticated chapter service is ready; generating a short GPU sample.", flush=True)
+    settings = {**config["render_pool"]["workers"][0], "timeout_seconds": 300}
+    engine = (engine_factory or FishHTTPEngine)(settings, config["engine"])
+    verifier = None
+    scratch = Path(service["data_dir"]) / "deployment-smoke"
+    scratch.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="check-", dir=scratch) as temporary:
+            directory = Path(temporary)
+            audio = directory / "sample.wav"
+            # A self-contained smoke check cannot require any book's cast. The
+            # native transport accepts an empty reference list for this probe.
+            engine._request(SMOKE_TEXT, [], audio, 4101)
+            print("Smoke test: checking generated words with CPU Whisper.", flush=True)
+            verifier = (verifier_factory or create_verifier)(
+                config["verification"], config.get("jev"), config.get("provider"))
+            report = validate_audio(audio, SMOKE_TEXT, verifier, config["quality"], purpose="reference")
+            if not report["passed"]:
+                raise RuntimeError("GPU smoke speech did not pass verification: " + ", ".join(report["reasons"]))
+            samples, rate = sf.read(audio, dtype="int16", always_2d=True)
+            compressed = directory / "chapter.flac"
+            sf.write(compressed, samples, rate, subtype="PCM_16", format="FLAC")
+            print("Smoke test: encoding M4A and checking compressed Ceph downloads.", flush=True)
+            chapter = directory / "chapter.m4a"
+            result = subprocess.run(
+                [config["render"]["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error",
+                 "-i", str(compressed), "-c:a", "aac", "-b:a", config["render"]["aac_bitrate"],
+                 "-movflags", "+faststart", str(chapter)],
+                capture_output=True, timeout=60, check=False)
+            if result.returncode or not chapter.is_file() or chapter.stat().st_size == 0:
+                raise RuntimeError("Smoke M4A encoding failed")
+            for artifact in (compressed, chapter):
+                roundtrip(config, artifact)
+            print("Smoke test passed: GPU speech, Whisper, M4A/FLAC and Ceph round trips; temporary objects deleted.", flush=True)
+    finally:
+        engine.close()
+        if verifier is not None:
+            verifier.close()
 
 
 class WorkerStopped(Exception):
@@ -275,10 +397,12 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE,
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("/workspace/epub-tts-narrator.toml"))
+    parser.add_argument("--config", type=Path, default=Path("/workspace/epub-tts-narrator.remote.toml"))
     parser.add_argument("--startup-timeout", type=float, default=600,
                         help="Seconds to allow the private CUDA process to load (1–3600)")
-    parser.add_argument("command", choices=("prepare", "check", "serve"))
+    parser.add_argument("--fish-source", type=Path, default=FISH_SOURCE,
+                        help="Persistent, pinned Fish Speech checkout (default: beside the application)")
+    parser.add_argument("command", choices=("prepare", "check", "serve", "smoke"))
     args = parser.parse_args(argv)
     config = None
     try:
@@ -290,8 +414,19 @@ def main(argv=None):
         elif args.command == "check":
             check(config)
             print("Worker config and prepared model files are ready.", flush=True)
+        elif args.command == "smoke":
+            def smoke_timeout(number, frame):
+                raise RuntimeError("Worker smoke test exceeded its ten-minute limit")
+            previous_handler = signal.signal(signal.SIGALRM, smoke_timeout)
+            previous_alarm = signal.alarm(600)
+            try:
+                smoke(config)
+            finally:
+                signal.alarm(previous_alarm)
+                signal.signal(signal.SIGALRM, previous_handler)
         else:
-            return serve(config, args.config, startup_timeout=args.startup_timeout)
+            return serve(config, args.config, startup_timeout=args.startup_timeout,
+                         fish_source=args.fish_source)
         return 0
     except KeyboardInterrupt:
         return 130

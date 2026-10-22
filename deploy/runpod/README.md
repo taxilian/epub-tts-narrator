@@ -1,180 +1,158 @@
 # Run our chapter worker on Runpod
 
-This deployment runs **this project's code** for job scheduling, persistent voice
-registration, verification, chapter assembly, and Ceph publication. One unmodified,
-pinned Fish Speech process supplies CUDA inference on loopback. No SGLang-Omni
-service is required. References use Fish's memory cache, GPU requests are
-serialized, and CPU verification/assembly can overlap subsequent synthesis.
+The lifecycle CLI installs **this project's code** for voice registration, chapter
+jobs, verification, assembly, and Ceph publication. One pinned, unmodified Fish
+Speech process supplies CUDA inference on loopback. GPU requests are serialized;
+CPU verification and assembly can overlap subsequent synthesis.
 
-The launcher and transport have automated tests. **The image, model loading,
-real GPU synthesis, and Runpod/Ceph integration still need a live deployment
-test.** Do that with one short chapter before queuing a book.
+## Bootstrap, update, and encode
 
-## First deployment
+Keep your normal global configuration. Put deployment differences in
+`runpod.local.toml` beside it; the CLI merges them when preparing the private
+server configuration. Your Mac's renderer settings remain unchanged. The remote
+file includes rendering, verification, JEV and Ceph settings, plus analysis-provider
+settings when needed for pronunciation recovery. It excludes voice-design keys
+and local book/voice paths. The application bearer key is created once and kept
+in private deployment state. It differs from the Runpod account API key.
 
-1. Add credit in [Runpod billing](https://console.runpod.io/user/billing).
-   Use an on-demand Pod for the first test. An H100 with 80 GB VRAM provides
-   headroom for the native Drama 3 model; throughput still needs benchmarking.
-2. Create a network volume in the selected GPU region and mount it at
-   `/workspace`. Start with approximately 150 GB for the models and a limited
-   chapter test, then measure accepted paragraph checkpoint usage. Ceph holds
-   finished exports; it does not replace the resumable working directory.
-3. Start a Linux x86_64 development Pod with SSH, root access, and a CUDA 12.9
-   compatible NVIDIA driver. A Runpod PyTorch development template is useful
-   for the first installation; its model environment is not used. Expose
-   **HTTP port 8081 only** for our application. Check `nvidia-smi` on the Pod:
-   its driver-supported CUDA version must be 12.9 or newer.
-4. Upload the source archive described below using `scp` and the SSH details
-   from Runpod's Connect panel. On the Pod:
+Store your Runpod API key under `[chapter_server].runpod_api_key` and your Ceph
+RGW endpoint, bucket, region and credentials under `[chapter_storage]` in the
+normal local file. Configure the GPU, region, hourly price limit and storage in
+the override's `[runpod]` table. Use a private HTTPS Ceph bucket reachable from
+both the Pod and your Mac.
 
-   ```sh
-   mkdir -p /opt
-   tar -xzf /tmp/epub-tts-narrator-worker.tar.gz -C /opt
-   sh /opt/epub-tts-narrator/deploy/runpod/install.sh
-   cp /opt/epub-tts-narrator/deploy/runpod/epub-tts-narrator.example.toml /workspace/epub-tts-narrator.toml
-   chmod 600 /workspace/epub-tts-narrator.toml
-   ```
-
-   Edit that **one global server file**. Set a random application API key, Ceph
-   connection details, and the existing JEV settings. Use the same application
-   key in the Mac client's `[remote_chapters]` table. It is separate from the
-   Runpod and Ceph keys. Do not upload the Mac's entire private config; its
-   analyzer and voice-design credentials are unnecessary here.
-5. Explicitly prepare the pinned models, then check the prepared files:
-
-   ```sh
-   /opt/epub-tts-narrator/.venv/bin/python /opt/epub-tts-narrator/deploy/runpod/worker.py prepare
-   /opt/epub-tts-narrator/.venv/bin/python /opt/epub-tts-narrator/deploy/runpod/worker.py check
-   ```
-
-   These default to `/workspace/epub-tts-narrator.toml`. Override with
-   `--config PATH` **before** the subcommand. Preparation downloads public model
-   snapshots and can resume partial downloads. `check` validates config and
-   prepared files; it does not test the GPU. `serve` never downloads models.
-6. Start the first supervised test in the SSH terminal:
-
-   ```sh
-   /opt/epub-tts-narrator/.venv/bin/python -u /opt/epub-tts-narrator/deploy/runpod/worker.py serve
-   ```
-
-   Keep the terminal attached. The launcher waits for the native model to load,
-   then starts the chapter service. The public URL is
-   `https://POD_ID-8081.proxy.runpod.net`. The private inference endpoint is
-   `http://127.0.0.1:8080/v1/tts`; do not expose port 8080.
-
-Initial setup/model preparation is not covered by the application's idle timer.
-Stop the Pod yourself when leaving setup unfinished. Exiting SSH or Python does
-**not** stop GPU billing. Manual `/opt` installs live on the container disk and
-may need reinstalling after stop/replacement; use the image below for repeated,
-unattended deployments. Models and job checkpoints stay on `/workspace`.
-
-## Ceph and automatic shutdown
-
-Use a private bucket on an HTTPS RADOS Gateway endpoint reachable from Runpod
-and the Mac. Configure its endpoint, bucket, region/zonegroup API name, and a
-bucket-scoped access/secret key under `[chapter_storage]`. The publisher uses
-path-style requests and Signature V4, uploads compressed outputs, checks their
-size and SHA256 metadata, and issues presigned download URLs. Validate a small
-upload and download before enabling unattended jobs.
-
-After confirming the persistent mount, Ceph publication, and repeatable worker
-startup, merge these into the existing server table:
-
-```toml
-[chapter_server]
-persistent_data = true
-idle_action = "runpod_stop"
-idle_timeout_seconds = 600
-runpod_pod_id = "YOUR-POD-ID"
-runpod_api_key = "YOUR-RUNPOD-KEY"
-```
-
-The service calls Runpod's stop API after ten minutes without work, once outputs
-are published. CPU assembly, uploads, and queued jobs prevent shutdown; status
-polling does not. Ceph links work after shutdown until expiry. Restart the
-service to renew them. Runpod's network-volume S3 API currently does not support
-presigned URLs; use Ceph for this publisher.
-
-Persistent storage still costs money after stopping compute. A crashed process
-cannot run its idle callback; check billing/alerts during the initial test.
-See [remote rendering](../../REMOTE_RENDERING.md) for recovery and artifacts.
-Timing metadata currently links text at paragraph/chunk precision, not words.
-
-## Run a chapter from the Mac
-
-Install the client transport once:
+Copy [runpod.example.toml](runpod.example.toml) to `runpod.local.toml` beside your
+normal configuration. Its image is pinned; GPU availability and prices are
+checked when creating compute. The selected region must also support network
+volumes. The example's 150 GB volume costs storage fees even while stopped;
+the hourly ceiling covers compute and does not cap storage charges.
 
 ```sh
-uv pip install --python .venv-renderer/bin/python -e '.[remote]'
+# Create the deployment, install code/dependencies/models, test, then stop.
+.venv-renderer/bin/audiobook-render runpod bootstrap
+
+# Start it, update code/dependencies/configuration, test, then stop.
+.venv-renderer/bin/audiobook-render runpod update
+
+# Start the service, render and download one chapter, then stop.
+.venv-renderer/bin/audiobook-render runpod encode BOOK-DIRECTORY --chapters 6 --chapters-only
+
+# Inspect the provider's current state, or explicitly stop compute.
+.venv-renderer/bin/audiobook-render runpod status
+.venv-renderer/bin/audiobook-render runpod stop
 ```
 
-Merge into the Mac's existing global `epub-tts-narrator.toml`:
+`--config FILE` selects the normal configuration; `--override-config FILE`
+selects a different deployment override. Bootstrap and Update default to
+`--source github`, which checks out the configured public repository/ref.
+`--source local` transfers the current **committed HEAD** in a Git bundle;
+uncommitted files, private configuration and book data are not included. This
+allows testing a committed change before publishing it on GitHub.
 
-```toml
-[remote_chapters]
-url = "https://YOUR-POD-ID-8081.proxy.runpod.net"
-api_key = "THE-SAME-APPLICATION-KEY-AS-THE-SERVER"
-```
+Each operation stops the Pod on success, failure or interruption. Optionally
+pass `--stop-delay 300` to keep the client attached for a five-minute grace
+period before stopping; Ctrl-C ends the grace period and stops immediately.
+Server idle shutdown is an additional fallback after its configured period
+without queued work, synthesis, assembly or uploads. Leaving SSH or exiting a
+server process alone does **not** stop GPU billing.
 
-Select a chapter with no unfinished local paragraph cache:
+The first live deployment should use one short chapter. The CLI's smoke check
+runs a separate short passage through CUDA synthesis and CPU Whisper, encodes
+FLAC and M4A, and verifies Ceph upload/download checksums and deletion of its
+temporary objects. It does not change any book or saved character voice. A
+successful smoke check does not establish throughput for a full book.
 
-```sh
-.venv-renderer/bin/audiobook-render render BOOK-DIRECTORY --chapters 6 --chapters-only
-```
+## What persists when compute stops
 
-The client registers missing FLAC voices by hash, submits the chapter, follows
+Runpod clears the container disk when a Pod stops; the deployment therefore
+keeps source, managed Python, virtual environments, dependency cache, model
+weights, voices and job checkpoints on `/workspace`:
+
+| Path | Contents |
+| --- | --- |
+| `/workspace/epub-tts-narrator` | Application checkout and Python environment |
+| `/workspace/fish-speech` | Pinned, unmodified native inference checkout/environment |
+| `/workspace/.epub-tts-runtime` | Installer, managed Python and dependency cache |
+| `/workspace/models` | Drama 3 and CPU Whisper weights |
+| `/workspace/chapter-server-data` | Registered voices, durable jobs and resumable audio |
+| `/workspace/epub-tts-narrator.remote.toml` | Private merged server configuration |
+
+A network volume retains these files even if the Pod is replaced. Ceph retains
+finished exports independently. Persistent storage continues to cost money
+while compute is stopped. Stopping releases the GPU, so restarting depends on
+capacity becoming available on the Pod's machine; immediate restart is not
+guaranteed. Native model loading also takes time on every process start.
+
+On restart the installer restores missing container system packages, then
+reuses the persistent Python environments. Encode uses its `runtime` mode,
+which does not resolve or download Python packages. Bootstrap and Update use
+`full` mode to install requirements. Prepared model snapshots are checked and
+reused without new download requests when unchanged.
+
+The client registers missing FLAC voices by hash, submits chapter jobs, follows
 progress, and downloads M4A/JSON. Only compressed audio crosses the network.
-FLAC masters are downloaded when final M4B assembly needs them. Listen to the
-result, check multi-speaker passages and resume behavior, and measure actual
-throughput before submitting more chapters.
+FLAC masters support final M4B assembly without generating speech again.
+Timing metadata currently links text at paragraph/chunk precision, not words.
+See [remote rendering](../../REMOTE_RENDERING.md) for artifacts and recovery.
 
-## Source archive and reusable image
+## Manual worker commands and diagnostics
 
-From a checkout with committed deployment files, make an allowlisted archive.
-This excludes private configs, books, samples, weights, Git history, and the
-untracked working tree:
+For a Linux x86_64 Pod with root SSH access, `/workspace` mounted persistently,
+and a CUDA 12.9-compatible NVIDIA driver:
 
 ```sh
-mkdir -p dist
-git archive --format=tar.gz --prefix=epub-tts-narrator/ --output=dist/epub-tts-narrator-worker.tar.gz HEAD pyproject.toml README.md REMOTE_RENDERING.md RENDERER.md epub_tts_narrator deploy/runpod
+sh /workspace/epub-tts-narrator/deploy/runpod/install.sh /workspace/epub-tts-narrator full
+/workspace/epub-tts-narrator/.venv/bin/python /workspace/epub-tts-narrator/deploy/runpod/worker.py prepare
+/workspace/epub-tts-narrator/.venv/bin/python /workspace/epub-tts-narrator/deploy/runpod/worker.py check
+/workspace/epub-tts-narrator/.venv/bin/python -u /workspace/epub-tts-narrator/deploy/runpod/worker.py serve
 ```
 
-For repeat deployments, build our CUDA image on a Linux x86_64 builder (or
-Docker Buildx targeting Linux amd64). This requires a running Docker daemon
-and downloads sizeable dependencies, but no models or credentials:
+After the chapter service starts, run `worker.py smoke` from another SSH session.
+The default config is `/workspace/epub-tts-narrator.remote.toml`; use
+`--config PATH` before the subcommand to override it. `prepare` resumes partial
+model downloads; `check` validates offline receipts; `serve` never downloads
+models. `smoke` has a ten-minute limit. Each smoke object uses a unique prefix
+and is deleted even if download verification fails.
+
+The launcher waits for native model readiness before starting the authenticated
+chapter service. Its public URL is `https://POD_ID-8081.proxy.runpod.net`; expose
+HTTP port **8081 only**, plus TCP 22 for SSH. Fish binds exclusively to
+`http://127.0.0.1:8080/v1/tts`. A filesystem lease prevents duplicate launchers
+from using the same data directory. Child process groups are terminated on
+failure or interruption. The CLI stops paid compute after its operation, even
+if the worker failed during installation or startup.
+
+## Optional reusable image
+
+The included Dockerfile can preinstall source and dependencies in an immutable
+image, with models and job state on `/workspace`. Build on a Linux x86_64
+builder or Docker Buildx with a running daemon:
 
 ```sh
 docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t YOUR-REGISTRY/epub-tts-narrator:YOUR-VERSION --push .
 ```
 
-The Dockerfile-specific allowlist excludes local secrets/audio. The image
-defaults to `sleep infinity` for deliberate setup. Once the persistent volume
-contains the prepared models and config, set the Pod container start command:
-
-```text
-/opt/epub-tts-narrator/.venv/bin/python -u /opt/epub-tts-narrator/deploy/runpod/worker.py serve
-```
-
-No SSH service is bundled in our image. Prepare the volume using the development
-Pod, then attach it when deploying the image. The launcher tears down both child
-process groups on failure or interruption. Run one worker per data directory;
-a startup lease prevents duplicate loads.
+Its build context allowlist excludes credentials, books, audio and model files.
+No SSH server is bundled. The image uses `/opt` for preinstalled immutable
+runtime files; those are restored from the image rather than a manual container
+installation. The lifecycle CLI uses the persistent source/SSH deployment
+instead. Do not mount `/workspace` over `/opt`.
 
 ## Pinned inference contract
 
-- Fish Speech source: `541566932abbaebcb0a40e562a1f846738383f38`.
+- Fish source: `541566932abbaebcb0a40e562a1f846738383f38`.
 - Drama 3 weights: `b2b5ee998034b2975720906c815e7fb0e9f007bd`.
 - CTranslate2 Whisper large-v3: `edaa852ec7e145841d8ffdb056a99866b5f0a478`.
-- Fish uses its own Python 3.12 environment and frozen CUDA 12.9 lock. The
-  chapter application and CPU recognition use a separate environment.
-- `fish_native_drama3` sends `single_chunk=true`, `use_memory_cache="on"`, and
-  the seed in the MessagePack body, preserving speaker-tagged references.
-  Native `top_k` is fixed at 30; use inference concurrency **1**.
-- Multiple chapter coordinators overlap non-GPU stages. This does not add
-  native GPU batching or load a second model copy.
+- Fish uses managed Python 3.12 and its frozen CUDA 12.9 lock. Chapter processing
+  and CPU recognition use a separate environment.
+- Native requests use `single_chunk=true`, `use_memory_cache="on"`, a seed in
+  the MessagePack body, and speaker-tagged references. Native `top_k` is fixed
+  at 30; inference concurrency is **1**. No second model copy is loaded.
+- Native compilation is disabled. Multiple chapter coordinators overlap CPU
+  stages without adding unsupported GPU batching.
 
 Primary references: [Fish installation](https://speech.fish.audio/install/),
 [Fish inference](https://speech.fish.audio/inference/),
-[Runpod ports](https://docs.runpod.io/pods/configuration/expose-ports),
-[Runpod storage](https://docs.runpod.io/storage/s3-api), and
+[Runpod Pod lifecycle](https://docs.runpod.io/pods/manage-pods),
+[Runpod ports](https://docs.runpod.io/pods/configuration/expose-ports), and
 [Ceph S3 API](https://docs.ceph.com/en/latest/radosgw/s3/).

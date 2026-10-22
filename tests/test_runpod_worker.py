@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import wave
 from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.config import DEFAULTS, load_config
@@ -83,6 +84,49 @@ class RunpodWorkerTests(unittest.TestCase):
         self.config["huggingface"]["api_key"] = "file-key"
         self.prepare()
         self.assertTrue(all(call.kwargs["token"] == "file-key" for call in self.downloader.call_args_list))
+
+    def test_prepared_models_are_reused_without_download_requests(self):
+        self.prepare()
+        self.downloader.reset_mock()
+        self.prepare()
+        self.downloader.assert_not_called()
+
+    def test_launcher_paths_follow_the_installed_checkout(self):
+        self.assertEqual(worker.APPLICATION_PYTHON, _path.parents[2] / ".venv/bin/python")
+        self.assertEqual(worker.FISH_SOURCE, _path.parents[3] / "fish-speech")
+
+    def test_runtime_installer_reuses_environments_without_package_resolution(self):
+        commands = self.root / "commands"
+        commands.mkdir()
+        log = self.root / "runtime.log"
+        fixtures = {
+            "uname": 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac',
+            "id": "echo 0",
+            "dpkg-query": "printf installed",
+            "apt-get": "exit 91",
+            "uv": "exit 92",
+        }
+        for name, source in fixtures.items():
+            executable = commands / name
+            executable.write_text("#!/bin/sh\n" + source + "\n")
+            executable.chmod(0o755)
+        app, fish = self.root / "app", self.root / "fish"
+        for directory in (app, fish):
+            python = directory / ".venv/bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + str(log) + "\"\n")
+            python.chmod(0o755)
+        (app / "pyproject.toml").write_text("[project]\nname = 'fixture'\n")
+        result = subprocess.run(
+            ["/bin/sh", str(_path.parent / "install.sh"), str(app), "runtime",
+             str(self.root / "runtime"), str(fish)], capture_output=True, text=True,
+            env={**os.environ, "PATH": str(commands) + ":" + os.environ.get("PATH", "")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        imports = log.read_text().splitlines()
+        self.assertEqual(len(imports), 2)
+        self.assertIn("faster_whisper", imports[0])
+        self.assertIn("torch", imports[1])
+        self.assertFalse((self.root / "runtime").exists())
 
     def test_example_config_loads_but_requires_replacing_predictable_application_key(self):
         template = _path.parent / "epub-tts-narrator.example.toml"
@@ -262,6 +306,84 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertNotIn("hf-file-secret", output.getvalue())
         self.assertNotIn("storage-file-secret", output.getvalue())
         self.assertIn("REDACTED", output.getvalue())
+
+    def publisher(self):
+        publisher = Mock()
+        publisher.bucket = "fixture-bucket"
+        missing = RuntimeError("not found")
+        missing.response = {"Error": {"Code": "NoSuchKey"}}
+        publisher.client.head_object.side_effect = missing
+        return publisher
+
+    def test_storage_smoke_removes_only_unique_object_after_hash_failure(self):
+        audio = self.root / "chapter.flac"
+        audio.write_bytes(b"compressed fixture")
+        publisher = self.publisher()
+        publisher.publish.return_value = {"size": audio.stat().st_size}
+        publisher.url.return_value = "https://storage.example/private-signature"
+        factory = Mock(return_value=publisher)
+        with self.assertRaisesRegex(RuntimeError, "checksum"):
+            worker.storage_smoke(self.config, audio, publisher_factory=factory,
+                                 download=lambda *_: "0" * 64)
+        self.assertTrue(factory.call_args.args[0]["prefix"].endswith("/deployment-smoke"))
+        job_id, name, _, checksum = publisher.publish.call_args.args
+        key = publisher.client.delete_object.call_args.kwargs["Key"]
+        self.assertEqual(key, "/".join((factory.call_args.args[0]["prefix"], job_id, checksum, name)))
+        publisher.client.head_object.assert_called_once_with(Bucket="fixture-bucket", Key=key)
+
+    def test_storage_smoke_cleans_up_an_upload_that_failed_head_validation(self):
+        audio = self.root / "chapter.m4a"
+        audio.write_bytes(b"aac fixture")
+        publisher = self.publisher()
+        publisher.publish.side_effect = RuntimeError("head check failed")
+        with self.assertRaisesRegex(RuntimeError, "head check failed"):
+            worker.storage_smoke(self.config, audio, publisher_factory=lambda _: publisher)
+        publisher.client.delete_object.assert_called_once()
+        publisher.url.assert_not_called()
+
+    def test_storage_smoke_reports_cleanup_failure(self):
+        audio = self.root / "chapter.flac"
+        audio.write_bytes(b"compressed fixture")
+        publisher = self.publisher()
+        publisher.publish.return_value = {"size": audio.stat().st_size}
+        publisher.client.delete_object.side_effect = RuntimeError("private storage detail")
+        with self.assertRaisesRegex(RuntimeError, "confirm deletion") as caught:
+            worker.storage_smoke(self.config, audio, publisher_factory=lambda _: publisher,
+                                 download=lambda *_: worker.file_hash(audio))
+        self.assertNotIn("private storage detail", str(caught.exception))
+
+    def test_smoke_authenticates_then_checks_speech_encodes_and_roundtrips_compressed_audio(self):
+        self.prepare()
+        from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
+        fetch = Mock(return_value={"protocol": PROTOCOL})
+        engine = Mock()
+        def generate(text, references, destination, seed):
+            self.assertEqual(references, [])
+            with wave.open(str(destination), "wb") as stream:
+                stream.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                stream.writeframes(b"\x10\x10" * 24000)
+        engine._request.side_effect = generate
+        verifier, roundtrip = Mock(), Mock()
+        def encode(command, **kwargs):
+            Path(command[-1]).write_bytes(b"fixture m4a")
+            return Mock(returncode=0)
+        with (patch("epub_tts_narrator.renderer.quality.validate_audio", return_value={"passed": True}),
+              patch.object(worker.subprocess, "run", side_effect=encode),
+              patch("sys.stdout", new=io.StringIO())):
+            worker.smoke(self.config, fetch=fetch, engine_factory=lambda *_: engine,
+                         verifier_factory=lambda *_: verifier, roundtrip=roundtrip)
+        self.assertEqual(fetch.call_args.kwargs["headers"], {"Authorization": "Bearer test-service-key"})
+        self.assertEqual([call.args[1].suffix for call in roundtrip.call_args_list], [".flac", ".m4a"])
+        self.assertEqual(list((self.root / "data/deployment-smoke").iterdir()), [])
+        engine.close.assert_called_once()
+        verifier.close.assert_called_once()
+
+    def test_smoke_rejects_incorrect_service_before_synthesis(self):
+        self.prepare()
+        engine_factory = Mock()
+        with self.assertRaisesRegex(RuntimeError, "not ready"):
+            worker.smoke(self.config, fetch=lambda *_, **__: {}, engine_factory=engine_factory)
+        engine_factory.assert_not_called()
 
 
 if __name__ == "__main__":

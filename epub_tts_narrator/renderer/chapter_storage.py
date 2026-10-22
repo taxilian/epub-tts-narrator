@@ -96,7 +96,8 @@ def stop_runpod(settings):
     if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id) or not key:
         raise ValueError("Runpod idle shutdown requires an explicit Pod ID and API key")
     request = Request(f"https://rest.runpod.io/v1/pods/{pod_id}/stop", method="POST", data=b"",
-                      headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+                      headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                               "User-Agent": "epub-tts-narrator/1"})
     try:
         with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=30) as response:
             if not 200 <= response.status < 300:

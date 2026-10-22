@@ -96,7 +96,7 @@ class ChapterClient:
 
     def request(self, method, path, payload=None):
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
-        headers = {**self.headers, "Accept": "application/json"}
+        headers = {**self.headers, "Accept": "application/json", "User-Agent": "epub-tts-narrator/1"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(self._url(path), data=data, headers=headers, method=method)

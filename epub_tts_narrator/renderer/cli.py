@@ -77,6 +77,8 @@ def parser():
     serve.add_argument("--config", type=Path, help="Global TOML file containing [engine] and [server] settings")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
+    from .runpod import add_parser as add_runpod_parser
+    add_runpod_parser(commands)
     return root
 
 
@@ -216,6 +218,9 @@ def main(argv=None):
     args = parser().parse_args(argv)
     engine = verifier = None
     try:
+        if args.command == "runpod":
+            from .runpod import run_command
+            return run_command(args)
         config = (load_config(args.config, require_verifier=False) if args.command in {"serve", "cache-report"}
                   else load_config(args.config))
         if args.command == "serve":
