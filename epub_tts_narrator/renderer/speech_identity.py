@@ -16,6 +16,7 @@ from .speech_text import trim_speech_text
 
 
 _DRAMA_ENGINES = frozenset({"drama3_mlx", "drama3_mlx_audio", "fish_http", "fish_tts_pool"})
+_ALIAS_ENGINE = "drama_speech_cache_alias"
 _ENGINE_PROVENANCE = frozenset({
     "checkpoint", "recommended_model_revision", "required_runtime_version",
     "required_runtime_revision", "packages", "min_audio_seconds", "completion_check",
@@ -26,20 +27,155 @@ _ENGINE_PROVENANCE = frozenset({
 def synthesis_engine_identity(identity):
     """Retain generation behavior while ignoring installation and guard metadata.
 
-    Actual runtime/adapter versions and all unknown fields remain meaningful.
+    Actual runtime/adapter versions and all unknown fields remain meaningful
+    unless the operator explicitly chooses a shared model-cache alias.
     Model content hashes supersede download revision metadata when available.
     Worker locations and scheduling are already omitted by the pool identity.
     """
     if not isinstance(identity, Mapping):
         raise ValueError("A synthesis engine identity must be an object")
+    alias = _model_alias(identity)
+    if alias is not None:
+        return {"engine": _ALIAS_ENGINE, "cache_model_alias": alias,
+                "sampling": _common_sampling(identity)}
+    return _concrete_engine_identity(identity)
+
+
+def _concrete_engine_identity(identity):
     result = deepcopy(dict(identity))
     if identity.get("engine") not in _DRAMA_ENGINES:
         return result
+    result.pop("cache_model_alias", None)
     for field in _ENGINE_PROVENANCE:
         result.pop(field, None)
     if result.get("checkpoint_files_sha256"):
         result.pop("model_revision", None)
     return result
+
+
+def _model_alias(engine):
+    if engine.get("engine") not in _DRAMA_ENGINES | {_ALIAS_ENGINE}:
+        return None
+    alias = engine.get("cache_model_alias")
+    return alias.strip() if isinstance(alias, str) and alias.strip() else None
+
+
+def _common_sampling(engine):
+    settings = (engine.get("sampling", {})
+                if engine.get("engine") in {"fish_tts_pool", "fish_http", _ALIAS_ENGINE}
+                else engine)
+    if not isinstance(settings, Mapping):
+        raise ValueError("Speech sampling settings must be an object")
+    return {key: settings.get(key, value) for key, value in (
+        ("temperature", 1.0), ("top_p", .9), ("top_k", 30), ("max_new_tokens", 2048))}
+
+
+def engines_compatible(saved_engine, current_engine, *, engine_metadata=None):
+    """Allow transport changes without weakening concrete local cache identity.
+
+    A pool's pinned revision is the operator's existing compatibility contract
+    for its workers. Cross-mode reuse uses that contract only for known models
+    with matching sampling; local-to-local reuse remains content/runtime exact.
+    Recorded concrete workers add stronger checks when returning to local mode.
+    An alias on the current engine explicitly accepts model/quantization changes
+    for that logical model, while retaining the common speech sampling settings.
+    """
+    if not isinstance(saved_engine, Mapping) or not isinstance(current_engine, Mapping):
+        return False
+    alias = _model_alias(current_engine)
+    if alias is not None:
+        if saved_engine.get("engine") not in _DRAMA_ENGINES | {_ALIAS_ENGINE}:
+            return False
+        # A saved alias takes precedence over its execution model. Falling back
+        # to both would silently make unrelated aliases transitively equivalent.
+        saved_label = _model_alias(saved_engine) or saved_engine.get("model")
+        return alias == saved_label and _common_sampling(saved_engine) == _common_sampling(current_engine)
+    saved, current = _concrete_engine_identity(saved_engine), _concrete_engine_identity(current_engine)
+    if saved == current:
+        return True
+    saved_pool = saved_engine.get("engine") == "fish_tts_pool"
+    current_pool = current_engine.get("engine") == "fish_tts_pool"
+    if saved_pool == current_pool:
+        return False
+    pool = saved_engine if saved_pool else current_engine
+    local = current_engine if saved_pool else saved_engine
+    declared = pool_contract_identity(pool)
+    actual = _pool_contract(local, require_revision=False)
+    if declared is None or actual is None or not _same_pool_inputs(declared, actual):
+        return False
+
+    exact_worker = False
+    if saved_pool and isinstance(engine_metadata, Mapping) and "worker_engine" in engine_metadata:
+        worker = engine_metadata["worker_engine"]
+        if not isinstance(worker, Mapping):
+            return False
+        if worker.get("engine") in {"drama3_mlx", "drama3_mlx_audio"}:
+            exact_worker = _concrete_engine_identity(worker) == _concrete_engine_identity(local)
+            worker_contract = _pool_contract(worker, require_revision=False)
+            if (not exact_worker or worker_contract is None
+                    or not _same_pool_inputs(declared, worker_contract)):
+                return False
+    return actual["model_revision"] is not None or exact_worker
+
+
+def _same_pool_inputs(declared, actual):
+    return (declared["model"] == actual["model"]
+            and declared["sampling"] == actual["sampling"]
+            and actual["model_revision"] in {None, declared["model_revision"]})
+
+
+def _pool_contract(engine, *, require_revision):
+    from .drama3_models import DRAMA3_MODELS
+
+    if not isinstance(engine, Mapping):
+        return None
+    kind = engine.get("engine")
+    if kind not in {"fish_tts_pool", "drama3_mlx", "drama3_mlx_audio"}:
+        return None
+    model = DRAMA3_MODELS.get(engine.get("model"))
+    if model is None:
+        return None
+    if ((kind == "drama3_mlx" and model.runtime != "sogni")
+            or (kind == "drama3_mlx_audio" and model.runtime != "mlx_audio")
+            or (kind == "fish_tts_pool" and engine.get("contract_version", 1) != 1)):
+        return None
+    revision = engine.get("model_revision")
+    if not isinstance(revision, str) or not revision.strip():
+        if require_revision:
+            return None
+        revision = None
+    settings = engine.get("sampling", {}) if kind == "fish_tts_pool" else engine
+    if not isinstance(settings, Mapping):
+        return None
+    sampling = _common_sampling(engine)
+    # MLX-Audio quantization is already part of the model ID; the Sogni experts
+    # setting changes its model representation. min_audio_seconds is a gate.
+    if model.runtime == "sogni":
+        sampling["experts"] = settings.get("experts", "q8")
+    return {"model": model.repo, "model_revision": revision, "sampling": sampling}
+
+
+def pool_contract_identity(engine):
+    """Project a supported engine onto its explicit pool compatibility contract.
+
+    Unknown actual local revisions return None. Recommended download revisions
+    never establish which weights produced a recording.
+    """
+    return _pool_contract(engine, require_revision=True)
+
+
+def generation_compatible(saved_identity, current_identity, *, saved_engine=None,
+                          current_engine=None, engine_metadata=None):
+    """Compare audible inputs, permitting a compatible local/pool transition."""
+    if not isinstance(saved_identity, Mapping) or not isinstance(current_identity, Mapping):
+        return False
+    if ({key: value for key, value in saved_identity.items() if key != "engine"}
+            != {key: value for key, value in current_identity.items() if key != "engine"}):
+        return False
+    return engines_compatible(
+        saved_identity.get("engine") if saved_engine is None else saved_engine,
+        current_identity.get("engine") if current_engine is None else current_engine,
+        engine_metadata=engine_metadata)
 
 
 def voice_conditioning_identity(voice):

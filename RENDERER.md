@@ -202,7 +202,34 @@ Existing saved Drama 3 references work with either runtime. MLX-Audio does not
 create voices from descriptions: use saved voices, import recordings, or configure
 Gemini, ElevenLabs, or Qwen3 VoiceDesign for missing voices. The normal `auto`
 setting uses Gemini when its key is present. Switching models invalidates generated
-speech caches while retaining the saved voices.
+speech caches by default while retaining the saved voices.
+
+To keep already verified speech when changing models, add an optional
+`cache_model_alias` to the existing engine table. For example, when moving from
+the original model to the 4-bit checkpoint:
+
+```toml
+[engine]
+type = "drama3_mlx"
+model = "mlx-community/fish-audio-drama-3-4bit"
+checkpoint = "./models/fish-audio-drama-3-4bit"
+cache_model_alias = "fishaudio/drama-3"
+```
+
+Keep your existing sampling settings in this table. The alias explicitly declares
+the models, revisions, quantization settings, and runtimes interchangeable for
+successful cached speech. Text, selected voice references, delivery, shared sampling
+settings, seed, and output sample rate must still match. New or changed passages
+use `engine.model`; the alias does not change the model being loaded or reported
+in generation provenance. It applies to the built-in Drama 3 engine, including
+quantized models and render pools.
+
+Use the previous model ID as the alias to reuse recordings made before this setting
+existed. Compatible saved successes are matched automatically on the next render;
+no migration command or reanalysis is needed. You can instead choose a new group
+name and keep it consistent across future model changes, but an arbitrary new name
+cannot match older recordings from unrelated model IDs. Without this option, the
+normal model, revision, quantization, and runtime safeguards remain in force.
 
 The 4-bit checkpoint passed a short local narration/dialogue benchmark with lower
 time and memory than Sogni q8. The 8-bit and 3-bit HQ options have config and adapter
@@ -285,7 +312,7 @@ For a compatible hosted deployment, add another `fish_http` worker with its full
 
 The built-in server implements this reference-based WAV rendering subset, including JSON/base64 requests. It does not implement Fish's voice-management API, saved remote `reference_id` lookup, or streaming PCM. A cloud deployment must accept this same wire format; merely having a route named `/v1/tts` is insufficient. Some SGLang/vLLM deployments use a different reference-audio schema and need an adapter. Saved character references remain local to the coordinator, and only the voice recordings and requested passages are sent to configured workers.
 
-Within pool mode, changing worker addresses, credentials, order, or concurrency retains compatible accepted clips. `render_pool.model_revision` identifies the deployed model version; change it when replacing the model behind an endpoint. Sampling or voice changes invalidate the affected requests. Pool mode has a distinct synthesis identity from the original single-local mode, so first enabling it changes the cache identity; start it at a new book or finish an existing single-local run first if you need to avoid regeneration. Remote endpoint models and settings are recorded as execution provenance, while acceptance remains attached to the returned audio bytes. A transport failure stops after bounded retries; rerunning retries incomplete requests and retains accepted work. Verification thresholds are unchanged.
+Changing worker addresses, credentials, order, or concurrency retains compatible accepted clips. Switching between direct local generation and a pool also reuses accepted speech when the actual model revision and synthesis settings match; the transport itself does not make speech different. `render_pool.model_revision` identifies the deployed model version; change it when replacing the model behind an endpoint. An unknown model revision is not assumed compatible unless the concrete worker identity establishes the match. Sampling or voice changes invalidate the affected requests. Use `engine.cache_model_alias` as described above when deliberately sharing successful speech across different model versions or quantization. Remote endpoint models and settings remain execution provenance, while acceptance remains attached to the returned audio bytes. A transport failure stops after bounded retries; rerunning retries incomplete requests and retains accepted work. Verification thresholds are unchanged.
 
 Validation includes two real HTTP requests to the local Drama 3 model using the existing demonstration voices: a 2.60-second single-voice passage and a 4.04-second two-character passage. Both passed strict Whisper text and acoustic checks, and the original reference checksums were unchanged. The report is `output/distributed-render-pilot-paoj0g29/report.json`. Automated tests additionally exercise two HTTP workers through chapter/M4B assembly and offline resume. The real-model pilot used loopback on one Mac; a second machine and hosted Fish service have not yet been exercised.
 
@@ -597,6 +624,11 @@ To choose separate work and publication directories for one run, add `--work-dir
 Rerun the same `render` command after updating the scripts or selected voices. It reuses matching verified clips and unchanged completed chapters, generates the changed passages, and rebuilds the affected chapter files, synchronization data, and M4B in the existing output directory. Moving speech, renumbering segments, changing source IDs or offsets, and editing attribution explanations do not regenerate an otherwise identical performance. Chapter assembly and synchronization use the current locations. An unchanged local render also skips final encoding. Older published outputs without the new publication key are repackaged once from their compatible cached audio.
 
 Successful speech is indexed in `render-work/speech-cache/<content-key>.json`. For the built-in Drama/Fish engines, this key binds the prepared text and applied delivery controls, reference audio checksum and transcript, actual model/runtime identity and sampling settings, base seed, and output sample rate. Paragraph performances also bind their ordered text and speaker-reference mapping. Character labels, profile/designer metadata, verification settings, source positions, installation paths, and download requirements are excluded. Unknown plugins retain their engine/voice inputs conservatively because they may interpret additional fields. Original requests, take numbers, seeds, and reports remain under `render-work/clips/<original-request-hash>/` as provenance; those directory names are not the content lookup key. New generation seeds also use the content identity.
+
+The optional `engine.cache_model_alias` replaces the strict model/runtime component
+for compatibility matching, allowing accepted speech from the named model or alias
+to survive a deliberate model change. It never makes rejected or unverified audio
+eligible, and the actual generation identity remains in the original request.
 
 Only successful, checksum-verified recordings enter this index. Compatible legacy accepted takes are indexed automatically when their exact saved voices can be resolved; unresolved historical voice bindings are never guessed. Index entries bind both the acceptance file and waveform checksums. Failed takes remain diagnostics, not cache hits. A passage moved to another chapter can reuse its waveform while retaining separate current source mappings and chapter timing.
 

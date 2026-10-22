@@ -3,6 +3,7 @@
 from contextlib import redirect_stderr
 from importlib.metadata import PackageNotFoundError
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -58,6 +59,35 @@ class PrimaryModelConfigurationTests(unittest.TestCase):
         self.assertNotIn("temperatur", config["engine"])
         self.assertEqual(config["engine"]["model"], FOUR_BIT.repo)
         self.assertEqual(config["engine"]["temperature"], 1.0)
+
+    def test_cache_alias_loads_without_replacing_selected_model_or_checkpoint(self):
+        diagnostics = io.StringIO()
+
+        with redirect_stderr(diagnostics):
+            config = self.config(engine_extra='cache_model_alias=" fishaudio/drama-3 "\n')
+
+        self.assertEqual(diagnostics.getvalue(), "")
+        self.assertEqual(config["engine"]["cache_model_alias"], "fishaudio/drama-3")
+        self.assertEqual(config["engine"]["model"], FOUR_BIT.repo)
+        self.assertEqual(config["engine"]["checkpoint"], str(self.root / "checkpoint"))
+        self.assertEqual(config["render_pool"]["model_revision"], FOUR_BIT.revision)
+
+    def test_cache_alias_defaults_to_strict_identity_without_environment_settings(self):
+        with patch.dict("os.environ", {"CACHE_MODEL_ALIAS": "fishaudio/drama-3"}):
+            config = self.config()
+
+        self.assertIsNone(config["engine"]["cache_model_alias"])
+
+    def test_empty_malformed_or_control_character_cache_alias_is_rejected(self):
+        for value in ("", "  ", True, 42, [], "group\nsecond", "group\x1b", "group\x7f"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "engine.cache_model_alias"):
+                self.config(engine_extra=f'cache_model_alias={json.dumps(value)}\n')
+
+    def test_custom_plugin_cannot_silently_claim_builtin_cache_alias_support(self):
+        with self.assertRaisesRegex(ValueError, "cache_model_alias.*drama3_mlx"):
+            self.config(model="plugin/model", engine_extra=(
+                'type="custom_plugin"\ncache_model_alias="fishaudio/drama-3"\n'
+            ))
 
     def test_invalid_model_is_rejected_instead_of_warned_and_replaced_with_default(self):
         diagnostics = io.StringIO()

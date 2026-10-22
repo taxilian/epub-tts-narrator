@@ -17,6 +17,7 @@ from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 DEFAULTS = {
     "engine": {
         "type": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL, "checkpoint": None, "experts": "q8",
+        "cache_model_alias": None,
         "temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048, "options": {},
     },
     "verification": {
@@ -297,6 +298,14 @@ def load_config(path=None, *, require_verifier=True):
             raise ValueError("Unknown configuration section or invalid table")
         allowed = QUALITY_DEFAULTS if section == "quality" else result[section]
         result[section].update(known_settings(values, allowed, section=section))
+    alias = result["engine"]["cache_model_alias"]
+    if alias is not None:
+        if (not isinstance(alias, str) or not alias.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in alias)):
+            raise ValueError("engine.cache_model_alias must be a nonempty string without control characters")
+        if result["engine"]["type"] != "drama3_mlx":
+            raise ValueError("engine.cache_model_alias requires engine.type = drama3_mlx")
+        result["engine"]["cache_model_alias"] = alias.strip()
     if result["engine"]["type"] == "drama3_mlx":
         selected = get_drama3_model(result["engine"]["model"])
         if "model_revision" not in supplied.get("render_pool", {}):

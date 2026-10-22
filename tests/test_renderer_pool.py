@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.renderer.bundle import load_bundle
-from epub_tts_narrator.renderer.common import read_json
+from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.engines import DRAMA3_MODEL_REVISION, EngineError
 from epub_tts_narrator.renderer.pool import RenderPool, create_render_engine
@@ -45,6 +45,46 @@ def pool_config(*workers):
 class LocalFixtureEngine(FixtureEngine):
     identity = {"engine": "drama3_mlx", "model": "fishaudio/drama-3", "fixture": True}
     capabilities = {**FixtureEngine.capabilities, "multi_speaker": False}
+
+
+class ContractLocalFixtureEngine(ParagraphFixtureEngine):
+    """PCM-only engine carrying an actual local adapter's compatibility inputs."""
+
+    voice_binding_identity = LocalFixtureEngine.identity
+
+    def __init__(self, config, transcripts):
+        super().__init__()
+        self.fixture_transcripts = transcripts
+        contract = RenderPool(config).identity
+        self.identity = {
+            "engine": "drama3_mlx", "model": contract["model"], "adapter_version": 1,
+            "runtime": "Sogni-AI/drama3-mlx", "installed_version": "fixture-version",
+            "installed_revision": "fixture-runtime-revision",
+            "model_revision": contract["model_revision"],
+            "checkpoint": config["engine"]["checkpoint"],
+            "checkpoint_files_sha256": {"model.safetensors": "a" * 64},
+            "single_chunk": True, "output_encoding": "wav-float32-mono",
+            **contract["sampling"],
+        }
+
+
+class QuantizedLocalFixtureEngine(ParagraphFixtureEngine):
+    voice_binding_identity = {"engine": "drama3_mlx", "model": "fishaudio/drama-3"}
+
+    def __init__(self, config, transcripts):
+        super().__init__()
+        self.fixture_transcripts = transcripts
+        self.identity = {
+            "engine": "drama3_mlx_audio", "adapter_version": 1,
+            "model": "mlx-community/fish-audio-drama-3-4bit", "runtime": "mlx-audio",
+            "model_revision": "quantized-fixture-revision", "installed_version": "0.6.1",
+            "checkpoint_files_sha256": {"model-00001.safetensors": "c" * 64},
+            "stream": False, "chunking": "mlx-audio-fish_drama3",
+            "reference_decoder": "mlx_audio.audio_io.read-float32-mono",
+            "output_encoding": "wav-float32-mono",
+            **{key: config["engine"][key] for key in
+               ("temperature", "top_p", "top_k", "max_new_tokens")},
+        }
 
 
 class PoolUnitTests(unittest.TestCase):
@@ -363,6 +403,221 @@ class PoolWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RenderBlocked, "is stale"):
                 assemble(self.bundle, self.config, notify=lambda _: None)
             self.config[section][key] = old
+
+    def test_local_pool_local_switch_preserves_completed_book_without_loading_workers(self):
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+        remote_workers = deepcopy(self.config["render_pool"]["workers"])
+        self.config["render_pool"]["workers"] = []
+        first = render(self.bundle, self.config, local, self.verifier, notify=lambda _: None)
+        published = {path: file_hash(path) for path in (self.root / "output").rglob("*")
+                     if path.is_file()}
+        calls = len(local.speech_calls), len(local.dialogue_calls), len(self.verifier.calls)
+
+        self.config["render_pool"]["workers"] = remote_workers
+        remote_only = RenderPool(self.config)
+        with patch("epub_tts_narrator.renderer.pool._Worker.engine", side_effect=AssertionError("loaded worker")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("reverified speech")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("repackaged audiobook")):
+            pooled = render(self.bundle, self.config, remote_only, self.verifier, notify=lambda _: None)
+            self.config["render_pool"]["workers"] = []
+            returned = render(self.bundle, self.config, local, self.verifier, notify=lambda _: None)
+
+        self.assertEqual(first["audio"]["chapters"], pooled["audio"]["chapters"])
+        self.assertEqual(first["audio"]["chapters"], returned["audio"]["chapters"])
+        self.assertEqual(calls, (len(local.speech_calls), len(local.dialogue_calls), len(self.verifier.calls)))
+        self.assertEqual(published, {path: file_hash(path) for path in (self.root / "output").rglob("*")
+                                     if path.is_file()})
+
+    def test_local_and_pool_reuse_indexed_and_legacy_successes_in_both_directions(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        plan = make_render_plan(self.bundle, self.config)
+        chunk = next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"])
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in plan["voice_ids"]}
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+
+        for origin in ("local", "pool"):
+            for indexed in (False, True):
+                with self.subTest(origin=origin, indexed=indexed):
+                    work = self.root / f"switch-{origin}-{indexed}"
+                    start, destination = (local, self.pool) if origin == "local" else (self.pool, local)
+                    first = _render_chapter_chunks({"chunks": [chunk]}, voices, start,
+                        start.identity, self.verifier, self.config, work, notify=lambda _: None)
+                    if not indexed:
+                        for path in (work / "speech-cache").glob("*.json"):
+                            path.unlink()
+                    count = len(self.verifier.calls)
+
+                    with patch.object(destination, "synthesize", side_effect=AssertionError("regenerated compatible speech")):
+                        resumed = _render_chapter_chunks({"chunks": [chunk]}, voices, destination,
+                            destination.identity, self.verifier, self.config, work, notify=lambda _: None)
+
+                    self.assertEqual(resumed, first)
+                    self.assertEqual(len(self.verifier.calls), count)
+
+    def test_pool_model_revision_and_sampling_changes_do_not_reuse_local_speech(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        plan = make_render_plan(self.bundle, self.config)
+        chunk = next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"])
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in plan["voice_ids"]}
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+
+        for section, key, value in (("engine", "temperature", .3),
+                                   ("render_pool", "model_revision", "new-model-revision")):
+            with self.subTest(change=key):
+                work = self.root / f"changed-{key}"
+                first = _render_chapter_chunks({"chunks": [chunk]}, voices, local,
+                    local.identity, self.verifier, self.config, work, notify=lambda _: None)
+                config = deepcopy(self.config)
+                config[section][key] = value
+                changed = RenderPool(config)
+                for entry, engine in zip(changed._workers, self.engines):
+                    entry._engine = engine
+                count = sum(len(engine.speech_calls) for engine in self.engines)
+
+                second = _render_chapter_chunks({"chunks": [chunk]}, voices, changed,
+                    changed.identity, self.verifier, config, work, notify=lambda _: None)
+
+                self.assertEqual(sum(len(engine.speech_calls) for engine in self.engines), count + 1)
+                self.assertNotEqual(first[0][0]["wav_path"], second[0][0]["wav_path"])
+                self.assertTrue(second[1][0]["report"]["passed"])
+
+    def test_pool_local_worker_provenance_preserves_local_weight_and_runtime_invalidation(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        for change, value in (("checkpoint_files_sha256", {"model.safetensors": "b" * 64}),
+                              ("installed_revision", "different-runtime-revision")):
+            with self.subTest(change=change):
+                local = ContractLocalFixtureEngine(self.config, self.fixtures)
+                for engine in self.engines:
+                    engine.identity = deepcopy(local.identity)
+                self.config["render"]["work_dir"] = str(self.root / change)
+                self.chapters()
+                local.identity[change] = value
+                self.config["render_pool"]["workers"] = []
+
+                self.chapters(local)
+
+                self.assertGreater(len(local.speech_calls), 0)
+                self.config["render_pool"]["workers"] = [worker("first"), worker("second")]
+
+    def test_explicit_model_alias_preserves_completed_book_across_quantized_runtime(self):
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+        self.config["render_pool"]["workers"] = []
+        first = render(self.bundle, self.config, local, self.verifier, notify=lambda _: None)
+        published = {path: file_hash(path) for path in (self.root / "output").rglob("*")
+                     if path.is_file()}
+        config = deepcopy(self.config)
+        config["engine"].update(model="mlx-community/fish-audio-drama-3-4bit",
+                                cache_model_alias="fishaudio/drama-3")
+        quantized = QuantizedLocalFixtureEngine(config, self.fixtures)
+
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("reverified speech")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("repackaged audiobook")):
+            assembled = assemble(self.bundle, config, notify=lambda _: None)
+            resumed = render(self.bundle, config, quantized, self.verifier, notify=lambda _: None)
+
+        self.assertEqual(first["audio"]["chapters"], assembled["audio"]["chapters"])
+        self.assertEqual(first["audio"]["chapters"], resumed["audio"]["chapters"])
+        self.assertEqual(quantized.speech_calls, [])
+        self.assertEqual(quantized.dialogue_calls, [])
+        self.assertEqual(published, {path: file_hash(path) for path in (self.root / "output").rglob("*")
+                                     if path.is_file()})
+        config["engine"]["temperature"] = .3
+        with self.assertRaisesRegex(RenderBlocked, "is stale"):
+            assemble(self.bundle, config, notify=lambda _: None)
+
+    def test_only_alias_matching_original_model_reuses_its_verified_speech(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        plan = make_render_plan(self.bundle, self.config)
+        chunk = next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"])
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in plan["voice_ids"]}
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+
+        for number, alias in enumerate((None, "some-other-model", "fishaudio/drama-3")):
+            with self.subTest(alias=alias):
+                work = self.root / f"alias-{number}"
+                first = _render_chapter_chunks({"chunks": [chunk]}, voices, local,
+                    local.identity, self.verifier, self.config, work, notify=lambda _: None)
+                config = deepcopy(self.config)
+                config["engine"]["model"] = "mlx-community/fish-audio-drama-3-4bit"
+                if alias is not None:
+                    config["engine"]["cache_model_alias"] = alias
+                quantized = QuantizedLocalFixtureEngine(config, self.fixtures)
+
+                second = _render_chapter_chunks({"chunks": [chunk]}, voices, quantized,
+                    quantized.identity, self.verifier, config, work, notify=lambda _: None)
+
+                if alias == "fishaudio/drama-3":
+                    self.assertEqual(quantized.speech_calls, [])
+                    self.assertEqual(first, second)
+                else:
+                    self.assertEqual(len(quantized.speech_calls), 1)
+                    self.assertNotEqual(first[0][0]["wav_path"], second[0][0]["wav_path"])
+
+    def test_first_assembly_with_model_alias_preserves_actual_saved_generation_provenance(self):
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+        self.config["render_pool"]["workers"] = []
+        self.chapters(local)
+        self.assertFalse((self.root / "output" / "render.json").exists())
+        config = deepcopy(self.config)
+        config["engine"].update(model="mlx-community/fish-audio-drama-3-4bit",
+                                cache_model_alias="fishaudio/drama-3")
+        count = len(self.verifier.calls)
+
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("reverified speech")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")):
+            result = assemble(self.bundle, config, notify=lambda _: None)
+
+        published = read_json(self.root / "output" / "render.json")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(published["engine"], local.identity)
+        self.assertEqual(len(self.verifier.calls), count)
+        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+
+    def test_model_alias_does_not_reuse_changed_sampling_text_or_reference(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        plan = make_render_plan(self.bundle, self.config)
+        chunk = next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"])
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in plan["voice_ids"]}
+        local = ContractLocalFixtureEngine(self.config, self.fixtures)
+
+        for change in ("sampling", "text", "reference"):
+            with self.subTest(change=change):
+                work = self.root / f"alias-change-{change}"
+                first = _render_chapter_chunks({"chunks": [chunk]}, voices, local,
+                    local.identity, self.verifier, self.config, work, notify=lambda _: None)
+                config = deepcopy(self.config)
+                config["engine"].update(model="mlx-community/fish-audio-drama-3-4bit",
+                                        cache_model_alias="fishaudio/drama-3")
+                changed_chunk, changed_voices = deepcopy(chunk), dict(voices)
+                if change == "sampling":
+                    config["engine"]["temperature"] = .3
+                elif change == "text":
+                    changed_chunk["spoken_text"] += " More words."
+                    changed_chunk["segment"]["text"] += " More words."
+                    changed_chunk["segment"]["end"] += len(" More words.")
+                    changed_chunk["source_ranges"][-1]["end"] += len(" More words.")
+                else:
+                    voice_id = chunk["segment"]["voice_id"]
+                    replacement_store = VoiceStore(self.root / "replacement-voices", "pool-fixture")
+                    reference = self.root / "replacement-reference.wav"
+                    local._write("A new voice reference.", reference, 237)
+                    replacement_store.publish(voice_id, voices[voice_id]["profile"], reference,
+                        "A new voice reference.", local.voice_binding_identity, {"passed": True}, {})
+                    changed_voices[voice_id] = replacement_store.load(voice_id)
+                quantized = QuantizedLocalFixtureEngine(config, self.fixtures)
+
+                second = _render_chapter_chunks({"chunks": [changed_chunk]}, changed_voices,
+                    quantized, quantized.identity, self.verifier, config, work, notify=lambda _: None)
+
+                self.assertEqual(len(quantized.speech_calls), 1)
+                self.assertNotEqual(first[0][0]["wav_path"], second[0][0]["wav_path"])
+                self.assertTrue(second[1][0]["report"]["passed"])
 
     def test_transient_generation_errors_resume_after_repair(self):
         request = {"kind": "fixture", "engine": self.pool.identity}

@@ -678,9 +678,20 @@ def _lock_book_audio(bundle):
     return lock
 
 
+def _cache_engine_identity(engine_identity, config):
+    """Attach explicit reuse policy without changing actual model provenance."""
+    identity = deepcopy(engine_identity)
+    identity.pop("cache_model_alias", None)
+    alias = config["engine"].get("cache_model_alias")
+    if alias:
+        identity["cache_model_alias"] = alias
+    return identity
+
+
 def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
     request = {
-        "kind": "speech", "engine": engine_identity, "voice_asset_hash": voice["asset_hash"],
+        "kind": "speech", "engine": _cache_engine_identity(engine_identity, config),
+        "voice_asset_hash": voice["asset_hash"],
         "chunk": chunk, "base_seed": config["render"]["seed"],
         "sample_rate": config["render"]["sample_rate"],
     }
@@ -690,7 +701,8 @@ def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
 
 
 def _paragraph_request(chunk, voices, engine_identity, config):
-    return {"kind": "paragraph_speech", "version": 1, "engine": engine_identity,
+    return {"kind": "paragraph_speech", "version": 1,
+            "engine": _cache_engine_identity(engine_identity, config),
             "chunk": chunk, "base_seed": config["render"]["seed"],
             "sample_rate": config["render"]["sample_rate"],
             "voice_assets": {speaker["voice_id"]: voices[speaker["voice_id"]]["asset_hash"]
@@ -702,6 +714,10 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
             for speaker in chunk_speakers(chunk)}
     engine_config = dict(config["engine"])
+    # The optional alias is enforced by the engine compatibility comparison;
+    # omitting it must preserve old configuration hashes and checkpoints.
+    engine_config.pop("cache_model_alias", None)
+    engine_identity = _cache_engine_identity(engine_identity, config)
     # The original model was implicit before engine.model existed. Its explicit
     # default must not invalidate already completed chapter checkpoints.
     from .drama3_models import DEFAULT_DRAMA3_MODEL
@@ -734,8 +750,28 @@ def _same_chapter_audio_context(saved, current):
     # chapter_hash still binds this chapter's full plan. A revision elsewhere
     # changes bundle_hash without changing any of this chapter's audio inputs.
     ignored = {"verifier", "verification_config_hash", "quality", "quality_version", "bundle_hash"}
+    from .speech_identity import engines_compatible
+    old_engine, new_engine = saved["engine"], current["engine"]
+    routing_change = ((old_engine.get("engine") == "fish_tts_pool")
+                      != (new_engine.get("engine") == "fish_tts_pool"))
+    if routing_change or new_engine.get("cache_model_alias"):
+        if not engines_compatible(old_engine, new_engine):
+            return False
+        ignored.update({"engine", "engine_config_hash"})
     return ({key: value for key, value in saved.items() if key not in ignored}
             == {key: value for key, value in current.items() if key not in ignored})
+
+
+def _saved_chapter_engines_match(work, record, current_engine):
+    """Check actual worker provenance before choosing chapter reuse over rendering."""
+    from .speech_identity import engines_compatible
+    for accepted in record["acceptance"]:
+        for lane in accepted.get("speaker_lanes", [accepted]):
+            saved = read_json(regular_file(Path(work) / "clips" / lane["request_hash"] / "accepted.json"))
+            if not engines_compatible(saved["request"]["engine"], current_engine,
+                                      engine_metadata=saved.get("engine_metadata")):
+                return False
+    return True
 
 
 def _has_accepted_verification(record):
@@ -918,7 +954,15 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
     if (digest(previous) if previous is not None else None) != expected:
         raise RenderBlocked("Published output changed during rendering; rerun to use its current state")
     key = publication_key(bundle, config, plan, voices, rendered, acceptance, engine_identity, verifier_identity)
-    if previous is not None and previous.get("publication_key") == key:
+    unchanged = previous is not None and previous.get("publication_key") == key
+    if previous is not None and not unchanged:
+        # If all actual chapter audio and publication inputs are unchanged,
+        # scheduling or an explicit model alias need not re-encode the book.
+        from .speech_identity import engines_compatible
+        if engines_compatible(previous.get("engine"), _cache_engine_identity(engine_identity, config)):
+            unchanged = previous.get("publication_key") == publication_key(
+                bundle, config, plan, voices, rendered, acceptance, previous["engine"], verifier_identity)
+    if unchanged:
         notify(f"Audiobook unchanged; reusing {output / 'book.m4b'}")
         return previous
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
@@ -1036,7 +1080,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         # Duplicate logical jobs must never race over the same attempt files.
         with lock:
             try:
-                cached = speech_cache.find(identity)
+                cached = speech_cache.find(identity, request=request)
                 if cached is not None:
                     if not config["render"].get("keep_intermediate_audio", False):
                         from .cleanup import clean_take_intermediates
@@ -1267,7 +1311,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
             if (saved is not None and _same_chapter_audio_context(saved["context"], context)
-                    and _saved_chapter_clips_present(work, saved)):
+                    and _saved_chapter_clips_present(work, saved)
+                    and _saved_chapter_engines_match(work, saved, context["engine"])):
                 composed, chapter_acceptance = _restore_chapter(
                     work, chapter, saved, context, voices, config, speech_cache=speech_cache)
                 notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
@@ -1337,15 +1382,33 @@ def assemble(bundle, config, *, notify=print):
                                 + ". Run render --chapters-only first.")
         rendered, acceptance = [], []
         identities = None
+        publication_provenance = None
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
         for chapter, record in zip(plan["chapters"], records):
             saved = record["context"]
-            current = (saved["engine"], saved["verifier"])
-            if identities is not None and current[0] != identities[0]:
+            current_engine = _cache_engine_identity(saved["engine"], config)
+            if current_engine.get("cache_model_alias"):
+                # Assembly has no live engine identity. Apply the requested
+                # model/sampling so alias reuse cannot hide changed settings.
+                from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
+                selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
+                current_engine["model"] = selected.repo
+                if current_engine.get("engine") == "fish_tts_pool":
+                    from .pool import pool_sampling
+                    current_engine["sampling"] = pool_sampling(config)
+                else:
+                    current_engine["engine"] = "drama3_mlx" if selected.runtime == "sogni" else "drama3_mlx_audio"
+                    for key, default in (("temperature", 1.0), ("top_p", .9),
+                                         ("top_k", 30), ("max_new_tokens", 2048)):
+                        current_engine[key] = config["engine"].get(key, default)
+            current = (current_engine, saved["verifier"])
+            from .speech_identity import engines_compatible
+            if identities is not None and not engines_compatible(identities[0], current[0]):
                 raise RenderBlocked("Completed chapters used different synthesis models; rerun render "
                                     "--chapters-only with consistent settings before assembly.")
             identities = current
+            publication_provenance = (saved["engine"], saved["verifier"])
             context = _chapter_context(bundle, chapter, config, voices, *identities)
             # Encoding is independent of verified speech and its PCM timeline.
             # Allow repackaging as MP3 or at a different bitrate without models;
@@ -1366,7 +1429,8 @@ def assemble(bundle, config, *, notify=print):
             notify(f"Verified saved chapter {chapter['number']} / {len(bundle['chapters'])}: {chapter['title']}")
         if identities is None:
             raise RenderBlocked("No chapters selected for assembly")
-        result = _package(bundle, config, plan, store, voices, rendered, acceptance, *identities, notify=notify)
+        result = _package(bundle, config, plan, store, voices, rendered, acceptance,
+                          *publication_provenance, notify=notify)
         write_json(work / "status.json", {"status": "complete", "plan_hash": digest(plan),
                                           "output": config["render"]["output_dir"]})
         return result

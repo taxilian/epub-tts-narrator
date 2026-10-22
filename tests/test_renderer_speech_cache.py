@@ -159,6 +159,19 @@ class SpeechCacheTests(unittest.TestCase):
             self.cache.remember(other_identity, accepted)
         self.assertIsNone(self.cache.find(other_identity))
 
+    def test_incompatible_engine_audio_is_not_reused_or_inspected_as_a_candidate(self):
+        audio, accepted = self.accepted()
+        self.cache.remember(self.identity, accepted)
+        self.write_wave(audio, b"\x02\x00")
+        different = deepcopy(self.request)
+        different["engine"]["model"] = "another-model"
+        self.assertIsNone(self.cache.find(self.cache.identity(different), request=different))
+        # Explicitly opting into that prior model makes its bytes relevant,
+        # and a changed waveform must still fail the normal integrity check.
+        different["engine"]["cache_model_alias"] = self.request["engine"]["model"]
+        with self.assertRaisesRegex(ValueError, "audio changed"):
+            self.cache.find(self.cache.identity(different), request=different)
+
     def test_another_cache_publication_is_visible_after_an_earlier_miss(self):
         second = self.new_cache()
         self.assertIsNone(self.cache.find(self.identity))

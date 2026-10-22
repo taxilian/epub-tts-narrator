@@ -94,6 +94,24 @@ class ModelRuntimeTests(unittest.TestCase):
                 self.assertTrue(requires_mlx(engine))
                 self.assertFalse(requires_mlx(SimpleNamespace(identity=engine.identity)))
 
+    def test_optional_cache_alias_preserves_actual_adapter_selection_and_provenance(self):
+        for model in (DEFAULT_DRAMA3_MODEL, FOUR_BIT):
+            expected_type = Drama3MLXEngine if model == DEFAULT_DRAMA3_MODEL else MLXAudioDrama3Engine
+            settings = self.engine_config(model)
+            settings.pop("cache_model_alias")
+            original = create_engine(settings)
+            self.addCleanup(original.close)
+            for alias in (None, "fishaudio/drama-3"):
+                with self.subTest(model=model, alias=alias):
+                    settings["cache_model_alias"] = alias
+
+                    engine = create_engine(settings)
+                    self.addCleanup(engine.close)
+
+                    self.assertIsInstance(engine, expected_type)
+                    self.assertEqual(engine.identity, original.identity)
+                    self.assertEqual(engine.identity["model"], model)
+
     def test_switching_to_quantized_model_reuses_the_original_immutable_reference(self):
         store = VoiceStore(self.root / "voices", "same-series")
         source = self.root / "reference.wav"

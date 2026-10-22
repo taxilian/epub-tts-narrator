@@ -683,7 +683,7 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
         return engine
     allowed = {
         "name", "type", "model", "checkpoint", "experts", "temperature", "top_p", "top_k",
-        "max_new_tokens", "min_audio_seconds", "options",
+        "max_new_tokens", "min_audio_seconds", "options", "cache_model_alias",
     }
     unknown = set(config) - allowed
     if unknown:
@@ -698,7 +698,7 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
     except ValueError as exc:
         raise EngineError(str(exc)) from exc
     options = {key: value for key, value in config.items()
-               if key not in {"name", "type", "model", "options"}}
+               if key not in {"name", "type", "model", "options", "cache_model_alias"}}
     if selected.runtime == "mlx_audio":
         from .mlx_audio_engine import MLXAudioDrama3Engine
         # Converted checkpoints carry their complete quantization recipe.

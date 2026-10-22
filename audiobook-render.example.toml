@@ -17,6 +17,11 @@ checkpoint = "./models/drama-3"
 # All models use renderer.requirements.txt in the usual .venv-renderer environment.
 # Also supported: mlx-community/fish-audio-drama-3-8bit,
 #                 fcmeyer/drama-3-MLX-3bit-HQ
+# Optional: reuse accepted speech from the previous model when switching models.
+# Set this to that model's ID, or keep one alias across future compatible models.
+# This explicitly treats model revisions, quantization, and runtimes as interchangeable
+# for cached speech; text, voices, delivery, and sampling must still match.
+# cache_model_alias = "fishaudio/drama-3"
 experts = "q8" # Sogni only; MLX-Audio uses the checkpoint's quantization.
 temperature = 1.0
 top_p = 0.9

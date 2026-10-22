@@ -9,7 +9,7 @@ import re
 from threading import RLock
 
 from .common import digest, file_hash, read_json, regular_file, write_json
-from .speech_identity import generation_identity
+from .speech_identity import generation_compatible, generation_identity
 
 
 class SpeechCache:
@@ -17,11 +17,20 @@ class SpeechCache:
         self.work = Path(work)
         self.voices = {voice["asset_hash"]: voice for voice in voices.values()}
         self.entries = {}
+        self.performances = {}
         self.lock = RLock()
         self.loaded = False
 
     def identity(self, request, *, engine_metadata=None):
         return generation_identity(request, self.voices, engine_metadata=engine_metadata)
+
+    @staticmethod
+    def _performance_key(identity):
+        return digest({key: value for key, value in identity.items() if key != "engine"})
+
+    def _register(self, key, entry):
+        self.entries[key] = entry
+        self.performances.setdefault(self._performance_key(entry["identity"]), set()).add(key)
 
     def _accepted(self, key):
         if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
@@ -66,7 +75,7 @@ class SpeechCache:
             indexed.add(entry["request_hash"])
             if saved is None or file_hash(saved[0]) != entry.get("accepted_sha256"):
                 continue
-            self.entries[path.stem] = entry
+            self._register(path.stem, entry)
         # Import successful legacy takes without copying audio or changing
         # their provenance. Unresolvable historical voices cannot be guessed.
         for path in sorted((self.work / "clips").glob("*/accepted.json")):
@@ -82,7 +91,9 @@ class SpeechCache:
                 identity = self.identity(record["request"], engine_metadata=record.get("engine_metadata"))
             except ValueError:
                 continue
-            self.entries.setdefault(digest(identity), self._entry(identity, saved))
+            key = digest(identity)
+            if key not in self.entries:
+                self._register(key, self._entry(identity, saved))
         self.loaded = True
 
     @staticmethod
@@ -105,7 +116,7 @@ class SpeechCache:
         # storage. Observe publications made while waiting for the content lock.
         path = self.work / "speech-cache" / (key + ".json")
         if path.exists() or path.is_symlink():
-            self.entries[key] = self._read_index(path)
+            self._register(key, self._read_index(path))
         return self.entries.get(key)
 
     @staticmethod
@@ -128,24 +139,53 @@ class SpeechCache:
             existing = read_json(regular_file(path))
             if existing != dict(entry, record_sha256=digest(entry)):
                 write_json(path, dict(entry, record_sha256=digest(entry)))
-        self.entries[key] = entry
+        self._register(key, entry)
 
-    def find(self, identity):
+    def _verified_entry(self, entry, *, verify_audio=True):
+        saved = self._accepted(entry["request_hash"])
+        if saved is None or file_hash(saved[0]) != entry["accepted_sha256"]:
+            return None
+        _, audio, record = saved
+        if verify_audio and (file_hash(audio) != record["audio_sha256"]
+                             or record["audio_sha256"] != entry["audio_sha256"]):
+            raise ValueError("Cached speech audio changed on disk")
+        return saved
+
+    def find(self, identity, *, request=None):
         with self.lock:
             self._load()
             key = digest(identity)
             entry = self._current_entry(key)
-            if entry is None:
-                return None
-            saved = self._accepted(entry["request_hash"])
-            if saved is None or file_hash(saved[0]) != entry["accepted_sha256"]:
+            if entry is not None:
+                saved = self._verified_entry(entry)
+                if saved is not None:
+                    self._publish(key, entry)
+                    return saved[1:]
                 self.entries.pop(key, None)
-                return None
-            _, audio, record = saved
-            if file_hash(audio) != record["audio_sha256"] or record["audio_sha256"] != entry["audio_sha256"]:
-                raise ValueError("Cached speech audio changed on disk")
-            self._publish(key, entry)
-            return audio, record
+            if request is not None:
+                # Search only identical text/reference/settings candidates. The
+                # original engine retains revision evidence that canonical
+                # local identities may replace with checkpoint file hashes.
+                candidates = self.performances.get(self._performance_key(identity), ())
+                for candidate_key in sorted(candidates):
+                    candidate = self._current_entry(candidate_key)
+                    if candidate is None:
+                        continue
+                    saved = self._verified_entry(candidate, verify_audio=False)
+                    if saved is None:
+                        continue
+                    record = saved[2]
+                    if generation_compatible(candidate["identity"], identity,
+                            saved_engine=record["request"]["engine"], current_engine=request["engine"],
+                            engine_metadata=record.get("engine_metadata")):
+                        saved = self._verified_entry(candidate)
+                        if saved is None:
+                            continue
+                        # Add a lookup alias, preserving the original request,
+                        # successful verification, and waveform byte-for-byte.
+                        self._publish(key, self._entry(identity, saved))
+                        return saved[1:]
+            return None
 
     def remember(self, identity, record):
         with self.lock:
@@ -175,6 +215,13 @@ class SpeechCache:
                     and entry["accepted_sha256"] == file_hash(path)):
                 return True
             try:
-                return identity == self.identity(record["request"], engine_metadata=record.get("engine_metadata"))
+                original = self.identity(record["request"], engine_metadata=record.get("engine_metadata"))
             except ValueError:
-                return False
+                # An indexed reference can remain usable after its profile or
+                # selection metadata changes. Never guess an unindexed voice.
+                original = next((entry["identity"] for entry in self.entries.values()
+                    if entry["request_hash"] == record["request_hash"]
+                    and entry["accepted_sha256"] == file_hash(path)), None)
+            return original is not None and generation_compatible(original, identity,
+                saved_engine=record["request"]["engine"], current_engine=request["engine"],
+                engine_metadata=record.get("engine_metadata"))
