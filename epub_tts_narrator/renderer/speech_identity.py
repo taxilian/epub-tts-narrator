@@ -20,14 +20,15 @@ _ALIAS_ENGINE = "drama_speech_cache_alias"
 _ENGINE_PROVENANCE = frozenset({
     "checkpoint", "recommended_model_revision", "required_runtime_version",
     "required_runtime_revision", "packages", "min_audio_seconds", "completion_check",
-    "multi_speaker",
+    "multi_speaker", "runtime", "installed_version", "installed_revision", "adapter_version",
 })
 
 
 def synthesis_engine_identity(identity):
     """Retain generation behavior while ignoring installation and guard metadata.
 
-    Actual runtime/adapter versions and all unknown fields remain meaningful
+    Runtime names, versions, and revisions remain request provenance only.
+    Actual models, synthesis settings, and unknown fields remain meaningful
     unless the operator explicitly chooses a shared model-cache alias.
     Model content hashes supersede download revision metadata when available.
     Worker locations and scheduling are already omitted by the pool identity.
@@ -75,7 +76,8 @@ def engines_compatible(saved_engine, current_engine, *, engine_metadata=None):
 
     A pool's pinned revision is the operator's existing compatibility contract
     for its workers. Cross-mode reuse uses that contract only for known models
-    with matching sampling; local-to-local reuse remains content/runtime exact.
+    with matching sampling; local-to-local reuse still requires matching model
+    contents and synthesis settings, independently of runtime metadata.
     Recorded concrete workers add stronger checks when returning to local mode.
     An alias on the current engine explicitly accepts model/quantization changes
     for that logical model, while retaining the common speech sampling settings.

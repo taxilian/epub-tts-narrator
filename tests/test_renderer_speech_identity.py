@@ -121,7 +121,7 @@ class SpeechIdentityTests(unittest.TestCase):
         for field, value in (("base_seed", 99), ("sample_rate", 48000)):
             variants.append({**original, field: value})
         for field, value in (("temperature", .8), ("top_p", .8), ("top_k", 20),
-                             ("installed_version", "2.0"),
+                             ("model", "example/another-model"),
                              ("checkpoint_files_sha256", {"weights.safetensors": "different"})):
             variant = deepcopy(original)
             variant["engine"][field] = value
@@ -143,6 +143,21 @@ class SpeechIdentityTests(unittest.TestCase):
             packages={"numpy": "different"}, min_audio_seconds=.2,
             completion_check="new guard")
         self.assertEqual(self.key(original, voice), self.key(changed, voice))
+
+    def test_runtime_updates_do_not_change_single_or_paragraph_speech_keys(self):
+        voice = reference()
+        requests = [speech_request(voice),
+                    paragraph_request([("Hello. ", voice, ""), ("Stay here.", voice, "whisper")])]
+        for request in requests:
+            for engine in ("drama3_mlx", "drama3_mlx_audio", "fish_http", "fish_tts_pool"):
+                original = deepcopy(request)
+                original["engine"]["engine"] = engine
+                for field, value in (("runtime", "updated-runtime"), ("installed_version", "2.0"),
+                                     ("installed_revision", "new-revision"), ("adapter_version", 2)):
+                    with self.subTest(kind=request["kind"], engine=engine, field=field):
+                        changed = deepcopy(original)
+                        changed["engine"][field] = value
+                        self.assertEqual(self.key(original, voice), self.key(changed, voice))
 
     def test_remote_worker_capability_is_not_a_single_speech_input(self):
         voice = reference()
@@ -286,15 +301,24 @@ class PoolSpeechCompatibilityTests(unittest.TestCase):
                 self.assertFalse(self.compatible(self.local, changed))
                 self.assertFalse(self.compatible(changed, self.local))
 
-    def test_pool_cannot_hide_changed_local_weights_or_runtime_when_worker_is_known(self):
+    def test_pool_cannot_hide_changed_local_weights_when_worker_is_known(self):
         metadata = {"worker_engine": self.local}
         self.assertTrue(self.compatible(self.pool, self.local, metadata=metadata))
-        for field, value in (("checkpoint_files_sha256", {"weights.safetensors": digest("new")}),
-                             ("installed_version", "2.0"), ("adapter_version", 2)):
+        for field, value in (("checkpoint_files_sha256", {"weights.safetensors": digest("new")}),):
             with self.subTest(field=field):
                 changed = dict(self.local, **{field: value})
                 self.assertFalse(self.compatible(self.pool, changed, metadata=metadata))
                 self.assertFalse(self.compatible(self.local, changed))
+
+    def test_runtime_updates_reuse_local_and_recorded_pool_speech_without_alias(self):
+        for field, value in (("runtime", "updated-runtime"), ("installed_version", "2.0"),
+                             ("installed_revision", "new-revision"), ("adapter_version", 2)):
+            with self.subTest(field=field):
+                changed = dict(self.local, **{field: value})
+                self.assertTrue(self.compatible(self.local, changed))
+                self.assertTrue(self.compatible(changed, self.local))
+                self.assertTrue(self.compatible(self.pool, changed,
+                                                metadata={"worker_engine": self.local}))
 
     def test_unknown_local_revision_requires_exact_recorded_worker(self):
         unknown = dict(self.local, model_revision=None,
@@ -303,6 +327,8 @@ class PoolSpeechCompatibilityTests(unittest.TestCase):
         self.assertFalse(self.compatible(self.pool, unknown))
         self.assertTrue(self.compatible(self.pool, unknown, metadata={"worker_engine": unknown}))
         changed = dict(unknown, installed_version="2.0")
+        self.assertTrue(self.compatible(self.pool, changed, metadata={"worker_engine": unknown}))
+        changed = dict(unknown, checkpoint_files_sha256={"weights.safetensors": digest("new")})
         self.assertFalse(self.compatible(self.pool, changed, metadata={"worker_engine": unknown}))
 
     def test_exact_worker_does_not_override_known_revision_mismatch(self):
@@ -388,7 +414,7 @@ class PoolSpeechCompatibilityTests(unittest.TestCase):
         saved = dict(self.local, cache_model_alias=self.quantized()["model"])
         self.assertFalse(self.compatible(saved, self.quantized()))
         self.assertTrue(self.compatible(saved, self.local))
-        self.assertFalse(self.compatible(saved, dict(self.local, installed_version="2.0")))
+        self.assertTrue(self.compatible(saved, dict(self.local, installed_version="2.0")))
 
     def test_alias_does_not_transitively_relabel_another_logical_model(self):
         saved = self.quantized(self.local["model"])

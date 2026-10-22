@@ -484,7 +484,7 @@ class PoolWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(first[0][0]["wav_path"], second[0][0]["wav_path"])
                 self.assertTrue(second[1][0]["report"]["passed"])
 
-    def test_pool_local_worker_provenance_preserves_local_weight_and_runtime_invalidation(self):
+    def test_pool_local_worker_reuse_ignores_runtime_but_keeps_weight_invalidation(self):
         self.config["render"]["paragraph_synthesis"] = False
         for change, value in (("checkpoint_files_sha256", {"model.safetensors": "b" * 64}),
                               ("installed_revision", "different-runtime-revision")):
@@ -499,7 +499,10 @@ class PoolWorkflowTests(unittest.TestCase):
 
                 self.chapters(local)
 
-                self.assertGreater(len(local.speech_calls), 0)
+                if change == "installed_revision":
+                    self.assertEqual(len(local.speech_calls), 0)
+                else:
+                    self.assertGreater(len(local.speech_calls), 0)
                 self.config["render_pool"]["workers"] = [worker("first"), worker("second")]
 
     def test_explicit_model_alias_preserves_completed_book_across_quantized_runtime(self):

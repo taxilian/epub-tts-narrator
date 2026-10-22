@@ -54,6 +54,66 @@ class SpeechCacheTests(unittest.TestCase):
     def index_path(self):
         return self.root / "speech-cache" / (digest(self.identity) + ".json")
 
+    def legacy_runtime_take(self):
+        original = deepcopy(self.request)
+        runtime = {"runtime": "mlx-audio", "installed_version": "0.1.1",
+                   "installed_revision": "old-runtime-revision", "adapter_version": 1}
+        original["engine"].update(runtime)
+        audio, accepted = self.accepted(request=original)
+        # Persist the pre-upgrade format explicitly: earlier indexes included
+        # runtime metadata even when model weights and all speech inputs matched.
+        identity = self.cache.identity(original)
+        identity["engine"].update(runtime)
+        entry = {"format": "audiobook-speech-cache", "version": 1,
+                 "identity": identity, "request_hash": accepted["request_hash"],
+                 "accepted_sha256": file_hash(audio.parent / "accepted.json"),
+                 "audio_sha256": accepted["audio_sha256"]}
+        write_json(self.root / "speech-cache" / (digest(identity) + ".json"),
+                   {**entry, "record_sha256": digest(entry)})
+        current = deepcopy(original)
+        current["engine"].update(runtime="vendored-mlx-audio", installed_version="0.1.1+epub.1",
+                                 installed_revision=None, adapter_version=2)
+        return audio, accepted, current
+
+    def test_runtime_upgrade_reuses_persisted_index_without_rewriting_provenance(self):
+        audio, accepted, current_request = self.legacy_runtime_take()
+        original_acceptance = (audio.parent / "accepted.json").read_bytes()
+        original_audio = audio.read_bytes()
+        # The durable index must also work when later voice notes prevent
+        # resolving the original candidate's metadata from the current cast.
+        current_voice = {**self.voice, "asset_hash": digest("updated voice notes")}
+        current_request["voice_asset_hash"] = current_voice["asset_hash"]
+        current = self.new_cache(current_voice)
+
+        self.assertEqual(current.find(current.identity(current_request), request=current_request),
+                         (audio, accepted))
+        self.assertTrue(current.matches(current_request, accepted))
+        self.assertEqual((audio.parent / "accepted.json").read_bytes(), original_acceptance)
+        self.assertEqual(audio.read_bytes(), original_audio)
+        self.assertEqual(list((self.root / "clips").rglob("*.wav")), [audio])
+
+    def test_runtime_upgrade_does_not_reimport_rejected_or_altered_acceptance(self):
+        for state in ("rejected", "altered"):
+            with self.subTest(state=state):
+                audio, accepted, current_request = self.legacy_runtime_take()
+                if state == "rejected":
+                    accepted["report"]["passed"] = False
+                else:
+                    accepted["engine_metadata"]["extra"] = "Changed after publication"
+                write_json(audio.parent / "accepted.json", accepted)
+                current = self.new_cache()
+
+                self.assertIsNone(current.find(current.identity(current_request),
+                                               request=current_request))
+
+    def test_runtime_upgrade_still_checks_cached_audio_bytes(self):
+        audio, _, current_request = self.legacy_runtime_take()
+        self.write_wave(audio, b"\x02\x00")
+        current = self.new_cache()
+
+        with self.assertRaisesRegex(ValueError, "audio changed"):
+            current.find(current.identity(current_request), request=current_request)
+
     def test_rejected_legacy_audio_is_not_imported_or_published(self):
         audio, rejected = self.accepted(passed=False)
         with self.assertRaisesRegex(ValueError, "successful"):

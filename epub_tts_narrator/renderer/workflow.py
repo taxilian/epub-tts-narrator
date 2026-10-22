@@ -752,12 +752,15 @@ def _same_chapter_audio_context(saved, current):
     ignored = {"verifier", "verification_config_hash", "quality", "quality_version", "bundle_hash"}
     from .speech_identity import engines_compatible
     old_engine, new_engine = saved["engine"], current["engine"]
+    if not engines_compatible(old_engine, new_engine):
+        return False
+    # Runtime metadata remains provenance, including for completed chapters.
+    # Model content and synthesis settings are checked by engines_compatible.
+    ignored.add("engine")
     routing_change = ((old_engine.get("engine") == "fish_tts_pool")
                       != (new_engine.get("engine") == "fish_tts_pool"))
     if routing_change or new_engine.get("cache_model_alias"):
-        if not engines_compatible(old_engine, new_engine):
-            return False
-        ignored.update({"engine", "engine_config_hash"})
+        ignored.add("engine_config_hash")
     return ({key: value for key, value in saved.items() if key not in ignored}
             == {key: value for key, value in current.items() if key not in ignored})
 
@@ -957,7 +960,8 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
     unchanged = previous is not None and previous.get("publication_key") == key
     if previous is not None and not unchanged:
         # If all actual chapter audio and publication inputs are unchanged,
-        # scheduling or an explicit model alias need not re-encode the book.
+        # runtime updates, scheduling, or an explicit model alias need not
+        # re-encode the book.
         from .speech_identity import engines_compatible
         if engines_compatible(previous.get("engine"), _cache_engine_identity(engine_identity, config)):
             unchanged = previous.get("publication_key") == publication_key(

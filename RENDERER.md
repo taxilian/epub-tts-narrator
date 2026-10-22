@@ -202,7 +202,9 @@ Existing saved Drama 3 references work with either runtime. MLX-Audio does not
 create voices from descriptions: use saved voices, import recordings, or configure
 Gemini, ElevenLabs, or Qwen3 VoiceDesign for missing voices. The normal `auto`
 setting uses Gemini when its key is present. Switching models invalidates generated
-speech caches by default while retaining the saved voices.
+speech caches by default while retaining the saved voices. Updating the runtime or
+adapter does not invalidate verified speech or completed chapters; their versions
+remain recorded as provenance, and no alias is needed for a runtime update.
 
 To keep already verified speech when changing models, add an optional
 `cache_model_alias` to the existing engine table. For example, when moving from
@@ -217,7 +219,7 @@ cache_model_alias = "fishaudio/drama-3"
 ```
 
 Keep your existing sampling settings in this table. The alias explicitly declares
-the models, revisions, quantization settings, and runtimes interchangeable for
+the models, revisions, and quantization settings interchangeable for
 successful cached speech. Text, selected voice references, delivery, shared sampling
 settings, seed, and output sample rate must still match. New or changed passages
 use `engine.model`; the alias does not change the model being loaded or reported
@@ -229,7 +231,7 @@ existed. Compatible saved successes are matched automatically on the next render
 no migration command or reanalysis is needed. You can instead choose a new group
 name and keep it consistent across future model changes, but an arbitrary new name
 cannot match older recordings from unrelated model IDs. Without this option, the
-normal model, revision, quantization, and runtime safeguards remain in force.
+normal model, revision, and quantization safeguards remain in force.
 
 The 4-bit checkpoint passed a short local narration/dialogue benchmark with lower
 time and memory than Sogni q8. The 8-bit and 3-bit HQ options have config and adapter
@@ -623,9 +625,9 @@ To choose separate work and publication directories for one run, add `--work-dir
 
 Rerun the same `render` command after updating the scripts or selected voices. It reuses matching verified clips and unchanged completed chapters, generates the changed passages, and rebuilds the affected chapter files, synchronization data, and M4B in the existing output directory. Moving speech, renumbering segments, changing source IDs or offsets, and editing attribution explanations do not regenerate an otherwise identical performance. Chapter assembly and synchronization use the current locations. An unchanged local render also skips final encoding. Older published outputs without the new publication key are repackaged once from their compatible cached audio.
 
-Successful speech is indexed in `render-work/speech-cache/<content-key>.json`. For the built-in Drama/Fish engines, this key binds the prepared text and applied delivery controls, reference audio checksum and transcript, actual model/runtime identity and sampling settings, base seed, and output sample rate. Paragraph performances also bind their ordered text and speaker-reference mapping. Character labels, profile/designer metadata, verification settings, source positions, installation paths, and download requirements are excluded. Unknown plugins retain their engine/voice inputs conservatively because they may interpret additional fields. Original requests, take numbers, seeds, and reports remain under `render-work/clips/<original-request-hash>/` as provenance; those directory names are not the content lookup key. New generation seeds also use the content identity.
+Successful speech is indexed in `render-work/speech-cache/<content-key>.json`. For the built-in Drama/Fish engines, this key binds the prepared text and applied delivery controls, reference audio checksum and transcript, actual model identity and sampling settings, base seed, and output sample rate. Paragraph performances also bind their ordered text and speaker-reference mapping. Runtime names, runtime and adapter versions, character labels, profile/designer metadata, verification settings, source positions, installation paths, and download requirements are excluded. Unknown plugins retain their engine/voice inputs conservatively because they may interpret additional fields. Original requests, take numbers, seeds, and reports remain under `render-work/clips/<original-request-hash>/` as provenance; those directory names are not the content lookup key. New generation seeds also use the content identity.
 
-The optional `engine.cache_model_alias` replaces the strict model/runtime component
+The optional `engine.cache_model_alias` replaces the strict model component
 for compatibility matching, allowing accepted speech from the named model or alias
 to survive a deliberate model change. It never makes rejected or unverified audio
 eligible, and the actual generation identity remains in the original request.
@@ -833,7 +835,7 @@ Synchronization currently has **chunk precision**. ASR word times are retained i
 
 ## Adding another TTS backend
 
-The `TTSEngine` protocol separates engine identity, capabilities, voice creation, and synthesis from planning, verification, caching, and packaging. A separate `[voice_design]` configuration supplies reference creation when the speech engine lacks descriptive voice design. Setting its type to `engine` delegates creation to the speech engine only if that engine advertises voice-design support; random unconditioned generation is not a fallback. Saved voice bindings use a `kind` discriminator; the implemented kind is `reference`. Built-in speech cache identity uses actual model/runtime behavior, sampling settings, and voice-reference contents. Designer identities and full voice-asset records remain creation provenance; they do not independently invalidate an identical built-in speech performance.
+The `TTSEngine` protocol separates engine identity, capabilities, voice creation, and synthesis from planning, verification, caching, and packaging. A separate `[voice_design]` configuration supplies reference creation when the speech engine lacks descriptive voice design. Setting its type to `engine` delegates creation to the speech engine only if that engine advertises voice-design support; random unconditioned generation is not a fallback. Saved voice bindings use a `kind` discriminator; the implemented kind is `reference`. Built-in speech cache identity uses actual model content, sampling settings, and voice-reference contents. Runtime versions, designer identities, and full voice-asset records remain provenance; they do not independently invalidate an identical built-in speech performance.
 
 Installed adapters can register a Python entry point in the `epub_tts_narrator.tts` group. Existing registrations in `audiobook_renderer.tts` remain supported when the configured name has no registration in the new group. A matching registration in the new group takes precedence; duplicate matches in the selected group are rejected. Both rendering and `doctor` use this lookup. Set `engine.type` to that entry point's name and put adapter-specific values in `[engine.options]`; the factory receives that options dictionary and must return a `TTSEngine`. Its identity must include stable `engine` and `model` strings plus every setting affecting synthesis. Unknown or invalid adapters fail explicitly, with no fallback to a different engine.
 

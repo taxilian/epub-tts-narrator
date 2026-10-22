@@ -130,6 +130,35 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(before, self.output_bytes())
         self.assertEqual(counts, self.model_counts())
 
+    def test_runtime_update_reuses_published_book_without_model_alias(self):
+        self.engine.identity = {
+            "engine": "drama3_mlx", "model": "fishaudio/drama-3",
+            "runtime": "Sogni-AI/drama3-mlx", "adapter_version": 1,
+            "installed_version": "0.1.1", "installed_revision": "old-runtime",
+            "checkpoint_files_sha256": {"model.safetensors": "a" * 64},
+        }
+        original = self.run_render()
+        before = self.output_bytes()
+        counts = self.model_counts()
+        accepted = {path: path.read_bytes() for path in (self.work / "clips").rglob("accepted.json")}
+        checkpoints = {number: self.checkpoint(number).read_bytes() for number in (1, 2)}
+        self.engine.identity = dict(self.engine.identity,
+            runtime="updated-runtime", adapter_version=2,
+            installed_version="0.1.1+epub.1", installed_revision=None)
+
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("No chapter encoding")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("No book encoding")):
+            current = self.run_render()
+
+        self.assertEqual(current, original)
+        self.assertEqual(before, self.output_bytes())
+        self.assertEqual(counts, self.model_counts())
+        for path, contents in accepted.items():
+            self.assertEqual(path.read_bytes(), contents)
+        for number, contents in checkpoints.items():
+            self.assertEqual(self.checkpoint(number).read_bytes(), contents)
+
     def test_source_reidentification_reuses_speech_and_publishes_current_locations(self):
         self.run_render()
         counts = self.model_counts()
