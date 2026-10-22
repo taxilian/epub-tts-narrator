@@ -181,6 +181,80 @@ class SpeechCacheTests(unittest.TestCase):
 
         self.assertEqual(second.find(self.identity), (audio, accepted))
 
+    def test_switching_back_finds_an_older_model_when_alias_points_to_another_take(self):
+        original = deepcopy(self.request)
+        original["engine"]["cache_model_alias"] = "shared-model-family"
+        changed = deepcopy(original)
+        changed["engine"]["model"] = "another-model"
+        changed["engine"]["checkpoint_files_sha256"] = {"weights.safetensors": "other-weights"}
+        old_audio, old_accepted = self.accepted(request=original)
+        _, changed_accepted = self.accepted(request=changed)
+        # Existing caches can contain multiple successful concrete models but
+        # only the last one published under their shared logical model alias.
+        self.cache.remember(self.cache.identity(changed), changed_accepted)
+        original_metadata = (old_audio.parent / "accepted.json").read_bytes()
+        original_audio = old_audio.read_bytes()
+
+        for cache in (self.cache, self.new_cache()):
+            with self.subTest(cache=cache):
+                self.assertEqual(cache.find(self.identity, request=self.request),
+                                 (old_audio, old_accepted))
+        self.assertEqual((old_audio.parent / "accepted.json").read_bytes(), original_metadata)
+        self.assertEqual(old_audio.read_bytes(), original_audio)
+
+    def test_alias_collision_does_not_recover_a_rejected_or_missing_old_take(self):
+        original = deepcopy(self.request)
+        original["engine"]["cache_model_alias"] = "shared-model-family"
+        changed = deepcopy(original)
+        changed["engine"]["model"] = "another-model"
+        old_audio, old_accepted = self.accepted(request=original)
+        _, changed_accepted = self.accepted(request=changed)
+        self.cache.remember(self.cache.identity(changed), changed_accepted)
+
+        for state in ("rejected", "missing"):
+            with self.subTest(state=state):
+                rejected = deepcopy(old_accepted)
+                rejected["report"]["passed"] = state != "rejected"
+                write_json(old_audio.parent / "accepted.json", rejected)
+                if state == "missing":
+                    old_audio.unlink()
+                self.assertIsNone(self.new_cache().find(self.identity, request=self.request))
+
+    def test_new_aliased_take_can_be_found_by_concrete_model_after_prior_cache_miss(self):
+        second = self.new_cache()
+        self.assertIsNone(second.find(self.identity, request=self.request))
+        aliased = deepcopy(self.request)
+        aliased["engine"]["cache_model_alias"] = "shared-model-family"
+        audio, accepted = self.accepted(request=aliased)
+        self.cache.remember(self.cache.identity(aliased), accepted)
+
+        self.assertEqual(second.find(self.identity, request=self.request), (audio, accepted))
+
+    def test_old_alias_index_preserves_reference_identity_when_returning_to_concrete_model(self):
+        aliased = deepcopy(self.request)
+        aliased["engine"]["cache_model_alias"] = "shared-model-family"
+        audio, accepted = self.accepted(request=aliased)
+        self.cache.remember(self.cache.identity(aliased), accepted)
+        # Simulate an older cache with only its logical alias lookup persisted.
+        self.index_path().unlink(missing_ok=True)
+        changed_voice = {**self.voice, "asset_hash": digest("new-candidate-notes"),
+                         "profile": {"description": "Updated notes"}}
+        current = self.new_cache(changed_voice)
+        request = speech_request(changed_voice)
+
+        self.assertEqual(current.find(current.identity(request), request=request), (audio, accepted))
+
+    def test_alias_cannot_recover_acceptance_altered_after_publication(self):
+        aliased = deepcopy(self.request)
+        aliased["engine"]["cache_model_alias"] = "shared-model-family"
+        audio, accepted = self.accepted(request=aliased)
+        self.cache.remember(self.cache.identity(aliased), accepted)
+        changed = deepcopy(accepted)
+        changed["engine_metadata"]["extra"] = "Changed after publication"
+        write_json(audio.parent / "accepted.json", changed)
+
+        self.assertIsNone(self.new_cache().find(self.identity, request=self.request))
+
     def test_another_cache_replacement_wins_over_a_previously_loaded_entry(self):
         audio, accepted = self.accepted()
         self.cache.remember(self.identity, accepted)

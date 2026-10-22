@@ -9,7 +9,7 @@ import re
 from threading import RLock
 
 from .common import digest, file_hash, read_json, regular_file, write_json
-from .speech_identity import generation_compatible, generation_identity
+from .speech_identity import generation_compatible, generation_identity, synthesis_engine_identity
 
 
 class SpeechCache:
@@ -31,6 +31,26 @@ class SpeechCache:
     def _register(self, key, entry):
         self.entries[key] = entry
         self.performances.setdefault(self._performance_key(entry["identity"]), set()).add(key)
+
+    @staticmethod
+    def _concrete_entry(entry, record):
+        # A logical alias may cover several real models. Retain the original
+        # model as another lookup so switching back without the alias can find
+        # every accepted take, including ones displaced from the shared key.
+        if entry["identity"].get("engine", {}).get("engine") != "drama_speech_cache_alias":
+            return None
+        engine = dict(record["request"]["engine"])
+        engine.pop("cache_model_alias", None)
+        identity = dict(entry["identity"], engine=synthesis_engine_identity(engine))
+        return dict(entry, identity=identity)
+
+    def _register_concrete(self, entry, record):
+        concrete = self._concrete_entry(entry, record)
+        if concrete is not None:
+            key = digest(concrete["identity"])
+            # A persisted concrete lookup takes precedence over a derived one.
+            if key not in self.entries:
+                self._register(key, concrete)
 
     def _accepted(self, key):
         if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
@@ -76,6 +96,7 @@ class SpeechCache:
             if saved is None or file_hash(saved[0]) != entry.get("accepted_sha256"):
                 continue
             self._register(path.stem, entry)
+            self._register_concrete(entry, saved[2])
         # Import successful legacy takes without copying audio or changing
         # their provenance. Unresolvable historical voices cannot be guessed.
         for path in sorted((self.work / "clips").glob("*/accepted.json")):
@@ -92,8 +113,10 @@ class SpeechCache:
             except ValueError:
                 continue
             key = digest(identity)
+            entry = self._entry(identity, saved)
             if key not in self.entries:
-                self._register(key, self._entry(identity, saved))
+                self._register(key, entry)
+            self._register_concrete(entry, record)
         self.loaded = True
 
     @staticmethod
@@ -196,7 +219,11 @@ class SpeechCache:
                 raise ValueError("Speech cache publication requires unchanged verified audio")
             if identity != self.identity(record["request"], engine_metadata=record.get("engine_metadata")):
                 raise ValueError("Speech cache identity does not match the accepted performance")
-            self._publish(digest(identity), self._entry(identity, saved))
+            entry = self._entry(identity, saved)
+            self._publish(digest(identity), entry)
+            concrete = self._concrete_entry(entry, record)
+            if concrete is not None:
+                self._publish(digest(concrete["identity"]), concrete)
 
     def matches(self, request, accepted):
         """Validate a chapter's reused performance against its current inputs."""
