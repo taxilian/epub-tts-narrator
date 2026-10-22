@@ -130,7 +130,7 @@ def _runtime_details() -> dict[str, Any]:
     }
 
 
-def _checkpoint_fingerprints(checkpoint: Path, *, extra_names=()) -> tuple[dict[str, str], str | None]:
+def _checkpoint_fingerprints(checkpoint: Path, *, extra_names=(), write_cache=True) -> tuple[dict[str, str], str | None]:
     """Fingerprint actual model content, reusing hashes only for unchanged files.
 
     The cache is an optimization for repeated CLI invocations, not an assertion
@@ -183,7 +183,7 @@ def _checkpoint_fingerprints(checkpoint: Path, *, extra_names=()) -> tuple[dict[
             revision = None
         revisions.append(revision if isinstance(revision, str)
                          and re.fullmatch(r"[a-f0-9]{40}", revision) else None)
-    if current != entries:
+    if write_cache and current != entries:
         temp_name = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -263,9 +263,14 @@ class Drama3MLXEngine:
 
     @property
     def identity(self) -> dict[str, Any]:
+        return self.get_identity()
+
+    def get_identity(self, *, cache_fingerprints=True) -> dict[str, Any]:
+        """Read synthesis identity without writing model metadata during audits."""
         if self._identity is not None:
             return deepcopy(self._identity)
-        file_fingerprints, model_revision = _checkpoint_fingerprints(self.checkpoint)
+        file_fingerprints, model_revision = _checkpoint_fingerprints(
+            self.checkpoint, write_cache=cache_fingerprints)
         packages = {}
         for name in ("mlx", "mlx-metal", "mlx-lm", "mlx-audio", "numpy", "soundfile", "torch", "tokenizers"):
             try:

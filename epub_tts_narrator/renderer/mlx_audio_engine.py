@@ -91,9 +91,13 @@ class MLXAudioDrama3Engine:
 
     @property
     def identity(self) -> dict[str, Any]:
+        return self.get_identity()
+
+    def get_identity(self, *, cache_fingerprints=True) -> dict[str, Any]:
+        """Read synthesis identity without writing model metadata during audits."""
         if self._identity is None:
             fingerprints, revision = _checkpoint_fingerprints(
-                self.checkpoint, extra_names=("chat_template.jinja",),
+                self.checkpoint, extra_names=("chat_template.jinja",), write_cache=cache_fingerprints,
             )
             packages = {}
             for name in ("mlx-audio", "mlx", "mlx-metal", "mlx-lm", "numpy",

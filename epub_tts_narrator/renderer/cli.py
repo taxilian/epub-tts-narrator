@@ -20,14 +20,14 @@ from .book_context import resolve_book_config, voice_store
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "render", "assemble", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
+    for name in ("plan", "cache-report", "render", "assemble", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
         command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
         command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
         command.add_argument("--epub", type=Path, help="Original EPUB for audiobook cover extraction")
-        if name in {"plan", "render", "assemble"}:
+        if name in {"plan", "cache-report", "render", "assemble"}:
             command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
             command.add_argument("--allow-review", action="store_true", default=None,
                                  help="Compatibility option; review notes are advisory and need no override")
@@ -37,6 +37,9 @@ def parser():
         if name == "render":
             command.add_argument("--chapters-only", action="store_true",
                                  help="Generate and save chapter audio; assemble the M4B later")
+        if name == "cache-report":
+            command.add_argument("--max-examples", type=int, default=10,
+                                 help="Maximum cache-miss examples in the read-only JSON report (default: 10)")
         if name == "cleanup":
             command.add_argument("--dry-run", action="store_true",
                                  help="List removable files and space savings without deleting anything")
@@ -213,7 +216,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     engine = verifier = None
     try:
-        config = (load_config(args.config, require_verifier=False) if args.command == "serve"
+        config = (load_config(args.config, require_verifier=False) if args.command in {"serve", "cache-report"}
                   else load_config(args.config))
         if args.command == "serve":
             if config["engine"]["type"] != "drama3_mlx" or not config["engine"]["checkpoint"]:
@@ -265,6 +268,28 @@ def main(argv=None):
             from .audition import casting_command
             config = select_voice_designer(config, args.voice_designer)
             return casting_command(args, bundle, config)
+        if args.command == "cache-report":
+            if not 1 <= args.max_examples <= 100:
+                raise ValueError("--max-examples must be from 1 through 100")
+            if config.get("remote_chapters", {}).get("url"):
+                raise ValueError("Run cache-report on the chapter server's local book/cache directory")
+            if config["engine"]["type"] != "drama3_mlx":
+                raise ValueError("cache-report currently supports the built-in Drama/Fish engines")
+            from .cache_report import cache_report
+            from .pool import create_render_engine
+            # Built-in adapters expose identity lazily by reading model files.
+            # Do not set up/download models, initialize inference, or create ASR.
+            engine = create_render_engine(config)
+            print("Inspecting saved audio and model fingerprints; no audio will be generated.",
+                  file=sys.stderr)
+            identity = (engine.get_identity(cache_fingerprints=False)
+                        if hasattr(engine, "get_identity") else engine.identity)
+            report = cache_report(bundle, config, identity,
+                multi_speaker=engine.capabilities.get("multi_speaker", False),
+                max_examples=args.max_examples)
+            report["renderer_source"] = str(Path(__file__).resolve())
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0
         plan = make_plan(bundle, config)
         if args.command == "plan":
             from .workflow import make_render_plan

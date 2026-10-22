@@ -40,6 +40,51 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(json.loads(output)["voices"], 2)
 
+    def test_cache_report_is_read_only_and_never_initializes_models(self):
+        checkpoint = self.root / "tts-model"
+        checkpoint.mkdir()
+        (checkpoint / "config.json").write_text('{"model_type":"fish_drama3"}')
+        (checkpoint / "model.safetensors").write_bytes(b"fixture weights; never loaded")
+        original_config = self.config.read_text()
+        for model in ("fishaudio/drama-3", "mlx-community/fish-audio-drama-3-4bit"):
+            with self.subTest(model=model):
+                self.config.write_text(original_config.replace(
+                    '[engine]\n', '[engine]\nmodel=' + json.dumps(model) + '\n'))
+                before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                with (patch("epub_tts_narrator.renderer.engines.Drama3MLXEngine._load",
+                            side_effect=AssertionError("No TTS")),
+                      patch("epub_tts_narrator.renderer.mlx_audio_engine.MLXAudioDrama3Engine._load",
+                            side_effect=AssertionError("No TTS")),
+                      patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure",
+                            side_effect=AssertionError("No downloads")),
+                      patch("epub_tts_narrator.renderer.verification.create_verifier",
+                            side_effect=AssertionError("No ASR"))):
+                    status, output, error = self.run_cli("cache-report", self.bundle,
+                        "--config", self.config, "--chapters", "1", "--max-examples", "2")
+                self.assertEqual(status, 0, error)
+                self.assertGreater(json.loads(output)["summary"]["missing_voice_requests"], 0)
+                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_cache_report_rejects_invalid_example_limit_before_engine_creation(self):
+        with patch("epub_tts_narrator.renderer.pool.create_render_engine") as factory:
+            status, _, error = self.run_cli("cache-report", self.bundle,
+                "--config", self.config, "--max-examples", "0")
+        self.assertEqual(status, 2)
+        self.assertIn("--max-examples must be", error)
+        factory.assert_not_called()
+
+    def test_cache_report_for_pool_never_contacts_workers_or_exposes_credentials(self):
+        self.config.write_text(self.config.read_text() + '\n[[render_pool.workers]]\n'
+            'name="other"\ntype="fish_http"\nurl="http://127.0.0.1:9999/v1/tts"\n'
+            'api_key="private-worker-key"\n')
+        with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine.__init__",
+                   side_effect=AssertionError("No worker connection")):
+            status, output, error = self.run_cli("cache-report", self.bundle,
+                                                "--config", self.config)
+        self.assertEqual(status, 0, error)
+        self.assertGreater(json.loads(output)["summary"]["missing_voice_requests"], 0)
+        self.assertNotIn("private-worker-key", output + error)
+
     def test_unknown_engine_key_warns_and_plan_continues_with_same_configuration(self):
         expected = load_config(self.config)
         self.config.write_text(self.config.read_text().replace(

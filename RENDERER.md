@@ -625,6 +625,23 @@ To choose separate work and publication directories for one run, add `--work-dir
 
 Rerun the same `render` command after updating the scripts or selected voices. It reuses matching verified clips and unchanged completed chapters, generates the changed passages, and rebuilds the affected chapter files, synchronization data, and M4B in the existing output directory. Moving speech, renumbering segments, changing source IDs or offsets, and editing attribution explanations do not regenerate an otherwise identical performance. Chapter assembly and synchronization use the current locations. An unchanged local render also skips final encoding. Older published outputs without the new publication key are repackaged once from their compatible cached audio.
 
+To investigate unexpected regeneration, run a read-only report on the computer
+that owns the book's render cache:
+
+```sh
+.venv-renderer/bin/audiobook-render cache-report out/my-book > /tmp/audiobook-cache-report.json
+```
+
+It compares the current plan with accepted recordings and reports reusable clips,
+cache misses, and the fields that differ from nearby saved passages. Use
+`--chapters 7` to inspect one chapter or `--max-examples 30` for more miss examples.
+It reads model fingerprints and verifies cached audio checksums, but does not load
+inference models, download files, generate speech, or modify the book/cache/model
+directories. No verifier is needed. The report omits API keys and full source text.
+Counts are a snapshot; stopping a render before inspection makes the result easier
+to compare. Built-in local engines and rendering pools are supported; for chapter
+server mode, run it against the server's local book and cache.
+
 Successful speech is indexed in `render-work/speech-cache/<content-key>.json`. For the built-in Drama/Fish engines, this key binds the prepared text and applied delivery controls, reference audio checksum and transcript, actual model identity and sampling settings, base seed, and output sample rate. Paragraph performances also bind their ordered text and speaker-reference mapping. Runtime names, runtime and adapter versions, character labels, profile/designer metadata, verification settings, source positions, installation paths, and download requirements are excluded. Unknown plugins retain their engine/voice inputs conservatively because they may interpret additional fields. Original requests, take numbers, seeds, and reports remain under `render-work/clips/<original-request-hash>/` as provenance; those directory names are not the content lookup key. New generation seeds also use the content identity.
 
 The optional `engine.cache_model_alias` replaces the strict model component
