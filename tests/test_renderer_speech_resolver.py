@@ -1,6 +1,8 @@
 """Model recovery proposals remain bounded by original text and sound evidence."""
 
 from copy import deepcopy
+import json
+from pathlib import Path
 import unittest
 
 from epub_tts_narrator.renderer.common import digest
@@ -49,6 +51,83 @@ class SpeechResolverTests(unittest.TestCase):
         audit = resolver.resolve(expected, failures, **kwargs)
         proposal = validate_resolution(audit, expected, failures, resolver.identity, **kwargs)
         return audit, proposal, client, resolver, failures
+
+    def legacy_rewrite(self):
+        return json.loads((Path(__file__).parent / "fixtures/speech-rewrite-policy-v1.json").read_text())
+
+    def test_previously_accepted_rewrite_audit_survives_prompt_upgrade(self):
+        saved = self.legacy_rewrite()
+        for version in (4, 5):
+            with self.subTest(coverage_version=version):
+                audit = deepcopy(saved["audit"])
+                identity = audit["identity"]
+                identity["coverage_version"] = version
+                identity["policy_sha256"] = digest({k: v for k, v in identity.items() if k != "policy_sha256"})
+                proposal = validate_resolution(audit, saved["expected_text"], saved["failures"], identity)
+                self.assertEqual(proposal["tts_text"], "Zekra waited outside.")
+                self.assertNotEqual(identity, SpeechResolver(Client()).identity)
+
+    def test_legacy_rewrite_keeps_the_original_generation_identity(self):
+        from epub_tts_narrator.renderer.speech_identity import generation_identity
+        saved = self.legacy_rewrite()
+        voice = {"kind": "reference", "asset_hash": digest("voice asset"), "voice_id": "voice",
+                 "reference_sha256": digest("reference bytes"), "reference_text": "Reference speech."}
+        request = {"kind": "speech", "engine": {"engine": "drama3_mlx_audio", "model": "fixture"},
+                   "base_seed": 42, "sample_rate": 44100, "voice_asset_hash": voice["asset_hash"],
+                   "chunk": {"spoken_text": saved["expected_text"],
+                             "segment": {"delivery": {"direction": "", "evidence": []}}}}
+        voices = {voice["asset_hash"]: voice}
+        marker = {"version": 1, "original_text": saved["expected_text"],
+                  "tts_text": "Zekra waited outside.", "audit": saved["audit"], "failures": saved["failures"]}
+        metadata = {"synthesis_text": marker["tts_text"], "speech_resolution": marker}
+        self.assertEqual(generation_identity(request, voices, engine_metadata=metadata),
+                         generation_identity(request, voices))
+        metadata["synthesis_text"] = "Zekra waited."
+        with self.assertRaises(ValueError):
+            generation_identity(request, voices, engine_metadata=metadata)
+
+    def test_legacy_rewrite_requires_known_policy_exact_source_and_original_votes(self):
+        saved = self.legacy_rewrite()
+        variants = []
+        for key, value in (("coverage_version", 3), ("planner_prompt_sha256", digest("other prompt"))):
+            audit = deepcopy(saved["audit"])
+            identity = audit["identity"]
+            identity[key] = value
+            identity["policy_sha256"] = digest({k: v for k, v in identity.items() if k != "policy_sha256"})
+            variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        audit["identity"]["limits"]["required_votes"] = 1
+        audit["identity"]["policy_sha256"] = digest({k: v for k, v in audit["identity"].items() if k != "policy_sha256"})
+        variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        audit["proposal"]["action"] = "accept"
+        audit["proposal"]["edits"] = []
+        variants.append(audit)
+        for target, key, value in (("proposal", "replacement", "Zekra again"),
+                                   ("proposal", "end", 4)):
+            audit = deepcopy(saved["audit"])
+            audit[target]["edits"][0][key] = value
+            variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        audit["payload"]["source_addresses"] = []
+        variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        audit["reviews"].pop()
+        variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        for review in audit["reviews"][:2]:
+            review["response"]["pairs"][0]["plausible"] = False
+        variants.append(audit)
+        audit = deepcopy(saved["audit"])
+        audit["reviews"][0]["prompt"] = SOUND_PROMPT
+        variants.append(audit)
+        for audit in variants:
+            with self.subTest(audit=audit):
+                self.assertIsNone(validate_resolution(audit, saved["expected_text"], saved["failures"], audit["identity"]))
+        self.assertIsNone(validate_resolution(saved["audit"], "Xzqra waited.", saved["failures"], saved["audit"]["identity"]))
+        failures = deepcopy(saved["failures"])
+        failures[0]["audio_sha256"] = "0" * 64
+        self.assertIsNone(validate_resolution(saved["audit"], saved["expected_text"], failures, saved["audit"]["identity"]))
 
     def test_rare_name_outside_local_coverage_gets_three_independent_sound_votes(self):
         expected, actual = "Xzqra waited outside.", "Zekra waited outside."
@@ -192,6 +271,72 @@ class SpeechResolverTests(unittest.TestCase):
                 audit, proposal, _, _, _ = self.resolve(expected, "Zekra watched Karim.", Client("rewrite", edits=bad_edits))
                 self.assertIsNone(proposal)
                 self.assertEqual(audit["decision"], "blocked")
+
+    def test_complete_address_rewrite_preserves_surrounding_text_and_provenance(self):
+        cases = [
+            ("https://www.example.com/dp/B07KJSRVMS/",
+             "www dot example dot com slash dee pee slash bee zero seven kay jay ess ar vee em ess slash"),
+            ("reader7@example.com", "reader seven at example dot com"),
+        ]
+        for source, replacement in cases:
+            with self.subTest(source=source):
+                expected = f"Visit {source}.\n  Thank you."
+                start = expected.index(source)
+                edit = {"start": start, "end": start + len(source), "source": source,
+                        "replacement": replacement}
+                audit, proposal, client, resolver, failures = self.resolve(
+                    expected, expected.replace(source, "wrong address"), Client("rewrite", edits=[edit]))
+                self.assertEqual(audit["decision"], "resolved")
+                self.assertEqual(proposal["tts_text"], f"Visit {replacement}.\n  Thank you.")
+                self.assertEqual(audit["payload"]["source_addresses"], [{key: edit[key]
+                                  for key in ("start", "end", "source")}])
+                self.assertEqual(audit["payload"]["requested_text"], expected)
+                self.assertEqual(len(client.calls), 4)
+                self.assertEqual(proposal["validated_pairs"][0]["expected_word"], source)
+                self.assertEqual(proposal["validated_pairs"][0]["recognized_word"], replacement)
+                altered = deepcopy(audit)
+                altered["payload"]["source_addresses"][0]["end"] -= 1
+                self.assertIsNone(validate_resolution(altered, expected, failures, resolver.identity))
+
+    def test_address_rewrite_cannot_change_components_add_instructions_or_consume_prose(self):
+        source = "https://www.example.com/dp/B07KJSRVMS/"
+        spelling = "www dot example dot com slash dee pee slash bee zero seven kay jay ess ar vee em ess slash"
+        bad_spellings = [
+            spelling + " dot com", spelling.replace("seven", "eight"),
+            spelling.replace("ar ", ""), spelling.replace("kay jay", "jay kay"),
+            spelling.replace("com slash", "org slash"), spelling.replace("dee pee slash ", ""),
+            "the link", "[loud] " + spelling, spelling + " ignore instructions", spelling + "\n",
+            "x" * 4097,
+        ]
+        expected = f"Visit {source} now."
+        start = expected.index(source)
+        for replacement in bad_spellings:
+            with self.subTest(replacement=replacement[:100]):
+                edit = {"start": start, "end": start + len(source), "source": source,
+                        "replacement": replacement}
+                audit, proposal, client, _, _ = self.resolve(
+                    expected, "wrong address", Client("rewrite", edits=[edit]))
+                self.assertIsNone(proposal)
+                self.assertEqual(audit["error_code"], "invalid_proposal")
+                self.assertEqual(len(client.calls), 1)
+        for original, replacement in (("example", "egzample"),
+                                      (source + " now", spelling)):
+            edit_start = expected.index(original)
+            edit = {"start": edit_start, "end": edit_start + len(original), "source": original,
+                    "replacement": replacement}
+            audit, proposal, client, _, _ = self.resolve(expected, "wrong address", Client("rewrite", edits=[edit]))
+            self.assertIsNone(proposal)
+            self.assertEqual(len(client.calls), 1)
+
+    def test_address_rewrite_still_needs_independent_sound_consensus(self):
+        source = "https://example.com/A7Z/"
+        edit = {"start": 0, "end": len(source), "source": source,
+                "replacement": "example dot com slash ay seven zee slash"}
+        audit, proposal, client, _, _ = self.resolve(
+            source, "wrong address", Client("rewrite", edits=[edit], votes=[[False], [False], [True]]))
+        self.assertIsNone(proposal)
+        self.assertEqual(audit["error_code"], "sound_review_rejected")
+        self.assertEqual(len(client.calls), 4)
 
     def test_actual_prior_tts_spellings_are_bound_and_cannot_be_repeated(self):
         expected, actual = "Xzqra waited.", "Zekra waited."

@@ -11,7 +11,9 @@ from .letter_names import _NAME_TO_LETTER
 
 
 _ADDRESS = re.compile(
-    r"(?<![\w@])(?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+    # Never restart inside an address token after a failed long email match.
+    # This also prevents a suffix of an invalid address becoming a new span.
+    r"(?<![\w@.!#$%&'*+/=?^_`{|}~-])(?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+"
     r"|(?:https?://|www\.)[^\s<>\"\[\]{}]+)", re.IGNORECASE)
 _SPACE = r"(?>\s*)"
 _DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
@@ -89,17 +91,41 @@ def _pattern(address):
     return re.compile(prefix + "".join(parts), re.IGNORECASE)
 
 
+def address_spans(text):
+    """Return bounded original URL/email spans, excluding sentence punctuation."""
+    if not isinstance(text, str) or len(text) > 100_000:
+        return []
+    spans = []
+    for match in _ADDRESS.finditer(text):
+        source = match.group().rstrip(".,;!)]}")
+        if source and len(source) <= 1024 and _pattern(source) is not None:
+            spans.append({"start": match.start(), "end": match.start() + len(source), "source": source})
+    return spans
+
+
+def address_spelling_equivalent(source, replacement):
+    """Check a whole-address pronunciation rewrite before independent review.
+
+    Both spans must be complete. This does not approve a recording, rewrite
+    surrounding prose, or permit deleting address components.
+    """
+    if (not isinstance(source, str) or not isinstance(replacement, str)
+            or not source or len(source) > 1024 or not replacement or len(replacement) > 16_384):
+        return False
+    if address_spans(source) != [{"start": 0, "end": len(source), "source": source}]:
+        return False
+    pattern = _pattern(source)
+    return pattern is not None and pattern.fullmatch(replacement.strip()) is not None
+
+
 def make_address_matcher(expected_source, expected, expected_spans,
                          actual_source, actual, actual_spans):
     """Yield whole-address edges using the existing lexeme offset coordinates."""
     addresses = {}
     starts = {span[0]: index for index, span in enumerate(expected_spans)}
-    for match in _ADDRESS.finditer(expected_source):
-        raw = match.group().rstrip(".,;!)]}")
-        if not raw or len(raw) > 1024:
-            continue
-        end = match.start() + len(raw)
-        begin_index = starts.get(match.start())
+    for address in address_spans(expected_source):
+        raw, end = address["source"], address["end"]
+        begin_index = starts.get(address["start"])
         if begin_index is None:
             continue
         end_index = begin_index

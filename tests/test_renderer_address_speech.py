@@ -8,6 +8,7 @@ from unittest.mock import patch
 from epub_tts_narrator.jev import JevTranscriptJudge
 from epub_tts_narrator.renderer.quality import validate_audio
 from epub_tts_narrator.renderer.speech_coverage import speech_coverage
+from epub_tts_narrator.renderer.address_speech import address_spans, address_spelling_equivalent
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
 import test_renderer_reference_consensus as consensus
 
@@ -19,10 +20,37 @@ SPELLED = ("h t t p s colon slash slash w w w dot example dot com slash g p slas
 
 
 class AddressCoverageTests(unittest.TestCase):
+    def test_whole_address_helper_rejects_partial_spans_and_added_prose(self):
+        self.assertTrue(address_spelling_equivalent(URL, "  " + SPELLED + "  "))
+        self.assertTrue(address_spelling_equivalent(EMAIL, "author.sample.writer.email at example.com"))
+        for source, replacement in (
+            ("Visit " + URL, "Visit " + SPELLED),
+            (URL + " today", SPELLED + " today"),
+            (URL, "Visit " + SPELLED),
+            (URL, SPELLED + " today"),
+            (URL, "www.example.com.gp.product.bo7kjsrvms.com"),
+            ("B07KJSRVMS", "bee zero seven kay jay ess are vee em ess"),
+            (URL, SPELLED.replace("zero", "one")),
+            ("https://example.com/" + "a" * 1024, "a"),
+            (URL, "a" * 16_385),
+        ):
+            with self.subTest(source=source, replacement=replacement[:100]):
+                self.assertFalse(address_spelling_equivalent(source, replacement))
+
+    def test_address_spans_preserve_original_offsets_and_separate_prose(self):
+        text = "Email " + EMAIL + ", then visit " + URL + ". Thank you."
+        spans = address_spans(text)
+        self.assertEqual([row["source"] for row in spans], [EMAIL, URL])
+        for row in spans:
+            self.assertEqual(text[row["start"]:row["end"]], row["source"])
+        self.assertEqual(address_spans("Ordinary text with no address."), [])
+        self.assertEqual(address_spans("x" * 100_001), [])
+
     def test_long_ambiguous_spellings_and_late_failures_are_bounded(self):
         # Isolate the adversarial match so a regression cannot hang the suite.
         code = '''
-from epub_tts_narrator.renderer.address_speech import _pattern
+from epub_tts_narrator.renderer.address_speech import _pattern, address_spans
+assert address_spans("a." * 49_999 + "@") == []
 cases = [
  ("https://www.example.com/" + "be" * 200 + "/end",
   "https://www.example.com/" + "bee ee " * 200 + "slash wrong"),
