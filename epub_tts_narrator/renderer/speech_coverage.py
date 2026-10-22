@@ -19,7 +19,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 5
+SPEECH_COVERAGE_VERSION = 6
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -39,6 +39,29 @@ _CONTRACTIONS = {
     **{f"{word}'d": ((word, "had"), (word, "would")) for word in ("i", "you", "he", "she", "it", "we", "they", "who", "that", "there")},
     **{f"{word}'s": ((word, "is"), (word, "has")) for word in ("he", "she", "it", "who", "what", "that", "there", "here")},
 }
+
+
+def stretched_word_equivalent(expected, actual):
+    """Recognize shortening a visibly elongated word, never a missing word.
+
+    One source run must contain at least three repeated letters. Once that
+    identifies deliberate elongation, other doubled runs may shorten too:
+    ``Wheerrre`` becomes ``Where``. Ordinary ``dessert``/``desert`` does not
+    qualify. The target preserves every distinct letter and apostrophe in
+    order, cannot lengthen any run, and cannot add or remove a word boundary.
+    This permits sound review; it does not approve a take by itself.
+    """
+    if not isinstance(expected, str) or not isinstance(actual, str):
+        return False
+    expected, actual = (value.casefold().replace("’", "'") for value in (expected, actual))
+    if (not _ALPHABETIC_WORD.fullmatch(expected) or not _ALPHABETIC_WORD.fullmatch(actual)
+            or len(actual.replace("'", "")) < 2 or expected == actual):
+        return False
+    left, right = ([match.group() for match in re.finditer(r"(.)\1*", value)]
+                   for value in (expected, actual))
+    return (len(left) == len(right)
+            and any(run[0].isalpha() and len(run) >= 3 for run in left)
+            and all(a[0] == b[0] and len(b) <= len(a) for a, b in zip(left, right)))
 
 
 def speech_coverage(expected_text, transcript):
@@ -224,6 +247,10 @@ def speech_coverage(expected_text, transcript):
             yield from letter_matches(i, j)
             return
         yield from letter_matches(i, j)
+        if stretched_word_equivalent(expected[i], actual[j]):
+            yield i + 1, j + 1, {"operation": "pronunciation_candidate", "rule": "stretched_spelling",
+                "expected_start": i, "expected_end": i + 1, "actual_start": j,
+                "actual_end": j + 1, "expected": expected[i:i + 1], "actual": actual[j:j + 1]}
         variant = spelling_variant(expected[i], actual[j])
         if variant is not None:
             yield i + 1, j + 1, {"operation": "pronunciation_candidate", "rule": variant,

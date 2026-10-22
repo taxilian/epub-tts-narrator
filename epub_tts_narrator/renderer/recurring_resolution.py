@@ -2,6 +2,7 @@
 
 from collections import Counter
 from copy import deepcopy
+import json
 from pathlib import Path
 
 from .common import digest, file_hash, read_json, regular_file, write_json
@@ -108,13 +109,67 @@ class RecurringResolution:
                 'tts_text': marker.get('tts_text', self.text),
                 'reasons': report.get('reasons', [])}
 
+    def _feedback(self, history):
+        """Keep bounded outcomes, not nested prompts or old failed-take payloads."""
+        limits = self.identity.get('limits', {})
+        maximum = limits.get('max_prior_decisions', 5)
+        character_limit = limits.get('max_feedback_chars', 30000)
+
+        def bounded(value, limit):
+            try:
+                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                return {'summary': 'The earlier model response was not valid bounded JSON.'}
+            if len(encoded) <= limit:
+                return deepcopy(value)
+            return {'truncated': True, 'preview': encoded[:limit]}
+
+        result = []
+        for row in reversed(history):
+            audit = row['audit']
+            if (type(row.get('attempt')) is not int or row['attempt'] < 1
+                    or audit.get('decision') not in {'resolved', 'blocked', 'unavailable'}):
+                continue
+            entry = {
+                'attempt': row['attempt'], 'proposal': bounded(audit.get('proposal'), 12000),
+                'decision': audit['decision'],
+                'error_code': (audit['error_code'][:100] if isinstance(audit.get('error_code'), str) else None),
+                'validation_error': (audit['validation_error'][:800]
+                                     if isinstance(audit.get('validation_error'), str) else None),
+                'sound_reviews': [
+                    {'reviewer': review['reviewer'], 'response': bounded(review.get('response'), 4000)}
+                    for review in audit.get('reviews', [])[:3]
+                    if isinstance(review, dict) and type(review.get('reviewer')) is int
+                    and 1 <= review['reviewer'] <= 3],
+            }
+            candidate = [entry, *result]
+            if len(json.dumps(candidate, ensure_ascii=False, allow_nan=False)) > character_limit:
+                break
+            result = candidate
+            if len(result) >= maximum:
+                break
+        return result
+
+    def _saved_feedback(self, index):
+        row = self.state['history'][index]
+        if 'previous_decisions' not in row:
+            # Earlier state records did not separately bind feedback. Their
+            # existing audit keeps its original empty/historical payload.
+            return None
+        expected = self._feedback(self.state['history'][:index])
+        if row['previous_decisions'] != expected:
+            raise ValueError('Saved speech resolution feedback differs from its preceding decisions')
+        return expected
+
     def active_rewrite(self):
         from .speech_resolver import validate_resolution
-        for row in reversed(self.state['history']):
+        for index in range(len(self.state['history']) - 1, -1, -1):
+            row = self.state['history'][index]
             if row['audit'].get('decision') != 'resolved':
                 continue
             proposal = validate_resolution(row['audit'], self.text, row['failures'], self.identity,
-                                           can_rewrite=self.can_rewrite, can_split=self.can_split)
+                                           can_rewrite=self.can_rewrite, can_split=self.can_split,
+                                           previous_decisions=self._saved_feedback(index))
             if proposal is None:
                 raise ValueError('Saved speech resolution no longer validates')
             if proposal['action'] == 'rewrite':
@@ -144,7 +199,8 @@ class RecurringResolution:
                 and previous['failures'][-1] == self._failure(record)):
             proposal = validate_resolution(
                 previous['audit'], self.text, previous['failures'], self.identity,
-                can_rewrite=self.can_rewrite, can_split=self.can_split)
+                can_rewrite=self.can_rewrite, can_split=self.can_split,
+                previous_decisions=self._saved_feedback(len(self.state['history']) - 1))
             if proposal is not None and proposal['action'] in {'accept', 'split'}:
                 self._check_candidate_audio(record)
                 notify('  Resuming saved speech recovery decision: ' + proposal['action'] + '.')
@@ -165,14 +221,16 @@ class RecurringResolution:
                     if number <= record['attempt'] and failure_signatures(self.text, saved['report'])][-30:]
         notify(f'  Recurring speech discrepancy ({max(counts[s] for s in ready)} takes); asking the analysis model how to recover.')
         self.rounds += 1
+        feedback = self._feedback(self.state['history'])
         audit = self.resolver.resolve(self.text, failures, can_rewrite=self.can_rewrite,
-                                      can_split=self.can_split)
+                                      can_split=self.can_split, previous_decisions=feedback)
         row = {'trigger_counts': {key: counts[key] for key in ready},
                'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
-               'failures': failures, 'audit': audit}
+               'failures': failures, 'audit': audit, 'previous_decisions': feedback}
         self.state['history'].append(row)
         proposal = validate_resolution(audit, self.text, failures, self.identity,
-                                       can_rewrite=self.can_rewrite, can_split=self.can_split)
+                                       can_rewrite=self.can_rewrite, can_split=self.can_split,
+                                       previous_decisions=feedback)
         if audit.get('decision') != 'unavailable':
             self.state['handled'].update(row['trigger_counts'])
         self._save()  # Commit the decision before changing input or accepting audio.
