@@ -75,6 +75,13 @@ language = "en"
 # [provider] analysis model (three votes; two required per word). No audio sent.
 # Set to "off" to disable; without a configured analysis model it is inactive.
 phonetic_fallback = "analysis"
+# Recurring rendering failures use the same analysis provider to choose an
+# acceptance, pronunciation spelling, fresh take, or safe split. No audio sent.
+# Disabled automatically without [provider]; set "off" to disable explicitly.
+recurring_resolution = "analysis"
+recurrence_threshold = 3
+max_resolution_attempts = 12
+max_resolution_rounds = 2
 # Optional second recognizer for small wording discrepancies in voice samples.
 # Download the model first; book passages always use the strict speech policy.
 # reference_model = "./models/parakeet-tdt-0.6b-v3"

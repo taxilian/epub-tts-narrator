@@ -139,7 +139,7 @@ def _concatenate(parts, target, sample_rate):
 
 
 def recover_speech(text, synthesize_part, parent_directory, parent_request, verifier, config,
-                   *, notify=print, retry_budget=None):
+                   *, notify=print, retry_budget=None, resolution_episode=None):
     """Verify split parts with the caller's bounded allowance for this invocation.
 
     The caller selects this strategy only after ordinary speech takes fail.
@@ -184,11 +184,14 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
             notify(f"  Recovery part {number}/{len(request['recovery']['parts'])}: checking saved audio.")
             wav, record = verified_take(part["text"], generate_part, child_directory,
                                         child_request, verifier, config, notify=notify,
-                                        purpose="speech", retry_budget=retry_budget)
+                                        purpose="speech", retry_budget=retry_budget,
+                                        generate_repaired=synthesize_part,
+                                        resolution_episode=resolution_episode)
             verified.append((wav, record))
             audit.append({**part, "request_hash": record["request_hash"],
                           "audio_sha256": record["audio_sha256"],
                           "validation_key": record["validation_key"],
+                          "accepted_sha256": file_hash(wav.parent / "accepted.json"),
                           "audio_file": str(wav.relative_to(directory))})
         _concatenate(verified, path, config["render"]["sample_rate"])
         return {"synthesis_text": trim_speech_text(text),

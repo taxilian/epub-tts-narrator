@@ -7,7 +7,7 @@ import unittest
 
 from epub_tts_narrator.renderer.common import digest, read_json, write_json
 from epub_tts_narrator.renderer.paragraph_recovery import (
-    load_paragraph_fallbacks, record_paragraph_fallback,
+    load_paragraph_fallbacks, paragraph_retry_episode, record_paragraph_fallback,
 )
 from epub_tts_narrator.renderer.paragraphs import group_paragraphs
 
@@ -41,6 +41,64 @@ class ParagraphRecoveryTests(unittest.TestCase):
     def test_missing_directory_is_empty_and_does_not_create_files(self):
         self.assertEqual(load_paragraph_fallbacks(self.work), set())
         self.assertFalse(self.work.exists())
+
+    def test_retry_episode_is_shared_without_changing_source_or_request_identity(self):
+        before = deepcopy(self.request)
+        grouped = self.request["chunk"]
+        episode = paragraph_retry_episode(self.work, grouped)
+        self.assertIsNone(paragraph_retry_episode(self.work, grouped["paragraph_turns"][0]))
+        self.assertFalse(self.work.exists())
+        record_paragraph_fallback(self.work, self.request)
+        for child in grouped["paragraph_turns"]:
+            self.assertEqual(paragraph_retry_episode(self.work, child), episode)
+        self.assertEqual(self.request, before)
+        self.assertEqual(digest(self.request), digest(before))
+        unrelated = deepcopy(grouped["paragraph_turns"][0])
+        unrelated["chunk_id"] = digest("unrelated chunk")[:32]
+        self.assertIsNone(paragraph_retry_episode(self.work, unrelated))
+
+    def test_retry_episode_survives_multiple_engine_request_markers(self):
+        record_paragraph_fallback(self.work, self.request)
+        child = self.request["chunk"]["paragraph_turns"][0]
+        episode = paragraph_retry_episode(self.work, child)
+        changed = deepcopy(self.request)
+        changed["engine"] = {"model": "another model"}
+        record_paragraph_fallback(self.work, changed)
+        self.assertEqual(paragraph_retry_episode(self.work, child), episode)
+        self.assertEqual(paragraph_retry_episode(self.work, self.request["chunk"]), episode)
+
+    def test_ordinary_symbolic_chunk_ids_have_no_paragraph_episode(self):
+        child = deepcopy(self.request["chunk"]["paragraph_turns"][0])
+        child["chunk_id"] = "ordinary-passage"
+        self.assertIsNone(paragraph_retry_episode(self.work, child))
+        self.assertFalse(self.work.exists())
+        record_paragraph_fallback(self.work, self.request)
+        self.assertIsNone(paragraph_retry_episode(self.work, child))
+        grouped = deepcopy(self.request["chunk"])
+        grouped["chunk_id"] = "ordinary-passage"
+        with self.assertRaises(ValueError):
+            paragraph_retry_episode(self.work, grouped)
+
+    def test_overlapping_legacy_groups_share_one_conservative_episode(self):
+        from epub_tts_narrator.renderer.paragraphs import _group
+        record_paragraph_fallback(self.work, self.request)
+        shorter = deepcopy(self.request)
+        shorter["chunk"] = _group(self.request["chunk"]["paragraph_turns"][:2])[0]
+        record_paragraph_fallback(self.work, shorter)
+        episodes = {paragraph_retry_episode(self.work, child)
+                    for child in self.request["chunk"]["paragraph_turns"]}
+        episodes.add(paragraph_retry_episode(self.work, self.request["chunk"]))
+        episodes.add(paragraph_retry_episode(self.work, shorter["chunk"]))
+        self.assertEqual(len(episodes), 1)
+        self.assertNotIn(None, episodes)
+
+    def test_retry_episode_rejects_corrupt_saved_relationships(self):
+        path = record_paragraph_fallback(self.work, self.request)
+        record = read_json(path)
+        record["record_sha256"] = "0" * 64
+        write_json(path, record)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            paragraph_retry_episode(self.work, self.request["chunk"]["paragraph_turns"][0])
 
     def test_marker_preserves_original_ids_and_replans_without_regrouping(self):
         path = record_paragraph_fallback(self.work, self.request)

@@ -231,6 +231,52 @@ def _check_recorded_text(metadata, expected):
                 raise ValueError("Recorded synthesis text differs from the prepared speech input")
 
 
+def _resolved_generation_identity(request, voices_by_asset, metadata):
+    """Validate an audited pronunciation input without relabelling its source.
+
+    Speech acceptance still belongs to the verifier, against the original text.
+    Once accepted, that performance can satisfy the original logical request;
+    the engine metadata retains the exact alternate input and its resolver
+    audit. Merely recording different synthesis text never enables this path.
+    """
+    from .speech_resolver import validate_resolution
+
+    marker = metadata["speech_resolution"]
+    chunk = request["chunk"]
+    if (request["kind"] != "speech" or not isinstance(marker, Mapping)
+            or set(marker) != {"version", "original_text", "tts_text", "audit", "failures"}
+            or type(marker["version"]) is not int or marker["version"] != 1
+            or marker["original_text"] != chunk.get("spoken_text")
+            or not isinstance(marker["tts_text"], str) or not marker["tts_text"].strip()
+            or marker["tts_text"] == marker["original_text"]
+            or not isinstance(marker["audit"], Mapping)
+            or not isinstance(metadata.get("synthesis_text"), str)
+            or not metadata["synthesis_text"].strip()):
+        raise ValueError("Invalid audited speech pronunciation input")
+    payload = marker["audit"].get("payload")
+    permitted = payload.get("permitted_actions") if isinstance(payload, Mapping) else None
+    if not isinstance(permitted, list):
+        raise ValueError("Speech pronunciation audit is missing its permitted actions")
+    proposal = validate_resolution(
+        marker["audit"], marker["original_text"], marker["failures"],
+        marker["audit"].get("identity"), can_rewrite=True, can_split="split" in permitted)
+    if (not isinstance(proposal, Mapping) or proposal.get("action") != "rewrite"
+            or proposal.get("tts_text") != marker["tts_text"]):
+        raise ValueError("Speech pronunciation input does not match its resolver audit")
+
+    actual_request = deepcopy(dict(request))
+    actual_request["chunk"]["spoken_text"] = marker["tts_text"]
+    actual_request.pop("synthesis_identity", None)
+    actual_metadata = dict(metadata)
+    actual_metadata.pop("speech_resolution")
+    # The normal engine formatter must independently reproduce the actual
+    # synthesis input, including delivery controls and voice conditioning.
+    # Do not substitute a logical identity for this check or weaken it to a
+    # substring comparison merely because a resolver proposed the rewrite.
+    generation_identity(actual_request, voices_by_asset, engine_metadata=actual_metadata)
+    return generation_identity(request, voices_by_asset)
+
+
 def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     """Return generation inputs without position, source IDs or cast bookkeeping.
 
@@ -248,6 +294,8 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     chunk = request.get("chunk")
     if not isinstance(chunk, Mapping):
         raise ValueError("Speech request is missing its chunk")
+    if isinstance(engine_metadata, Mapping) and "speech_resolution" in engine_metadata:
+        return _resolved_generation_identity(request, voices_by_asset, engine_metadata)
     engine = request.get("engine")
     result = {"version": 1, "kind": request["kind"],
               "engine": synthesis_engine_identity(engine),

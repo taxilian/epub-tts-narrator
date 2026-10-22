@@ -7,7 +7,10 @@ from pathlib import Path
 from threading import RLock
 
 from .common import file_hash
-from .verification import ReferenceCorroboratingVerifier, ReferenceTextJudgingVerifier
+from .verification import (
+    RecurringSpeechVerifier, ReferenceCorroboratingVerifier, ReferenceTextJudgingVerifier,
+    create_speech_resolver,
+)
 
 
 class FasterWhisperVerifier:
@@ -128,4 +131,7 @@ def create_chapter_verifier(settings, jev_settings=None, provider_settings=None)
         from .verification import create_phonetic_reviewer
         verifier = ReferenceTextJudgingVerifier(
             verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
+    resolver = create_speech_resolver(settings, provider_settings)
+    if resolver is not None:
+        verifier = RecurringSpeechVerifier(verifier, resolver)
     return verifier

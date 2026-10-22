@@ -163,7 +163,8 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
 
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
-                  purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None):
+                  purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
+                  generate_repaired=None, resolution_episode=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -176,9 +177,15 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
+    resolver = getattr(verifier, "speech_resolver", None)
+    adaptive = (resolver is not None and purpose == "speech" and "recovery" not in request
+                and request.get("kind") in {"speech", "speech_recovery_part", "paragraph_speech"})
+    if adaptive and retry_budget is None:
+        retry_budget = SpeechRetryBudget(retry_paragraphs=True)
     fresh_speech = (retry_budget is not None and purpose == "speech"
                     and (request.get("kind") in {"speech", "speech_recovery_part"}
-                         or (request.get("kind") == "paragraph_speech" and retry_budget.retry_paragraphs)))
+                         or (request.get("kind") == "paragraph_speech"
+                             and (adaptive or retry_budget.retry_paragraphs))))
     request_hash = digest(request)
     set_phase(notify, "checking saved audio")
 
@@ -195,7 +202,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         return wav, record
 
     def pending_confirmation(report):
-        return text_confirmation_unavailable(report)
+        return text_confirmation_unavailable(report) or report.get("resolution_pending") is True
 
     def stop_for_confirmation():
         raise VerificationUnavailable(
@@ -273,6 +280,72 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 return finish(wav, accepted)
     validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
     attempts = config["render"]["max_attempts"]
+    resolution_session, rewrite = None, None
+    if adaptive:
+        from .recurring_resolution import RecurringResolution, accepted_report
+        from .speech_recovery import split_recovery_text
+        settings = config.get("verification", {})
+        attempts = settings.get("max_resolution_attempts", 12)
+        resolution_session = RecurringResolution(
+            directory, request, text, resolver, settings,
+            can_rewrite=generate_repaired is not None,
+            can_split=(request.get("kind") == "paragraph_speech"
+                       or (request.get("kind") == "speech" and split_recovery_text(text) is not None)))
+        rewrite = resolution_session.active_rewrite()
+
+    def resolve_failure(record):
+        nonlocal rewrite
+        if resolution_session is None:
+            return None
+        result = resolution_session.consider(record, notify=notify)
+        if result is None:
+            return None
+        action = result["action"]
+        if action == "unavailable":
+            record["report"]["resolution_pending"] = True
+            write_json(directory / f"attempt-{record['attempt']:03d}.json", record)
+            raise VerificationUnavailable(
+                "Speech recovery model is unavailable. The candidate and recurrence counts "
+                f"are saved; rerun to resume without new synthesis. Inspect {directory}"
+                + ("\n" + result["audit"]["error"] if result["audit"].get("error") else ""))
+        notify("  Speech recovery: " + action + " — " + _diagnostic_text(result.get("reason", ""), 240))
+        if action == "accept":
+            record = deepcopy(record)
+            record["report"] = accepted_report(record["report"], result)
+            record["validation_key"] = validation_key
+            write_json(accepted_path, record)
+            return finish(directory / record["audio_file"], record)
+        if action == "rewrite":
+            rewrite = resolution_session.active_rewrite()
+        if action in {"split", "stop"}:
+            report = dict(record["report"], resolution_action=action)
+            raise SpeechVerificationFailed(
+                f"Speech recovery selected {action}. Inspect {directory}", request=request, report=report)
+        return None
+
+    # A resumed run can resolve an existing recurring failure before spending
+    # another TTS attempt. Recheck the candidate under today's acoustic policy.
+    if resolution_session is not None and resolution_session.records:
+        latest = resolution_session.records[max(resolution_session.records)]
+        name = latest.get("audio_file")
+        if name == f"attempt-{latest['attempt']:03d}.wav" and (directory / name).exists():
+            if file_hash(regular_file(directory / name)) != latest.get("audio_sha256"):
+                raise RenderBlocked("Speech recovery candidate changed on disk")
+            # Pending decisions and recurring failures are reconsidered; no saved
+            # transcript is substituted for independent recognition here.
+            latest = deepcopy(latest)
+            latest["report"] = validate_audio(directory / name, text, verifier, config["quality"], purpose=purpose)
+            marker = latest.get("engine_metadata", {}).get("speech_resolution")
+            if marker is not None:
+                from .recurring_resolution import confirm_rewritten_report
+                latest["report"] = confirm_rewritten_report(latest["report"], marker)
+            if latest["report"].get("passed"):
+                latest["validation_key"] = validation_key
+                write_json(accepted_path, latest)
+                return finish(directory / name, latest)
+            result = resolve_failure(latest)
+            if result is not None:
+                return result
     secrets = configured_secrets(config)
     last_report = None
     first_attempt = missing_accepted_attempt or resume_attempt or 1
@@ -359,7 +432,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
                     if fresh_speech:
-                        generation_ordinal = retry_budget.claim(directory, request_hash, attempts)
+                        generation_ordinal = retry_budget.claim(
+                            directory, request_hash, attempts,
+                            episode=((resolution_episode or request.get("parent_request_hash", request_hash))
+                                     if adaptive else None),
+                            episode_maximum=attempts if adaptive else None)
                         if generation_ordinal is None:
                             break
                         # Reserve this take before discarding abandoned raw
@@ -386,7 +463,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     set_phase(notify, f"generating {kind}, attempt {current_attempt}/{attempts}", generated=True)
                     if purpose == "speech":
                         notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
-                    metadata = generate(raw, seed)
+                    if rewrite is not None:
+                        metadata = generate_repaired(rewrite["tts_text"], raw, seed)
+                        metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
+                    else:
+                        metadata = generate(raw, seed)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
                                       "seed": seed, "raw_file": raw.name,
@@ -399,12 +480,31 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 if generation is not None:
                     generation["normalized_sha256"] = file_hash(regular_file(wav))
                     _save_elevenlabs_generation(generation_path, generation)
+                # Persist the actual synthesis input and its byte binding before
+                # recognition can be interrupted. In particular, a pronunciation
+                # rewrite must retain its reviewed spelling and audit when this
+                # already-generated waveform is verified on the next run.
+                if adaptive:
+                    write_json(result_path, {
+                        "request_hash": request_hash, "request": request,
+                        "attempt": attempt, "seed": seed, "validation_key": validation_key,
+                        "report": {"passed": False, "reasons": ["generation_incomplete"],
+                                   "retry_on_resume": True},
+                        "engine_metadata": metadata, "audio_file": wav.name,
+                        "audio_sha256": file_hash(regular_file(wav)),
+                    })
             if fresh_speech and generation_ordinal is None:
                 set_phase(notify, f"verifying saved take {attempt}")
             else:
                 current_attempt = generation_ordinal if fresh_speech else attempt
                 set_phase(notify, f"verifying speech, attempt {current_attempt}/{attempts}")
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
+            if metadata.get("speech_resolution") is not None:
+                from .recurring_resolution import confirm_rewritten_report
+                report = confirm_rewritten_report(report, metadata["speech_resolution"])
+            if "recovery" in request and metadata.get("recovery") is not None:
+                from .recurring_resolution import confirm_recovery_report
+                report = confirm_recovery_report(report, request, metadata, directory)
         except RenderBlocked:
             raise
         except (ValueError, RuntimeError, OSError) as exc:
@@ -451,6 +551,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         else:
             label = f"Attempt {attempt}/{attempts}"
         notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
+        resolved = resolve_failure(record)
+        if resolved is not None:
+            return resolved
+        if (adaptive and report.get("reasons") == ["generation_or_verification_error"]
+                and generation_ordinal is not None and generation_ordinal >= config["render"]["max_attempts"]):
+            break  # Transport/generator errors are not pronunciation experiments.
     if fresh_speech:
         used = retry_budget.started(directory, request_hash)
         failure = f"Speech verification failed after {used} attempts in this run. Inspect {directory}"
@@ -1084,6 +1190,10 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     def take(text, generate, request, *, synthesize_part=None):
         identity = speech_cache.identity(request)
         key = digest(identity)
+        resolution_episode = None
+        if getattr(verifier, "speech_resolver", None) is not None:
+            from .paragraph_recovery import paragraph_retry_episode
+            resolution_episode = paragraph_retry_episode(work, request["chunk"])
         with take_locks_guard:
             lock = take_locks.setdefault(key, Lock())
         # Duplicate logical jobs must never race over the same attempt files.
@@ -1112,18 +1222,23 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                     # A persisted alternate strategy resumes its verified parts
                     # instead of spending another batch on the same full text.
                     result = recover_speech(text, synthesize_part, directory, request,
-                                            verifier, config, notify=notify, retry_budget=retry_budget)
+                                            verifier, config, notify=notify, retry_budget=retry_budget,
+                                            resolution_episode=resolution_episode)
                 else:
                     try:
                         result = verified_take(text, generate, directory, request,
                                                verifier, config, notify=notify, retry_budget=retry_budget,
-                                               seed_identity=identity)
+                                               seed_identity=identity, generate_repaired=synthesize_part,
+                                               resolution_episode=resolution_episode)
                     except SpeechVerificationFailed as exc:
-                        if (synthesize_part is None or exc.report.get("reasons") != ["text_mismatch"]
+                        if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
+                                or (exc.report.get("reasons") != ["text_mismatch"]
+                                    and exc.report.get("resolution_action") != "split")
                                 or split_recovery_text(text) is None):
                             raise
                         result = recover_speech(text, synthesize_part, directory, request,
-                                                verifier, config, notify=notify, retry_budget=retry_budget)
+                                                verifier, config, notify=notify, retry_budget=retry_budget,
+                                                resolution_episode=resolution_episode)
                 speech_cache.remember(identity, result[1])
                 return result
             except RenderBlocked:
@@ -1265,6 +1380,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             reasons = report.get("reasons", [])
             chunk = request.get("chunk", {})
             if (request.get("kind") != "paragraph_speech"
+                    or report.get("resolution_action") == "stop"
                     or not isinstance(reasons, list) or not reasons
                     or any(reason not in recoverable for reason in reasons)
                     or text_confirmation_unavailable(report)

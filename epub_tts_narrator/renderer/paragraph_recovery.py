@@ -125,3 +125,43 @@ def load_paragraph_fallbacks(work):
         record = _validate_record(read_json(regular_file(path)), path)
         members.update(record["member_chunk_ids"])
     return members
+
+
+def paragraph_retry_episode(work, chunk):
+    """Bind a paragraph and its fallback children to one run-local allowance.
+
+    This scheduling identity stays outside synthesis requests: introducing a
+    shared budget must not move failed takes or discard their saved evidence.
+    Existing immutable fallback markers restore the relation on a later run.
+    Overlapping legacy groups share one conservative allowance for their whole
+    connected component instead of granting each child a separate budget.
+    """
+    if not isinstance(chunk, dict):
+        raise ValueError("Paragraph retry budget requires a chunk object")
+    if "paragraph_turns" in chunk:
+        record = _request_record({"kind": "paragraph_speech", "chunk": chunk})
+        groups = {record["paragraph_chunk_id"]}
+        members = set(record["member_chunk_ids"])
+    else:
+        # Ordinary caller-supplied chunks need not use the planner's digest ID
+        # format. They cannot match validated fallback members and therefore
+        # have no shared paragraph allowance. Grouped requests remain strict.
+        if not _chunk_id(chunk.get("chunk_id")):
+            return None
+        members, groups = {chunk["chunk_id"]}, set()
+    directory = _directory(work)
+    if directory.exists():
+        records = [_validate_record(read_json(regular_file(path)), path)
+                   for path in sorted(directory.glob("*.json"))]
+        while True:
+            discovered = [record for record in records
+                          if record["paragraph_chunk_id"] not in groups
+                          and members.intersection(record["member_chunk_ids"])]
+            if not discovered:
+                break
+            for record in discovered:
+                groups.add(record["paragraph_chunk_id"])
+                members.update(record["member_chunk_ids"])
+    if not groups:
+        return None
+    return digest({"paragraph_retry_groups": sorted(groups)})

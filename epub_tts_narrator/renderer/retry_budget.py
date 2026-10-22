@@ -58,21 +58,30 @@ class SpeechRetryBudget:
             raise ValueError("retry_paragraphs must be a boolean")
         self.retry_paragraphs = retry_paragraphs
         self._counts = {}
+        self._episodes = {}
         self._lock = Lock()
 
     @staticmethod
     def _key(directory, request_hash):
         return Path(directory).resolve(), request_hash
 
-    def claim(self, directory, request_hash, maximum):
+    def claim(self, directory, request_hash, maximum, *, episode=None, episode_maximum=None):
         """Return this run's next ordinal, or None if its allowance is spent."""
         if type(maximum) is not int or maximum < 1:
             raise ValueError("Speech generation allowance must be a positive integer")
+        if episode is not None and (not isinstance(episode, str) or
+                type(episode_maximum) is not int or episode_maximum < 1):
+            raise ValueError("Speech resolution requires a bounded parent allowance")
         key = self._key(directory, request_hash)
         with self._lock:
             started = self._counts.get(key, 0)
             if started >= maximum:
                 return None
+            if episode is not None:
+                total = self._episodes.get(episode, 0)
+                if total >= episode_maximum:
+                    return None
+                self._episodes[episode] = total + 1
             started += 1
             self._counts[key] = started
             return started

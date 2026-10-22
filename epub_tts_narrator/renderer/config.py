@@ -24,6 +24,8 @@ DEFAULTS = {
         "type": "mlx_whisper", "model": None, "language": "en",
         "reference_model": None,
         "phonetic_fallback": "analysis",
+        "recurring_resolution": "analysis", "recurrence_threshold": 3,
+        "max_resolution_attempts": 12, "max_resolution_rounds": 2,
         "device": "cpu", "compute_type": "int8", "cpu_threads": 4,
     },
     "voice_design": {
@@ -323,6 +325,18 @@ def load_config(path=None, *, require_verifier=True):
     if (not isinstance(result["verification"]["phonetic_fallback"], str)
             or result["verification"]["phonetic_fallback"] not in {"analysis", "off"}):
         raise ValueError("verification.phonetic_fallback must be analysis or off")
+    verification = result["verification"]
+    if (not isinstance(verification["recurring_resolution"], str)
+            or verification["recurring_resolution"] not in {"analysis", "off"}):
+        raise ValueError("verification.recurring_resolution must be analysis or off")
+    for key, low, high in (("recurrence_threshold", 2, 10),
+                          ("max_resolution_attempts", 3, 30),
+                          ("max_resolution_rounds", 1, 5)):
+        value = verification[key]
+        if type(value) is not int or not low <= value <= high:
+            raise ValueError(f"verification.{key} must be an integer from {low} through {high}")
+    if verification["max_resolution_attempts"] < verification["recurrence_threshold"]:
+        raise ValueError("verification.max_resolution_attempts must be at least recurrence_threshold")
     result["huggingface"] = validate_huggingface_settings(result["huggingface"])
     validate_distributed_settings(result)
     validate_chapter_settings(result)

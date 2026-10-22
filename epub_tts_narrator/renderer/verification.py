@@ -63,6 +63,42 @@ class ReferenceTextJudgingVerifier:
                 close()
 
 
+class RecurringSpeechVerifier:
+    """Expose bounded recovery while preserving all underlying verification APIs."""
+
+    def __init__(self, verifier, resolver):
+        self.verifier = verifier
+        self.speech_resolver = resolver
+        self.speech_resolution_identity = resolver.identity
+        self.identity = {**verifier.identity, "speech_resolution": resolver.identity}
+
+    def __getattr__(self, name):
+        return getattr(self.verifier, name)
+
+    def close(self):
+        try:
+            close = getattr(self.verifier, "close", None)
+            if callable(close):
+                close()
+        finally:
+            close = getattr(self.speech_resolver, "close", None)
+            if callable(close):
+                close()
+
+
+def create_speech_resolver(settings, provider_settings):
+    """Use the configured analysis endpoint only after a recurring speech failure."""
+    if (settings.get("recurring_resolution", "analysis") == "off"
+            or not provider_settings or not provider_settings.get("model")):
+        return None
+    from epub_tts_narrator.provider import OpenAICompatibleClient
+    from .speech_resolver import SpeechResolver
+    options = dict(provider_settings)
+    options["max_output_tokens"] = min(options.get("max_output_tokens") or 2048, 2048)
+    options["max_retries"] = min(options.get("max_retries", 0), 2)
+    return SpeechResolver(OpenAICompatibleClient(**options), secrets=(options.get("api_key"),))
+
+
 def create_phonetic_reviewer(settings, provider_settings):
     """Reuse the explicitly configured analysis endpoint for bounded tie-breaking."""
     if (settings.get("phonetic_fallback", "analysis") == "off"
@@ -99,4 +135,7 @@ def create_verifier(settings, jev_settings=None, provider_settings=None):
         from epub_tts_narrator.jev import JevTranscriptJudge
         verifier = ReferenceTextJudgingVerifier(
             verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
+    resolver = create_speech_resolver(settings, provider_settings)
+    if resolver is not None:
+        verifier = RecurringSpeechVerifier(verifier, resolver)
     return verifier
