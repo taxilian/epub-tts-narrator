@@ -204,6 +204,11 @@ Gemini, ElevenLabs, or Qwen3 VoiceDesign for missing voices. The normal `auto`
 setting uses Gemini when its key is present. Switching models invalidates generated
 speech caches while retaining the saved voices.
 
+The 4-bit checkpoint passed a short local narration/dialogue benchmark with lower
+time and memory than Sogni q8. The 8-bit and 3-bit HQ options have config and adapter
+coverage but have not been run locally. See [measurements and listening samples](scripts/QUANTIZED_TTS.md);
+these results do not establish full-book reliability.
+
 The config-based 4-bit adapter also rendered the Last Lantern demo: all six blocks
 passed exact-transcript and acoustic checks across eight attempts (two silence
 stalls were rejected). Resume reused the completed chapter, and assembly produced

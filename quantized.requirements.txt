@@ -1,0 +1,2 @@
+# Benchmarks use the same runtime dependencies as the renderer.
+-r renderer.requirements.txt
