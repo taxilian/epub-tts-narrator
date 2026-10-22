@@ -273,16 +273,18 @@ experts = "q8"
 [server]
 host = "127.0.0.1" # Default; --host overrides it for a particular run.
 port = 8080
-api_key = "YOUR_SHARED_SERVER_KEY"
+api_key = "" # serve generates and saves a random key if missing or empty.
 ```
 
-Use a long random key and put the same value in the client's worker entry. These settings belong in each machine's existing global config; no book-specific config is needed. The server does not need Whisper, analyzer credentials, or a book directory. Start it from the project directory:
+These settings belong in each machine's existing global config; no book-specific config is needed. The server does not need Whisper, analyzer credentials, or a book directory. Start it from the project directory:
 
 ```sh
 .venv-renderer/bin/audiobook-render serve --host 0.0.0.0 --port 8080
 ```
 
-`--host` and `--port` override the configuration for this invocation without editing the file. Omitted flags use `[server]` defaults, falling back to `127.0.0.1:8080`. To make LAN listening permanent, set `server.host = "0.0.0.0"` instead. Keep the shared API key in the config.
+`--host` and `--port` override the configuration for this invocation without saving those overrides. Omitted flags use `[server]` defaults, falling back to `127.0.0.1:8080`. To make LAN listening permanent, set `server.host = "0.0.0.0"` instead.
+
+When `server.api_key` is missing or empty, `serve` generates a random key and saves it in the config it loaded (including a file selected with `--config`). Copy that saved value into the client's worker `api_key` below. Subsequent starts reuse it; existing keys are never rotated automatically. The key is not printed. The update preserves other settings and comments, writes the file with owner-only permissions, and must succeed before the server starts.
 
 If the Drama 3 files are missing, startup offers the normal model download. Startup then loads the model before printing the listening address; cold loading and quantization can take several minutes. Wait for that ready message before starting rendering. The model stays loaded and one persistent inference thread owns its GPU work. Keep the command running while the main machine renders. Binding to a LAN interface requires a configured key. For internet access, put the service behind HTTPS or a private network; the built-in server itself serves HTTP.
 

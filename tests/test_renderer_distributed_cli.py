@@ -5,6 +5,7 @@ from io import StringIO
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -84,6 +85,101 @@ class DistributedCLITests(unittest.TestCase):
                 self.assertEqual(settings["api_key"], "fixture-server-key")
                 self.assertNotIn("fixture-server-key", output + error)
                 self.assertEqual(self.config.read_bytes(), before)
+
+    def test_serve_creates_missing_key_and_reuses_it_on_subsequent_starts(self):
+        for server_text in (
+            "",
+            '[server]\nhost="127.0.0.2"\nport=8091\n',
+            '[server]\napi_key="" # created automatically\n',
+        ):
+            with self.subTest(server_text=server_text):
+                self.configure(server_text, verifier=False)
+                before = tomllib.loads(self.config.read_text())
+                with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+                      patch("epub_tts_narrator.renderer.server.serve") as serve):
+                    status, output, error = self.run_cli("serve")
+                self.assertEqual(status, 0, error)
+                setup.assert_called_once_with("engine")
+                serve.assert_called_once()
+                saved = tomllib.loads(self.config.read_text())
+                key = saved["server"]["api_key"]
+                self.assertIsInstance(key, str)
+                self.assertGreaterEqual(len(key), 32)
+                self.assertEqual(serve.call_args.args[0]["server"]["api_key"], key)
+                self.assertNotIn(key, output + error)
+                self.assertIn("server.api_key", output)
+                self.assertIn(str(self.config), output)
+                expected = {**before, "server": {**before.get("server", {}), "api_key": key}}
+                self.assertEqual(saved, expected)
+
+                after_first_start = self.config.read_bytes()
+                with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+                      patch("epub_tts_narrator.renderer.server.serve") as serve):
+                    status, output, error = self.run_cli("serve")
+                self.assertEqual(status, 0, error)
+                self.assertEqual(serve.call_args.args[0]["server"]["api_key"], key)
+                self.assertNotIn(key, output + error)
+                self.assertEqual(self.config.read_bytes(), after_first_start)
+
+    def test_serve_key_creation_does_not_persist_bind_overrides(self):
+        self.configure('[server]\nhost="127.0.0.2"\nport=8091\n', verifier=False)
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.server.serve") as serve):
+            status, _, error = self.run_cli("serve", "--host", "0.0.0.0", "--port", "8092")
+        self.assertEqual(status, 0, error)
+        saved = tomllib.loads(self.config.read_text())
+        self.assertEqual(saved["server"]["host"], "127.0.0.2")
+        self.assertEqual(saved["server"]["port"], 8091)
+        settings = serve.call_args.args[0]["server"]
+        self.assertEqual(settings["host"], "0.0.0.0")
+        self.assertEqual(settings["port"], 8092)
+        self.assertEqual(settings["api_key"], saved["server"]["api_key"])
+
+    def test_serve_saves_key_to_the_selected_explicit_default_or_legacy_config(self):
+        canonical = self.root / "epub-tts-narrator.toml"
+        legacy = self.root / "epub-audiobook.toml"
+        config_text = '[engine]\ncheckpoint="./drama-3"\n'
+        for selection in ("explicit", "canonical", "legacy"):
+            with self.subTest(selection=selection):
+                self.config.write_text(config_text)
+                legacy.write_text(config_text)
+                canonical.unlink(missing_ok=True)
+                if selection != "legacy":
+                    canonical.write_text(config_text)
+                target = {"explicit": self.config, "canonical": canonical, "legacy": legacy}[selection]
+                argv = ["serve"]
+                if selection == "explicit":
+                    argv.extend(["--config", str(self.config)])
+                output, error = StringIO(), StringIO()
+                with (patch("epub_tts_narrator.config.Path.cwd", return_value=self.root),
+                      patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+                      patch("epub_tts_narrator.renderer.server.serve") as serve,
+                      redirect_stdout(output), redirect_stderr(error)):
+                    status = main(argv)
+                self.assertEqual(status, 0, error.getvalue())
+                saved = tomllib.loads(target.read_text())
+                self.assertEqual(serve.call_args.args[0]["server"]["api_key"], saved["server"]["api_key"])
+                self.assertIn(str(target), output.getvalue())
+                self.assertNotIn(saved["server"]["api_key"], output.getvalue() + error.getvalue())
+                for candidate in (self.config, canonical, legacy):
+                    if candidate != target and candidate.exists():
+                        self.assertEqual(candidate.read_text(), config_text)
+                if selection == "legacy":
+                    self.assertFalse(canonical.exists())
+
+    def test_serve_cannot_start_with_an_unsaved_generated_key(self):
+        self.configure(verifier=False)
+        before = self.config.read_bytes()
+        with (patch("epub_tts_narrator.renderer.server_config.ensure_server_api_key",
+                    side_effect=OSError("Cannot save server API key: permission denied")),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+              patch("epub_tts_narrator.renderer.server.serve") as serve):
+            status, _, error = self.run_cli("serve")
+        self.assertEqual(status, 2)
+        self.assertIn("permission denied", error)
+        setup.assert_not_called()
+        serve.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), before)
 
     def test_serve_invalid_bind_flags_fail_before_model_setup_or_server_start(self):
         self.configure(verifier=False)
@@ -217,6 +313,7 @@ class DistributedCLITests(unittest.TestCase):
 
     def test_serve_rejects_remote_only_configuration_without_a_local_model(self):
         self.configure(worker_table(), local=False, verifier=False)
+        before = self.config.read_bytes()
         with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
               patch("epub_tts_narrator.renderer.server.serve") as serve):
             status, _, error = self.run_cli("serve")
@@ -224,6 +321,7 @@ class DistributedCLITests(unittest.TestCase):
         self.assertIn("local engine.checkpoint", error)
         setup.assert_not_called()
         serve.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), before)
 
     def test_plan_reports_only_worker_names_types_and_slots_without_loading_models(self):
         self.configure(worker_table("mac", "local")

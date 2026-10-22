@@ -52,7 +52,8 @@ max_new_tokens = 2048
 
 # Only used by `audiobook-render serve`, on a Mac providing local Drama 3.
 # These are defaults; `serve --host 0.0.0.0 --port 8080` overrides this run.
-# LAN access requires a shared key in this file and its clients.
+# On first serve, a missing/empty api_key is generated and saved in this file.
+# Copy the saved key into each client's render_pool worker api_key.
 [server]
 host = "127.0.0.1"
 port = 8080

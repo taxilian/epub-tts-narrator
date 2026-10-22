@@ -2,6 +2,7 @@
 epub-tts-narrator.toml
 epub-audiobook.toml
 *.local.toml
+.*.toml.server-key.lock
 .env
 .env.*
 !.env.example

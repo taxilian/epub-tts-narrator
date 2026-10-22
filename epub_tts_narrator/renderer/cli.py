@@ -74,7 +74,7 @@ def parser():
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
-    serve.add_argument("--config", type=Path, help="Global TOML file containing [engine] and [server] settings")
+    serve.add_argument("--config", type=Path, help="Global TOML settings; a missing server.api_key is generated and saved here")
     serve.add_argument("--host", help="Listen address; use 0.0.0.0 for LAN access (default: server.host, normally 127.0.0.1)")
     serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
@@ -223,10 +223,15 @@ def main(argv=None):
         if args.command == "runpod":
             from .runpod import run_command
             return run_command(args)
-        config = (load_config(args.config, require_verifier=False) if args.command in {"serve", "cache-report"}
-                  else load_config(args.config))
+        config_path = args.config
+        if args.command == "serve":
+            from epub_tts_narrator.config import resolve_config_path
+            config_path = resolve_config_path(config_path).resolve()
+        config = (load_config(config_path, require_verifier=False) if args.command in {"serve", "cache-report"}
+                  else load_config(config_path))
         if args.command == "serve":
             from .config import validate_distributed_settings
+            from .server_config import ensure_server_api_key
             for key in ("host", "port"):
                 value = getattr(args, key)
                 if value is not None:
@@ -234,6 +239,10 @@ def main(argv=None):
             validate_distributed_settings(config)
             if config["engine"]["type"] != "drama3_mlx" or not config["engine"]["checkpoint"]:
                 raise ValueError("serve requires engine.type = drama3_mlx and a local engine.checkpoint")
+            config["server"]["api_key"], generated = ensure_server_api_key(config_path)
+            if generated:
+                print(f"Generated and saved server.api_key in {config_path}. "
+                      "Copy that value to the client's render_pool worker api_key.")
             from .model_setup import ModelSetup
             from .server import serve
             ModelSetup(config).ensure("engine")
