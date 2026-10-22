@@ -181,16 +181,16 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.verifier.calls), 3)
         self.assertEqual(len(list((self.root / "takes").glob("attempt-001-regenerated-*.wav"))), 2)
 
-    def test_changed_policy_rechecks_unsuccessful_saved_audio_without_new_synthesis(self):
+    def test_changed_policy_does_not_reuse_unsuccessful_audio_from_an_exhausted_budget(self):
         self.verifier.wrong_texts.add("Hello there.")
         with self.assertRaises(RenderBlocked):
             self.take()
         verifier = FixtureVerifier(self.fixtures, version=2)
-        with patch.object(self.engine, "_write", side_effect=AssertionError("regenerated saved attempt")):
-            wav, accepted = self.take(verifier=verifier)
-        self.assertEqual(wav.name, "attempt-001.wav")
-        self.assertTrue(accepted["report"]["passed"])
-        self.assertEqual(len(verifier.calls), 1)
+        with patch.object(self.engine, "_write", side_effect=AssertionError("reset exhausted budget")):
+            with self.assertRaises(RenderBlocked):
+                self.take(verifier=verifier)
+        self.assertFalse((self.root / "takes" / "accepted.json").exists())
+        self.assertEqual(len(verifier.calls), 0)
 
     def test_corrupt_accepted_audio_is_blocked_before_asr(self):
         wav, _ = self.take()

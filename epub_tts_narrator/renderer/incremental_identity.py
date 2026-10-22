@@ -20,6 +20,8 @@ def accepted_requests(work):
         if (not isinstance(request, dict) or record.get("request_hash") != digest(request)
                 or path.parent.name != record["request_hash"]):
             raise ValueError(f"Invalid accepted synthesis request: {path}")
+        if not isinstance(record.get("report"), dict) or record["report"].get("passed") is not True:
+            continue
         requests.append(request)
     return requests
 

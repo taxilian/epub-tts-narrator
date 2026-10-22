@@ -214,7 +214,7 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
                              verifier, self.config, notify=lambda _: None,
                              retry_budget=SpeechRetryBudget())
 
-    def test_new_policy_rechecks_saved_failure_without_new_synthesis(self):
+    def test_new_policy_verifies_a_fresh_take_and_preserves_the_rejected_attempt(self):
         judge = Judge("uncertain")
         before = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge)
         with self.assertRaises(SpeechVerificationFailed):
@@ -224,10 +224,11 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         old_report = read_json(wav.with_suffix(".json"))
         reviewer = PronunciationReviewer(PairClient())
         after = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge, reviewer)
-        reused, accepted = self.take(after)
-        self.assertEqual(reused, wav)
-        self.assertEqual(reused.read_bytes(), old_bytes)
-        self.assertEqual(len(self.calls), 1)
+        regenerated, accepted = self.take(after)
+        self.assertEqual(regenerated.name, "attempt-002.wav")
+        self.assertEqual(wav.read_bytes(), old_bytes)
+        self.assertEqual(read_json(wav.with_suffix(".json")), old_report)
+        self.assertEqual(len(self.calls), 2)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "phonetic_primary")
         self.assertNotEqual(accepted["validation_key"], old_report["validation_key"])

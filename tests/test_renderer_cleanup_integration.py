@@ -122,17 +122,18 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.assertTrue((self.directory / "attempt-001-raw.wav").is_file())
         self.assertEqual(read_json(self.directory / "attempt-001.json")["report"], pending)
 
-    def test_revalidated_legacy_acceptance_cleans_intermediates_after_success(self):
+    def test_failed_legacy_acceptance_is_replaced_with_fresh_verified_audio(self):
         self.config["render"]["keep_intermediate_audio"] = True
         audio, accepted = self.take()
         accepted["report"] = {"passed": False, "reasons": ["text_mismatch"]}
         write_json(self.directory / "accepted.json", accepted)
         self.config["render"]["keep_intermediate_audio"] = False
-        with patch.object(self.engine, "_write", side_effect=AssertionError("regenerated speech")):
-            resumed, revalidated = self.take()
-        self.assertEqual(resumed, audio)
+        resumed, revalidated = self.take()
+        self.assertNotEqual(resumed, audio)
+        self.assertEqual(resumed.name, "attempt-002.wav")
         self.assertTrue(revalidated["report"]["passed"])
         self.assertEqual(len(self.verifier.calls), 2)
+        self.assertFalse(read_json(self.directory / "attempt-001.json")["report"]["passed"])
         self.assertFalse((self.directory / "attempt-001-raw.wav").exists())
 
     def test_cleanup_error_warns_but_preserves_successful_acceptance(self):

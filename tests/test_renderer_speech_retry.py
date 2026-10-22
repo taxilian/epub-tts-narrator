@@ -104,17 +104,71 @@ class SpeechRetryTests(unittest.TestCase):
                 self.take()
         self.assertEqual(len(self.calls), 2)
 
-    def test_changed_verifier_rechecks_saved_audio_before_generating_anything(self):
+    def test_changed_verifier_generates_a_fresh_take_instead_of_reusing_rejected_audio(self):
         self.verifier.wrong_texts.add(self.text)
         with self.assertRaises(SpeechVerificationFailed):
             self.take(SpeechRetryBudget())
+        before = self.snapshot()
         replacement_verifier = FixtureVerifier(self.fixtures, version=2)
-        with patch.object(self.engine, "_write", side_effect=AssertionError("regenerated before rechecking")):
-            wav, accepted = self.take(SpeechRetryBudget(), verifier=replacement_verifier)
-        self.assertEqual(wav.name, "attempt-001.wav")
+        wav, accepted = self.take(SpeechRetryBudget(), verifier=replacement_verifier)
+        self.assertEqual(wav.name, "attempt-003.wav")
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(replacement_verifier.calls), 1)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 3)
+        self.assert_snapshot_unchanged(before)
+
+    def test_failed_legacy_acceptance_is_demoted_before_a_new_generation_failure(self):
+        self.verifier.wrong_texts.add(self.text)
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(SpeechRetryBudget())
+        directory = self.root / "takes"
+        rejected = read_json(directory / "attempt-002.json")
+        write_json(directory / "accepted.json", rejected)
+        (directory / "attempt-002.json").unlink()
+        old_wav = (directory / "attempt-002.wav").read_bytes()
+
+        def unavailable(path, seed):
+            self.assertFalse((directory / "accepted.json").exists())
+            raise OSError("fixture generator unavailable")
+
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(SpeechRetryBudget(), generate=unavailable)
+        self.assertFalse((directory / "accepted.json").exists())
+        self.assertEqual(read_json(directory / "attempt-002.json"), rejected)
+        self.assertEqual((directory / "attempt-002.wav").read_bytes(), old_wav)
+        self.assertEqual(len(self.verifier.calls), 2)
+
+    def test_failed_legacy_acceptance_never_survives_pending_verification(self):
+        self.verifier.wrong_texts.add(self.text)
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(SpeechRetryBudget())
+        directory = self.root / "takes"
+        write_json(directory / "accepted.json", read_json(directory / "attempt-001.json"))
+        pending = {"passed": False, "reasons": ["text_mismatch"],
+                   "text_judge": {"decision": "unavailable"}}
+        with patch.object(workflow, "validate_audio", return_value=pending):
+            with self.assertRaises(VerificationUnavailable):
+                self.take(SpeechRetryBudget())
+        self.assertFalse((directory / "accepted.json").exists())
+        self.assertEqual(read_json(directory / "attempt-003.json")["report"], pending)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_pending_legacy_acceptance_remains_pending_without_new_generation(self):
+        directory = self.root / "takes"
+        pending = {"passed": False, "reasons": ["text_mismatch"],
+                   "text_judge": {"decision": "unavailable"}}
+        with patch.object(workflow, "validate_audio", return_value=pending):
+            with self.assertRaises(VerificationUnavailable):
+                self.take(SpeechRetryBudget())
+            write_json(directory / "accepted.json", read_json(directory / "attempt-001.json"))
+            with self.assertRaises(VerificationUnavailable):
+                self.take(SpeechRetryBudget())
+        self.assertFalse((directory / "accepted.json").exists())
+        self.assertEqual(len(self.calls), 1)
+        wav, accepted = self.take(SpeechRetryBudget())
+        self.assertEqual(wav.name, "attempt-001.wav")
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(self.calls), 1)
 
     def test_interrupted_verification_reuses_saved_waveform(self):
         with patch.object(workflow, "validate_audio", side_effect=KeyboardInterrupt("verification interrupted")):

@@ -163,7 +163,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                   purpose="speech", resume_attempt=None, retry_budget=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
-    Verification settings govern new or unsuccessful candidates. An existing
+    Verification settings govern new candidates and pending verification. An existing
     successful verification remains provenance for the exact accepted bytes;
     changing recognizers or policy does not revoke that acceptance.
     Individual speech gets a fresh bounded generation allowance per explicit
@@ -218,6 +218,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
 
     accepted = None
     missing_accepted_attempt = None
+    demoted_attempt = None
     if accepted_path.exists() or accepted_path.is_symlink():
         try:
             accepted = read_json(regular_file(accepted_path))
@@ -231,7 +232,25 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         wav = directory / name
         if accepted.get("request_hash") != digest(request):
             raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
-        if not wav.exists() and not wav.is_symlink():
+        if not (isinstance(accepted.get("report"), dict)
+                and accepted["report"].get("passed") is True):
+            # Old versions wrote failed revalidation into the acceptance file.
+            # Keep that outcome as an attempt diagnostic, never as a cache hit,
+            # even if verification is interrupted again before recovery finishes.
+            demoted_attempt = accepted.get("attempt")
+            if (type(demoted_attempt) is not int or demoted_attempt < 1
+                    or (purpose != "speech" and demoted_attempt > 10)
+                    or name != f"attempt-{demoted_attempt:03d}.wav"):
+                raise RenderBlocked("Invalid failed acceptance attempt")
+            diagnostic_path = directory / f"attempt-{demoted_attempt:03d}.json"
+            if diagnostic_path.exists() or diagnostic_path.is_symlink():
+                previous = read_json(regular_file(diagnostic_path))
+                if not isinstance(previous, dict) or previous.get("request_hash") != request_hash:
+                    raise RenderBlocked("Attempt belongs to a different synthesis request")
+            write_json(diagnostic_path, accepted)
+            accepted_path.unlink()
+            accepted = None
+        elif not wav.exists() and not wav.is_symlink():
             missing_accepted_attempt = accepted.get("attempt")
             if (type(missing_accepted_attempt) is not int or missing_accepted_attempt < 1
                     or (purpose != "speech" and missing_accepted_attempt > 10)
@@ -250,17 +269,6 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
                 return finish(wav, accepted)
     validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
-    if accepted is not None:
-        # Older versions could leave a failed revalidation in accepted.json.
-        # Such a record has no successful acceptance to preserve.
-        set_phase(notify, "verifying saved audio")
-        report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
-        accepted.update(validation_key=validation_key, report=report)
-        write_json(accepted_path, accepted)
-        if report["passed"]:
-            return finish(wav, accepted)
-        if pending_confirmation(report):
-            stop_for_confirmation()
     attempts = config["render"]["max_attempts"]
     secrets = configured_secrets(config)
     last_report = None
@@ -286,8 +294,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
         generation = None
-        # Completed rejected attempts remain reviewable; interrupted raw outputs
-        # never count as accepted. Recover a normalized candidate by revalidating.
+        # Completed rejected speech remains diagnostic only. Pending verification
+        # can resume from its saved waveform, but a definitive failure needs a new take.
         if result_path.exists():
             previous = read_json(result_path)
             if previous.get("request_hash") != digest(request):
@@ -298,10 +306,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 # changed. Preserve the failed request and append a new take.
                 last_report = previous.get("report", {})
                 continue
-            if (previous.get("validation_key") == validation_key
-                    and not previous.get("report", {}).get("passed")
+            if ((purpose == "speech" or previous.get("validation_key") == validation_key)
+                    and previous.get("report", {}).get("passed") is not True
                     and not pending_confirmation(previous.get("report", {}))
-                    and not previous.get("report", {}).get("retry_on_resume", False)):
+                    and not previous.get("report", {}).get("retry_on_resume", False)
+                    and not (purpose == "reference" and attempt == demoted_attempt)):
                 last_report = previous.get("report", {})
                 continue
             metadata = previous.get("engine_metadata", {})
@@ -759,6 +768,9 @@ def _saved_chapter_clips_present(work, record):
                 continue
             try:
                 cached = read_json(regular_file(path))
+                if not isinstance(cached, dict) or not _has_accepted_verification(cached):
+                    present = False
+                    continue
                 name = cached.get("audio_file") if isinstance(cached, dict) else None
                 if (not isinstance(name, str) or name != Path(name).name or not name.endswith(".wav")
                         or cached.get("request_hash") != key):
