@@ -53,9 +53,68 @@ class DistributedCLITests(unittest.TestCase):
         setup.assert_called_once_with("engine")
         serve.assert_called_once()
         self.assertIsNone(serve.call_args.args[0]["verification"]["model"])
+        self.assertEqual(serve.call_args.args[0]["server"]["host"], "127.0.0.1")
+        self.assertEqual(serve.call_args.args[0]["server"]["port"], 8080)
         bundle.assert_not_called()
         store.assert_not_called()
         verifier.assert_not_called()
+
+    def test_serve_flags_override_only_explicit_bind_settings_without_editing_config(self):
+        self.configure(
+            '[server]\nhost="127.0.0.2"\nport=8091\napi_key="fixture-server-key"\n',
+            verifier=False,
+        )
+        before = self.config.read_bytes()
+        for args, expected_host, expected_port in (
+            ((), "127.0.0.2", 8091),
+            (("--host", "0.0.0.0"), "0.0.0.0", 8091),
+            (("--port", "8092"), "127.0.0.2", 8092),
+            (("--host", "0.0.0.0", "--port", "8092"), "0.0.0.0", 8092),
+        ):
+            with self.subTest(args=args):
+                with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+                      patch("epub_tts_narrator.renderer.server.serve") as serve):
+                    status, output, error = self.run_cli("serve", *args)
+                self.assertEqual(status, 0, error)
+                setup.assert_called_once_with("engine")
+                serve.assert_called_once()
+                settings = serve.call_args.args[0]["server"]
+                self.assertEqual(settings["host"], expected_host)
+                self.assertEqual(settings["port"], expected_port)
+                self.assertEqual(settings["api_key"], "fixture-server-key")
+                self.assertNotIn("fixture-server-key", output + error)
+                self.assertEqual(self.config.read_bytes(), before)
+
+    def test_serve_invalid_bind_flags_fail_before_model_setup_or_server_start(self):
+        self.configure(verifier=False)
+        before = self.config.read_bytes()
+        for args, diagnostic in (
+            (("--host", ""), "server.host"),
+            (("--host", "bad host"), "server.host"),
+            (("--host", "localhost\n"), "server.host"),
+            (("--port", "0"), "server.port"),
+            (("--port", "65536"), "server.port"),
+            (("--port", "-1"), "server.port"),
+        ):
+            with self.subTest(args=args):
+                with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+                      patch("epub_tts_narrator.renderer.server.serve") as serve):
+                    status, _, error = self.run_cli("serve", *args)
+                self.assertEqual(status, 2)
+                self.assertIn(diagnostic, error)
+                setup.assert_not_called()
+                serve.assert_not_called()
+                self.assertEqual(self.config.read_bytes(), before)
+
+    def test_serve_noninteger_port_is_a_usage_error_before_model_setup(self):
+        self.configure(verifier=False)
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+              patch("epub_tts_narrator.renderer.server.serve") as serve,
+              self.assertRaises(SystemExit) as error):
+            self.run_cli("serve", "--port", "eight-thousand")
+        self.assertEqual(error.exception.code, 2)
+        setup.assert_not_called()
+        serve.assert_not_called()
 
     def test_declining_server_model_download_does_not_start_server(self):
         self.configure(verifier=False)

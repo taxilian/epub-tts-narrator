@@ -271,7 +271,7 @@ checkpoint = "./models/drama-3"
 experts = "q8"
 
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1" # Default; --host overrides it for a particular run.
 port = 8080
 api_key = "YOUR_SHARED_SERVER_KEY"
 ```
@@ -279,10 +279,12 @@ api_key = "YOUR_SHARED_SERVER_KEY"
 Use a long random key and put the same value in the client's worker entry. These settings belong in each machine's existing global config; no book-specific config is needed. The server does not need Whisper, analyzer credentials, or a book directory. Start it from the project directory:
 
 ```sh
-.venv-renderer/bin/audiobook-render serve
+.venv-renderer/bin/audiobook-render serve --host 0.0.0.0 --port 8080
 ```
 
-If the Drama 3 files are missing, startup offers the normal model download. Startup then loads the model before printing the listening address; cold loading and quantization can take several minutes. Wait for that ready message before starting rendering. The model stays loaded and one persistent inference thread owns its GPU work. Keep the command running while the main machine renders. The default host is `127.0.0.1`; binding to a LAN interface requires a configured key. For internet access, put the service behind HTTPS or a private network; the built-in server itself serves HTTP.
+`--host` and `--port` override the configuration for this invocation without editing the file. Omitted flags use `[server]` defaults, falling back to `127.0.0.1:8080`. To make LAN listening permanent, set `server.host = "0.0.0.0"` instead. Keep the shared API key in the config.
+
+If the Drama 3 files are missing, startup offers the normal model download. Startup then loads the model before printing the listening address; cold loading and quantization can take several minutes. Wait for that ready message before starting rendering. The model stays loaded and one persistent inference thread owns its GPU work. Keep the command running while the main machine renders. Binding to a LAN interface requires a configured key. For internet access, put the service behind HTTPS or a private network; the built-in server itself serves HTTP.
 
 On the main Mac, add these entries to its existing global config, replacing the hostname and key:
 

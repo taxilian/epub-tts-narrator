@@ -75,6 +75,8 @@ def parser():
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
     serve.add_argument("--config", type=Path, help="Global TOML file containing [engine] and [server] settings")
+    serve.add_argument("--host", help="Listen address; use 0.0.0.0 for LAN access (default: server.host, normally 127.0.0.1)")
+    serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
     from .runpod import add_parser as add_runpod_parser
@@ -224,6 +226,12 @@ def main(argv=None):
         config = (load_config(args.config, require_verifier=False) if args.command in {"serve", "cache-report"}
                   else load_config(args.config))
         if args.command == "serve":
+            from .config import validate_distributed_settings
+            for key in ("host", "port"):
+                value = getattr(args, key)
+                if value is not None:
+                    config["server"][key] = value
+            validate_distributed_settings(config)
             if config["engine"]["type"] != "drama3_mlx" or not config["engine"]["checkpoint"]:
                 raise ValueError("serve requires engine.type = drama3_mlx and a local engine.checkpoint")
             from .model_setup import ModelSetup
