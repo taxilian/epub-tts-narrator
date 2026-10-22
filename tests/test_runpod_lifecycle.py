@@ -251,6 +251,267 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(deployment.state["pod_id"], "pod_fixture")
         self.assertEqual(deployment.state_path.stat().st_mode & 0o777, 0o600)
 
+    def capacity_deployment(self):
+        """Fake provider with a stopped old host and a separately schedulable Pod."""
+        deployment = self.deployment()
+        deployment.state.update(pod_id="old_pod", volume_id="volume_fixture", bootstrapped=True,
+                                revision="fixture-revision")
+        deployment.save()
+        old = {"id": "old_pod", "name": "original-worker", "image": deployment.cfg["image"],
+               "gpu": {"id": deployment.cfg["gpu_type_id"], "count": 1}, "cloud": "SECURE",
+               "dataCenterId": "US-FIXTURE-1", "status": "EXITED", "cost": 2.0,
+               "mounts": {"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]}}
+        pods = {"old_pod": old}
+        self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
+        self.api.get_pod_details.side_effect = lambda pod_id: deepcopy(pods[pod_id])
+        def read(pod_id):
+            return {"id": pod_id, "desiredStatus": pods[pod_id]["status"], "costPerHr": pods[pod_id]["cost"],
+                    "publicIp": "203.0.113.7", "portMappings": {"22": 10341}}
+        self.api.get_pod.side_effect = read
+        def create(spec):
+            pods["new_pod"] = dict(deepcopy(old), id="new_pod", name=spec["name"], status="RUNNING",
+                                   image=spec["image"], mounts=deepcopy(spec["mounts"]))
+            return deepcopy(pods["new_pod"])
+        self.api.create_pod.side_effect = create
+        self.api.list_pods.side_effect = lambda: deepcopy(list(pods.values()))
+        def start(pod_id):
+            if pod_id == "old_pod":
+                raise RunpodAPIError("host unavailable", status=400, reason="host_capacity")
+            pods[pod_id]["status"] = "RUNNING"
+        self.api.start_pod.side_effect = start
+        self.api.stop_pod.side_effect = lambda pod_id: pods[pod_id].update(status="EXITED")
+        deployment.configure_runtime = Mock(side_effect=lambda pod: pod)
+        deployment.ssh = Mock(return_value=b"")
+        return deployment, pods, create
+
+    def test_capacity_replacement_preserves_volume_revision_and_application_identity(self):
+        deployment, pods, _ = self.capacity_deployment()
+        identity = {key: deployment.state[key] for key in ("deployment_id", "api_key", "revision", "bootstrapped")}
+        deployment.start()
+        self.assertEqual(deployment.pod_id, "new_pod")
+        self.assertEqual(deployment.state["previous_pod_ids"], ["old_pod"])
+        self.assertEqual(pods["old_pod"]["status"], "EXITED")
+        self.assertEqual(identity, {key: deployment.state[key] for key in identity})
+        self.assertNotIn("pod_replacement", deployment.state)
+        self.api.create_pod.assert_called_once()
+        self.api.create_volume.assert_not_called()
+        spec = self.api.create_pod.call_args.args[0]
+        self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
+        self.assertEqual(spec["gpu"]["id"], deployment.cfg["gpu_type_id"])
+        self.assertEqual(spec["mounts"], pods["old_pod"]["mounts"])
+        self.assertNotEqual(spec["name"], deployment.cfg["name"] + "-" + deployment.state["deployment_id"])
+        self.api.start_pod.assert_called_once_with("old_pod")
+
+    def test_fixed_pod_capacity_failure_never_replaces(self):
+        self.settings["deployment"]["pod_id"] = "old_pod"
+        deployment, _, _ = self.capacity_deployment()
+        with self.assertRaisesRegex(RunpodAPIError, "fixed"):
+            deployment.start()
+        self.api.create_pod.assert_not_called()
+        self.api.create_volume.assert_not_called()
+        self.assertEqual(deployment.pod_id, "old_pod")
+
+    def test_unknown_start_failure_never_replaces(self):
+        for failure in (RunpodAPIError("bad settings", status=400), RunpodAmbiguousOutcome("timeout")):
+            with self.subTest(failure=failure):
+                deployment, _, _ = self.capacity_deployment()
+                self.api.start_pod.side_effect = failure
+                with self.assertRaises(RunpodAPIError):
+                    deployment.start()
+                self.api.create_pod.assert_not_called()
+                self.api.create_volume.assert_not_called()
+
+    def test_replacement_requires_confirmed_stopped_matching_source_and_volume(self):
+        for change in ("running", "gpu", "image", "datacenter", "mount", "missing_volume", "volume_datacenter"):
+            with self.subTest(change=change):
+                deployment, pods, _ = self.capacity_deployment()
+                if change == "running":
+                    pods["old_pod"]["status"] = "RUNNING"
+                elif change == "gpu":
+                    pods["old_pod"]["gpu"]["id"] = "another-gpu"
+                elif change == "image":
+                    pods["old_pod"]["image"] = "another-image"
+                elif change == "datacenter":
+                    pods["old_pod"]["dataCenterId"] = "another-datacenter"
+                elif change == "mount":
+                    pods["old_pod"]["mounts"]["network"][0]["volumeId"] = "another-volume"
+                elif change == "missing_volume":
+                    deployment.state.pop("volume_id")
+                else:
+                    self.api.get_volume.return_value["dataCenterId"] = "another-datacenter"
+                with self.assertRaises(RuntimeError):
+                    deployment._replace_capacity_blocked_pod()
+                self.api.create_pod.assert_not_called()
+                self.api.create_volume.assert_not_called()
+                self.assertEqual(deployment.pod_id, "old_pod")
+
+    def test_replacement_checks_current_price_before_creating(self):
+        deployment, _, _ = self.capacity_deployment()
+        self.api.catalog_gpus.return_value["gpus"][0]["price"]["secure"] = 100
+        with self.assertRaisesRegex(ValueError, "price"):
+            deployment.start()
+        self.api.create_pod.assert_not_called()
+        self.api.create_volume.assert_not_called()
+
+    def test_lost_replacement_response_recovers_by_unique_intent_without_duplicate(self):
+        deployment, _, create = self.capacity_deployment()
+        def uncertain(spec):
+            saved = json.loads(deployment.state_path.read_text())
+            self.assertEqual(saved["pod_id"], "old_pod")
+            self.assertEqual(saved["pod_replacement"]["spec"], spec)
+            create(spec)
+            raise RunpodAmbiguousOutcome("lost response")
+        self.api.create_pod.side_effect = uncertain
+        deployment.start()
+        self.assertEqual(deployment.pod_id, "new_pod")
+        self.api.create_pod.assert_called_once()
+        self.api.create_volume.assert_not_called()
+
+    def test_pending_replacement_is_reconciled_on_next_start_without_another_post(self):
+        deployment, _, create = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+        with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
+            deployment.start()
+        pending = deepcopy(deployment.state["pod_replacement"])
+        create(pending["spec"])
+        restored = self.deployment()
+        restored.configure_runtime = Mock(side_effect=lambda pod: pod)
+        restored.ssh = Mock(return_value=b"")
+        restored.start()
+        self.assertEqual(restored.pod_id, "new_pod")
+        self.assertNotIn("pod_replacement", restored.state)
+        self.api.create_pod.assert_called_once()
+        self.api.create_volume.assert_not_called()
+
+    def test_pending_replacement_missing_or_duplicate_match_never_creates_again(self):
+        deployment, _, _ = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+        with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
+            deployment.start()
+        for matches in ([], [{"id": "one"}, {"id": "two"}]):
+            with self.subTest(matches=matches):
+                name = deployment.state["pod_replacement"]["spec"]["name"]
+                self.api.list_pods.side_effect = None
+                self.api.list_pods.return_value = [dict(row, name=name) for row in matches]
+                restored = self.deployment()
+                with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
+                    restored.start()
+                self.assertEqual(restored.pod_id, "old_pod")
+        self.api.create_pod.assert_called_once()
+        self.api.create_volume.assert_not_called()
+
+    def test_definite_replacement_rejection_keeps_old_id_and_clears_intent(self):
+        deployment, _, _ = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAPIError("rejected", status=400)
+        with self.assertRaises(RunpodAPIError):
+            deployment.start()
+        self.assertEqual(deployment.pod_id, "old_pod")
+        self.assertNotIn("pod_replacement", deployment.state)
+        self.api.create_pod.assert_called_once()
+
+    def test_only_one_replacement_is_allowed_per_lifecycle(self):
+        deployment, pods, create = self.capacity_deployment()
+        def stopped_create(spec):
+            result = create(spec)
+            pods["new_pod"]["status"] = "EXITED"
+            return result
+        self.api.create_pod.side_effect = stopped_create
+        self.api.start_pod.side_effect = RunpodAPIError("host unavailable", status=400, reason="host_capacity")
+        with self.assertRaisesRegex(RunpodAPIError, "only one replacement"):
+            deployment.start()
+        self.api.create_pod.assert_called_once()
+        self.assertEqual(deployment.pod_id, "new_pod")
+
+    def test_candidate_mismatch_or_price_failure_stops_candidate_and_keeps_old_id(self):
+        for field, value in (("dataCenterId", "wrong-datacenter"), ("image", "wrong-image"), ("cost", 100),
+                             ("gpu", {"id": "wrong-gpu", "count": 1}),
+                             ("mounts", {"network": [{"volumeId": "wrong-volume", "path": "/workspace"}]})):
+            with self.subTest(field=field):
+                deployment, pods, create = self.capacity_deployment()
+                def wrong_create(spec):
+                    result = create(spec)
+                    pods["new_pod"][field] = value
+                    return result
+                self.api.create_pod.side_effect = wrong_create
+                with self.assertRaises(RuntimeError):
+                    self.run_fake(deployment, self.args("update"))
+                self.assertEqual(deployment.pod_id, "old_pod")
+                self.assertEqual(deployment.state["pod_replacement"]["candidate_id"], "new_pod")
+                self.assertEqual(pods["new_pod"]["status"], "EXITED")
+                self.api.stop_pod.assert_called_with("new_pod")
+                self.api.create_volume.assert_not_called()
+                # Each subcase owns a new intent, as separate operations would.
+                deployment.state.pop("pod_replacement")
+                deployment.save()
+
+    def test_resuming_stopped_candidate_requires_a_positive_current_rate(self):
+        deployment, pods, create = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+        with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
+            deployment.start()
+        create(deployment.state["pod_replacement"]["spec"])
+        pods["new_pod"].update(status="EXITED", cost=0)
+        restored = self.deployment()
+        with self.assertRaisesRegex(RuntimeError, "rate is unavailable"):
+            restored.start()
+        self.assertEqual(restored.pod_id, "old_pod")
+        self.assertEqual(restored.state["pod_replacement"]["candidate_id"], "new_pod")
+        self.api.start_pod.assert_called_once_with("old_pod")
+        self.api.create_pod.assert_called_once()
+
+    def test_interrupt_after_replacement_creation_stops_known_candidate(self):
+        deployment, pods, create = self.capacity_deployment()
+        def interrupted_create(spec):
+            create(spec)
+            raise KeyboardInterrupt()
+        self.api.create_pod.side_effect = interrupted_create
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_fake(deployment, self.args("update"))
+        self.assertEqual(pods["new_pod"]["status"], "EXITED")
+        self.assertEqual(deployment.pod_id, "old_pod")
+        self.api.create_pod.assert_called_once()
+
+    def test_unknown_candidate_shutdown_still_reports_pending_billing(self):
+        deployment, _, _ = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+        with self.assertRaisesRegex(RuntimeError, "billing may continue"):
+            self.run_fake(deployment, self.args("update"))
+        self.assertIn("pod_replacement", deployment.state)
+        self.api.stop_pod.assert_not_called()
+        self.api.create_pod.assert_called_once()
+
+    def test_status_reports_pending_candidate_even_when_previous_pod_stopped(self):
+        deployment, _, _ = self.capacity_deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+        with self.assertRaises(RuntimeError):
+            deployment.start()
+        with patch("epub_tts_narrator.renderer.runpod_config.load_settings", return_value=self.settings), \
+                patch("epub_tts_narrator.renderer.runpod.Deployment", return_value=deployment), \
+                redirect_stdout(StringIO()) as output:
+            run_command(self.args("status"))
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["status"], "EXITED")
+        self.assertIn("unconfirmed", status["pending_replacement"]["status"])
+        self.assertEqual(status["pending_replacement"]["name"], deployment.state["pod_replacement"]["spec"]["name"])
+        for secret in deployment.secrets:
+            self.assertNotIn(secret, output.getvalue())
+
+    def test_encode_after_replacement_uses_runtime_install_and_current_worker_configuration(self):
+        deployment, pods, _ = self.capacity_deployment()
+        deployment.prepare_encode = Mock()
+        deployment.stop_service = Mock()
+        deployment.configure = Mock()
+        deployment.install = Mock()
+        deployment.launch = Mock()
+        deployment.encode = Mock()
+        deployment.deploy_code = Mock()
+        self.assertEqual(self.run_fake(deployment, self.args("encode", "book")), 0)
+        deployment.install.assert_called_once_with(full=False)
+        deployment.launch.assert_called_once_with(prepare=False)
+        deployment.deploy_code.assert_not_called()
+        self.assertIn("new_pod-8082", deployment.url)
+        self.assertEqual(pods["new_pod"]["status"], "EXITED")
+
     def test_unavailable_or_over_budget_gpu_creates_nothing(self):
         for changes in ({"availability": "NONE"}, {"price": {"secure": 10.0}}):
             with self.subTest(changes=changes):

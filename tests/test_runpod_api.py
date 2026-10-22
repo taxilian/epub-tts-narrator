@@ -63,6 +63,18 @@ class RunpodAPITests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), spec)
         self.assertEqual(self.opener.open.call_count, 1)
 
+    def test_detailed_pod_read_uses_v2_and_confirms_identity(self):
+        payload = {"id": "pod_1", "gpu": {"id": "fixture-gpu", "count": 1},
+                   "mounts": {"network": [{"volumeId": "vol_1", "path": "/workspace"}]}}
+        self.opener.open.return_value = response(payload)
+        self.assertEqual(self.api.get_pod_details("pod_1"), payload)
+        self.assertEqual(self.opener.open.call_args.args[0].full_url, "https://api.runpod.io/v2/pods/pod_1")
+        for wrong in ({}, {"id": "another_pod"}):
+            self.opener.open.return_value = response(wrong)
+            with self.assertRaises(RunpodAPIError) as caught:
+                self.api.get_pod_details("pod_1")
+            self.assertFalse(caught.exception.ambiguous)
+
     def test_start_stop_use_v2_actions_and_return_updated_pod(self):
         for action, status in (("start", "STARTING"), ("stop", "EXITED")):
             with self.subTest(action=action):
@@ -214,6 +226,7 @@ class RunpodAPITests(unittest.TestCase):
         with self.assertRaisesRegex(RunpodAPIError, "assigned host has no free GPU capacity") as caught:
             self.api.start_pod("pod_1")
         self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(caught.exception.reason, "host_capacity")
         self.assertFalse(caught.exception.ambiguous)
         self.assertFalse(caught.exception.retryable)
         self.assertNotIn("fixture-explicit-key", str(caught.exception))
@@ -232,6 +245,7 @@ class RunpodAPITests(unittest.TestCase):
                 with self.assertRaises(RunpodAPIError) as caught:
                     self.api.start_pod("pod_1")
                 self.assertEqual(str(caught.exception), "Runpod rejected the request settings (HTTP 400)")
+                self.assertIsNone(caught.exception.reason)
                 self.assertFalse(caught.exception.ambiguous)
                 self.assertEqual(self.opener.open.call_count, 1)
 

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import fcntl
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -102,6 +103,7 @@ class Deployment:
         self.api = api or RunpodAPI(settings["runpod_api_key"])
         self.notify = notify
         self.endpoint = None
+        self._replacement_attempted = False
         self.secrets = configured_secrets(settings["renderer_config"]) | {settings["runpod_api_key"]}
         self.secrets.update(configured_secrets(settings["override_raw"]))
         for source in (settings["renderer_config"], settings["override_raw"]):
@@ -258,12 +260,7 @@ class Deployment:
         # v1 validates datacenter IDs against a stale enum. v2 accepts the
         # current catalog's IDs and retains explicit placement beside the
         # existing network volume. Secure on-demand Pods expose a public IP.
-        spec = {"name": name, "image": self.cfg["image"], "cloud": "SECURE",
-                "gpu": {"id": self.cfg["gpu_type_id"], "count": 1, "minCudaVersion": "12.9"},
-                "dataCenterIds": [self.cfg["data_center_id"]],
-                "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
-                "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
-                "env": {"PUBLIC_KEY": self._public_key()}, "cmd": self.startup_command()}
+        spec = self._pod_spec(name, volume_id)
         self.state["pod_creation_pending"] = True
         self.save()
         try:
@@ -287,6 +284,117 @@ class Deployment:
         if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
             raise RuntimeError("Created worker's rate exceeds configured cap; stopping immediately")
         self.notify(f"Created worker {self.pod_id}; persistent volume {volume_id}.")
+
+    def _pod_spec(self, name, volume_id):
+        return {"name": name, "image": self.cfg["image"], "cloud": "SECURE",
+                "gpu": {"id": self.cfg["gpu_type_id"], "count": 1, "minCudaVersion": "12.9"},
+                "dataCenterIds": [self.cfg["data_center_id"]],
+                "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
+                "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
+                "env": {"PUBLIC_KEY": self._public_key()}, "cmd": self.startup_command()}
+
+    @staticmethod
+    def _check_replacement_placement(pod, spec, *, candidate):
+        """Fail closed on missing placement data; a name alone cannot prove identity."""
+        gpu, mounts = pod.get("gpu"), pod.get("mounts")
+        if (not isinstance(gpu, dict) or not isinstance(mounts, dict)
+                or gpu.get("id") != spec["gpu"]["id"] or type(gpu.get("count")) is not int
+                or gpu["count"] != 1 or pod.get("cloud") != "SECURE"
+                or pod.get("dataCenterId") != spec["dataCenterIds"][0]
+                or mounts.get("network") != spec["mounts"]["network"]
+                or mounts.get("persistent") or mounts.get("global")
+                or pod.get("image") != spec["image"]
+                or (candidate and pod.get("name") != spec["name"])):
+            raise RuntimeError("Pod replacement placement does not match its saved GPU, datacenter, image, or existing volume; no worker adopted")
+
+    def _check_replacement_source(self, intent):
+        spec = intent["spec"]
+        volume_id = spec["mounts"]["network"][0]["volumeId"]
+        if (self.cfg.get("pod_id") or self.pod_id != intent["previous_pod_id"]
+                or self.state.get("volume_id") != volume_id
+                or (self.cfg.get("volume_id") and self.cfg["volume_id"] != volume_id)
+                or self.cfg["gpu_type_id"] != spec["gpu"]["id"]
+                or self.cfg["data_center_id"] != spec["dataCenterIds"][0]
+                or self.cfg["image"] != spec["image"]):
+            raise RuntimeError("Saved Pod replacement differs from the configured deployment; inspect saved state before continuing")
+        volume = self.api.get_volume(volume_id)
+        if volume.get("id") != volume_id or volume.get("dataCenterId") != spec["dataCenterIds"][0]:
+            raise RuntimeError("Pod replacement requires the same existing network volume in the configured datacenter")
+        previous = self.api.get_pod_details(intent["previous_pod_id"])
+        if previous.get("status") not in {"EXITED", "STOPPED"}:
+            raise RuntimeError("Previous Pod is not confirmed stopped; no replacement will be created or adopted")
+        self._check_replacement_placement(previous, spec, candidate=False)
+
+    def _replacement_candidate(self):
+        """Reconcile a unique saved creation intent, never issue another POST."""
+        intent = self.state["pod_replacement"]
+        if not intent.get("candidate_id"):
+            matches = [pod for pod in self.api.list_pods() if pod.get("name") == intent["spec"]["name"]]
+            if len(matches) != 1 or not isinstance(matches[0].get("id"), str) or not matches[0]["id"]:
+                raise RuntimeError("POD REPLACEMENT UNCONFIRMED: inspect Runpod for " + intent["spec"]["name"] +
+                                   "; GPU billing may continue. No duplicate will be created automatically.")
+            if matches[0]["id"] == intent["previous_pod_id"]:
+                raise RuntimeError("Pod replacement resolved to the previous worker; inspect saved state")
+            # This unpredictable name was persisted before our only POST. Save
+            # its unique returned ID before validation so cleanup can stop it.
+            intent["candidate_id"] = matches[0]["id"]
+            self.save()
+        if intent["candidate_id"] == intent["previous_pod_id"]:
+            raise RuntimeError("Pod replacement resolved to the previous worker; inspect saved state")
+        return intent["candidate_id"]
+
+    def _adopt_replacement(self):
+        intent = self.state["pod_replacement"]
+        self._check_replacement_source(intent)
+        candidate_id = self._replacement_candidate()
+        pod = self.api.get_pod_details(candidate_id)
+        self._check_replacement_placement(pod, intent["spec"], candidate=True)
+        price = pod.get("cost")
+        cap = min(intent["max_hourly_price"], self.cfg["max_hourly_price"])
+        if type(price) not in (float, int) or not math.isfinite(price) or not 0 < price <= cap:
+            raise RuntimeError("Replacement worker's rate is unavailable or exceeds the configured cap; stopping it")
+        previous = intent["previous_pod_id"]
+        retired = self.state.setdefault("previous_pod_ids", [])
+        if previous not in retired:
+            retired.append(previous)
+        self.state["pod_id"] = candidate_id
+        self.state["catalog_hourly_price"] = intent["catalog_hourly_price"]
+        self.state.pop("pod_replacement")
+        self.endpoint = None
+        self.save()
+        self.notify(f"Using replacement worker {candidate_id}; existing volume retained and previous worker {previous} remains stopped.")
+
+    def _replace_capacity_blocked_pod(self):
+        if self.cfg.get("pod_id"):
+            raise RunpodAPIError("The configured runpod.pod_id has no free GPU on its host. It is fixed and will not be replaced automatically.",
+                                 status=400, reason="host_capacity")
+        if self._replacement_attempted:
+            raise RunpodAPIError("Replacement worker also has no free GPU on its host; only one replacement is attempted per operation.",
+                                 status=400, reason="host_capacity")
+        self._replacement_attempted = True
+        volume_id = self.state.get("volume_id")
+        if not volume_id:
+            raise RuntimeError("Capacity replacement requires a saved existing network volume; no new volume will be created")
+        intent = {"previous_pod_id": self.pod_id,
+                  "spec": self._pod_spec(self.cfg["name"] + "-" + self.state["deployment_id"] + "-r" + uuid.uuid4().hex[:12], volume_id),
+                  "max_hourly_price": self.cfg["max_hourly_price"]}
+        self._check_replacement_source(intent)
+        intent["catalog_hourly_price"] = self.quote()
+        self.state["pod_replacement"] = intent
+        self.save()
+        self.notify("The stopped worker's host has no free GPU. Creating one replacement in the same datacenter with the existing volume…")
+        try:
+            pod = self.api.create_pod(intent["spec"])
+        except RunpodAmbiguousOutcome:
+            pass  # Observe our durable unique name; never retry creation.
+        except RunpodAPIError:
+            self.state.pop("pod_replacement")
+            self.save()
+            raise
+        else:
+            intent["candidate_id"] = pod["id"]
+            self.save()
+        self._adopt_replacement()
 
     def service_ports(self):
         return ["22/tcp", f"{self.cfg['service_port']}/http"]
@@ -332,18 +440,30 @@ class Deployment:
     def start(self):
         if not self.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
-        pod = self.api.get_pod(self.pod_id)
-        actual = pod.get("costPerHr")
-        if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
-            raise ValueError("Worker's current rate exceeds runpod.max_hourly_price")
-        pod = self.configure_runtime(pod)
-        if pod.get("desiredStatus") != "RUNNING":
-            self.notify(f"Starting worker {self.pod_id}…")
-            try:
-                self.api.start_pod(self.pod_id)
-            except RunpodAmbiguousOutcome:
-                if self.api.get_pod(self.pod_id).get("desiredStatus") != "RUNNING":
-                    raise
+        if self.state.get("pod_replacement"):
+            self._replacement_attempted = True
+            self._adopt_replacement()
+        # At most the original worker and one replacement. Capacity errors on
+        # a recovered/replacement allocation cannot cause a creation loop.
+        for _ in range(2):
+            pod = self.api.get_pod(self.pod_id)
+            actual = pod.get("costPerHr")
+            if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
+                raise ValueError("Worker's current rate exceeds runpod.max_hourly_price")
+            pod = self.configure_runtime(pod)
+            if pod.get("desiredStatus") != "RUNNING":
+                self.notify(f"Starting worker {self.pod_id}…")
+                try:
+                    self.api.start_pod(self.pod_id)
+                except RunpodAmbiguousOutcome:
+                    if self.api.get_pod(self.pod_id).get("desiredStatus") != "RUNNING":
+                        raise
+                except RunpodAPIError as exc:
+                    if exc.reason != "host_capacity":
+                        raise
+                    self._replace_capacity_blocked_pod()
+                    continue
+            break
         self.notify("Waiting for the worker's SSH connection…")
         deadline = time.monotonic() + self.cfg["startup_timeout_seconds"]
         while time.monotonic() < deadline:
@@ -365,26 +485,45 @@ class Deployment:
         raise RuntimeError("Worker did not become ready before startup_timeout_seconds; GPU capacity may be unavailable")
 
     def stop(self):
-        if not self.pod_id:
-            return
-        self.notify(f"Stopping worker {self.pod_id}…")
-        for attempt in range(3):
-            pod = self.api.get_pod(self.pod_id)
-            if pod.get("desiredStatus") in {"EXITED", "STOPPED", "TERMINATED"}:
-                self.state["last_status"] = pod["desiredStatus"]
-                self.save()
-                self.notify("Runpod confirms the worker is stopped. Persistent storage remains billed.")
-                return
+        # A failed validation or lost creation response must not leave a paid
+        # candidate running merely because the old Pod is still the active ID.
+        targets, unresolved = [], None
+        if self.state.get("pod_replacement"):
             try:
-                self.api.stop_pod(self.pod_id)
+                targets.append(self._replacement_candidate())
+            except Exception as exc:
+                unresolved = exc
+        if self.pod_id and self.pod_id not in targets:
+            targets.append(self.pod_id)
+        failures = []
+        for pod_id in targets:
+            try:
+                self._stop_pod(pod_id)
+            except Exception as exc:
+                failures.append(safe_error_text(exc, self.secrets))
+        if unresolved is not None:
+            failures.append(safe_error_text(unresolved, self.secrets))
+        if failures:
+            raise RuntimeError("; ".join(failures))
+
+    def _stop_pod(self, pod_id):
+        self.notify(f"Stopping worker {pod_id}…")
+        for attempt in range(3):
+            pod = self.api.get_pod(pod_id)
+            if pod.get("desiredStatus") in {"EXITED", "STOPPED", "TERMINATED"}:
+                break
+            try:
+                self.api.stop_pod(pod_id)
             except RunpodAmbiguousOutcome:
                 pass  # Observe status before any repeat stop request.
             time.sleep(3)
-        pod = self.api.get_pod(self.pod_id)
+        else:
+            pod = self.api.get_pod(pod_id)
         if pod.get("desiredStatus") not in {"EXITED", "STOPPED", "TERMINATED"}:
-            raise RuntimeError(f"STOP NOT CONFIRMED for Runpod worker {self.pod_id}; GPU billing may continue. Stop it in the Runpod console.")
-        self.state["last_status"] = pod["desiredStatus"]
-        self.save()
+            raise RuntimeError(f"STOP NOT CONFIRMED for Runpod worker {pod_id}; GPU billing may continue. Stop it in the Runpod console.")
+        if pod_id == self.pod_id:
+            self.state["last_status"] = pod["desiredStatus"]
+            self.save()
         self.notify("Runpod confirms the worker is stopped. Persistent storage remains billed.")
 
     def upload(self, local_path, remote_path):
@@ -556,9 +695,15 @@ def run_command(args):
         deployment = Deployment(settings)
         if args.runpod_action == "status":
             pod = deployment.api.get_pod(deployment.pod_id) if deployment.pod_id else {}
-            print(json.dumps({"pod_id": deployment.pod_id, "status": pod.get("desiredStatus", "not created"),
-                              "volume_id": deployment.state.get("volume_id"), "revision": deployment.state.get("revision"),
-                              "bootstrapped": deployment.state.get("bootstrapped", False)}, indent=2))
+            summary = {"pod_id": deployment.pod_id, "status": pod.get("desiredStatus", "not created"),
+                       "volume_id": deployment.state.get("volume_id"), "revision": deployment.state.get("revision"),
+                       "bootstrapped": deployment.state.get("bootstrapped", False)}
+            if deployment.state.get("pod_replacement"):
+                intent = deployment.state["pod_replacement"]
+                summary["pending_replacement"] = {"name": intent["spec"]["name"],
+                                                   "pod_id": intent.get("candidate_id"),
+                                                   "status": "unconfirmed; may still be running"}
+            print(json.dumps(summary, indent=2))
             return 0
         if args.runpod_action == "stop":
             deployment.stop()
@@ -609,7 +754,7 @@ def run_command(args):
                     try:
                         deployment.stop()
                     except Exception as exc:
-                        raise RuntimeError(f"Could not confirm shutdown of {deployment.pod_id}; GPU billing may continue. "
+                        raise RuntimeError("Could not confirm shutdown of the Runpod deployment; GPU billing may continue. "
                                            "Stop it in the Runpod console. " + safe_error_text(exc, deployment.secrets)) from None
                     finally:
                         signal.signal(signal.SIGINT, saved_interrupt)

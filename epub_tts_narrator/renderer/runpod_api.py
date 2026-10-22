@@ -1,7 +1,8 @@
 """Small, file-credential-only Runpod management client.
 
 Pod creation, configuration, lifecycle actions, and the GPU/data-center catalog
-use v2. Pod reads and volume management retain v1. Hosts are fixed, redirects
+use v2, including detailed placement reads for replacement checks. Routine Pod
+reads and volume management retain v1. Hosts are fixed, redirects
 and ambient HTTP proxies are disabled, and provider error bodies are never
 exposed. A failed mutation is never retried here: callers must reconcile
 uncertain outcomes before creating another paid resource.
@@ -30,11 +31,12 @@ _TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 class RunpodAPIError(RuntimeError):
     """Sanitized failure with machine-readable status and outcome certainty."""
 
-    def __init__(self, message, *, status=None, ambiguous=False, retryable=False):
+    def __init__(self, message, *, status=None, ambiguous=False, retryable=False, reason=None):
         super().__init__(message)
         self.status = status
         self.ambiguous = ambiguous
         self.retryable = retryable
+        self.reason = reason
 
 
 class RunpodAmbiguousOutcome(RunpodAPIError):
@@ -98,6 +100,14 @@ class RunpodAPI:
 
     def get_pod(self, pod_id, **expansions):
         return self._request("GET", f"/pods/{_resource_id(pod_id)}", query=expansions, expected=dict)
+
+    def get_pod_details(self, pod_id):
+        """Read v2 placement and mounts when validating a replacement allocation."""
+        pod_id = _resource_id(pod_id)
+        result = self._request("GET", f"/pods/{pod_id}", v2=True, expected=dict)
+        if result.get("id") != pod_id:
+            raise self._invalid_response(False)
+        return result
 
     def create_pod(self, spec):
         """Create from the v2 nested request schema; return its cost/status fields."""
@@ -244,7 +254,7 @@ class RunpodAPI:
                 return RunpodAPIError(
                     "Runpod cannot restart this Pod because its assigned host has no free GPU capacity "
                     "(HTTP 400). The Pod remains stopped; retry later or replace the Pod while keeping "
-                    "its existing network volume.", status=status)
+                    "its existing network volume.", status=status, reason="host_capacity")
         detail = {
             400: "rejected the request settings", 401: "rejected the API key",
             403: "denied permission for this operation", 404: "could not find the requested resource",

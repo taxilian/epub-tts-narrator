@@ -92,6 +92,20 @@ while compute is stopped. Stopping releases the GPU, so restarting depends on
 capacity becoming available on the Pod's machine; immediate restart is not
 guaranteed. Native model loading also takes time on every process start.
 
+For managed deployments, a confirmed host-capacity error triggers at most one
+replacement Pod per operation. The replacement uses the same GPU, image,
+datacenter, and existing network volume and must meet the configured hourly
+cap. The previous Pod remains stopped. The client does not allocate another
+volume or choose a different region or GPU. A deployment with an explicit
+`runpod.pod_id` is fixed and is never replaced automatically.
+
+Replacement intent is saved before creation. If the API response is lost, the
+client looks for that uniquely named Pod and verifies its placement before
+adopting it. Rerunning resumes this check instead of creating another Pod.
+An unresolved creation is reported by `runpod status` and shutdown diagnostics;
+inspect Runpod when the CLI cannot confirm which resource was created. Keep
+the private deployment state so the client can reconcile the outcome safely.
+
 On restart the installer restores missing container system packages, then
 reuses the persistent Python environments. Encode uses its `runtime` mode,
 which does not resolve or download Python packages. Bootstrap and Update use

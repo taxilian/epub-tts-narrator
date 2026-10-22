@@ -57,6 +57,11 @@ seconds and is an additional fallback when no work is pending.
 
 Stopping releases the GPU. Restarting depends on capacity on the Pod's machine,
 and every new inference process must load the model into GPU memory again.
+If Runpod confirms that a managed Pod's host has no free GPU, the client can
+create one replacement with the same GPU, datacenter, and existing network
+volume, within the configured price cap. Explicit `runpod.pod_id` deployments
+remain fixed. An uncertain creation is reconciled before another operation;
+it is never blindly repeated. See the deployment guide for recovery details.
 The persistent network volume retains model files, environments, registered
 voices, and accepted checkpoints, so unchanged models are not downloaded again.
 Storage remains billed while compute is stopped.
