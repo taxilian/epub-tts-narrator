@@ -1177,6 +1177,70 @@ def _failed_run(work, exc, notify):
     notify(f"Verified clips and completed chapters are retained in {work}. Rerun the same command to resume.")
 
 
+def _recheck_saved_whole_take(text, directory, request, verifier, config, *, notify):
+    """Reconsider one saved whole take before resuming an existing split plan.
+
+    This path never synthesizes or asks a language model for a new decision.
+    Only fresh recognition plus deterministic comparisons (or an already
+    audited pronunciation input) can avoid resuming the saved recovery parts.
+    """
+    class RecognitionOnly:
+        identity = verifier.identity
+
+        def transcribe(self, path):
+            return verifier.transcribe(path)
+
+    directory = Path(directory)
+    request_hash = digest(request)
+    for attempt in reversed(generation_attempts(directory)):
+        result_path = directory / f"attempt-{attempt:03d}.json"
+        if not result_path.exists():
+            continue
+        record = read_json(regular_file(result_path))
+        if (not isinstance(record, dict) or record.get("request_hash") != request_hash
+                or digest(record.get("request")) != request_hash or record.get("attempt") != attempt):
+            raise RenderBlocked("Saved whole speech candidate does not match its original request")
+        filename = record.get("audio_file")
+        if filename is None:
+            continue  # Interrupted synthesis has no normalized candidate to check.
+        if filename != f"attempt-{attempt:03d}.wav":
+            raise RenderBlocked("Invalid saved whole speech candidate path")
+        wav = directory / filename
+        if not wav.exists() and not wav.is_symlink():
+            continue
+        if file_hash(regular_file(wav)) != record.get("audio_sha256"):
+            raise RenderBlocked("Saved whole speech candidate changed on disk")
+        metadata = record.get("engine_metadata")
+        if not isinstance(metadata, dict):
+            raise RenderBlocked("Invalid saved whole speech generation metadata")
+        notify("  Rechecking saved whole speech before resuming its split parts.")
+        # Hiding model judgment hooks must never turn a permissive configured
+        # WER threshold into permission to skip a missing or extra full word.
+        policy = {**config["quality"], "max_wer": 0.0}
+        report = validate_audio(wav, text, RecognitionOnly(), policy, purpose="speech")
+        if metadata.get("speech_resolution") is not None:
+            from .recurring_resolution import confirm_rewritten_report
+            try:
+                report = confirm_rewritten_report(report, metadata["speech_resolution"])
+            except ValueError:
+                return None  # An obsolete input audit cannot bypass the existing split plan.
+        proven = (report.get("metrics", {}).get("wer") == 0
+                  or report.get("text_confirmation_method") in {
+                      "word_spacing", "double_metaphone", "pronunciation_rewrite"})
+        if report.get("passed") is not True or not proven:
+            return None
+        report["saved_whole_take_recheck"] = {
+            "method": "deterministic", "model_judgment_requested": False,
+            "previous_validation_key": record.get("validation_key"),
+        }
+        accepted = {**deepcopy(record), "report": report,
+                    "validation_key": make_validation_key(text, verifier, config["quality"], purpose="speech")}
+        write_json(directory / "accepted.json", accepted)
+        notify("  Saved whole speech passed current deterministic verification; reusing it.")
+        return wav, accepted
+    return None
+
+
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
                   config, work, take_locks, take_locks_guard, *, notify, retry_budget=None,
                   speech_cache=None):
@@ -1219,11 +1283,16 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 from .speech_recovery import recovery_available, recover_speech, split_recovery_text
                 if synthesize_part is not None and recovery_available(
                         directory, request, text, verifier, config):
-                    # A persisted alternate strategy resumes its verified parts
-                    # instead of spending another batch on the same full text.
-                    result = recover_speech(text, synthesize_part, directory, request,
-                                            verifier, config, notify=notify, retry_budget=retry_budget,
-                                            resolution_episode=resolution_episode)
+                    result = None
+                    if getattr(verifier, "speech_resolver", None) is not None:
+                        result = _recheck_saved_whole_take(
+                            text, directory, request, verifier, config, notify=notify)
+                    if result is None:
+                        # Preserve the persisted strategy and verified parts;
+                        # never generate more whole takes on this resume path.
+                        result = recover_speech(text, synthesize_part, directory, request,
+                                                verifier, config, notify=notify, retry_budget=retry_budget,
+                                                resolution_episode=resolution_episode)
                 else:
                     try:
                         result = verified_take(text, generate, directory, request,

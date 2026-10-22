@@ -179,7 +179,9 @@ class RecurringResolution:
         if audit.get('decision') == 'unavailable':
             return {'action': 'unavailable', 'audit': audit, 'failures': failures}
         if proposal is None:
-            notify('  The recovery proposal did not pass validation; continuing within the remaining attempt limit.')
+            detail = audit.get('validation_error') or audit.get('error_code') or 'invalid recovery decision'
+            notify('  The recovery proposal did not pass validation: ' + detail
+                   + '. Continuing within the remaining attempt limit.')
             return None
         return {**proposal, 'audit': audit, 'failures': failures}
 

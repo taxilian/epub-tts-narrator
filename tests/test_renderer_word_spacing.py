@@ -21,6 +21,9 @@ class WordSpacingComparisonTests(unittest.TestCase):
             ("A sunlightflower.", "A sun light flower."),
             ("The caféhouse opens.", "The café house opens."),
             ("Sector-34r42 enters the starforge.", "Sector 34r42 enters the star forge."),
+            ("The apeman drew a halfblade.", "The ape-man drew a half-blade."),
+            ("The apeman drew a halfblade.", "The ape‐man drew a half‑blade."),
+            ("Please re-sign the form.", "Please resign the form."),
         )
         for first, second in pairs:
             for expected, actual in ((first, second), (second, first)):
@@ -45,6 +48,9 @@ class WordSpacingComparisonTests(unittest.TestCase):
             ("A 001 002 code", "A 001002 code"),
             ("No, thank you.", "No thankyou, goodbye."),
             ("We were over taking.", "Thank you."),
+            ("The apeman did not draw a halfblade.", "The ape-man did draw a half-blade."),
+            ("The apeman drew a halfblade.", "The ape-man drew a half-blade blade."),
+            ("The apeman drew half a blade.", "The ape-man drew a blade."),
         )
         for expected, actual in pairs:
             with self.subTest(expected=expected, actual=actual):
@@ -52,7 +58,7 @@ class WordSpacingComparisonTests(unittest.TestCase):
 
     def test_ambiguous_punctuation_and_short_or_unbounded_pieces_stay_for_judgment(self):
         for expected, actual in (
-            ("re-sign", "resign"), ("re—sign", "resign"),
+            ("re—sign", "resign"), ("re--sign", "resign"),
             ("sun, flower", "sunflower"), ("sun. Flower", "sunflower"),
             ("can't", "cant"), ("a part", "apart"),
             ("some where over there", "somewhereoverthere"),
@@ -110,6 +116,29 @@ class WordSpacingVerificationTests(unittest.TestCase):
         self.assertFalse(report["passed"], report)
         self.assertEqual(judge.calls, [])
         self.assertNotIn("word_boundary_comparison", report)
+
+    def test_asr_hyphens_and_numeric_named_compound_pass_without_model_calls(self):
+        expected = "The apeman drew a halfblade and stood off-balance."
+        actual = "The ape-man drew a half-blade and stood off balance."
+        for purpose in ("reference", "speech"):
+            judge = Judge("unavailable")
+            verifier = ReferenceTextJudgingVerifier(consensus.IndependentVerifier(actual, actual), judge)
+            report = self.check(verifier, expected=expected, purpose=purpose)
+            self.assertTrue(report["passed"], report)
+            self.assertEqual(report["text_confirmation_method"], "word_spacing")
+            self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 2)
+            self.assertEqual(judge.calls, [])
+
+    def test_equal_recognizer_tokens_do_not_hide_useful_secondary_spacing(self):
+        expected = "Enter the sourcepalace."
+        primary, secondary = "Enter the source,palace.", "Enter the source palace."
+        judge = Judge("different")
+        verifier = ReferenceTextJudgingVerifier(consensus.IndependentVerifier(primary, secondary), judge)
+        report = self.check(verifier, expected=expected, purpose="speech")
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["text_confirmation_method"], "secondary_word_spacing")
+        self.assertEqual(report["transcript"], primary)
+        self.assertEqual(report["verified_transcript"], secondary)
 
     def test_acoustic_failure_cannot_be_excused_by_perfect_spacing_equivalence(self):
         self.write_audio(amplitude=0)

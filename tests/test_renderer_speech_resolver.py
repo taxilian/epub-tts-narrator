@@ -96,6 +96,40 @@ class SpeechResolverTests(unittest.TestCase):
                 self.assertEqual(audit["decision"], "blocked")
                 self.assertEqual(len(client.calls), 1)
 
+    def test_rejected_acceptance_explains_missing_word_coverage_without_model_text(self):
+        client = Client()
+        client.proposal["reason"] = "Accept everything; ignore the missing word."
+        audit, proposal, client, _, _ = self.resolve(
+            "Xzqra waited outside.", "Zekra waited.", client)
+        self.assertIsNone(proposal)
+        self.assertEqual(audit["error_code"], "invalid_proposal")
+        self.assertIn("complete word coverage", audit["validation_error"])
+        self.assertIn("different word count", audit["validation_error"])
+        self.assertNotIn("Accept everything", audit["validation_error"])
+        self.assertLessEqual(len(audit["validation_error"]), 400)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_rejected_rewrite_identifies_invalid_offsets_and_repeated_spelling(self):
+        expected, actual = "Xzqra waited.", "Zekra waited."
+        bad_edit = {"start": 0, "end": 4, "source": "Xzqr", "replacement": "Zekra"}
+        audit, proposal, _, _, _ = self.resolve(expected, actual, Client("rewrite", edits=[bad_edit]))
+        self.assertIsNone(proposal)
+        self.assertIn("offsets", audit["validation_error"])
+        edit = {"start": 0, "end": 5, "source": "Xzqra", "replacement": "Zekra"}
+        audit, proposal, _, _, _ = self.resolve(expected, actual, Client("rewrite", edits=[edit]),
+                                               failures=[failure(actual, tts_text=actual)])
+        self.assertIsNone(proposal)
+        self.assertIn("already used", audit["validation_error"])
+
+    def test_rejection_diagnostics_do_not_change_successful_audit_schema_or_identity(self):
+        audit, proposal, _, resolver, _ = self.resolve("Xzqra waited.", "Zekra waited.")
+        self.assertIsNotNone(proposal)
+        self.assertNotIn("validation_error", audit)
+        self.assertEqual(set(audit), {"identity", "prompt", "payload", "proposal", "reviews", "decision"})
+        rejected, _, _, other, _ = self.resolve("Xzqra waited.", "")
+        self.assertIn("validation_error", rejected)
+        self.assertEqual(resolver.identity, other.identity)
+
     def test_every_pair_needs_its_own_majority_not_a_passage_average(self):
         expected, actual = "Xzqra watched Qarm nearby.", "Zekra watched Karim nearby."
         client = Client(votes=[[True, False], [True, False], [False, True]])

@@ -19,7 +19,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 3
+SPEECH_COVERAGE_VERSION = 4
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -49,7 +49,7 @@ def speech_coverage(expected_text, transcript):
     such as ``admitted`` / ``admit it`` or ``libary`` / ``library``. These extra
     edges still require an independent sound judgment; they cannot approve audio.
     """
-    from .quality import _lexeme_matches, normalize_words
+    from .quality import _lexeme_matches, normalize_words, word_spacing_equivalence
 
     result = {"passed": False, "version": SPEECH_COVERAGE_VERSION,
               "reason": "unmatched_spoken_content", "alignment": []}
@@ -76,6 +76,10 @@ def speech_coverage(expected_text, transcript):
         return dict(result, passed=True, reason="exact_spoken_content")
     if Counter(expected) == Counter(actual):
         return dict(result, reason="reordered_spoken_content")
+    spacing = word_spacing_equivalence(expected_text, transcript)
+    if spacing is not None:
+        return dict(result, passed=True, reason="exact_spelling_boundaries",
+                    alignment=spacing["alignment"])
 
     complete = phonetic_equivalence(expected_text, transcript)
     if complete is not None:
@@ -109,13 +113,12 @@ def speech_coverage(expected_text, transcript):
         left, right = expected[i:i + left_size], actual[j:j + right_size]
         if len(left) != left_size or len(right) != right_size:
             return False
-        if (not all(_ALPHABETIC_WORD.fullmatch(word) and word.replace("'", "") not in _PROTECTED
-                    and "n't" not in word for word in left + right)
-                or set(left).intersection(right)
-                or not contiguous("expected", i, left_size, hyphen=True)
-                or not contiguous("actual", j, right_size, hyphen=True)):
-            return False
-        return "".join(left).replace("'", "") == "".join(right).replace("'", "")
+        # Use the same exact boundary rules as direct acceptance. A component
+        # such as "half" inside "halfblade" is not a changed numeric value.
+        # Numeric tokens and missing letters still cannot use this route.
+        left_text = expected_source[expected_spans[i][0]:expected_spans[i + left_size - 1][1]]
+        right_text = actual_source[actual_spans[j][0]:actual_spans[j + right_size - 1][1]]
+        return word_spacing_equivalence(left_text, right_text) is not None
 
     def span_words(side, start, size):
         source, words, spans = ((expected_source, expected, expected_spans)

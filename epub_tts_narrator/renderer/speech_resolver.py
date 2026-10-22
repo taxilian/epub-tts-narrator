@@ -151,13 +151,18 @@ def _pair(expected_text, transcript, left, right, start, end, actual_start, actu
             "recognized_context": context(transcript, right, actual_start, actual_end)}
 
 
-def _accept_pairs(expected_text, transcript):
+def _accept_pairs(expected_text, transcript, *, validation_errors=None):
+    def reject(reason):
+        if validation_errors is not None:
+            validation_errors.append(reason)
+        return None
+
     expected, actual = normalize_words(expected_text), normalize_words(transcript)
     if not expected or not actual or max(len(expected), len(actual)) > 2000:
-        return None
+        return reject("Acceptance requires nonempty transcripts within the 2,000-word comparison limit.")
     left, right = _original_words(expected_text, expected), _original_words(transcript, actual)
     if left is None or right is None:
-        return None
+        return reject("Acceptance could not map the normalized transcript words back to their source text.")
     letter_matches = make_letter_name_matcher(
         expected_text, expected, [(start, end, word.casefold()) for word, start, end in left],
         transcript, actual, [(start, end, word.casefold()) for word, start, end in right],
@@ -167,51 +172,59 @@ def _accept_pairs(expected_text, transcript):
         changes = coverage["alignment"]
     else:
         if len(expected) != len(actual):
-            return None
+            return reject("Acceptance failed complete word coverage: the transcript has a different word count, "
+                          "and no supported spelling or pronunciation alignment accounts for every word.")
         alignment = compare_words(expected_text, transcript)["alignment"]
         # Equal token counts alone can conceal one omitted word plus an added
         # one. A complete minimal alignment must consist only of substitutions.
         if any(row["operation"] not in {"equal", "substitute"} for row in alignment):
-            return None
+            return reject("Acceptance failed complete word coverage: the alignment contains missing, extra, or moved words.")
         changes = [row for row in alignment if row["operation"] == "substitute"]
         if (not changes or {word for row in changes for word in row["expected"]}
                 & {word for row in changes for word in row["actual"]}):
-            return None  # Known words moved, rather than unfamiliar spellings.
+            return reject("Acceptance found reordered words rather than an isolated pronunciation variation.")
     if len(changes) > _LIMITS["max_pairs"]:
-        return None
+        return reject("Acceptance needs more than four separate pronunciation comparisons.")
     pairs = []
     for change in changes:
         start, end = change["expected_start"], change["expected_end"]
         heard_start, heard_end = change["actual_start"], change["actual_end"]
         if not (1 <= end - start <= _LIMITS["max_span_words"]
                 and 1 <= heard_end - heard_start <= _LIMITS["max_span_words"]):
-            return None
+            return reject("Acceptance contains a pronunciation span longer than three words.")
         if not coverage["passed"] and letter_matches.blocks_fuzzy(
                 start, heard_start, end - start, heard_end - heard_start):
-            return None
+            return reject("Acceptance would change a protected spoken letter or initialism.")
         pair = _pair(expected_text, transcript, left, right, start, end,
                      heard_start, heard_end, len(pairs) + 1)
         if not coverage["passed"] and not all(_safe_span(pair[key]) for key in (
                 "expected_word", "recognized_word")):
-            return None
+            return reject("Acceptance would change a protected number, negation, function word, "
+                          "or a span outside the permitted pronunciation format.")
         pairs.append(pair)
     return pairs
 
 
-def _proposal(proposal, payload):
+def _proposal(proposal, payload, *, validation_errors=None):
+    def reject(reason):
+        if validation_errors is not None:
+            validation_errors.append(reason)
+        return None
+
     if (not isinstance(proposal, dict) or set(proposal) != {"action", "edits", "reason"}
             or not isinstance(proposal["action"], str) or proposal["action"] not in _ACTIONS
-            or proposal["action"] not in payload["permitted_actions"]
             or not isinstance(proposal["edits"], list) or not _reason(proposal["reason"])):
-        return None
+        return reject("The model response must contain only a supported action, an edits array, and a brief reason.")
+    if proposal["action"] not in payload["permitted_actions"]:
+        return reject("The proposed action is not permitted for this take's verification failures or recovery capabilities.")
     action, expected = proposal["action"], payload["requested_text"]
     result = deepcopy(proposal)
     if action != "rewrite":
         if proposal["edits"]:
-            return None
+            return reject("Only a rewrite action may include text edits.")
         if action == "accept":
             transcript = payload["failures"][-1]["transcript"]
-            pairs = _accept_pairs(expected, transcript)
+            pairs = _accept_pairs(expected, transcript, validation_errors=validation_errors)
             if pairs is None:
                 return None
             result["acceptance_transcript"] = transcript
@@ -220,7 +233,7 @@ def _proposal(proposal, payload):
         return dict(result, validated_pairs=pairs)
     edits = proposal["edits"]
     if not 1 <= len(edits) <= _LIMITS["max_pairs"]:
-        return None
+        return reject("A pronunciation rewrite requires between one and four edits.")
     source_lexemes = list(_lexeme_matches(expected.replace("’", "'").replace("‘", "'")))
     boundaries_start = {match.start() for match in source_lexemes}
     boundaries_end = {match.end() for match in source_lexemes}
@@ -230,20 +243,24 @@ def _proposal(proposal, payload):
                 or type(edit["start"]) is not int or type(edit["end"]) is not int
                 or not cursor <= edit["start"] < edit["end"] <= len(expected)
                 or edit["start"] not in boundaries_start or edit["end"] not in boundaries_end
-                or edit["source"] != expected[edit["start"]:edit["end"]]
-                or not _safe_span(edit["source"]) or not _safe_span(edit["replacement"])
-                or normalize_words(edit["source"]) == normalize_words(edit["replacement"])):
-            return None
+                or edit["source"] != expected[edit["start"]:edit["end"]]):
+            return reject("A rewrite edit has invalid fields or offsets: edits must be ordered, nonoverlapping, "
+                          "and copy complete words exactly from the original text.")
+        if not _safe_span(edit["source"]) or not _safe_span(edit["replacement"]):
+            return reject("A rewrite must use one to three plain pronunciation words; it cannot change "
+                          "numbers, negation, function words, initialisms, or include instructions or markup.")
+        if normalize_words(edit["source"]) == normalize_words(edit["replacement"]):
+            return reject("The proposed rewrite does not change the normalized TTS wording.")
         # Do not let a multiword spelling consume a retained neighboring word;
         # that would disguise a deletion or insertion as a name respelling.
         before, after = normalize_words(edit["source"]), normalize_words(edit["replacement"])
         if set(before) & set(after):
-            return None
+            return reject("A rewrite overlaps retained words and could conceal an added or missing word.")
         span_coverage = speech_coverage(edit["source"], edit["replacement"])
         if ((len(before) != len(after) and not span_coverage["passed"])
                 or (not span_coverage["passed"]
                     and _accept_pairs(edit["source"], edit["replacement"]) is None)):
-            return None
+            return reject("The pronunciation rewrite failed complete word coverage for the edited span.")
         selected = [index for index, match in enumerate(source_lexemes)
                     if edit["start"] <= match.start() and match.end() <= edit["end"]]
         context = expected[source_lexemes[max(0, selected[0] - 3)].start():
@@ -256,7 +273,7 @@ def _proposal(proposal, payload):
     pieces.append(expected[cursor:])
     tts_text = "".join(pieces)
     if any(failure.get("tts_text") == tts_text for failure in payload["failures"]):
-        return None
+        return reject("The proposed TTS spelling was already used in a failed take.")
     return dict(result, tts_text=tts_text, validated_pairs=pairs)
 
 
@@ -303,12 +320,14 @@ class SpeechResolver:
             from .diagnostics import safe_error_text
             return dict(audit, decision="unavailable", error_code="request_failed",
                         error=safe_error_text(exc, secrets=self._secrets))
+        validation_errors = []
         try:
-            proposal = _proposal(audit["proposal"], audit["payload"])
+            proposal = _proposal(audit["proposal"], audit["payload"], validation_errors=validation_errors)
         except (ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError):
             proposal = None
         if proposal is None:
-            return dict(audit, error_code="invalid_proposal")
+            return dict(audit, error_code="invalid_proposal", validation_error=(validation_errors[0]
+                        if validation_errors else "The model proposal contains invalid or unsupported data."))
         pairs = proposal["validated_pairs"]
         if proposal["action"] in {"accept", "rewrite"}:
             for reviewer in range(1, _LIMITS["reviewers"] + 1):

@@ -89,6 +89,7 @@ class FailureOutputTests(unittest.TestCase):
                     verified_take("My pack mate.", generate, temp, {"test": True},
                                   object(), config, notify=messages.append)
             self.assertEqual(messages, [
+            "  Generating speech, attempt 1/1",
                 "  Attempt 1/1 rejected: text_mismatch "
                 "(expected → heard: pack mate → packmate; recognizers disagreed)",
             ])

@@ -281,6 +281,81 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertTrue(any("Resuming saved speech recovery decision: split" in row for row in self.messages))
         self.assertTrue(Path(result["wav_path"]).is_file())
 
+    def prepare_persisted_split(self, *, omitted_word=False):
+        text = "Everyone watched the river. The halfblade struck the apeman."
+        self.chunk["spoken_text"] = text
+        self.chunk["source_ranges"][0]["end"] = 7 + len(text)
+        self.client.actions = [{"action": "split", "edits": [], "reason": "Try complete short sentences."}]
+        if omitted_word:
+            self.engine.heard = lambda given, number: given.replace("struck ", "") if given == text else given
+        else:
+            self.engine.heard = lambda given, number: given.replace("halfblade", "half-blade").replace("apeman", "ape-man")
+        recognize = workflow.validate_audio
+        synthesize = self.engine.synthesize
+
+        def older_comparison(path, expected, *args, **kwargs):
+            report = recognize(path, expected, *args, **kwargs)
+            if expected == text:
+                # Preserve real PCM and recognition, but simulate the earlier
+                # policy that wrongly rejected exact hyphen boundaries.
+                report = {**report, "passed": False, "reasons": ["text_mismatch"]}
+            return report
+
+        def interrupt_second_part(given, *args, **kwargs):
+            if given == "The halfblade struck the apeman.":
+                raise KeyboardInterrupt("Split plan and first verified part are saved")
+            return synthesize(given, *args, **kwargs)
+
+        with (patch.object(workflow, "validate_audio", side_effect=older_comparison),
+              patch.object(self.engine, "synthesize", side_effect=interrupt_second_part)):
+            with self.assertRaises(KeyboardInterrupt):
+                self.render_chunk()
+        self.assertEqual(len(self.engine.calls), 4)
+        self.assertEqual(len(self.client.plans), 1)
+        self.assertEqual(len(list((self.work / "clips").glob("*/speech-recovery.json"))), 1)
+        self.assertEqual(len(list((self.work / "clips").glob("*/parts/*/accepted.json"))), 1)
+        return text
+
+    def test_persisted_split_reuses_whole_take_that_now_passes_exact_spacing(self):
+        text = self.prepare_persisted_split()
+        existing = {path: path.read_bytes() for path in (self.work / "clips").rglob("*") if path.is_file()}
+        result, acceptance = self.render_chunk()
+        self.assertEqual(Path(result["wav_path"]).name, "attempt-003.wav")
+        self.assertEqual(len(self.engine.calls), 4, "No new whole or part TTS should be generated")
+        self.assertEqual(len(self.client.plans), 1)
+        self.assertEqual(self.client.reviews, [])
+        self.assertEqual(acceptance["report"]["expected_text"], text)
+        self.assertEqual(acceptance["report"]["text_confirmation_method"], "word_spacing")
+        self.assertFalse(acceptance["report"]["saved_whole_take_recheck"]["model_judgment_requested"])
+        for path, data in existing.items():
+            self.assertEqual(path.read_bytes(), data, str(path.relative_to(self.work)))
+        self.assertTrue(list((self.work / "speech-cache").glob("*.json")))
+
+    def check_persisted_split_with_omission(self, *, permissive_wer=False):
+        text = self.prepare_persisted_split(omitted_word=True)
+        first_part = next((self.work / "clips").glob("*/parts/*/accepted.json"))
+        saved_first_part = first_part.read_bytes()
+        if permissive_wer:
+            self.config["quality"]["max_wer"] = 0.5
+        result, acceptance = self.render_chunk()
+        self.assertEqual(len(self.engine.calls), 5, "Resume only the still-missing second part")
+        self.assertEqual(sum(row["text"] == text for row in self.engine.calls), 3,
+                         "An unresolved saved whole take must not restart whole-text generation")
+        self.assertEqual(len(self.client.plans), 1, "Rechecking cannot ask the planner to override missing speech")
+        self.assertEqual(self.client.reviews, [])
+        self.assertEqual(first_part.read_bytes(), saved_first_part)
+        self.assertEqual(acceptance["report"]["expected_text"], text)
+        self.assertEqual(acceptance["report"]["transcript"], text)
+        self.assertEqual(acceptance["report"]["metrics"]["duration_seconds"], 2)
+        self.assertNotIn("saved_whole_take_recheck", acceptance["report"])
+        self.assertTrue(Path(result["wav_path"]).is_file())
+
+    def test_persisted_split_with_missing_word_resumes_existing_parts(self):
+        self.check_persisted_split_with_omission()
+
+    def test_persisted_split_recheck_never_uses_permissive_wer_to_approve_omission(self):
+        self.check_persisted_split_with_omission(permissive_wer=True)
+
     def test_rewrites_and_split_parts_share_the_twelve_generation_budget(self):
         text = "Insang waited beside the old gate. Everyone watched the river."
         self.chunk["spoken_text"] = text

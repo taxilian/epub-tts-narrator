@@ -46,6 +46,9 @@ UNACCEPTABLE = (
      "Darren's entered the source palace."),
     ("compound spacing cannot hide nearby omitted word", "The sourcepalace gate opened.",
      "The source palace opened."),
+    ("hyphenated compound cannot hide omission", "The apeman drew his halfblade.",
+     "The ape-man drew half-blade."),
+    ("actual fraction omitted", "Mota carried half a blade.", "Moda carried a blade."),
 )
 
 ACCEPTABLE = (
@@ -61,6 +64,10 @@ ACCEPTABLE = (
     ("minor pronunciation", "Meet me at the libary.", "Meet me at the library."),
     ("contraction expansion", "I'm waiting beside the door.", "I am waiting beside the door."),
     ("negative contraction expansion", "Don't open the door.", "Do not open the door."),
+    ("hyphenated compounds with numeric named part", "The apeman drew his halfblade.",
+     "The ape-man drew his half-blade."),
+    ("compound boundary plus separate name variant", "Mota drew his halfblade.",
+     "Moda drew his half-blade."),
 )
 
 

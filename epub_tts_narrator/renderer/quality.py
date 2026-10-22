@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 14
+QUALITY_VERSION = 15
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -250,9 +250,10 @@ def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | Non
     """Explain complete transcripts differing only in bounded word spacing.
 
     Join/split one alphabetic word and two or three adjacent pieces of at least
-    two letters. The pieces must be separated by whitespace in the original
-    text. Hyphens (e.g. re-sign/resign), apostrophes, numbers and changes to any
-    letters still need ordinary verification. No insertion, deletion or
+    two letters. Pieces may be separated by whitespace or a single compound
+    hyphen. ASR-added hyphens do not establish a pronunciation difference.
+    Apostrophes, numbers and changes to any letters still need ordinary
+    verification. No insertion, deletion or
     substitution edge exists; even one other discrepancy rejects this shortcut.
     """
     def tokens(text):
@@ -281,7 +282,18 @@ def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | Non
             return None
         if any(not span[2].isalpha() for span in spans[start:end]):
             return None
-        if any(not source[spans[index - 1][1]:spans[index][0]].isspace()
+        # Do not apply an alphabetic compound rule to a fragment embedded in
+        # an alphanumeric identifier such as A34-sun-flower-8r9.
+        neighbors = []
+        if start:
+            neighbors.append((spans[start - 1][2], source[spans[start - 1][1]:spans[start][0]]))
+        if end < len(spans):
+            neighbors.append((spans[end][2], source[spans[end - 1][1]:spans[end][0]]))
+        if any(not word.isalpha() and re.fullmatch(r"[-‐‑]", separator)
+               for word, separator in neighbors):
+            return None
+        if any(not re.fullmatch(r"(?:\s+|\s*[-‐‑]\s*)",
+                                source[spans[index - 1][1]:spans[index][0]])
                for index in range(start + 1, end)):
             return None
         return "".join(selected)
@@ -311,7 +323,7 @@ def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | Non
         i, j = end_i, end_j
     if i != len(expected) or j != len(actual):
         return None
-    return {"method": "word_spacing_v1", "boundary_changes": len(changes), "alignment": changes}
+    return {"method": "word_spacing_v2", "boundary_changes": len(changes), "alignment": changes}
 
 
 def compare_reference_words(expected_text: str, actual_text: str, *,
@@ -838,24 +850,29 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
     except Exception:
         corroboration["decision"] = "verification_failed"
         return False
-    if compare_words(primary, secondary)["wer"] == 0:
+    secondary_exact = compare_words(expected, secondary)["wer"] == 0
+    spacing = word_spacing_equivalence(expected, secondary)
+    phonetic = phonetic_equivalence(expected, secondary)
+    # Normalized equality between recognizers can hide a useful punctuation
+    # difference: "source,palace" and "source palace" have identical tokens,
+    # but only the latter supplies a valid spacing match to "sourcepalace".
+    if (compare_words(primary, secondary)["wer"] == 0
+            and not secondary_exact and spacing is None and phonetic is None):
         corroboration["decision"] = "same_transcript"
         return False
     first_judgment = report.pop("text_judge")
     report["text_judge_history"] = [{"recognizer": "primary", "judgment": first_judgment}]
     report["speech_coverage_history"] = report.pop("speech_coverage", [])
     report.pop("text_judge_skipped", None)
-    if compare_words(expected, secondary)["wer"] == 0:
+    if secondary_exact:
         report.pop("text_judge_source", None)
         corroboration["decision"] = "secondary_matches_requested"
         return accept(secondary, "secondary_exact")
-    spacing = word_spacing_equivalence(expected, secondary)
     if spacing is not None:
         report.pop("text_judge_source", None)
         report["word_boundary_comparison"] = spacing
         corroboration["decision"] = "secondary_matches_requested_spacing"
         return accept(secondary, "secondary_word_spacing")
-    phonetic = phonetic_equivalence(expected, secondary)
     if phonetic is not None:
         report.pop("text_judge_source", None)
         report["phonetic_comparison"] = phonetic
