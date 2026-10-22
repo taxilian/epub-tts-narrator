@@ -92,6 +92,15 @@ class SpeechTargetTests(unittest.TestCase):
                     '<|speaker:1|> <whisper>Stay here.</whisper>')
         self.assertEqual(trim_wire_text(source, {0, 1}), expected)
 
+    def test_wire_parenthesis_fragments_are_cleaned_inside_controls(self):
+        source = ("<|speaker:0|> [nervous] (Lie, \n"
+                  "<|speaker:1|> <whisper>I thought fiercely). </whisper>\n"
+                  "<|speaker:0|> He said (quietly) that he agreed.")
+        expected = ("<|speaker:0|> [nervous] Lie,\n"
+                    "<|speaker:1|> <whisper>I thought fiercely.</whisper>\n"
+                    "<|speaker:0|> He said (quietly) that he agreed.")
+        self.assertEqual(trim_wire_text(source, {0, 1}), expected)
+
     def test_empty_or_invalid_wire_turns_are_rejected_even_with_valid_neighbors(self):
         for invalid in ('<|speaker:1|> “”', '<|speaker:1|> <whisper> “” </whisper>',
                         '<|speaker:1|> [nervous] “”', '<|speaker:1|> [unknown] Hi.'):
@@ -219,6 +228,28 @@ class NativeDrama3TransportTests(unittest.TestCase):
         payload, _ = self.payload()
         self.assertEqual(payload["text"], '<whisper>Don\'t call it "easy".</whisper>')
         self.assertEqual(payload["references"][0]["text"], ' “Saved reference.” ')
+
+    def test_http_parenthesis_fragments_are_cleaned_without_changing_reference(self):
+        voice = {**self.voice, "reference_text": "(A saved reference)."}
+        original = dict(voice)
+        cases = (
+            ("(Lie, ", "Lie,"),
+            ("I thought fiercely). ", "I thought fiercely."),
+            ("(Lie.)", "Lie."),
+            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
+            ("He said (quietly).", "He said (quietly)."),
+        )
+        for index, (source, target) in enumerate(cases):
+            with self.subTest(source=source):
+                self.client().synthesize(
+                    source, voice, self.root / f"parenthesis-{index}.wav",
+                    seed=3, direction="whisper",
+                )
+                payload, _ = self.payload()
+                self.assertEqual(payload["text"], f"<whisper>{target}</whisper>")
+                self.assertEqual(payload["references"][0]["text"], "(A saved reference).")
+                self.assertEqual(payload["references"][0]["audio"], wav_bytes())
+                self.assertEqual(voice, original)
 
     def test_native_dialogue_keeps_individual_reference_speaker_bindings(self):
         client = self.client(protocol="fish_native_drama3")

@@ -226,6 +226,31 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual(resumed, first)
         self.assertEqual(self.accepted_clips(), before)
 
+    def test_parenthetical_thought_and_narration_keep_separate_source_assignments(self):
+        from test_renderer_paragraphs import passages, plan
+        members = passages(['(Lie, ', 'I thought fiercely). '],
+                           voices=["voice_lena", "voice_mara"], offset=178)
+        original = deepcopy(members)
+        grouped = group_paragraphs(plan(members))["chapters"][0]["chunks"]
+        chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=grouped)
+        voices = {voice_id: {"voice_id": voice_id, "asset_hash": "shared-voice"}
+                  for voice_id in ("voice_lena", "voice_mara")}
+
+        clips, accepted = _render_chapter_chunks(
+            chapter, voices, self.engine, self.engine.identity, self.verifier,
+            self.config, self.root / "work", notify=self.messages.append,
+        )
+
+        self.assertEqual(self.engine.dialogue_calls, [])
+        self.assertEqual([call["text"] for call in self.engine.speech_calls], ['Lie,', 'I thought fiercely.'])
+        self.assertEqual(members, original)
+        self.assertEqual([clip["source_ranges"] for clip in clips],
+                         [member["source_ranges"] for member in members])
+        self.assertEqual([clip["segment"]["voice_id"] for clip in clips], ["voice_lena", "voice_mara"])
+        self.assertTrue(all(record["report"]["passed"] for record in accepted))
+        self.assertEqual([record["report"]["expected_text"] for record in accepted],
+                         ['(Lie, ', 'I thought fiercely). '])
+
     def test_migration_replaces_only_mixed_cached_paragraph_and_rebuilds_chapter(self):
         def legacy_groups(*args, **kwargs):
             return group_paragraphs(*args, **kwargs, multi_speaker=True)

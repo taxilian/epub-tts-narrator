@@ -135,6 +135,48 @@ class RendererEngineTests(unittest.TestCase):
         reference.assert_not_called()
         self.model.generate.assert_not_called()
 
+    def test_synthesis_removes_parenthesis_edges_without_rewriting_interior_or_reference(self):
+        voice = self.dialogue_voice("narrator")
+        voice["reference_text"] = "(A saved reference)."
+        original = deepcopy(voice)
+        saved = FakeReference(voice["reference_text"], object())
+        cases = (
+            ("(Lie, ", "Lie,"),
+            ("I thought fiercely). ", "I thought fiercely."),
+            ("(Lie.)", "Lie."),
+            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
+            ("He said (quietly).", "He said (quietly)."),
+        )
+        for index, (source, target) in enumerate(cases):
+            with self.subTest(source=source):
+                expected = f"<whisper>{target}</whisper>"
+                self.generate(self.segment(text=expected))
+                with patch.object(self.engine, "_reference", return_value=saved):
+                    result = self.engine.synthesize(
+                        source, voice, self.root / f"parenthesis-{index}.wav",
+                        seed=1, direction="whisper",
+                    )
+                self.assertEqual(self.model.generate.call_args.args, (expected,))
+                self.assertEqual(result["synthesis_text"], expected)
+                self.assertIs(self.model.generate.call_args.kwargs["references"][0], saved)
+                self.assertEqual(saved.text, "(A saved reference).")
+                self.assertEqual(voice, original)
+
+    def test_dialogue_parenthesis_trim_preserves_turns_and_word_boundaries(self):
+        voice = self.dialogue_voice("narrator")
+        turns = [{"text": text, "voice": voice} for text in (
+            "(Lie, ", "I thought fiercely). ", "He said (quietly) that he agreed.",
+        )]
+        original = deepcopy(turns)
+        expected = "<|speaker:0|> Lie, I thought fiercely. He said (quietly) that he agreed."
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value=FakeReference(
+            voice["reference_text"], object(),
+        )):
+            self.engine.synthesize_dialogue(turns, self.output, seed=1)
+        self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(turns, original)
+
     def test_dialogue_trims_each_turn_without_losing_word_boundaries(self):
         voice = self.dialogue_voice("narrator")
         turns = [{"text": text, "voice": voice} for text in (

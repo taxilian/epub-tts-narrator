@@ -27,7 +27,7 @@ from .drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION,
     generate_scene_voice, validate_scene_fields,
 )
-from .speech_text import trim_speech_text
+from .speech_text import speech_text_parts, trim_speech_text
 
 
 DRAMA3_RUNTIME_VERSION = "0.1.1+epub.1"
@@ -579,9 +579,8 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
             raise EngineError(f"dialogue turn {index + 1} must contain a saved voice")
         label = f"dialogue turn {index + 1} text"
         source_text = _text(turn.get("text"), label)
-        text = _text(trim_speech_text(source_text), label)
-        start = source_text.index(text)
-        leading, trailing = source_text[:start], source_text[start + len(text):]
+        text, leading, trailing = speech_text_parts(source_text)
+        text = _text(text, label)
         _, delivery = _directed_text(text, turn.get("direction", ""))
         voice = turn["voice"]
         if voice.get("kind") != "reference":

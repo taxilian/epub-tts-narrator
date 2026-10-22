@@ -190,6 +190,33 @@ class MLXAudioEngineTests(unittest.TestCase):
         self.assertEqual(request["ref_text"], [' “Saved reference.” '])
         self.assertEqual(self.voice, before)
 
+    def test_parenthesis_fragments_are_cleaned_only_in_target_before_generation(self):
+        self.voice["reference_text"] = "(A saved reference)."
+        original = deepcopy(self.voice)
+        reference_bytes = Path(self.voice["reference_audio"]).read_bytes()
+        cases = (
+            ("(Lie, ", "Lie,"),
+            ("I thought fiercely). ", "I thought fiercely."),
+            ("(Lie.)", "Lie."),
+            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
+            ("He said (quietly).", "He said (quietly)."),
+        )
+        for index, (source, target) in enumerate(cases):
+            with self.subTest(source=source):
+                self.generate(self.segment())
+                result = self.engine.synthesize(
+                    source, self.voice, self.root / f"parenthesis-{index}.wav",
+                    seed=1, direction="whisper",
+                )
+                expected = f"<whisper>{target}</whisper>"
+                request = self.model.generate.call_args.kwargs
+                self.assertEqual(request["text"], expected)
+                self.assertEqual(result["synthesis_text"], expected)
+                self.split.assert_called_with(expected)
+                self.assertEqual(request["ref_text"], ["(A saved reference)."])
+                self.assertEqual(self.decoded[-1], (reference_bytes, 100, 1))
+                self.assertEqual(self.voice, original)
+
     def test_all_text_chunks_are_concatenated_in_order_before_publication(self):
         self.generate(self.segment(audio=[0.1] * 8, final=False),
                       self.segment(audio=[0.2] * 6, index=1), chunks=2)
