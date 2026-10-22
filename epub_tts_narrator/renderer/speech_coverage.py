@@ -19,7 +19,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 4
+SPEECH_COVERAGE_VERSION = 5
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -89,6 +89,9 @@ def speech_coverage(expected_text, transcript):
     letter_matches = make_letter_name_matcher(
         expected_source, expected, expected_spans, actual_source, actual, actual_spans,
         protected=_PROTECTED)
+    from .address_speech import make_address_matcher
+    address_matches = make_address_matcher(
+        expected_source, expected, expected_spans, actual_source, actual, actual_spans)
 
     @lru_cache(maxsize=None)
     def keys(spelling):
@@ -215,6 +218,7 @@ def speech_coverage(expected_text, transcript):
         return "terminal_s_variation"
 
     def next_matches(i, j):
+        yield from address_matches(i, j)
         if expected[i] == actual[j]:
             yield i + 1, j + 1, None
             yield from letter_matches(i, j)
@@ -303,7 +307,7 @@ def speech_coverage(expected_text, transcript):
                 state = previous
             changes.reverse()
             uncertain = [change for change in changes if change["operation"] not in {
-                "colloquial", "contraction", "spelling_boundary", "letter_names"}]
+                "colloquial", "contraction", "spelling_boundary", "letter_names", "address_pronunciation"}]
             if ({word for change in uncertain for word in change["expected"]}
                     & {word for change in uncertain for word in change["actual"]}):
                 return dict(result, reason="reordered_spoken_content")
