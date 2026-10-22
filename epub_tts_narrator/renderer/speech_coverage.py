@@ -12,13 +12,14 @@ from functools import lru_cache
 import re
 import unicodedata
 
+from .letter_names import make_letter_name_matcher
 from .phonetic_match import (
     _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _PROTECTED,
     _load_double_metaphone, phonetic_equivalence,
 )
 
 
-SPEECH_COVERAGE_VERSION = 1
+SPEECH_COVERAGE_VERSION = 2
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -57,12 +58,12 @@ def speech_coverage(expected_text, transcript):
         return dict(result, reason="invalid_text")
 
     def tokens(text):
-        source = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
+        source = unicodedata.normalize("NFKC", text).replace("’", "'").replace("‘", "'")
         words, spans = [], []
         for match in _lexeme_matches(source):
             normalized = normalize_words(match.group())
             words.extend(normalized)
-            spans.extend([(match.start(), match.end(), match.group())] * len(normalized))
+            spans.extend([(match.start(), match.end(), match.group().casefold())] * len(normalized))
         return source, words, spans
 
     expected_source, expected, expected_spans = tokens(expected_text)
@@ -81,6 +82,9 @@ def speech_coverage(expected_text, transcript):
         return dict(result, passed=True, reason="complete_phonetic_coverage",
                     alignment=complete["alignment"])
     metaphone = _load_double_metaphone()
+    letter_matches = make_letter_name_matcher(
+        expected_source, expected, expected_spans, actual_source, actual, actual_spans,
+        protected=_PROTECTED)
 
     @lru_cache(maxsize=None)
     def keys(spelling):
@@ -191,7 +195,9 @@ def speech_coverage(expected_text, transcript):
     def next_matches(i, j):
         if expected[i] == actual[j]:
             yield i + 1, j + 1, None
+            yield from letter_matches(i, j)
             return
+        yield from letter_matches(i, j)
         variant = spelling_variant(expected[i], actual[j])
         if variant is not None:
             yield i + 1, j + 1, {"operation": "pronunciation_candidate", "rule": variant,
@@ -231,6 +237,8 @@ def speech_coverage(expected_text, transcript):
                 "expected_end": end_i, "actual_start": j, "actual_end": end_j,
                 "expected": expected[i:end_i], "actual": actual[j:end_j]}
         for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
+            if letter_matches.blocks_fuzzy(i, j, left_size, right_size):
+                continue
             if left_size != right_size and exact_compound(i, j, left_size, right_size):
                 end_i, end_j = i + left_size, j + right_size
                 yield end_i, end_j, {"operation": "spelling_boundary", "expected_start": i,
@@ -271,7 +279,8 @@ def speech_coverage(expected_text, transcript):
                     changes.append(change)
                 state = previous
             changes.reverse()
-            uncertain = [change for change in changes if change["operation"] not in {"colloquial", "contraction", "spelling_boundary"}]
+            uncertain = [change for change in changes if change["operation"] not in {
+                "colloquial", "contraction", "spelling_boundary", "letter_names"}]
             if ({word for change in uncertain for word in change["expected"]}
                     & {word for change in uncertain for word in change["actual"]}):
                 return dict(result, reason="reordered_spoken_content")

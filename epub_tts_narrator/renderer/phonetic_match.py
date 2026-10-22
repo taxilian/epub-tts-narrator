@@ -15,8 +15,10 @@ import shlex
 import sys
 import unicodedata
 
+from .letter_names import make_letter_name_matcher
 
-PHONETIC_MATCH_VERSION = 2
+
+PHONETIC_MATCH_VERSION = 3
 _MAX_ALIGNMENT_STATES = 20_000
 _ALPHABETIC_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*\Z")
 _PROTECTED = frozenset("""
@@ -81,23 +83,24 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
     """Return an audited full-transcript match, or leave it for other checks.
 
     Match a word to one word or to two/three whitespace-separated words using
-    complete Double Metaphone primary/alternate keys or an explicit colloquial
-    expansion. Multiword keys concatenate
-    each word's own encoding, preserving every boundary sound. Numbers,
-    negations, short/non-Latin words, punctuation-spanning joins and unmatched
-    words cannot be excused by this check. Exact transcripts return ``None``.
+    complete Double Metaphone primary/alternate keys, exact letter-name
+    sequences, or an explicit colloquial expansion. Multiword keys concatenate
+    each word's own encoding, preserving every boundary sound. General phonetic
+    joins exclude short/non-Latin words and punctuation boundaries; exact letter
+    sequences have their own spelling-separator rules. Numbers, negations and
+    unmatched words cannot be excused. Exact transcripts return ``None``.
     """
     # Imported at call time so quality can use this helper without a module
     # initialization cycle; all verification paths share lexical normalization.
     from .quality import _lexeme_matches, normalize_words
 
     def tokens(text):
-        source = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
+        source = unicodedata.normalize("NFKC", text).replace("’", "'").replace("‘", "'")
         words, spans = [], []
         for match in _lexeme_matches(source):
             normalized = normalize_words(match.group())
             words.extend(normalized)
-            spans.extend([(match.start(), match.end(), match.group())] * len(normalized))
+            spans.extend([(match.start(), match.end(), match.group().casefold())] * len(normalized))
         return source, words, spans
 
     expected_source, expected, expected_spans = tokens(expected_text)
@@ -111,6 +114,9 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
         # the actual words around when their exact identities are available.
         return None
     double_metaphone = _load_double_metaphone()
+    letter_matches = make_letter_name_matcher(
+        expected_source, expected, expected_spans, actual_source, actual, actual_spans,
+        protected=_PROTECTED)
 
     @lru_cache(maxsize=None)
     def word_keys(word):
@@ -150,7 +156,9 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             # Preserve exact anchors rather than swallowing a matching word
             # into a neighboring name to make an otherwise bad passage fit.
             yield i + 1, j + 1, None
+            yield from letter_matches(i, j)
             return
+        yield from letter_matches(i, j)
         for reverse in (False, True):
             form = actual[j] if reverse else expected[i]
             expansion = _COLLOQUIAL_EXPANSIONS.get(form)
@@ -174,6 +182,8 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
                 "expansion": list(expansion),
             }
         for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
+            if letter_matches.blocks_fuzzy(i, j, left_size, right_size):
+                continue
             multi = left_size != right_size
             if multi:
                 single = expected[i] if left_size == 1 else actual[j]
@@ -218,7 +228,8 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
                 return None
             # Explicit expansions already preserve the same lexical content;
             # only uncertain sound matches can disguise moved exact words.
-            phonetic_changes = [change for change in changes if change["operation"] != "colloquial"]
+            phonetic_changes = [change for change in changes
+                                if change["operation"] not in {"colloquial", "letter_names"}]
             changed_expected = {word for change in phonetic_changes for word in change["expected"]}
             changed_actual = {word for change in phonetic_changes for word in change["actual"]}
             if changed_expected & changed_actual:

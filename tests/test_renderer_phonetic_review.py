@@ -193,7 +193,7 @@ class PronunciationReviewerTests(unittest.TestCase):
         self.assertEqual(record["pairs"][0]["recognized_word"], "In saying")
         self.assertEqual(record["pairs"][0]["coverage_operation"], "phonetic_group")
         self.assertEqual(record["pairs"][0]["coverage_rule"], "complete_group_sound")
-        self.assertEqual(reviewer.identity["coverage_version"], 1)
+        self.assertEqual(reviewer.identity["coverage_version"], 2)
         self.assertNotIn("JEV", PROMPT)
         for bad in (actual.replace("does", "is"), actual.replace("What ", ""),
                     actual + " Thanks."):

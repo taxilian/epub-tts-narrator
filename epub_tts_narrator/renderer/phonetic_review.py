@@ -25,7 +25,7 @@ PROMPT = (
 _LIMITS = {"max_pairs": 4, "max_fraction": 0.2,
            "minimum_allowed_substitutions": 1, "max_words": 2000,
            "context_words": 3, "guard_version": 3}
-_PROVEN_COVERAGE_OPERATIONS = frozenset({"contraction", "colloquial", "spelling_boundary"})
+_PROVEN_COVERAGE_OPERATIONS = frozenset({"contraction", "colloquial", "spelling_boundary", "letter_names"})
 
 
 def _original_words(text, words):
