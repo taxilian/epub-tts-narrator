@@ -1,4 +1,8 @@
-# Apple Silicon runtime; install into a separate Python 3.12 virtual environment.
-drama3-mlx @ git+https://github.com/Sogni-AI/drama3-mlx@3b76bf84714d3766d7872f3409639a438e296cc8
+# Shared Apple Silicon runtime for original and prequantized Drama 3 models.
+# Run from the project root; see vendor/drama3-mlx/PROVENANCE.md.
+./vendor/drama3-mlx
+mlx-audio>=0.6.1,<0.7
 mlx-whisper==0.4.3
+soundfile==0.13.1
+packaging>=24.0
 msgpack>=1.1,<2

@@ -4,9 +4,11 @@
 of Fish Audio Drama 3. Fish's own runtime currently requires NVIDIA GPUs; the
 adapter runs the same model locally through MLX on Apple Silicon.
 
-The pinned runtime is version `0.1.1`, commit
+The vendored runtime is version `0.1.1+epub.1`, with unchanged inference code from commit
 `3b76bf84714d3766d7872f3409639a438e296cc8`. It supports Python 3.10 or newer
-and pins MLX 0.32.3, MLX-LM 0.31.3, and MLX-Audio 0.5.7. The renderer itself
+and uses MLX 0.32.4, MLX-LM 0.31.3, and stable MLX-Audio `>=0.6.1,<0.7`.
+Only upstream dependency metadata and the package version were changed; see
+[provenance](../../vendor/drama3-mlx/PROVENANCE.md). The renderer itself
 requires Python 3.11 or newer; Python 3.12 is suitable for a dedicated environment.
 The recommended [official model](https://huggingface.co/fishaudio/drama-3)
 revision is `b2b5ee998034b2975720906c815e7fb0e9f007bd`. Its weights and codec
@@ -41,7 +43,7 @@ to the model at all. Their failures were not evidence of a model limitation.
 Existing selected recordings remain in use until explicitly regenerated.
 
 An optional alternative designer is `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16`
-through the already installed MLX-Audio 0.5.7. The model and speech tokenizer
+through the shared MLX-Audio runtime. The model and speech tokenizer
 occupy about 4.52 GB; the pinned model revision is
 `7d3824abff87e49756bb0f83fb5411de75d160c4`. Load the downloaded local directory
 with `mlx_audio.tts.utils.load_model`, then call

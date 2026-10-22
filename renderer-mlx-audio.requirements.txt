@@ -1,0 +1,2 @@
+# Compatibility alias: all Drama 3 models now share the renderer environment.
+-r renderer.requirements.txt

@@ -1,0 +1,4 @@
+/build/
+/dist/
+/*.egg-info/
+/drama3_mlx/__pycache__/

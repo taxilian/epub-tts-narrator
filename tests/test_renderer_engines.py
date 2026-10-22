@@ -355,7 +355,7 @@ class RendererEngineTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.engines._runtime_details",
                    return_value={"installed_version": None, "installed_revision": None}):
             identity = self.engine.identity
-        self.assertEqual(identity["required_runtime_version"], "0.1.1")
+        self.assertEqual(identity["required_runtime_version"], "0.1.1+epub.1")
         self.assertIsNone(identity["installed_version"])
         self.assertTrue(self.engine.capabilities["voice_design"])
         self.assertTrue(self.engine.capabilities["reference_voice"])

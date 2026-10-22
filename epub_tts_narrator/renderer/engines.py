@@ -29,14 +29,11 @@ from .drama3_design import (
 )
 
 
-DRAMA3_RUNTIME_VERSION = "0.1.1"
+DRAMA3_RUNTIME_VERSION = "0.1.1+epub.1"
 DRAMA3_RUNTIME_REVISION = "3b76bf84714d3766d7872f3409639a438e296cc8"
 DRAMA3_MODEL_REVISION = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
 DRAMA3_MAX_SPEAKERS = 16
-DRAMA3_INSTALL = (
-    "drama3-mlx @ git+https://github.com/Sogni-AI/drama3-mlx@"
-    + DRAMA3_RUNTIME_REVISION
-)
+DRAMA3_INSTALL = "uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt"
 
 
 class EngineError(RuntimeError):
@@ -326,8 +323,8 @@ class Drama3MLXEngine:
             details = _runtime_details()
             if details["installed_version"] != DRAMA3_RUNTIME_VERSION:
                 raise EngineError(
-                    "The pinned Drama 3 MLX runtime is required. Install the "
-                    f"renderer local dependencies, including {DRAMA3_INSTALL}"
+                    "The pinned Drama 3 MLX runtime is required. From the project "
+                    f"directory, run {DRAMA3_INSTALL}"
                 )
             revision = details["installed_revision"]
             if revision is not None and revision != DRAMA3_RUNTIME_REVISION:
