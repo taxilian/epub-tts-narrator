@@ -211,7 +211,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(spec["image"], self.settings["deployment"]["image"])
         self.assertEqual(spec["disk"], self.settings["deployment"]["container_disk_gb"])
         self.assertEqual(spec["cloud"], "SECURE")
-        self.assertEqual(spec["ports"], ["22/tcp", "8081/http"])
+        self.assertEqual(spec["ports"], ["22/tcp", "8082/http"])
         self.assertNotIn("interruptible", spec)
         self.assertNotIn("supportPublicIp", spec)
         self.assertEqual(spec["gpu"], {"id": self.settings["deployment"]["gpu_type_id"],
@@ -346,6 +346,57 @@ class RunpodLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex((ValueError, RuntimeError), "rate|price|configured cap"):
                 deployment.start()
         self.api.start_pod.assert_not_called()
+
+    def test_custom_service_port_sets_proxy_and_create_request(self):
+        self.settings["deployment"]["service_port"] = 9001
+        deployment = self.deployment()
+        deployment.provision()
+        self.assertEqual(deployment.url, "https://pod_fixture-9001.proxy.runpod.net")
+        self.assertEqual(self.api.create_pod.call_args.args[0]["ports"], ["22/tcp", "9001/http"])
+
+    def test_changed_port_updates_stopped_pod_without_replacing_volume(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        pod = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"]}
+        updated = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8082/http"]}
+        self.api.get_pod.return_value = updated
+        self.assertEqual(deployment.configure_ports(pod), updated)
+        self.api.update_pod.assert_called_once_with("pod_fixture", {"ports": ["22/tcp", "8082/http"]})
+        self.api.create_pod.assert_not_called()
+        self.api.create_volume.assert_not_called()
+        self.api.start_pod.assert_not_called()
+        self.api.stop_pod.assert_not_called()
+
+    def test_unchanged_port_does_not_mutate_running_worker(self):
+        deployment = self.deployment()
+        pod = {"desiredStatus": "RUNNING", "ports": ["8082/http", "22/tcp"]}
+        self.assertIs(deployment.configure_ports(pod), pod)
+        self.api.update_pod.assert_not_called()
+        self.api.stop_pod.assert_not_called()
+
+    def test_uncertain_port_update_is_read_back_without_retrying(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        self.api.update_pod.side_effect = RunpodAmbiguousOutcome("uncertain")
+        old = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"]}
+        self.api.get_pod.return_value = old
+        with self.assertRaisesRegex(RuntimeError, "port update was not confirmed"):
+            deployment.configure_ports(old)
+        self.assertEqual(self.api.update_pod.call_count, 1)
+        self.api.start_pod.assert_not_called()
+
+    def test_dead_supervisor_fails_launch_without_waiting_full_timeout(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        deployment.ssh = Mock(side_effect=[b"", b"", b"Worker supervisor exited.\n", b"Bind failed.\n"])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
+            client.return_value.request.side_effect = ChapterClientError("unavailable")
+            with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+                deployment.launch()
+        self.assertEqual(client.return_value.request.call_count, 1)
+        self.assertIn("tail -n 60", deployment.ssh.call_args.args[0])
+        self.sleep.assert_not_called()
 
     def test_missing_or_invalid_ssh_endpoint_is_not_used(self):
         self.assertEqual(ssh_endpoint({"publicIp": "203.0.113.7", "portMappings": {"22": 10341}}),

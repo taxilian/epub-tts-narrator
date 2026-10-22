@@ -32,6 +32,7 @@ DEPLOYMENT_DEFAULTS = {
     "max_hourly_price": 3.50,
     "state_dir": "./dist/runpod",
     "startup_timeout_seconds": 900,
+    "service_port": 8082,
     "ssh_user": "root",
     "app_dir": "/workspace/epub-tts-narrator",
     "fish_source": "/workspace/fish-speech",
@@ -173,9 +174,12 @@ def _deployment_settings(values, directory):
     for key, low, high in (
         ("volume_size_gb", 100, 4000), ("container_disk_gb", 10, 1000),
         ("startup_timeout_seconds", 60, 7200), ("idle_timeout_seconds", 60, 86400),
+        ("service_port", 1, 65535),
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:
             raise ValueError(f"runpod.{key} must be an integer from {low} through {high}")
+    if settings["service_port"] in {22, 8080}:
+        raise ValueError("runpod.service_port must differ from SSH port 22 and native speech port 8080")
     price = settings["max_hourly_price"]
     if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price <= 100:
         raise ValueError("runpod.max_hourly_price must be a positive hourly limit at most 100")
@@ -270,7 +274,7 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
     if "compute_type" not in override_raw.get("verification", {}):
         config["verification"]["compute_type"] = "int8"
     server = config.setdefault("chapter_server", {})
-    server.update(host="0.0.0.0", port=8081, api_key=auth_key, data_dir=settings["data_dir"],
+    server.update(host="0.0.0.0", port=settings["service_port"], api_key=auth_key, data_dir=settings["data_dir"],
                   persistent_data=True, runpod_pod_id=pod_id, idle_action="runpod_stop",
                   idle_timeout_seconds=(settings["idle_timeout_seconds"]
                                         if idle_timeout_seconds is None else idle_timeout_seconds))

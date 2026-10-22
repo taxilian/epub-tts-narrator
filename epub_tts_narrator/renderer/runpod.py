@@ -127,7 +127,7 @@ class Deployment:
 
     @property
     def url(self):
-        return f"https://{self.pod_id}-8081.proxy.runpod.net"
+        return f"https://{self.pod_id}-{self.cfg['service_port']}.proxy.runpod.net"
 
     def _run(self, command, *, input=None, timeout=1800):
         # Captured output is redacted before display, including failed command
@@ -268,7 +268,7 @@ class Deployment:
                 "gpu": {"id": self.cfg["gpu_type_id"], "count": 1, "minCudaVersion": "12.9"},
                 "dataCenterIds": [self.cfg["data_center_id"]],
                 "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
-                "disk": self.cfg["container_disk_gb"], "ports": ["22/tcp", "8081/http"],
+                "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
                 "env": {"PUBLIC_KEY": self._public_key()}, "cmd": ["bash", "-lc", startup]}
         self.state["pod_creation_pending"] = True
         self.save()
@@ -294,6 +294,29 @@ class Deployment:
             raise RuntimeError("Created worker's rate exceeds configured cap; stopping immediately")
         self.notify(f"Created worker {self.pod_id}; persistent volume {volume_id}.")
 
+    def service_ports(self):
+        return ["22/tcp", f"{self.cfg['service_port']}/http"]
+
+    def configure_ports(self, pod):
+        """Reconcile a changed service port without replacing persistent storage."""
+        ports = self.service_ports()
+        if set(pod.get("ports") or []) == set(ports):
+            return pod
+        if pod.get("desiredStatus") not in {"EXITED", "STOPPED"}:
+            self.stop()
+        self.notify(f"Configuring chapter service on port {self.cfg['service_port']}…")
+        try:
+            self.api.update_pod(self.pod_id, {"ports": ports})
+        except RunpodAmbiguousOutcome:
+            pass  # Read back before deciding whether another operation is safe.
+        updated = self.api.get_pod(self.pod_id)
+        if set(updated.get("ports") or []) != set(ports):
+            raise RuntimeError("Worker port update was not confirmed; no replacement worker was created")
+        if updated.get("desiredStatus") not in {"EXITED", "STOPPED"}:
+            self.stop()
+            updated = self.api.get_pod(self.pod_id)
+        return updated
+
     def start(self):
         if not self.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
@@ -301,6 +324,7 @@ class Deployment:
         actual = pod.get("costPerHr")
         if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
             raise ValueError("Worker's current rate exceeds runpod.max_hourly_price")
+        pod = self.configure_ports(pod)
         if pod.get("desiredStatus") != "RUNNING":
             self.notify(f"Starting worker {self.pod_id}…")
             try:
@@ -447,6 +471,24 @@ if pidfile.exists():
                 client.request("GET", "v1/capabilities")
                 return
             except ChapterClientError:
+                # A dead supervisor cannot recover merely by waiting for the
+                # HTTP timeout. Surface its diagnostics and stop paid compute.
+                check = '''import pathlib, sys
+pidfile, worker = pathlib.Path(sys.argv[1]), sys.argv[2].encode()
+try:
+    proc = pathlib.Path('/proc') / str(int(pidfile.read_text()))
+    running = worker in (proc / 'cmdline').read_bytes().split(b'\\0')
+    running = running and (proc / 'stat').read_text().rpartition(') ')[2].split()[0] != 'Z'
+except (OSError, ValueError, IndexError):
+    running = False
+if not running:
+    print('Worker supervisor exited before the chapter service became ready.')
+'''
+                stopped = self.ssh("python3 -c " + shlex.quote(check) + " " + pid + " " +
+                                   shlex.quote(self.cfg["app_dir"] + "/deploy/runpod/worker.py"), timeout=30)
+                if stopped.strip():
+                    self.ssh(f"tail -n 60 {log}")
+                    raise RuntimeError("Chapter worker exited during startup; see diagnostics above")
                 time.sleep(5)
         self.ssh(f"tail -n 60 {log}")
         raise RuntimeError("Chapter service failed to start before startup_timeout_seconds")

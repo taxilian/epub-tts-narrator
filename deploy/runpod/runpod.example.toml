@@ -12,6 +12,8 @@ volume_size_gb = 150
 container_disk_gb = 30
 state_dir = "./dist/runpod"
 startup_timeout_seconds = 900
+# The pinned base image uses 8081 for nginx; keep the chapter service separate.
+service_port = 8082
 idle_timeout_seconds = 600
 github_url = "https://github.com/taxilian/epub-tts-narrator.git"
 git_ref = "main"

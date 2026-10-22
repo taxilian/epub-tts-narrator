@@ -33,7 +33,7 @@ cpu_threads = 4
 
 [chapter_server]
 host = "0.0.0.0"
-port = 8081
+port = 8082
 api_key = "REPLACE-WITH-A-RANDOM-APPLICATION-KEY"
 data_dir = "/workspace/chapter-server-data"
 assembly_workers = 2

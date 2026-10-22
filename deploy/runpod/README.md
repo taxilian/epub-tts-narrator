@@ -27,6 +27,15 @@ checked when creating compute. The selected region must also support network
 volumes. The example's 150 GB volume costs storage fees even while stopped;
 the hourly ceiling covers compute and does not cap storage charges.
 
+`[runpod].service_port` selects the chapter service's listen port and Runpod
+proxy port; it defaults to **8082**. The pinned base image reserves 8081 for
+nginx. Choose an unused port if using another image; ports 22 and 8080 are
+reserved for SSH and native Fish inference. This deployment setting overrides
+`[chapter_server].port` in the generated worker configuration. The CLI applies
+changed port exposure while the Pod is stopped, preserving its network volume.
+If the worker exits during startup, the CLI reports its logs and stops compute
+without waiting for the full readiness timeout.
+
 ```sh
 # Create the deployment, install code/dependencies/models, test, then stop.
 .venv-renderer/bin/audiobook-render runpod bootstrap
@@ -115,8 +124,9 @@ models. `smoke` has a ten-minute limit. Each smoke object uses a unique prefix
 and is deleted even if download verification fails.
 
 The launcher waits for native model readiness before starting the authenticated
-chapter service. Its public URL is `https://POD_ID-8081.proxy.runpod.net`; expose
-HTTP port **8081 only**, plus TCP 22 for SSH. Fish binds exclusively to
+chapter service. Its default public URL is `https://POD_ID-8082.proxy.runpod.net`;
+expose HTTP port **8082**, plus TCP 22 for SSH. If changing `service_port`, use
+that port in the URL and Pod exposure settings. Fish binds exclusively to
 `http://127.0.0.1:8080/v1/tts`. A filesystem lease prevents duplicate launchers
 from using the same data directory. Child process groups are terminated on
 failure or interruption. The CLI stops paid compute after its operation, even

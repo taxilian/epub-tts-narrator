@@ -1,6 +1,6 @@
 """Small, file-credential-only Runpod management client.
 
-Pod creation and the GPU/data-center catalog use v2, whose placement fields
+Pod creation, configuration updates, and the GPU/data-center catalog use v2, whose placement fields
 support current datacenters. Other resource management retains v1. Hosts are
 fixed, redirects and ambient HTTP proxies are disabled, and provider error
 bodies are never exposed. A failed
@@ -75,7 +75,7 @@ class RunpodAPI:
     """Use an explicit key loaded by the caller from its configuration file.
 
     Successful payloads are returned intact, including Pod publicIp and
-    portMappings. GETs retry transient failures at most twice. POSTs never
+    portMappings. GETs retry transient failures at most twice. Mutations never
     retry, including start and stop; inspect the Pod afterward if the result
     is ambiguous. Acknowledging start/stop does not mean the transition has
     finished, so callers still need to poll desiredStatus/runtime readiness.
@@ -101,6 +101,15 @@ class RunpodAPI:
     def create_pod(self, spec):
         """Create from the v2 nested request schema; return its cost/status fields."""
         return self._request("POST", "/pods", spec=spec, v2=True, expected=dict, require_id=True)
+
+    def update_pod(self, pod_id, spec):
+        """Patch only supplied configuration fields; inspect status before starting.
+
+        Omitted fields, including mounts, are preserved by Runpod. This does
+        not request a lifecycle action, and an uncertain result is never retried.
+        """
+        return self._request("PATCH", f"/pods/{_resource_id(pod_id)}", spec=spec,
+                             v2=True, expected=dict, require_id=True)
 
     def start_pod(self, pod_id):
         return self._request("POST", f"/pods/{_resource_id(pod_id)}/start", allow_empty=True)

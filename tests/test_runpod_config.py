@@ -74,6 +74,26 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(remote["verification"]["model"], "/workspace/models/whisper-ct2")
         self.assertIsNone(remote["verification"]["reference_model"])
         self.assertEqual(remote["verification"]["recurrence_threshold"], 4)
+        self.assertEqual(remote["chapter_server"]["port"], 8082)
+
+    def test_deployment_service_port_controls_worker_without_changing_local_server(self):
+        base = deepcopy(self.base)
+        base["chapter_server"]["port"] = 8090
+        base["runpod"] = {"service_port": 8091}
+        write_private_toml(self.path, base)
+        write_private_toml(self.directory / "runpod.local.toml", {
+            "runpod": {"service_port": 8182}, "chapter_server": {"port": 8183}})
+        settings = load_settings(self.path)
+        self.assertEqual(settings["deployment"]["service_port"], 8182)
+        self.assertEqual(settings["renderer_config"]["chapter_server"]["port"], 8090)
+        self.assertEqual(self.remote(settings)["chapter_server"]["port"], 8182)
+
+    def test_rejects_invalid_or_conflicting_service_ports(self):
+        for value in (0, 65536, True, 8082.0, "8082", 22, 8080):
+            with self.subTest(value=value):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"service_port": value}})
+                with self.assertRaisesRegex(ValueError, "runpod.service_port"):
+                    load_settings(self.path)
 
     def test_remote_copies_required_judges_and_ceph_but_no_voice_design_or_book_paths(self):
         remote = self.remote()
@@ -108,9 +128,9 @@ class RunpodConfigTests(unittest.TestCase):
     def test_client_uses_remote_endpoint_without_editing_local_book_locations(self):
         settings = load_settings(self.path)
         local = deepcopy(settings["renderer_config"])
-        client = build_client_config(local, "https://pod123-8081.proxy.runpod.net", "app-key")
+        client = build_client_config(local, "https://pod123-8082.proxy.runpod.net", "app-key")
         self.assertFalse(local["remote_chapters"]["url"])
-        self.assertEqual(client["remote_chapters"]["url"], "https://pod123-8081.proxy.runpod.net")
+        self.assertEqual(client["remote_chapters"]["url"], "https://pod123-8082.proxy.runpod.net")
         self.assertEqual(client["render"]["work_dir"], str(self.directory / "work"))
         self.assertEqual(client["render"]["output_dir"], str(self.directory / "audio"))
 
@@ -120,7 +140,7 @@ class RunpodConfigTests(unittest.TestCase):
                                 "chapter_numbers": [2], "chapter_format": "mp3",
                                 "work_dir": "/workspace/work", "epub": "/workspace/book.epub",
                                 "ffmpeg": "/workspace/bin/ffmpeg"}}
-        client = build_client_config(local, "https://pod123-8081.proxy.runpod.net", "app-key", override)
+        client = build_client_config(local, "https://pod123-8082.proxy.runpod.net", "app-key", override)
         remote = build_remote_config(local, override, "pod123", "app-key")
         for key in ("sentence_pause_ms", "max_paragraph_chars", "chapter_format"):
             self.assertEqual(client["render"][key], remote["render"][key])

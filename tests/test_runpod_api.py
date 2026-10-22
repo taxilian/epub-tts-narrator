@@ -73,6 +73,28 @@ class RunpodAPITests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod_1/stop")
         self.assertEqual(request.data, b"")
 
+    def test_update_pod_only_sends_requested_fields_without_starting(self):
+        spec = {"ports": ["22/tcp", "8082/http"]}
+        payload = {"id": "pod_1", "status": "EXITED", "ports": spec["ports"],
+                   "mounts": {"network": [{"volumeId": "vol_1", "path": "/workspace"}]}}
+        self.opener.open.return_value = response(payload)
+        self.assertEqual(self.api.update_pod("pod_1", spec), payload)
+        request = self.opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.runpod.io/v2/pods/pod_1")
+        self.assertEqual(request.method, "PATCH")
+        self.assertEqual(json.loads(request.data), spec)
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_update_pod_uncertain_result_never_retries(self):
+        for result in (TimeoutError("secret-value"), response(raw=b"{}")):
+            with self.subTest(result=type(result).__name__):
+                self.opener.open.reset_mock()
+                self.opener.open.side_effect = [result]
+                with self.assertRaises(RunpodAmbiguousOutcome):
+                    self.api.update_pod("pod_1", {"ports": ["22/tcp", "8082/http"]})
+                self.assertEqual(self.opener.open.call_count, 1)
+        self.sleep.assert_not_called()
+
     def test_volume_operations_use_v1(self):
         self.opener.open.return_value = response([])
         self.assertEqual(self.api.list_volumes(), [])
