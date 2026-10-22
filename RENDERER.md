@@ -2,7 +2,7 @@
 
 `audiobook-render` consumes a version-2 analyzer bundle, creates or reuses persistent character voices, verifies each generated chunk, and produces chapter audio plus a chaptered `.m4b`. The analyzer and renderer read the same global `epub-tts-narrator.toml`, while the book directory and optional path overrides are command arguments. They remain separate commands.
 
-Voice creation prefers Gemini when its API key is configured. Fish Audio Drama 3 renders the book locally through the **unofficial Sogni MLX port** on Apple Silicon, cloning the saved character recordings. Drama 3 can also create references locally from scene prompts, and Qwen3 VoiceDesign remains an optional alternative. The port reports 48–55 GB peak memory for `q8` on an M5 Max; Drama 3's download is about 41.5 GB. Allow additional disk space for Whisper, dependencies, voice references, and retained attempts. These are upstream memory figures, not combined-memory guarantees for this renderer. [Sogni port](https://github.com/Sogni-AI/drama3-mlx), [scene casting format](https://arxiv.org/html/2610.18010v1#A2)
+Voice creation prefers Gemini when its API key is configured. Fish Audio Drama 3 renders the book locally on Apple Silicon, cloning the saved character recordings. The default model uses the **unofficial Sogni MLX port**; prequantized checkpoints use MLX-Audio, selected through `engine.model`. Sogni can also create references locally from scene prompts, and Qwen3 VoiceDesign remains an optional alternative. The Sogni port reports 48–55 GB peak memory for `q8` on an M5 Max; its model download is about 41.5 GB. Allow additional disk space for Whisper, dependencies, voice references, and retained attempts. These are upstream memory figures, not combined-memory guarantees for this renderer. [Sogni port](https://github.com/Sogni-AI/drama3-mlx), [scene casting format](https://arxiv.org/html/2610.18010v1#A2)
 
 **Validation status:** automated tests cover real FFmpeg encoding, synchronization, quality gates, adapters, interactive casting, and voice replacement across books. A live local Drama 3 / MLX Whisper pilot produced a 17.38-second chapter and M4B with two persisted voices and nine verified speech clips; every accepted clip had zero normalized word errors. During voice creation, the acoustic checks rejected one real attempt for excessive silence and a long internal stall, and a subsequent attempt passed. A separate live Whisper check rejected an extra spoken sentence. The pilot outputs are in `audiobooks/last-lantern-demo/`, with accepted transcripts in `verification.json` and retained attempts in `render-work/last-lantern-demo/`.
 
@@ -31,9 +31,11 @@ uv pip install --python .venv-renderer/bin/python -e .
 
 FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
 
-Unknown configuration keys warn and are ignored, so an obsolete field such as `engine.model` does not stop rendering. Engine selection uses `engine.type` and `engine.checkpoint`; plugin-specific settings belong in `engine.options`. Invalid recognized values and unknown configuration sections still stop with an error. Ignored fields do not participate in audio cache identity.
+Unknown configuration keys, such as `engine.old_option`, warn and are ignored. Engine selection uses `engine.type`, `engine.model`, and `engine.checkpoint`; plugin-specific settings belong in `engine.options`. Invalid recognized values and unknown configuration sections still stop with an error. Ignored fields do not participate in audio cache identity.
 
 Both original and prequantized Drama 3 models use this environment, with stable MLX-Audio `>=0.6.1,<0.7` and MLX Whisper `0.4.3`. The vendored Sogni port retains the inference code from commit `3b76bf84714d3766d7872f3409639a438e296cc8`; version `0.1.1+epub.1` updates its dependency metadata for the shared runtime. See [provenance](vendor/drama3-mlx/PROVENANCE.md). Upgrade an existing environment by rerunning the requirements install command above; there is no need to recreate it.
+
+A local MLX-Audio 0.6.1 compatibility pilot exercised Sogni reference cloning and scene voice design, MLX-Audio 4-bit cloning, Qwen3 voice design, Whisper, and Parakeet. Every accepted clip had zero normalized word errors; three first attempts were rejected and retried by the normal quality checks. The usual renderer environment also passed a first-attempt 4-bit generation using the current config. Audio and verification records are in `output/shared-runtime-pilot/`. These short checks establish runtime compatibility, not full-book or perceptual quality.
 
 When casting or rendering first needs a missing supported model, it shows the model and destination and asks before downloading the pinned files. Complete local models are reused. `doctor`, `plan`, listing voices, playback, and assembly do not download models. If a download is interrupted, rerun the same command to reuse its saved download progress.
 
@@ -81,6 +83,7 @@ Edit the model paths before running. Configured paths are literal strings, resol
 ```toml
 [engine]
 type = "drama3_mlx"
+model = "fishaudio/drama-3"
 checkpoint = "./models/drama-3"
 experts = "q8"
 temperature = 1.0
@@ -153,6 +156,73 @@ Aliases follow the same continuation chain as recordings. A mapping in book 1 is
 Choose chapters per book with `--chapters 3` or `--chapters 3-5,7` on `plan`, `render`, or `assemble`. Numbers use the **one-based order of script entries in the bundle manifest**, including front matter. Ranges are inclusive, duplicate numbers are ignored, and chapters always stay in source order. Omit the option to use all entries. `plan` lists the corresponding titles. The legacy global `chapter_numbers` setting remains supported, but book-specific selections belong on the command line. A selected subset produces a partial audiobook and records `partial_book: true`.
 
 Analysis notes are advisory and do not require a review or acceptance step. `--allow-review` and the global `allow_review` setting remain accepted for compatibility but are unnecessary. Rendering requires a valid script and assigned voices for every spoken passage in the selected chapters; missing speakers still block those chapters. Rerun `epub-tts-narrator analyze BOOK_DIRECTORY` to complete remaining assignments using the saved book. There is no implicit narrator substitution.
+
+## Choose the speech model
+
+Set `engine.model` to one of these model IDs. Omitting it preserves the existing
+Sogni configuration. `checkpoint` is the local directory containing that model's
+files, resolved relative to the config file; give each model its own directory.
+
+| `engine.model` | Runtime | Download |
+| --- | --- | --- |
+| `fishaudio/drama-3` | Sogni | About 41.5 GB |
+| `mlx-community/fish-audio-drama-3-8bit` | MLX-Audio | About 44 GB |
+| `mlx-community/fish-audio-drama-3-4bit` | MLX-Audio | About 23.8 GB |
+| `fcmeyer/drama-3-MLX-3bit-HQ` | MLX-Audio | About 21.3 GB |
+
+For example, change the existing engine table to:
+
+```toml
+[engine]
+type = "drama3_mlx"
+model = "mlx-community/fish-audio-drama-3-4bit"
+checkpoint = "./models/fish-audio-drama-3-4bit"
+temperature = 1.0
+top_p = 0.9
+top_k = 30
+max_new_tokens = 2048
+```
+
+`experts` controls only Sogni's runtime quantization. It is ignored for MLX-Audio,
+where the checkpoint already determines quantization. Sampling settings still
+apply. Missing files use the selected model's pinned download; `doctor` checks
+the matching files and runtime. A directory identified as another model is
+rejected rather than filled with an incompatible download.
+
+Use the same Python 3.12 renderer environment for every model. To upgrade an
+existing installation, run from the project directory:
+
+```sh
+uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
+.venv-renderer/bin/audiobook-render doctor
+.venv-renderer/bin/audiobook-render render runs/book-01
+```
+
+Existing saved Drama 3 references work with either runtime. MLX-Audio does not
+create voices from descriptions: use saved voices, import recordings, or configure
+Gemini, ElevenLabs, or Qwen3 VoiceDesign for missing voices. The normal `auto`
+setting uses Gemini when its key is present. Switching models invalidates generated
+speech caches while retaining the saved voices.
+
+The config-based 4-bit adapter also rendered the Last Lantern demo: all six blocks
+passed exact-transcript and acoustic checks across eight attempts (two silence
+stalls were rejected). Resume reused the completed chapter, and assembly produced
+an M4B. A separate 529-byte passage crossed two MLX-Audio text chunks and produced
+32.69 seconds of verified speech with zero normalized word errors. Saved reference
+recordings remained unchanged. Local evidence and audio are in
+[`output/config-model-pilot/`](output/config-model-pilot/), including
+[`validation.json`](output/config-model-pilot/validation.json) and
+[`long-text.wav`](output/config-model-pilot/long-text.wav).
+
+For a render pool, configure every worker with the same model. Quantized HTTP
+workers inherit `engine.model` when their `model` field is omitted; an explicit
+value must match it. The server checks the requested model and reports its selected
+ID in `/health`. The pool defaults `model_revision` to the selected model's pinned
+revision; keep an explicit override consistent with the files on every worker.
+
+When using `[remote_chapters]`, set `engine.model` on the chapter-server host.
+The client uses the server's advertised renderer identity; its local engine
+settings do not select the remote server's model.
 
 ## Render across multiple machines
 

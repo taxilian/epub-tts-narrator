@@ -17,9 +17,10 @@ import socket
 import tempfile
 import threading
 
-from .engines import Drama3MLXEngine, EngineError, _text, create_engine
+from .engines import EngineError, _text, create_engine
+from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .fish_http import MAX_AUDIO_BYTES, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
-from .local_runtime import LocalRuntime
+from .local_runtime import LocalRuntime, requires_mlx
 
 
 class RequestError(ValueError):
@@ -134,6 +135,10 @@ class _RenderServer(ThreadingHTTPServer):
     def __init__(self, address, config, engine):
         self.settings = config["server"]
         self.engine = engine
+        self.model_id = get_drama3_model(
+            config["engine"].get("model", DEFAULT_DRAMA3_MODEL)).repo
+        self.accepted_models = ({"drama-3", DEFAULT_DRAMA3_MODEL}
+                                if self.model_id == DEFAULT_DRAMA3_MODEL else {self.model_id})
         self.inference_runtime = LocalRuntime(name="drama3-inference")
         self._inference_closed = False
         self._close_lock = threading.Lock()
@@ -159,7 +164,7 @@ class _RenderServer(ThreadingHTTPServer):
     def synthesize(self, text, voices, output, seed, sampling):
         return self.inference_runtime.run(
             self._infer, text, voices, output, seed, sampling,
-            initialize_mlx=type(self.engine) is Drama3MLXEngine,
+            initialize_mlx=requires_mlx(self.engine),
         )
 
     def _warmup(self):
@@ -168,7 +173,7 @@ class _RenderServer(ThreadingHTTPServer):
             warmup()
 
     def warmup(self):
-        self.inference_runtime.run(self._warmup, initialize_mlx=type(self.engine) is Drama3MLXEngine)
+        self.inference_runtime.run(self._warmup, initialize_mlx=requires_mlx(self.engine))
 
     def get_request(self):
         request, address = super().get_request()
@@ -246,7 +251,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self._json(404, {"error": {"message": "Use GET /health or POST /v1/tts"}})
             return
-        self._json(200, {"status": "ready", "model": "drama-3", "protocol": "fish-inline-reference-wav-v1"})
+        model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
+        self._json(200, {"status": "ready", "model": model, "protocol": "fish-inline-reference-wav-v1"})
 
     def do_POST(self):
         try:
@@ -270,8 +276,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not 0 < length <= self.server.settings.get("max_request_bytes", MAX_AUDIO_BYTES):
                 self._json(413, {"error": {"message": "Request body exceeds the configured size limit"}})
                 return
-            if self.headers.get("model", "drama-3") not in {"drama-3", "fishaudio/drama-3"}:
-                raise RequestError("This server provides model drama-3 only")
+            if self.headers.get("model", self.server.model_id) not in self.server.accepted_models:
+                raise RequestError(f"This server provides model {self.server.model_id} only")
             data = self.rfile.read(length)
             if len(data) != length:
                 raise RequestError("Incomplete request body")

@@ -11,11 +11,12 @@ from urllib.parse import urlsplit
 
 from epub_tts_narrator.config_warnings import known_settings
 from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
+from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 
 
 DEFAULTS = {
     "engine": {
-        "type": "drama3_mlx", "checkpoint": None, "experts": "q8",
+        "type": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL, "checkpoint": None, "experts": "q8",
         "temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048, "options": {},
     },
     "verification": {
@@ -162,6 +163,7 @@ def validate_chapter_settings(config):
 def validate_distributed_settings(config):
     """Validate file-only worker/server settings without importing model packages."""
     pool = config["render_pool"]
+    selected_model = config["engine"].get("model", DEFAULT_DRAMA3_MODEL)
     if not isinstance(pool["model_revision"], str) or not pool["model_revision"].strip():
         raise ValueError("render_pool.model_revision must be a nonempty string")
     workers = pool["workers"]
@@ -192,7 +194,8 @@ def validate_distributed_settings(config):
             if concurrency != 1 or any(item["type"] == "local" for item in normalized):
                 raise ValueError("Use at most one local renderer, with concurrency = 1")
         else:
-            worker = {"api_key": "", "model": "drama-3", "timeout_seconds": 300.0,
+            default_model = "drama-3" if selected_model == DEFAULT_DRAMA3_MODEL else selected_model
+            worker = {"api_key": "", "model": default_model, "timeout_seconds": 300.0,
                       "multi_speaker": True, "protocol": "fish_inline", **worker}
             if (not isinstance(worker["protocol"], str)
                     or worker["protocol"] not in {"fish_inline", "fish_native_drama3"}):
@@ -213,9 +216,10 @@ def validate_distributed_settings(config):
                 valid = False
             if not valid:
                 raise ValueError(f"{label}.url must be a full HTTP(S) TTS URL without credentials, query or fragment")
-            if (not isinstance(worker["model"], str)
-                    or worker["model"] not in {"drama-3", "fishaudio/drama-3"}):
-                raise ValueError(f"{label}.model must be drama-3 or fishaudio/drama-3")
+            compatible_models = ({"drama-3", DEFAULT_DRAMA3_MODEL}
+                                 if selected_model == DEFAULT_DRAMA3_MODEL else {selected_model})
+            if not isinstance(worker["model"], str) or worker["model"] not in compatible_models:
+                raise ValueError(f"{label}.model must match the selected engine.model")
             timeout = worker["timeout_seconds"]
             if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:
                 raise ValueError(f"{label}.timeout_seconds must be from 1 through 3600")
@@ -287,6 +291,10 @@ def load_config(path=None, *, require_verifier=True):
             raise ValueError("Unknown configuration section or invalid table")
         allowed = QUALITY_DEFAULTS if section == "quality" else result[section]
         result[section].update(known_settings(values, allowed, section=section))
+    if result["engine"]["type"] == "drama3_mlx":
+        selected = get_drama3_model(result["engine"]["model"])
+        if "model_revision" not in supplied.get("render_pool", {}):
+            result["render_pool"]["model_revision"] = selected.revision
     # Preserve explicit legacy shared-library configurations. New configurations
     # leave book locations unset until the input bundle is known.
     if result["voices"]["series_id"] is not None:

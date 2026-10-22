@@ -43,12 +43,12 @@ class RendererCLITests(unittest.TestCase):
     def test_unknown_engine_key_warns_and_plan_continues_with_same_configuration(self):
         expected = load_config(self.config)
         self.config.write_text(self.config.read_text().replace(
-            '[engine]\n', '[engine]\nmodel="unused-model-setting"\n'))
+            '[engine]\n', '[engine]\nold_option="unused-model-setting"\n'))
         before = self.config.read_bytes()
         with patch("epub_tts_narrator.renderer.engines.create_engine") as factory:
             status, output, error = self.run_cli("plan", self.bundle, "--config", self.config)
         self.assertEqual(status, 0, error)
-        self.assertIn("Warning: ignoring unknown configuration key engine.model.", error)
+        self.assertIn("Warning: ignoring unknown configuration key engine.old_option.", error)
         self.assertNotIn("unused-model-setting", error)
         self.assertEqual(json.loads(output)["voices"], 2)
         factory.assert_not_called()

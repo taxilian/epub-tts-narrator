@@ -670,7 +670,7 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
             raise EngineError(f"TTS plugin {name!r} could not initialize ({type(exc).__name__})") from exc
         return engine
     allowed = {
-        "name", "type", "checkpoint", "experts", "temperature", "top_p", "top_k",
+        "name", "type", "model", "checkpoint", "experts", "temperature", "top_p", "top_k",
         "max_new_tokens", "min_audio_seconds", "options",
     }
     unknown = set(config) - allowed
@@ -680,4 +680,16 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
         raise EngineError("Drama 3 settings belong directly in the engine table")
     if not isinstance(config.get("checkpoint"), (str, Path)):
         raise EngineError("engine.checkpoint must specify a local Drama 3 directory")
-    return Drama3MLXEngine(**{key: value for key, value in config.items() if key not in {"name", "type", "options"}})
+    from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
+    try:
+        selected = get_drama3_model(config.get("model", DEFAULT_DRAMA3_MODEL))
+    except ValueError as exc:
+        raise EngineError(str(exc)) from exc
+    options = {key: value for key, value in config.items()
+               if key not in {"name", "type", "model", "options"}}
+    if selected.runtime == "mlx_audio":
+        from .mlx_audio_engine import MLXAudioDrama3Engine
+        # Converted checkpoints carry their complete quantization recipe.
+        options.pop("experts", None)
+        return MLXAudioDrama3Engine(model=selected.repo, **options)
+    return Drama3MLXEngine(**options)

@@ -73,11 +73,12 @@ class LocalRuntime:
 def requires_mlx(component):
     """Recognize built-in lazy MLX components without looking at mock identities."""
     from .engines import Drama3MLXEngine
+    from .mlx_audio_engine import MLXAudioDrama3Engine
     from .quality import MlxWhisperVerifier
     from .reference_asr import MlxParakeetVerifier
     from .verification import ReferenceCorroboratingVerifier, ReferenceTextJudgingVerifier
 
-    if type(component) in (Drama3MLXEngine, MlxWhisperVerifier, MlxParakeetVerifier):
+    if type(component) in (Drama3MLXEngine, MLXAudioDrama3Engine, MlxWhisperVerifier, MlxParakeetVerifier):
         return True
     if type(component) is ReferenceCorroboratingVerifier:
         return requires_mlx(component.primary) or requires_mlx(component.reference)

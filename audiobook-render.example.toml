@@ -9,8 +9,15 @@ api_key = ""
 
 [engine]
 type = "drama3_mlx"
+model = "fishaudio/drama-3" # Default when omitted; selects the Sogni runtime.
 checkpoint = "./models/drama-3"
-experts = "q8"
+# For MLX-Audio, set model and checkpoint to a matching pair, for example:
+# model = "mlx-community/fish-audio-drama-3-4bit"
+# checkpoint = "./models/fish-audio-drama-3-4bit"
+# All models use renderer.requirements.txt in the usual .venv-renderer environment.
+# Also supported: mlx-community/fish-audio-drama-3-8bit,
+#                 fcmeyer/drama-3-MLX-3bit-HQ
+experts = "q8" # Sogni only; MLX-Audio uses the checkpoint's quantization.
 temperature = 1.0
 top_p = 0.9
 top_k = 30
@@ -31,6 +38,7 @@ max_new_tokens = 2048
 # url = "http://second-mac.local:8080/v1/tts"
 # api_key = "YOUR_SHARED_SERVER_KEY"
 # model = "drama-3"
+# For quantized models, omit this field to inherit engine.model, or match it exactly.
 # concurrency = 1
 # timeout_seconds = 300
 # multi_speaker = true
@@ -50,6 +58,7 @@ max_request_bytes = 104857600
 [voice_design]
 # Prefer Gemini when its API key is configured; otherwise create voices locally.
 # Drama 3 still synthesizes audiobook speech by cloning the saved recordings.
+# MLX-Audio reuses saved voices; new voices need Gemini, ElevenLabs, or Qwen3.
 # Use "engine" for local creation, "gemini" for Gemini, or "elevenlabs" for ElevenLabs.
 type = "auto"
 

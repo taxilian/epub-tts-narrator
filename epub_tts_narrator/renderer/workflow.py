@@ -685,12 +685,21 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     from .quality import QUALITY_VERSION
     used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
             for speaker in chunk_speakers(chunk)}
-    engine_config = config["engine"]
+    engine_config = dict(config["engine"])
+    # The original model was implicit before engine.model existed. Its explicit
+    # default must not invalidate already completed chapter checkpoints.
+    from .drama3_models import DEFAULT_DRAMA3_MODEL
+    if (engine_config.get("type") != "drama3_mlx"
+            or engine_config.get("model") == DEFAULT_DRAMA3_MODEL):
+        engine_config.pop("model", None)
     if engine_identity.get("engine") == "fish_tts_pool":
         from .pool import pool_sampling
-        from .engines import DRAMA3_MODEL_REVISION
+        from .drama3_models import get_drama3_model
+        selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
         engine_config = {"sampling": pool_sampling(config),
-                         "model_revision": config.get("render_pool", {}).get("model_revision", DRAMA3_MODEL_REVISION)}
+                         "model_revision": config.get("render_pool", {}).get("model_revision", selected.revision)}
+        if selected.repo != DEFAULT_DRAMA3_MODEL:
+            engine_config["model"] = selected.repo
     return {
         "version": 1, "bundle_hash": bundle["bundle_hash"],
         "source_fingerprint": bundle["manifest"]["source_fingerprint"],

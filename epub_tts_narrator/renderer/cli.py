@@ -93,6 +93,8 @@ def chapter_numbers(value, maximum):
 
 
 def doctor(config):
+    from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model, supports_mlx_audio_drama3
+
     if config.get("remote_chapters", {}).get("url"):
         checks = {key: shutil.which(config["render"][key]) for key in ("ffmpeg", "ffprobe")}
         return {"ready": all(checks.values()), "checks": checks, "packages": {},
@@ -104,7 +106,8 @@ def doctor(config):
     if faster_whisper:
         packages = ["faster-whisper", "ctranslate2", "tokenizers", "av"]
         if not remote_only and config["engine"]["type"] == "drama3_mlx":
-            packages += ["drama3-mlx", "mlx"]
+            selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
+            packages += ["mlx", "mlx-audio" if selected.runtime == "mlx_audio" else "drama3-mlx"]
         if config.get("voice_design", {}).get("type") == "qwen3_mlx":
             packages += ["mlx", "mlx-audio"]
     dependencies = {}
@@ -162,6 +165,7 @@ def doctor(config):
             checks["drama_shards"] = False
     else:
         checks["drama_shards"] = False
+    model_problem = None
     if remote_only:
         checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
         dependencies.pop("drama3-mlx", None)
@@ -172,6 +176,26 @@ def doctor(config):
         dependencies.pop("drama3-mlx", None)
         matches = engine_entry_points(config["engine"]["type"])
         checks["tts_plugin_installed"] = len(matches) == 1
+    else:
+        selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
+        if selected.runtime == "mlx_audio":
+            from .model_setup import ModelSetupError, engine_checkpoint_missing
+
+            dependencies.pop("drama3-mlx", None)
+            checks = {key: value for key, value in checks.items() if not key.startswith("drama_")}
+            checks["mlx_audio_drama3_version"] = supports_mlx_audio_drama3(dependencies["mlx-audio"])
+            try:
+                missing = engine_checkpoint_missing(config["engine"])
+                checks["drama_checkpoint"] = not missing
+                if missing:
+                    model_problem = "Missing: " + ", ".join(missing)
+            except (ModelSetupError, ValueError) as exc:
+                checks["drama_checkpoint"] = False
+                model_problem = str(exc)
+        else:
+            from .engines import DRAMA3_RUNTIME_VERSION
+
+            checks["drama_runtime_version"] = dependencies.get("drama3-mlx") == DRAMA3_RUNTIME_VERSION
     if any(worker["type"] == "fish_http" for worker in workers):
         try:
             dependencies["msgpack"] = metadata.version("msgpack")
@@ -179,6 +203,7 @@ def doctor(config):
             dependencies["msgpack"] = None
     return {"ready": all(checks.values()) and all(dependencies.values()),
             "checks": checks, "packages": dependencies,
+            "model_problem": model_problem,
             "reference_verification": reference_verification,
             "note": ("Checks installed files; a real generation test is still needed to exercise the configured inference backends."
                      if faster_whisper else "Checks installed files; a real generation test is still needed to exercise Metal.")}

@@ -16,7 +16,7 @@ import shlex
 import sys
 
 from .diagnostics import configured_secrets, safe_error_text
-from .engines import DRAMA3_MODEL_REVISION
+from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS, get_drama3_model
 
 
 class ModelSetupError(RuntimeError):
@@ -30,9 +30,10 @@ class _Model:
     revision: str
     label: str
     size: str
+    weight_files: tuple[str, ...] = ()
 
 
-DRAMA = _Model("drama", "fishaudio/drama-3", DRAMA3_MODEL_REVISION,
+DRAMA = _Model("drama", DEFAULT_DRAMA3_MODEL, get_drama3_model(DEFAULT_DRAMA3_MODEL).revision,
                "Fish Audio Drama 3", "about 41.5 GB")
 WHISPER = _Model("whisper", "mlx-community/whisper-large-v3-turbo",
                  "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
@@ -111,19 +112,73 @@ def _weight_files(path, *, index_required=False):
                      if p.name != "codec.safetensors") else ["model safetensors weights"]
 
 
+def drama_model_spec(settings):
+    selected = get_drama3_model(settings.get("model", DEFAULT_DRAMA3_MODEL))
+    if selected.runtime == "sogni":
+        return DRAMA
+    return _Model("drama_mlx_audio", selected.repo, selected.revision,
+                  selected.repo, selected.size, selected.weight_files)
+
+
+def _quantized_provenance(path, model, config):
+    """Never fill a known different conversion with the selected release."""
+    known_revisions = {entry.revision: entry.repo for entry in DRAMA3_MODELS.values()}
+    for metadata in (path / ".cache" / "huggingface" / "download").glob("*.metadata"):
+        try:
+            revision = metadata.read_text().splitlines()[0]
+        except (OSError, UnicodeError, IndexError):
+            continue
+        source = known_revisions.get(revision)
+        if source is not None and source != model.repo:
+            raise ModelSetupError(
+                f"The checkpoint at {path} contains files downloaded from {source}. "
+                f"It will not be mixed with {model.repo}; choose a separate model directory.")
+    allowed = {*model.weight_files, "codec.safetensors"}
+    unexpected = [candidate.name for candidate in path.glob("*.safetensors")
+                  if candidate.name not in allowed]
+    if unexpected:
+        raise ModelSetupError(
+            f"The checkpoint at {path} contains incompatible shard files: {', '.join(sorted(unexpected))}. "
+            f"It will not be mixed with {model.repo}; choose a separate model directory.")
+    if config is None:
+        return
+    quantization = config.get("quantization")
+    if quantization is None:
+        quantization = config.get("quantization_config")
+
+    def valid_recipe(value):
+        return (isinstance(value, dict) and type(value.get("bits")) is int
+                and value["bits"] in {2, 3, 4, 5, 6, 8}
+                and type(value.get("group_size")) is int and value["group_size"] > 0)
+
+    experts = ([value for name, value in quantization.items() if "switch_mlp" in name]
+               if isinstance(quantization, dict) else [])
+    if not valid_recipe(quantization) or not experts or not all(map(valid_recipe, experts)):
+        raise ModelSetupError(
+            f"The checkpoint at {path} has a missing or invalid quantization recipe. "
+            "It will not be overwritten; restore the selected model's config.json.")
+    expert_bits = {value["bits"] for value in experts}
+    expected_bits = ({4} if model.repo.endswith("-4bit") else
+                     {8} if model.repo.endswith("-8bit") else {3, 4})
+    if not expert_bits <= expected_bits or (model.repo.endswith("-3bit-HQ") and 3 not in expert_bits):
+        raise ModelSetupError(
+            f"The checkpoint at {path} uses a different expert quantization recipe. "
+            f"It will not be mixed with {model.repo}; choose a separate model directory.")
+
+
 def _missing(path, model):
     if path.exists() and not path.is_dir():
         raise ModelSetupError(f"Model checkpoint path is not a directory: {path}")
     metadata = _json(path / "config.json")
     model_type = metadata.get("model_type") if metadata else None
-    expected = {"drama": {"fish_omni"}, "whisper": {"whisper"},
+    expected = {"drama": {"fish_omni"}, "drama_mlx_audio": {"fish_drama3"}, "whisper": {"whisper"},
                 "qwen": {"qwen3_tts"}, "parakeet": {"parakeet"}}[model.kind]
     if model_type is not None and (not isinstance(model_type, str) or model_type not in expected):
         raise ModelSetupError(
             f"The checkpoint at {path} identifies a different model ({model_type}). "
             f"It will not be overwritten with {model.repo}; choose the correct directory in the global config.")
     architectures = metadata.get("architectures") if metadata else None
-    expected_architecture = {"drama": "FishOmniModel", "whisper": "WhisperForConditionalGeneration",
+    expected_architecture = {"drama": "FishOmniModel", "drama_mlx_audio": "FishOmniModel", "whisper": "WhisperForConditionalGeneration",
                              "qwen": "Qwen3TTSForConditionalGeneration"}.get(model.kind)
     if (expected_architecture and isinstance(architectures, list) and architectures
             and expected_architecture not in architectures):
@@ -134,7 +189,20 @@ def _missing(path, model):
             and metadata.get("tts_model_type", "voice_design") != "voice_design"):
         raise ModelSetupError(f"The Qwen checkpoint at {path} is not a voice-design model; it will not be overwritten.")
     missing = [] if metadata is not None else ["config.json (missing or invalid)"]
-    if model.kind == "drama":
+    if model.kind == "drama_mlx_audio":
+        if metadata is not None and metadata.get("model_type") != "fish_drama3":
+            raise ModelSetupError(
+                f"The checkpoint at {path} does not identify an MLX-Audio Drama 3 model. "
+                "It will not be overwritten; choose the selected model's directory.")
+        if metadata is not None and metadata.get("speech_template_version") != "reference-bracket-v1":
+            raise ModelSetupError(
+                f"The checkpoint at {path} has an incompatible Drama 3 speech template. "
+                "It will not be overwritten; choose the selected model's directory.")
+        _quantized_provenance(path, model, metadata)
+        for name in ("tokenizer.json", "codec.safetensors", *model.weight_files):
+            if not _file(path / name):
+                missing.append(name)
+    elif model.kind == "drama":
         if not _file(path / "tokenizer.json"):
             missing.append("tokenizer.json")
         if not any(_file(path / name) for name in ("codec.pth", "codec.safetensors")):
@@ -157,6 +225,17 @@ def _missing(path, model):
             missing.extend("speech_tokenizer/" + name
                            for name in _weight_files(path / "speech_tokenizer"))
     return missing
+
+
+def engine_checkpoint_missing(settings):
+    """Read-only model-aware prerequisite check, shared by setup and doctor."""
+    model = drama_model_spec(settings)
+    value = settings.get("checkpoint")
+    if not isinstance(value, (str, Path)) or not str(value):
+        raise ModelSetupError("Set engine.checkpoint to a local model directory in the global config.")
+    path = Path(value).expanduser().absolute()
+    model, _ = _snapshot_target(path, model)
+    return _missing(path, model)
 
 
 class ModelSetup:
@@ -184,7 +263,7 @@ class ModelSetup:
         settings = self.config.get(component, {}) if settings is None else settings
         requested = []
         if component == "engine" and settings.get("type") == "drama3_mlx":
-            requested.append((settings.get("checkpoint"), DRAMA, True, "engine.checkpoint"))
+            requested.append((settings.get("checkpoint"), drama_model_spec(settings), True, "engine.checkpoint"))
         elif component == "verification" and settings.get("type", "mlx_whisper") == "mlx_whisper":
             requested.append((settings.get("model"), WHISPER, False, "verification.model"))
             if settings.get("reference_model"):
@@ -213,10 +292,14 @@ class ModelSetup:
             if not isinstance(value, (str, Path)) or not str(value):
                 raise ModelSetupError(f"Set {setting} to a local model directory in the global config.")
             path = Path(value).expanduser().absolute()
+            cache_dir = None
+            if component == "engine":
+                model, cache_dir = _snapshot_target(path, model)
             missing = _missing(path, model)
             if not missing:
                 continue
-            model, cache_dir = _snapshot_target(path, model)
+            if component != "engine":
+                model, cache_dir = _snapshot_target(path, model)
             if cache_dir is None and not identifiable and path.name != model.repo.rsplit("/", 1)[-1]:
                 raise ModelSetupError(
                     f"Local model is incomplete at {path}: {', '.join(missing)}. "
@@ -225,9 +308,13 @@ class ModelSetup:
                     f"{model.repo.rsplit('/', 1)[-1]} directory for automatic download.")
             self._ensure(path, model, missing, cache_dir=cache_dir)
 
+    def _renderer_install(self):
+        return ".venv-renderer", "renderer.requirements.txt"
+
     def _manual(self, path, model, *, cache_dir=None):
         destination = ["--cache-dir", str(cache_dir)] if cache_dir is not None else ["--local-dir", str(path)]
-        command = shlex.join([".venv-renderer/bin/hf", "download", model.repo,
+        environment, _ = self._renderer_install()
+        command = shlex.join([f"{environment}/bin/hf", "download", model.repo,
                               "--revision", model.revision, *destination])
         return ("Rerun the same audiobook command from an interactive terminal to retry, "
                 "or download manually:\n" + command)
@@ -275,8 +362,9 @@ class ModelSetup:
                 try:
                     from huggingface_hub import snapshot_download
                 except ImportError as exc:
+                    _, requirements = self._renderer_install()
                     raise ModelSetupError(
-                        "The Hugging Face downloader is not installed. Install renderer.requirements.txt "
+                        f"The Hugging Face downloader is not installed. Install {requirements} "
                         "into the renderer environment, then rerun the same command.") from exc
                 downloader = snapshot_download
             token = self.config.get("huggingface", {}).get("api_key") or False

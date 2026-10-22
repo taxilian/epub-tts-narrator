@@ -7,7 +7,8 @@ from functools import wraps
 from queue import Queue
 from threading import RLock
 
-from .engines import DRAMA3_MODEL_REVISION, EngineError, create_engine
+from .engines import EngineError, create_engine
+from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 
 
@@ -86,6 +87,7 @@ class RenderPool:
 
     def __init__(self, config):
         settings = config["render_pool"]
+        selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
         self.sampling = pool_sampling(config)
         self.local_lock = RLock()
         self._local_runtime = LocalRuntime()
@@ -102,12 +104,13 @@ class RenderPool:
         # One verification/normalization job may overlap the occupied TTS slots.
         self.max_inflight = self.max_parallel + 1
         self._identity = {
-            "engine": "fish_tts_pool", "model": "fishaudio/drama-3", "contract_version": 1,
-            "model_revision": settings.get("model_revision", DRAMA3_MODEL_REVISION),
+            "engine": "fish_tts_pool", "model": selected.repo, "contract_version": 1,
+            "model_revision": settings.get("model_revision", selected.revision),
             "sampling": self.sampling,
         }
         self.capabilities = {
-            "reference_voice": True, "voice_design": any(w.local for w in self._workers),
+            "reference_voice": True,
+            "voice_design": selected.runtime == "sogni" and any(w.local for w in self._workers),
             "preset_voice": False, "delivery_control": True,
             "multi_speaker": all(w.local or w.settings.get("multi_speaker", True)
                                  for w in self._workers),
