@@ -154,7 +154,7 @@ class WordSpacingResumeTests(unittest.TestCase):
     generate = retry.SpeechRetryTests.generate
     take = retry.SpeechRetryTests.take
 
-    def test_rejected_spacing_takes_are_rechecked_and_reused_after_policy_update(self):
+    def test_policy_update_generates_a_fresh_take_then_reuses_only_accepted_speech(self):
         self.text = "We were over taking the cart."
         self.request["text"] = self.text
         judge = Judge("uncertain")
@@ -168,14 +168,19 @@ class WordSpacingResumeTests(unittest.TestCase):
         old_judge_calls = len(judge.calls)
         first = self.root / "takes" / "attempt-001.wav"
         saved_audio = first.read_bytes()
-        with patch.object(self.engine, "_write", side_effect=AssertionError("Good audio was regenerated")):
-            wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
-        self.assertEqual(wav, first)
-        self.assertEqual(wav.read_bytes(), saved_audio)
+        first_report = first.with_suffix(".json").read_bytes()
+        # Rejected attempts remain diagnostics even after a verification change.
+        # Only a successful new take becomes reusable speech.
+        wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
+        self.assertEqual(wav.name, "attempt-003.wav")
+        self.assertEqual(first.read_bytes(), saved_audio)
+        self.assertEqual(first.with_suffix(".json").read_bytes(), first_report)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "word_spacing")
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 3)
         self.assertEqual(len(judge.calls), old_judge_calls)
+        with patch.object(self.engine, "_write", side_effect=AssertionError("Accepted audio was regenerated")):
+            self.assertEqual(self.take(SpeechRetryBudget(), verifier=verifier), (wav, accepted))
 
 
 if __name__ == "__main__":
