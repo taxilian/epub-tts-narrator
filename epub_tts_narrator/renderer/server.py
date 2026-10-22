@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +17,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 
 from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
@@ -25,6 +27,10 @@ from .local_runtime import LocalRuntime, requires_mlx
 
 class RequestError(ValueError):
     pass
+
+
+def _print_activity(message):
+    print(message, flush=True)
 
 
 def _parse_request(data, content_type):
@@ -132,9 +138,12 @@ class _RenderServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = False
 
-    def __init__(self, address, config, engine):
+    def __init__(self, address, config, engine, *, notify=_print_activity):
         self.settings = config["server"]
         self.engine = engine
+        self.notify = notify
+        self._activity_lock = threading.Lock()
+        self._request_sequence = 0
         self.model_id = get_drama3_model(
             config["engine"].get("model", DEFAULT_DRAMA3_MODEL)).repo
         self.accepted_models = ({"drama-3", DEFAULT_DRAMA3_MODEL}
@@ -151,7 +160,26 @@ class _RenderServer(ThreadingHTTPServer):
             self.server_close()
             raise
 
-    def _infer(self, text, voices, output, seed, sampling):
+    def next_request_id(self):
+        with self._activity_lock:
+            self._request_sequence += 1
+            return f"request-{self._request_sequence:06d}"
+
+    def activity(self, request_id, message):
+        # Callers supply only metadata and fixed status messages. In particular,
+        # exception text can contain book/reference text and is not logged here.
+        with self._activity_lock:
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            try:
+                self.notify(f"[{timestamp}] {request_id}: {message}")
+            except (OSError, ValueError):
+                # A closed terminal/pipe must not fail synthesis or prevent the
+                # request handler from releasing its admission slot.
+                pass
+
+    def _infer(self, text, voices, output, seed, sampling, request_id=None, queued_at=None):
+        if request_id:
+            self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
         previous = {key: getattr(self.engine, key) for key in sampling}
         try:
             for key, value in sampling.items():
@@ -161,9 +189,9 @@ class _RenderServer(ThreadingHTTPServer):
             for key, value in previous.items():
                 setattr(self.engine, key, value)
 
-    def synthesize(self, text, voices, output, seed, sampling):
+    def synthesize(self, text, voices, output, seed, sampling, *, request_id=None, queued_at=None):
         return self.inference_runtime.run(
-            self._infer, text, voices, output, seed, sampling,
+            self._infer, text, voices, output, seed, sampling, request_id, queued_at,
             initialize_mlx=requires_mlx(self.engine),
         )
 
@@ -182,6 +210,7 @@ class _RenderServer(ThreadingHTTPServer):
 
     def process_request(self, request, client_address):
         if not self.admission.acquire(blocking=False):
+            self.activity(self.next_request_id(), "rejected: renderer queue is full (HTTP 503)")
             data = b'{"error":{"message":"Renderer queue is full; retry later"}}'
             try:
                 request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
@@ -229,6 +258,8 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, status, body):
+        if 400 <= status < 500 and getattr(self, "request_id", None):
+            self.server.activity(self.request_id, f"rejected (HTTP {status})")
         payload = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -255,9 +286,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, {"status": "ready", "model": model, "protocol": "fish-inline-reference-wav-v1"})
 
     def do_POST(self):
+        self.request_id = self.server.next_request_id()
+        self.request_started = time.monotonic()
         try:
             self._post()
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.server.activity(self.request_id, "client disconnected or timed out; response not delivered")
             self.close_connection = True
 
     def _post(self):
@@ -302,8 +336,11 @@ class _Handler(BaseHTTPRequestHandler):
                                    "reference_text": reference["text"], "speaker": reference["speaker"],
                                    "reference_sha256": hashlib.sha256(reference["audio"]).hexdigest()})
                 output = root / "take.wav"
-                self.server.synthesize(body["text"], voices, output, seed, sampling)
-                inspect_wav(output)
+                queued_at = time.monotonic()
+                self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, {len(voices)} reference(s)")
+                self.server.synthesize(body["text"], voices, output, seed, sampling,
+                                       request_id=self.request_id, queued_at=queued_at)
+                audio = inspect_wav(output)
                 size = output.stat().st_size
                 if size > MAX_AUDIO_BYTES:
                     raise EngineError("Generated WAV exceeds the 100 MiB response limit")
@@ -316,13 +353,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 with output.open("rb") as stream:
                     shutil.copyfileobj(stream, self.wfile)
+                self.wfile.flush()
+                self.server.activity(
+                    self.request_id,
+                    f"completed in {time.monotonic() - self.request_started:.2f}s: "
+                    f"{audio['duration_seconds']:.2f}s audio, {audio['sample_rate']} Hz, {size} bytes",
+                )
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
-            self.close_connection = True
+            raise
         except Exception as exc:
+            self.server.activity(self.request_id, f"failed ({type(exc).__name__}); returning HTTP 500")
             self._json(500, {"error": {"message": redact(f"{type(exc).__name__}: {exc}", self.server.settings.get("api_key", ""))}})
 
 
-def make_server(config, engine=None):
+def make_server(config, engine=None, *, notify=_print_activity):
     """Bind an endpoint; an injected engine enables hardware-free integration tests."""
     settings = config["server"]
     host = settings.get("host", "127.0.0.1")
@@ -336,11 +380,11 @@ def make_server(config, engine=None):
         if config["engine"].get("type", "drama3_mlx") != "drama3_mlx":
             raise EngineError("The local server requires engine.type='drama3_mlx'")
         engine = create_engine(config["engine"])
-    return _RenderServer((host, settings.get("port", 8080)), config, engine)
+    return _RenderServer((host, settings.get("port", 8080)), config, engine, notify=notify)
 
 
-def serve(config, notify=print):
-    server = make_server(config)
+def serve(config, notify=_print_activity):
+    server = make_server(config, notify=notify)
     host, port = server.server_address[:2]
     rendered_host = f"[{host}]" if ":" in host else host
     try:

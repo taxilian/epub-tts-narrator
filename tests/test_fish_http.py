@@ -145,8 +145,9 @@ class FishHTTPErrorBodyTests(unittest.TestCase):
         server = Mock(server_address=("127.0.0.1", 8080))
         server.warmup.side_effect = lambda: events.append("warmup")
         server.serve_forever.side_effect = lambda: events.append("serve")
-        with patch("epub_tts_narrator.renderer.server.make_server", return_value=server):
+        with patch("epub_tts_narrator.renderer.server.make_server", return_value=server) as factory:
             serve({}, notify=events.append)
+        self.assertEqual(factory.call_args.kwargs, {"notify": events.append})
         self.assertIn("Loading", events[0])
         self.assertEqual(events[1], "warmup")
         self.assertIn("listening", events[2])
@@ -304,11 +305,17 @@ class FishHTTPTests(unittest.TestCase):
                       "reference_text": "The reference words.", "voice_id": "character-1",
                       "reference_sha256": hashlib.sha256(wav_bytes()).hexdigest()}
         self.engine = FakeEngine()
+        self.activity = []
+        self.activity_changed = threading.Condition()
+        def notify(message):
+            with self.activity_changed:
+                self.activity.append(message)
+                self.activity_changed.notify_all()
         self.config = {"server": {"host": "127.0.0.1", "port": 0, "api_key": "private-test-key",
                                   "max_request_bytes": 104857600, "max_pending_requests": 4},
                        "engine": {"type": "drama3_mlx"}}
         try:
-            self.server = make_server(self.config, self.engine)
+            self.server = make_server(self.config, self.engine, notify=notify)
         except PermissionError:
             self.skipTest("localhost sockets are disabled by the sandbox")
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01})
@@ -330,6 +337,13 @@ class FishHTTPTests(unittest.TestCase):
     def json_body(self):
         return {"text": "Hello.", "format": "wav", "normalize": False,
                 "references": [{"audio": base64.b64encode(wav_bytes()).decode(), "text": "Reference."}]}
+
+    def wait_activity(self, marker, count=1):
+        with self.activity_changed:
+            ready = self.activity_changed.wait_for(
+                lambda: sum(marker in event for event in self.activity) >= count, timeout=5)
+            self.assertTrue(ready, self.activity)
+            return [event for event in self.activity if marker in event]
 
     def test_single_voice_roundtrip_uses_bytes_seed_and_direction(self):
         output = self.root / "take.wav"
@@ -362,6 +376,74 @@ class FishHTTPTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 4)
         self.assertEqual(self.engine.max_active, 1)
 
+    def test_activity_distinguishes_queue_wait_from_active_inference(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.engine.synthesize_fish
+        def blocked(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release generation")
+            return original(*args, **kwargs)
+        self.engine.synthesize_fish = blocked
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.client.synthesize, "Private first passage.", self.voice,
+                                self.root / "first.wav", seed=1)
+            try:
+                self.assertTrue(entered.wait(5))
+                second = pool.submit(self.client.synthesize, "Private second passage.", self.voice,
+                                     self.root / "second.wav", seed=2)
+                self.wait_activity("queued:", 2)
+                self.assertEqual(sum("inference started" in event for event in self.activity), 1)
+            finally:
+                release.set()
+            first.result()
+            second.result()
+        self.wait_activity("completed", 2)
+        for request_id in ("request-000001", "request-000002"):
+            events = [event for event in self.activity if request_id in event]
+            self.assertEqual(len(events), 3, events)
+            self.assertRegex(events[0], r"^\[\d{4}-\d{2}-\d{2}T.+\] request-\d{6}: queued: \d+ characters, 1 reference\(s\)$")
+            self.assertIn("inference started (queued ", events[1])
+            self.assertIn("completed in ", events[2])
+            self.assertIn("0.25s audio, 16000 Hz, 8044 bytes", events[2])
+        combined = "\n".join(self.activity)
+        for secret in ("Private first passage", "Private second passage", "The reference words.",
+                       "private-test-key", base64.b64encode(wav_bytes()).decode()):
+            self.assertNotIn(secret, combined)
+
+    def test_disconnect_is_logged_without_claiming_delivery(self):
+        with patch("epub_tts_narrator.renderer.server.shutil.copyfileobj", side_effect=BrokenPipeError("private text")):
+            with self.assertRaises(FishHTTPError):
+                self.client.synthesize("Private passage.", self.voice, self.root / "disconnect.wav", seed=1)
+            self.wait_activity("client disconnected")
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertFalse(any("completed" in event for event in self.activity))
+        self.assertFalse(any("private text" in event or "Private passage" in event for event in self.activity))
+
+    def test_closed_activity_output_does_not_fail_inference_or_leak_queue_slot(self):
+        original_notify = self.server.notify
+        for index, failure in enumerate((BrokenPipeError("closed pipe"), ValueError("closed stream"))):
+            with self.subTest(failure=type(failure).__name__):
+                self.server.notify = Mock(side_effect=failure)
+                # One occupied slot makes this a queue-rejection logging test.
+                self.server.admission = threading.BoundedSemaphore(1)
+                self.assertTrue(self.server.admission.acquire(blocking=False))
+                try:
+                    with self.assertRaises(FishHTTPError) as raised:
+                        self.client.synthesize("Queued.", self.voice, self.root / f"queued-{index}.wav", seed=1)
+                    self.assertIn("503", str(raised.exception))
+                finally:
+                    self.server.admission.release()
+                # All inference lifecycle logs also hit the failing notifier.
+                output = self.root / f"closed-log-{index}.wav"
+                self.client.synthesize("Hello.", self.voice, output, seed=1)
+                self.assertEqual(output.read_bytes(), wav_bytes())
+                # Admission release occurs just after delivery; wait for it.
+                self.assertTrue(self.server.admission.acquire(timeout=5))
+                self.server.admission.release()
+                self.assertGreaterEqual(self.server.notify.call_count, 4)
+        self.server.notify = original_notify
+
     def test_model_warmup_inference_and_close_share_one_persistent_thread(self):
         request_threads = []
         original = self.server.process_request_thread
@@ -391,6 +473,10 @@ class FishHTTPTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertTrue(raised.exception.transport_error)
         self.assertFalse((self.root / "failed.wav").exists())
+        self.wait_activity("failed (EngineError)")
+        self.assertFalse(any("completed" in event for event in self.activity))
+        self.assertNotIn("Detailed GPU failure", "\n".join(self.activity))
+        self.assertNotIn("private-test-key", "\n".join(self.activity))
 
     def test_auth_failure_is_permanent_for_this_run(self):
         self.client.api_key = "wrong"
@@ -399,6 +485,8 @@ class FishHTTPTests(unittest.TestCase):
         self.assertIn("401", str(raised.exception))
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(self.engine.calls, [])
+        self.wait_activity("rejected (HTTP 401)")
+        self.assertNotIn("wrong", "\n".join(self.activity))
 
     def test_checksum_mismatch_and_existing_output_never_make_requests(self):
         self.voice["reference_sha256"] = "0" * 64
@@ -544,6 +632,7 @@ class FishHTTPTests(unittest.TestCase):
                 release.set()
             active.result()
         self.assertEqual(len(self.engine.calls), 1)
+        self.wait_activity("queue is full (HTTP 503)")
 
     def test_malformed_audio_response_never_published(self):
         class Handler(BaseHTTPRequestHandler):

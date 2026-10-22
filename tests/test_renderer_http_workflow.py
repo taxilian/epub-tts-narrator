@@ -18,7 +18,7 @@ from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.server import make_server
 from epub_tts_narrator.renderer.voices import VoiceStore
-from epub_tts_narrator.renderer.workflow import assemble, render
+from epub_tts_narrator.renderer.workflow import assemble, make_render_plan, render
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
 
@@ -53,6 +53,7 @@ class HTTPWorkflowTests(unittest.TestCase):
                                     ffmpeg=FFMPEG, ffprobe=FFPROBE)
             config["quality"] = validate_policy({})
             fixtures, servers = {}, []
+            server_messages, client_messages = [], []
             engines = [HTTPFixtureEngine(fixtures), HTTPFixtureEngine(fixtures)]
             store = VoiceStore(config["voices"]["directory"], "http-fixture")
             for profile in bundle["cast"]["voices"]:
@@ -67,7 +68,7 @@ class HTTPWorkflowTests(unittest.TestCase):
                     server_config = deepcopy(config)
                     server_config["server"].update(port=0, api_key="test-server-key")
                     try:
-                        server = make_server(server_config, engine)
+                        server = make_server(server_config, engine, notify=server_messages.append)
                     except PermissionError:
                         self.skipTest("sandbox does not permit loopback sockets")
                     thread = Thread(target=server.serve_forever, kwargs={"poll_interval": .01})
@@ -79,31 +80,49 @@ class HTTPWorkflowTests(unittest.TestCase):
                         "model": "drama-3", "api_key": "test-server-key", "timeout_seconds": 10,
                     })
                 pool = RenderPool(config)
+                planned_ids = {chunk["chunk_id"]
+                               for chapter in make_render_plan(bundle, config,
+                                   multi_speaker=pool.capabilities["multi_speaker"])["chapters"]
+                               for chunk in chapter["chunks"] if not chunk["silent_control"]}
                 verifier = FixtureVerifier(fixtures)
                 with patch("epub_tts_narrator.renderer.pool.create_engine",
                            side_effect=AssertionError("coordinator must not load TTS")):
                     first = render(bundle, config, pool, verifier, chapters_only=True,
-                                   notify=lambda _: None)
+                                   notify=client_messages.append)
                     self.assertEqual(first["status"], "chapters_complete")
                     self.assertTrue(all(engine.speech_calls for engine in engines))
                     self.assertFalse(any(engine.voice_calls for engine in engines))
+                    for name in ("mac-0", "mac-1"):
+                        self.assertTrue(any("Chunk " in line and f"Generating speech on {name}" in line
+                                            for line in client_messages), client_messages)
+                        self.assertTrue(any(f"{name}: speech generation completed" in line
+                                            for line in client_messages), client_messages)
+                    self.assertTrue(any("inference started" in line for line in server_messages))
+                    self.assertTrue(any("completed in" in line for line in server_messages))
+                    self.assertNotIn("test-server-key", "\n".join(client_messages + server_messages))
                     accepted = {str(path): path.read_bytes()
                                 for path in (root / "work" / "clips").glob("*/accepted.json")}
-                    self.assertEqual(len(accepted), 6)
+                    self.assertEqual(len(accepted), len(planned_ids))
+                    self.assertEqual({read_json(Path(path))["request"]["chunk"]["chunk_id"]
+                                      for path in accepted}, planned_ids)
                     for server, thread in servers:
                         server.shutdown()
                         thread.join()
                         server.server_close()
                     servers.clear()
+                    client_messages.clear()
+                    server_message_count = len(server_messages)
                     # Even with both workers offline, completed work must reuse
                     # its accepted bytes and assemble without HTTP or ASR.
                     with patch.object(verifier, "transcribe", side_effect=AssertionError("reverified")):
                         resumed = render(bundle, config, pool, verifier, chapters_only=True,
-                                         notify=lambda _: None)
+                                         notify=client_messages.append)
                         self.assertEqual(first["chapters"], resumed["chapters"])
                         self.assertEqual(assemble(bundle, config, notify=lambda _: None)["status"], "complete")
                     self.assertEqual(accepted, {str(path): path.read_bytes()
                                                for path in (root / "work" / "clips").glob("*/accepted.json")})
+                    self.assertFalse(any("Generating speech on " in line for line in client_messages))
+                    self.assertEqual(len(server_messages), server_message_count)
                     self.assertTrue(list((root / "audio").glob("*.m4b")))
                     self.assertTrue((root / "audio" / "sync.json").is_file())
                     self.assertEqual(reference_hashes, {voice["id"]: store.load(voice["id"])["asset_hash"]

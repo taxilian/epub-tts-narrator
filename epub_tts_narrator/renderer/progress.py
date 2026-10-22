@@ -1,8 +1,10 @@
 """Display rendering progress without changing synthesis or cache identities."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import math
+import re
 import shutil
 import sys
 import threading
@@ -22,6 +24,8 @@ class _Task:
     phase: str
     phase_started: float
     generated_at: float | None = None
+    worker: str | None = None
+    worker_stage: str | None = None
 
 
 class _TaskNotifier:
@@ -30,16 +34,62 @@ class _TaskNotifier:
         self._index = index
 
     def __call__(self, message):
-        self._progress(message)
+        self._progress._task_message(self._index, message)
 
     def phase(self, phase, *, generated=False):
         self._progress._set_phase(self._index, phase, generated=generated)
+
+    def worker_activity(self, event, worker=None, elapsed=None):
+        self._progress._worker_activity(self._index, event, worker, elapsed)
 
 
 def set_phase(notify, phase, *, generated=False):
     """Update a tracked task; ordinary print/log callbacks remain compatible."""
     if isinstance(notify, _TaskNotifier):
         notify.phase(phase, generated=generated)
+
+
+_GENERATION_NOTIFY = ContextVar("audiobook_generation_notify", default=None)
+
+
+@contextmanager
+def generation_activity(notify):
+    """Bind progress to one take without adding UI arguments to every engine."""
+    token = _GENERATION_NOTIFY.set(notify)
+    try:
+        yield
+    finally:
+        _GENERATION_NOTIFY.reset(token)
+
+
+def generation_notifier():
+    return _GENERATION_NOTIFY.get()
+
+
+def _worker_message(event, worker, elapsed):
+    if event == "started":
+        return f"Generating speech on {worker}"
+    if event in {"completed", "failed"}:
+        duration = format_duration(elapsed or 0)
+        return f"{worker}: speech generation {event} in {duration}"
+    return None
+
+
+def report_worker_activity(notify, event, worker=None, elapsed=None):
+    if event == "source" and (not isinstance(worker, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", worker)):
+        worker = None
+    try:
+        if isinstance(notify, _TaskNotifier):
+            notify.worker_activity(event, worker, elapsed)
+        elif notify is not None:
+            message = _worker_message(event, worker, elapsed)
+            if message:
+                notify("  " + message)
+    except (OSError, ValueError):
+        # An unavailable output stream must not turn synthesized audio into a
+        # failed take, or stop a selected worker before its slot is returned.
+        pass
 
 
 class ChapterProgress:
@@ -116,6 +166,38 @@ class ChapterProgress:
             if self._tty and not self._closed:
                 self._show(force=True)
 
+    def _task_message(self, index, message):
+        with self._lock:
+            task = self._active.get(index)
+            if task and task.worker and not message.lstrip().startswith("Chunk "):
+                origin = "worker" if task.worker_stage else "audio from"
+                message = f"  Chunk {index + 1} ({origin} {task.worker}): {message.lstrip()}"
+            self(message)
+
+    def _worker_activity(self, index, event, worker, elapsed):
+        with self._lock:
+            task = self._active.get(index)
+            if task is None or self._closed:
+                return
+            if event == "waiting":
+                task.worker, task.worker_stage = None, "waiting"
+            elif event == "assigned":
+                task.worker, task.worker_stage = worker, "waiting"
+            elif event == "started":
+                task.worker, task.worker_stage = worker, "generating"
+            elif event == "source":
+                task.worker, task.worker_stage = worker, None
+            elif event in {"completed", "failed"}:
+                task.worker_stage = "failed" if event == "failed" else None
+                task.phase = "speech generated" if event == "completed" else "generation failed"
+            if event != "source":
+                task.phase_started = self._clock()
+            message = _worker_message(event, worker, elapsed)
+            if message:
+                self(f"  Chunk {index + 1}: {message}")
+            elif self._tty:
+                self._show(force=True)
+
     @contextmanager
     def task(self, index):
         with self._lock:
@@ -153,6 +235,8 @@ class ChapterProgress:
                 task.phase, task.phase_started = phase, now
             if generated and task.generated_at is None:
                 task.generated_at = now
+            if generated or phase == "checking saved audio":
+                task.worker, task.worker_stage = None, None
             if self._tty:
                 self._show(force=True)
 
@@ -191,6 +275,28 @@ class ChapterProgress:
     def _status(self, *, final=None, compact=False):
         now = self._clock()
         elapsed = format_duration(now - self._started)
+        if compact and final is None and any(task.worker for task in self._active.values()):
+            # Put machine activity before totals so an 80-column terminal shows
+            # remote generation even while an earlier block verifies locally.
+            active = []
+            tasks = sorted(self._active.items(), key=lambda item: (
+                item[1].worker_stage != "generating", item[0]))
+            for index, task in tasks:
+                if task.worker_stage == "generating":
+                    label = f"{task.worker} gen"
+                elif task.worker_stage == "waiting":
+                    label = f"{task.worker or 'renderer'} wait"
+                elif task.phase.startswith("verifying"):
+                    label = "local verify"
+                elif task.phase.startswith("normalizing"):
+                    label = "local normalize"
+                elif task.worker_stage == "failed":
+                    label = f"{task.worker} failed"
+                else:
+                    label = "cache" if "saved" in task.phase else "ready"
+                active.append(f"{label} #{index + 1}")
+            return (f"Ch {self.number}/{self.total_chapters} | " + "; ".join(active)
+                    + f" | {len(self._done)}/{len(self._weights)} blocks | {elapsed} elapsed")
         if compact:
             parts = [f"Ch {self.number}/{self.total_chapters}",
                      f"{len(self._done)}/{len(self._weights)} blocks", f"{elapsed} elapsed"]
@@ -206,6 +312,14 @@ class ChapterProgress:
             active = []
             for index, task in sorted(self._active.items()):
                 phase = task.phase.replace("\n", " ").replace("\r", " ")
+                if task.worker_stage == "waiting":
+                    phase = f"waiting for {task.worker or 'renderer'}"
+                elif task.worker_stage in {"generating", "failed"}:
+                    phase = f"{task.worker}: {phase}"
+                elif task.worker:
+                    if phase.startswith(("normalizing", "verifying")):
+                        phase += " locally"
+                    phase += f" (audio: {task.worker})"
                 if compact:
                     phase = phase.replace("generating speech, attempt ", "gen ")
                     phase = phase.replace("generating paragraph, attempt ", "gen ")

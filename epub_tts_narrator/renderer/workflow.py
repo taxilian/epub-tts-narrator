@@ -20,7 +20,8 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
-from .progress import ChapterProgress, format_duration, set_phase
+from .progress import (ChapterProgress, format_duration, generation_activity,
+                       report_worker_activity, set_phase)
 from .retry_budget import SpeechRetryBudget, generation_attempts
 from .speech_text import trim_speech_text
 from .voice_bindings import design_voice, designer_identity, require_designer
@@ -463,17 +464,19 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     set_phase(notify, f"generating {kind}, attempt {current_attempt}/{attempts}", generated=True)
                     if purpose == "speech":
                         notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
-                    if rewrite is not None:
-                        metadata = generate_repaired(rewrite["tts_text"], raw, seed)
-                        metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
-                    else:
-                        metadata = generate(raw, seed)
+                    with generation_activity(notify):
+                        if rewrite is not None:
+                            metadata = generate_repaired(rewrite["tts_text"], raw, seed)
+                            metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
+                        else:
+                            metadata = generate(raw, seed)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
                                       "seed": seed, "raw_file": raw.name,
                                       "raw_sha256": file_hash(regular_file(raw)),
                                       "engine_metadata": metadata, "normalized_sha256": None}
                         _save_elevenlabs_generation(generation_path, generation)
+                report_worker_activity(notify, "source", metadata.get("render_worker"))
                 set_phase(notify, "normalizing speech")
                 normalize_clip(raw, wav, sample_rate=config["render"]["sample_rate"],
                                ffmpeg=config["render"]["ffmpeg"])
@@ -493,6 +496,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                         "engine_metadata": metadata, "audio_file": wav.name,
                         "audio_sha256": file_hash(regular_file(wav)),
                     })
+            report_worker_activity(notify, "source", metadata.get("render_worker"))
             if fresh_speech and generation_ordinal is None:
                 set_phase(notify, f"verifying saved take {attempt}")
             else:
@@ -1252,6 +1256,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         speech_cache = SpeechCache(work, voices)
 
     def take(text, generate, request, *, synthesize_part=None):
+        set_phase(notify, "checking saved audio")
         identity = speech_cache.identity(request)
         key = digest(identity)
         resolution_episode = None
@@ -1265,6 +1270,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             try:
                 cached = speech_cache.find(identity, request=request)
                 if cached is not None:
+                    report_worker_activity(notify, "source",
+                                           cached[1].get("engine_metadata", {}).get("render_worker"))
                     if not config["render"].get("keep_intermediate_audio", False):
                         from .cleanup import clean_take_intermediates
                         try:

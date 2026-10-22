@@ -6,10 +6,12 @@ from copy import deepcopy
 from functools import wraps
 from queue import Queue
 from threading import RLock
+from time import monotonic
 
 from .engines import EngineError, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
+from .progress import generation_notifier, report_worker_activity
 
 
 _SAMPLING_DEFAULTS = {
@@ -140,17 +142,28 @@ class RenderPool:
     def _execute(self, method, *args, **kwargs):
         if self._closed:
             raise EngineError("The render pool is closed")
+        notify = generation_notifier()
+        report_worker_activity(notify, "waiting")
         worker = self._slots.get()
         try:
+            name = worker.settings["name"]
+            report_worker_activity(notify, "assigned", name)
             def run():
-                engine = worker.engine()
-                if worker.local and requires_mlx(engine):
-                    self._local_runtime.initialize_mlx()
-                metadata = getattr(engine, method)(*args, **kwargs)
-                if not isinstance(metadata, dict):
-                    raise EngineError("TTS worker returned invalid generation metadata")
-                return {**metadata, "render_worker": worker.settings["name"],
-                        "worker_engine": engine.identity}
+                started = monotonic()
+                report_worker_activity(notify, "started", name)
+                try:
+                    engine = worker.engine()
+                    if worker.local and requires_mlx(engine):
+                        self._local_runtime.initialize_mlx()
+                    metadata = getattr(engine, method)(*args, **kwargs)
+                    if not isinstance(metadata, dict):
+                        raise EngineError("TTS worker returned invalid generation metadata")
+                    result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                except BaseException:
+                    report_worker_activity(notify, "failed", name, monotonic() - started)
+                    raise
+                report_worker_activity(notify, "completed", name, monotonic() - started)
+                return result
             if worker.local:
                 # All model loading, arrays and default streams belong to one
                 # persistent thread, shared with local speech verification.
