@@ -174,20 +174,40 @@ def _eligible_performers(row):
     return [{"voice_id": row.get("voice_id"), "role_id": row.get("role_id")}]
 
 
-def _safe_text(text):
+def sample_text_problems(text):
+    """Describe unsuitable audition text without changing selection policy.
+
+    Controls are identified by code point, so rendering a diagnostic cannot
+    execute a terminal escape or hide the character that needs removing.
+    """
+    problems = []
     if any(char in text for char in "[]<>"):
-        return False
-    if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"}
-           and char not in "\n\r\t" for char in text):
-        return False
+        problems.append("Remove reserved markup characters: "
+                        + " ".join(char for char in "[]<>" if char in text) + ".")
+    controls = sorted({ord(char) for char in text
+                       if unicodedata.category(char) in {"Cc", "Cf", "Cs"}
+                       and char not in "\n\r\t"})
+    if controls:
+        problems.append("Remove forbidden control characters: "
+                        + ", ".join(f"U+{code:04X}" for code in controls) + ".")
     if "://" in text or re.search(r"\S+@\S+", text):
-        return False
+        problems.append("Remove the URL or email address; use ordinary spoken audition text.")
     letters = [char for char in text if char.isalpha()]
     if letters and sum(char.isupper() for char in letters) / len(letters) > .55:
-        return False
-    if re.search(r"([A-Za-z])\1{2,}", text):
-        return False
-    return not text.rstrip("”’\"'").endswith(("—", "–", "-"))
+        problems.append("Use normal capitalization; more than 55% of letters are uppercase.")
+    repeated = list(dict.fromkeys(word for word in _WORDS.findall(text)
+                                  if re.search(r"([A-Za-z])\1{2,}", word)))
+    if repeated:
+        problems.append("Use ordinary spelling for stretched words: "
+                        + ", ".join(repr(word) for word in repeated)
+                        + ". Keep the delivery style in the voice profile.")
+    if text.rstrip("”’\"'").endswith(("—", "–", "-")):
+        problems.append("Complete the unfinished phrase instead of ending it with a dash.")
+    return problems
+
+
+def _safe_text(text):
+    return not sample_text_problems(text)
 
 
 def _candidate_data(bundle, voice_id, canonical_id):

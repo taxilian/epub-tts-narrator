@@ -307,7 +307,7 @@ def main(argv=None):
         nonlocal model_cache
         from .analysis_directory import _completed_directory
         from .analysis_revision import related_directories, revise_directories
-        from .audition_scripts import prepare_document_samples
+        from .audition_scripts import prepare_document_samples, audition_preparation_pending
         from .narration_boundaries import repair_narration_boundaries
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
         from .speech_normalization import normalize_document_speech, normalization_pending
@@ -333,7 +333,8 @@ def main(argv=None):
         revised = repair_narration_boundaries(revised, progress=print)
         remaining = unassigned_segments(revised)
         print(f"Resuming saved analysis in {directory}; {len(remaining)} unassigned spoken passage(s).")
-        if not remaining and revised == original and not normalization_pending(revised):
+        if (not remaining and revised == original and not normalization_pending(revised)
+                and not audition_preparation_pending(revised)):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
             print("Saved analysis is complete; no model calls or file changes are needed.")
@@ -350,7 +351,7 @@ def main(argv=None):
         if targets:
             print(f"Checking remaining speakers in {len(targets)} source block(s); "
                   "saved assignments will be retained.", file=sys.stderr, flush=True)
-        if targets or normalization_pending(revised):
+        if targets or normalization_pending(revised) or audition_preparation_pending(revised):
             cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
@@ -371,11 +372,13 @@ def main(argv=None):
         revised = normalize_document_speech(revised, requests,
             workers=min(5, settings["attribution_workers"]),
             progress=lambda message: print(message, file=sys.stderr))
+        if "voice_samples" in original["provenance"] or audition_preparation_pending(revised):
+            # Keep successful auditions and retry only missing ones. Optional
+            # casting text must not prevent publishing finished book analysis.
+            revised = prepare_document_samples(revised, requests,
+                workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
+                progress=lambda message: print(message, file=sys.stderr))
         if revised != original:
-            # Prepared books already have creative scripts. Newly assigned
-            # dialogue can improve their auditions without another model call.
-            if "voice_samples" in original["provenance"]:
-                revised = prepare_document_samples(revised, None, workers=min(5, settings["attribution_workers"]))
             result = revise_directories({directory: revised}, directories=directories,
                                         expected_manifest_hashes=hashes)
             print(f"Original analysis files and revision journal: {result['backup_directory']}")
@@ -590,16 +593,17 @@ def main(argv=None):
                 workers=min(5, settings["attribution_workers"]),
                 progress=lambda message: print(message, file=sys.stderr))
             document = prepare_document_samples(document, sample_requests,
-                workers=min(5, settings["attribution_workers"]),
+                workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
                 progress=lambda message: print(message, file=sys.stderr))
             document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config))
             document = normalize_document_speech(document, sample_requests,
                 workers=min(5, settings["attribution_workers"]),
                 progress=lambda message: print(message, file=sys.stderr))
-            # Human choices may make additional real dialogue available. All
-            # creative scripts already exist, so this refresh makes no calls.
+            # Human choices may make additional real dialogue available. Keep
+            # optional missing auditions pending without another request pass.
             document = prepare_document_samples(document, None,
-                workers=min(5, settings["attribution_workers"]))
+                workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
+                progress=lambda message: print(message, file=sys.stderr))
             if directory_mode:
                 state = publish_directory(document, registry, args.output, export_bundle,
                                           continue_from=args.continue_from)

@@ -9,6 +9,7 @@ import unicodedata
 from .attribution_review import _bounded_map
 from .pipeline import CachedRequests, fingerprint, write_json
 from .prompts import COMMON
+from .provider import ProviderError
 
 
 VERSION = 1
@@ -34,23 +35,56 @@ Return exactly {"text":"audition speech only","reason":"brief casting rationale"
 
 
 def validate_script(value, *, require_plain_prose=True):
-    from epub_tts_narrator.renderer.samples import _safe_text, has_repeated_speech_wrappers, strip_speech_wrapper
+    from epub_tts_narrator.renderer.samples import sample_text_problems, has_repeated_speech_wrappers, strip_speech_wrapper
     if not isinstance(value, dict) or set(value) != {"text", "reason"}:
         raise ValueError("Audition script requires exactly text and reason")
     text, reason = value["text"], value["reason"]
-    if (not isinstance(text, str) or text != text.strip() or not 25 <= len(WORDS.findall(text)) <= 60
-            or len(text) > 650 or any(char in text for char in "[]<>")
-            or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in text)
-            or not _safe_text(text)):
-        raise ValueError("Audition text must be 25–60 words, at most 650 characters, without control syntax")
+    if not isinstance(text, str):
+        raise ValueError("Audition text must be a string of plain spoken prose")
+    problems = sample_text_problems(text)
+    # Formatting whitespace is not speech; normalize it without asking the
+    # model for another take. Check controls before normalization can hide them.
+    text = strip_speech_wrapper(" ".join(text.split()))
+    problems = list(dict.fromkeys([*problems, *sample_text_problems(text)]))
+    words = len(WORDS.findall(text))
+    if not 25 <= words <= 60:
+        problems.append(f"received {words} words; write 35–50 words (allowed range 25–60)")
+    if len(text) > 650:
+        problems.append(f"received {len(text)} characters; keep the text within 650 characters")
+    if problems:
+        raise ValueError("Audition text: " + "; ".join(problems))
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
         raise ValueError("Audition script requires a brief casting rationale")
-    text = strip_speech_wrapper(text)
     if require_plain_prose and has_repeated_speech_wrappers(text):
         raise ValueError("Audition script must use plain spoken prose, not separately quoted statements. "
                          "Remove the surrounding quotation marks from each statement; preserve only "
                          "meaningful quotations within speech and normal apostrophes.")
     return {"text": text, "basis": "casting", "reason": reason}
+
+
+def _pending(bundle):
+    prepared = bundle["manifest"].get("provenance", {}).get("voice_samples", {})
+    if not isinstance(prepared, dict):
+        raise ValueError("Invalid saved character audition script metadata")
+    pending = prepared.get("pending", {})
+    known = {voice["id"] for voice in bundle["cast"]["voices"]}
+    if (not isinstance(pending, dict) or any(
+            voice not in known or not isinstance(row, dict) or set(row) != {"name", "error"}
+            or any(not isinstance(row[key], str) or not row[key].strip() or len(row[key]) > limit
+                   for key, limit in (("name", 160), ("error", 2000)))
+            for voice, row in pending.items())):
+        raise ValueError("Invalid pending character audition script metadata")
+    return deepcopy(pending)
+
+
+def audition_preparation_pending(document):
+    return bool(_pending({"cast": document["cast"], "manifest": {"provenance": document["provenance"]}}))
+
+
+def _voice_name(people, roles, voice):
+    names = list(dict.fromkeys(person["name"] for person in people if person.get("name")))
+    label = ", ".join(names) if names else ("Narrator" if any(role.get("kind") == "narration" for role in roles) else voice)
+    return "".join(" " if unicodedata.category(char).startswith("C") else char for char in label)[:160]
 
 
 def _saved(bundle):
@@ -87,7 +121,7 @@ def _overrides(bundle):
 
 
 def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice_ids=None,
-                    workers=5, progress=lambda message: None, refresh=False):
+                    workers=5, progress=lambda message: None, refresh=False, allow_incomplete=False):
     """Prefer source auditions; explicitly refresh selected groups when requested.
 
     Refresh drops creative fallbacks only for the selected canonical groups.
@@ -97,7 +131,11 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
     from epub_tts_narrator.renderer.samples import select_book_sample, select_sample
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("Audition workers must be between one and five")
+    if type(allow_incomplete) is not bool:
+        raise ValueError("allow_incomplete must be a boolean")
     scripts = _saved(bundle)
+    prior_pending = _pending(bundle)
+    pending = {}
     profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
     selected = list(profiles) if voice_ids is None else list(dict.fromkeys(voice_ids))
     if any(voice not in profiles for voice in selected):
@@ -140,27 +178,49 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
                    "book": bundle["source"]["book"], "voice": profile,
                    "characters": people, "roles": roles, "short_speech_examples": examples,
                    "source_fingerprint": bundle["manifest"]["source_fingerprint"]}
-        tasks.append((aliases, payload))
+        tasks.append((aliases, payload, _voice_name(people, roles, voice)))
     def create(task, cancelled):
-        aliases, payload = task
-        script = requests.run(SYSTEM, payload, validate_script, cancelled=cancelled)
-        progress(f"Prepared character-specific audition script: {payload['voice']['id']}")
-        return aliases, script
+        aliases, payload, name = task
+        try:
+            script = requests.run(SYSTEM, payload, validate_script, cancelled=cancelled)
+        except (ProviderError, ValueError) as error:
+            if not allow_incomplete:
+                raise
+            detail = str(error)[:2000] or type(error).__name__
+            progress(f"Audition pending for {name}: {detail}")
+            return aliases, None, {"name": name, "error": detail}
+        progress(f"Prepared character-specific audition script: {name} ({payload['voice']['id']})")
+        return aliases, script, None
     if tasks:
         if requests is None:
-            raise ValueError("Character-specific audition scripts need the configured analysis model")
-        progress(f"Preparing {len(tasks)} missing character audition script(s)")
-        for aliases, script in _bounded_map(tasks, create, workers):
-            scripts.update({value: deepcopy(script) for value in aliases})
-    samples = {voice: select_sample(working, voice, canonical_id=canonical_id, fallback_text="") for voice in selected}
+            if not allow_incomplete:
+                raise ValueError("Character-specific audition scripts need the configured analysis model")
+            for aliases, payload, name in tasks:
+                for voice in aliases:
+                    pending[voice] = prior_pending.get(voice) or {
+                        "name": name, "error": "Character-specific audition script needs the configured analysis model"}
+        else:
+            progress(f"Preparing {len(tasks)} missing character audition script(s)")
+            for aliases, script, failure in _bounded_map(tasks, create, workers):
+                if script is None:
+                    pending.update({value: deepcopy(failure) for value in aliases})
+                else:
+                    scripts.update({value: deepcopy(script) for value in aliases})
+    samples = {voice: select_sample(working, voice, canonical_id=canonical_id, fallback_text="")
+               for voice in selected if voice not in pending}
     result = {"version": VERSION, "source_fingerprint": bundle["manifest"]["source_fingerprint"],
               "cast_fingerprint": fingerprint(bundle["cast"]), "scripts": scripts, "samples": samples}
     if replaced:
         result["replaced_voice_ids"] = sorted(replaced)
+    if pending:
+        result["pending"] = pending
+        progress(f"{len(pending)} voice audition(s) still need preparation; analysis can be saved. "
+                 "Rerun analyze or open casting to retry the missing auditions.")
     return result
 
 
-def prepare_document_samples(document, requests, *, workers=5, progress=lambda message: None):
+def prepare_document_samples(document, requests, *, workers=5, progress=lambda message: None,
+                             allow_incomplete=False):
     from .cli import script_partitions
     bundle = {"source": document["source"], "cast": document["cast"],
               "manifest": {"source_fingerprint": fingerprint(document["source"]),
@@ -171,7 +231,8 @@ def prepare_document_samples(document, requests, *, workers=5, progress=lambda m
                                      for item in document["segments"] if item["block_id"] in chapter["block_ids"]]}
                            for number, chapter in enumerate(script_partitions(document), 1)]}
     result = deepcopy(document)
-    result["provenance"]["voice_samples"] = prepare_samples(bundle, requests, workers=workers, progress=progress)
+    result["provenance"]["voice_samples"] = prepare_samples(
+        bundle, requests, workers=workers, progress=progress, allow_incomplete=allow_incomplete)
     return result
 
 

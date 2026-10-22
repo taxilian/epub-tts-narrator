@@ -353,7 +353,10 @@ class AnalyzeResumeTests(unittest.TestCase):
             status, _, error, _ = self.run_cli(path, answers="o\n2\n", client=CompletionClient(uncertain=True))
         self.assertEqual(status, 0, error)
         prepare.assert_called_once()
-        self.assertIsNone(prepare.call_args.args[1])
+        self.assertTrue(prepare.call_args.kwargs["allow_incomplete"])
+        # A request client is available for pending scripts, but this client's
+        # protocol rejects audition calls: existing prepared scripts stay local.
+        self.assertIsInstance(prepare.call_args.args[1], CachedRequests)
 
     def test_timeout_preserves_bundle_and_reuses_completed_jury_requests_on_next_run(self):
         _, path, _ = self.seed()
