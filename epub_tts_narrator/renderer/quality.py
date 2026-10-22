@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 8
+QUALITY_VERSION = 9
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -121,6 +121,28 @@ _LEXEMES = re.compile(
     re.UNICODE,
 )
 _SYMBOLS = {"%": ["percent"], "&": ["and"], "+": ["plus"], "=": ["equals"]}
+_IDENTIFIER_TOKEN = re.compile(r"(?<![\w'’])[^\W_]+(?:-[^\W_]+)+(?![\w'’])", re.UNICODE)
+
+
+def _lexeme_matches(text: str):
+    """Preserve source offsets while separating clearly structured code parts.
+
+    A hyphenated identifier needs both a mixed letter/digit component and a
+    separate alphabetic component of at least two letters. Its hyphens separate
+    code parts, rather than requesting the word 'minus'. Ambiguous forms such
+    as x-34, x1-34 and purely numeric subtraction retain their signs. This
+    affects verification only; source and synthesis text are never rewritten.
+    """
+    def separators(match):
+        value = match.group()
+        parts = value.split("-")
+        has_mixed = any(any(char.isalpha() for char in part)
+                        and any(char.isdigit() for char in part) for part in parts)
+        has_word = any(len(part) >= 2 and part.isalpha() for part in parts)
+        return value.replace("-", " ") if has_mixed and has_word else value
+
+    # Replacing each hyphen with one space leaves all match offsets unchanged.
+    return _LEXEMES.finditer(_IDENTIFIER_TOKEN.sub(separators, text))
 
 
 def _integer_words(value: int) -> list[str]:
@@ -142,7 +164,8 @@ def normalize_words(text: str) -> list[str]:
     """
     text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
     words = []
-    for token in _LEXEMES.findall(text):
+    for match in _lexeme_matches(text):
+        token = match.group()
         if token in _SYMBOLS:
             words.extend(_SYMBOLS[token])
             continue
@@ -235,7 +258,7 @@ def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | Non
     def tokens(text):
         text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
         words, spans = [], []
-        for match in _LEXEMES.finditer(text):
+        for match in _lexeme_matches(text):
             normalized = normalize_words(match.group())
             words.extend(normalized)
             spans.extend([(match.start(), match.end(), match.group())] * len(normalized))

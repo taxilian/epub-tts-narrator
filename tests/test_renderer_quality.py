@@ -110,6 +110,41 @@ class RendererQualityTests(unittest.TestCase):
             with self.subTest(expected=expected, actual=actual):
                 self.assertGreater(compare_words(expected, actual)["wer"], 0)
 
+    def test_hyphenated_identifier_does_not_invent_a_spoken_minus(self):
+        expected = "“Confirmation A34785-Derrins-34r42,”"
+        self.assertEqual(compare_words(expected, "Confirmation A34785 Derrins 34r42")["wer"], 0)
+        self.assertEqual(compare_words("Sector-34r42", "Sector 34r42")["wer"], 0)
+        self.assertEqual(compare_words("AB12-unit-8", "AB12 unit 8")["wer"], 0)
+        for recognized in ("Confirmation A34785, Darren's 34R42.",
+                           "Confirmation A34785, Darins 34R42."):
+            with self.subTest(recognized=recognized):
+                report = validate_audio(self.audio, expected, FakeVerifier(transcript(recognized)))
+                self.assertTrue(report["passed"], report)
+                self.assertEqual(report["transcript"], recognized)
+
+    def test_identifier_pronunciation_does_not_excuse_wrong_or_missing_code_parts(self):
+        expected = "Confirmation A34785-Derrins-34r42"
+        for recognized in ("Confirmation A34786 Darren's 34R42",
+                           "Confirmation A34785 Darren's 34R43",
+                           "Confirmation A34785 Darren's R42",
+                           "Confirmation A34785 Darren's 34Q42",
+                           "Confirmation A34785 Darren's",
+                           "Confirmation A34785 Darren's minus 34R42"):
+            with self.subTest(recognized=recognized):
+                report = validate_audio(self.audio, expected, FakeVerifier(transcript(recognized)))
+                self.assertFalse(report["passed"], report)
+                self.assertIn("text_mismatch", report["reasons"])
+
+    def test_identifier_separator_normalization_retains_actual_signs_and_subtraction(self):
+        for expected, recognized in (("-34", "34"), ("(+34)", "34"),
+                                     ("temperature -34", "temperature 34"),
+                                     ("34-42", "34 42"), ("x-34", "x 34"),
+                                     ("x-34", "x plus 34"), ("A1-34", "A1 34"),
+                                     ("A1-B2-34", "A1 B2 34")):
+            with self.subTest(expected=expected, recognized=recognized):
+                self.assertGreater(compare_words(expected, recognized)["wer"], 0)
+        self.assertEqual(compare_words("x-34", "x minus thirty four")["wer"], 0)
+
     def test_empty_speakable_text_is_a_control_event_not_speech(self):
         verifier = FakeVerifier(transcript("Hello"))
         report = validate_audio(self.audio, "", verifier, {})

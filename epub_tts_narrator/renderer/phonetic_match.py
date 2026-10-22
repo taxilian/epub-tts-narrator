@@ -78,12 +78,12 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
     """
     # Imported at call time so quality can use this helper without a module
     # initialization cycle; all verification paths share lexical normalization.
-    from .quality import _LEXEMES, normalize_words
+    from .quality import _lexeme_matches, normalize_words
 
     def tokens(text):
         source = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
         words, spans = [], []
-        for match in _LEXEMES.finditer(source):
+        for match in _lexeme_matches(source):
             normalized = normalize_words(match.group())
             words.extend(normalized)
             spans.extend([(match.start(), match.end(), match.group())] * len(normalized))

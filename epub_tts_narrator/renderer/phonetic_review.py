@@ -36,11 +36,11 @@ _ORDINALS = frozenset((
 
 def _original_words(text, words):
     """Map normalized words back to original spellings without guessing offsets."""
-    from .quality import _LEXEMES, normalize_words
+    from .quality import _lexeme_matches, normalize_words
 
     result, normalized = [], []
     # Apostrophe replacement retains character offsets in the original string.
-    for match in _LEXEMES.finditer(text.replace("’", "'").replace("‘", "'")):
+    for match in _lexeme_matches(text.replace("’", "'").replace("‘", "'")):
         source = text[match.start():match.end()]
         expanded = normalize_words(source)
         normalized.extend(expanded)

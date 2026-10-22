@@ -50,6 +50,17 @@ class SubstitutionPairsTests(unittest.TestCase):
         self.assertEqual(pairs[0]["recognized_context"], "four people followed Nerris along the narrow")
         self.assertNotIn("sunset", pairs[0]["requested_context"])
 
+    def test_identifier_name_review_preserves_original_spelling_and_context(self):
+        requested = "“Confirmation A34785-Derrins-34r42,”"
+        heard = "Confirmation A34785, Darren's 34R42."
+        pairs = substitution_pairs(requested, heard)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]["expected_word"], "Derrins")
+        self.assertEqual(pairs[0]["recognized_word"], "Darren's")
+        self.assertIn(pairs[0]["requested_context"], requested)
+        self.assertIn("-Derrins-", pairs[0]["requested_context"])
+        self.assertIn(pairs[0]["recognized_context"], heard)
+
     def test_missing_extra_and_reordered_words_are_ineligible(self):
         cases = (
             ("Nerys will not leave before sunrise.", "Nerris will leave before sunrise."),

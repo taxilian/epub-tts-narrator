@@ -20,6 +20,7 @@ class WordSpacingComparisonTests(unittest.TestCase):
             ("The moon\nlight snow flake drifted.", "The moonlight snowflake drifted."),
             ("A sunlightflower.", "A sun light flower."),
             ("The caféhouse opens.", "The café house opens."),
+            ("Sector-34r42 enters the starforge.", "Sector 34r42 enters the star forge."),
         )
         for first, second in pairs:
             for expected, actual in ((first, second), (second, first)):
@@ -58,6 +59,7 @@ class WordSpacingComparisonTests(unittest.TestCase):
             ("over taking", "overtak ing"),
             ("sunflower", "s u n f l o w e r"),
             ("sun&flower", "sunandflower"),
+            ("A34-sun-flower-8r9", "A34 sunflower 8r9"),
         ):
             with self.subTest(expected=expected, actual=actual):
                 self.assertIsNone(word_spacing_equivalence(expected, actual))
