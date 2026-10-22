@@ -14,12 +14,12 @@ import unicodedata
 
 from .letter_names import make_letter_name_matcher
 from .phonetic_match import (
-    _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _PROTECTED,
+    _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _FUNCTION_WORDS, _PROTECTED,
     _load_double_metaphone, phonetic_equivalence,
 )
 
 
-SPEECH_COVERAGE_VERSION = 2
+SPEECH_COVERAGE_VERSION = 3
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -192,6 +192,25 @@ def speech_coverage(expected_text, transcript):
             return "repeated_phonetic_consonant"
         return None
 
+    def terminal_s_variation(left, right, i, j):
+        # A weak final /s/ or /z/ can disappear in connected speech or its
+        # transcription. Retain BOTH complete words and require a sound judge;
+        # this is not stemming, grammatical correction, or local acceptance.
+        if (any(word in _CONTRACTIONS or word.replace("'", "") in _PROTECTED
+                or word in _FUNCTION_WORDS for word in (left, right))):
+            return None
+        base, inflected = sorted((left, right), key=len)
+        if (not re.fullmatch(r"[a-z]{3,}", base) or not re.search(r"[aeiouy]", base)
+                or inflected not in {base + "s", base + "'s"}):
+            return None
+        for source, span in ((expected_source, expected_spans[i]),
+                             (actual_source, actual_spans[j])):
+            if source[span[0]:span[1]].isupper():
+                # Check both sides: ASR can lowercase a shortened initialism.
+                # A final spoken letter is not a weak grammatical ending.
+                return None
+        return "terminal_s_variation"
+
     def next_matches(i, j):
         if expected[i] == actual[j]:
             yield i + 1, j + 1, None
@@ -253,7 +272,8 @@ def speech_coverage(expected_text, transcript):
                 continue
             left_keys, right_keys = group_keys("expected", i, left_size), group_keys("actual", j, right_size)
             common = sorted(set(left_keys).intersection(right_keys))
-            candidate = (bounded_pronunciation(left[0], right[0], left_keys, right_keys)
+            candidate = ((terminal_s_variation(left[0], right[0], i, j)
+                          or bounded_pronunciation(left[0], right[0], left_keys, right_keys))
                          if not multi and not common else None)
             if not common and candidate is None:
                 continue

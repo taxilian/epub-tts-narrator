@@ -3,6 +3,7 @@
 import unittest
 
 from epub_tts_narrator.renderer.quality import normalize_words, phonetic_equivalence
+from epub_tts_narrator.renderer.phonetic_match import PHONETIC_MATCH_VERSION
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
 from test_renderer_jev_verification import Judge
 import test_renderer_reference_consensus as consensus
@@ -32,7 +33,7 @@ class ColloquialAlignmentTests(unittest.TestCase):
                     with self.subTest(expected=expected, actual=actual):
                         report = phonetic_equivalence(expected, actual)
                         self.assertIsNotNone(report)
-                        self.assertEqual(report["method"], "double_metaphone_v2")
+                        self.assertEqual(report["method"], f"double_metaphone_v{PHONETIC_MATCH_VERSION}")
                         self.assertEqual(len(report["alignment"]), 1)
                         change = report["alignment"][0]
                         self.assertEqual(change["operation"], "colloquial")
@@ -109,7 +110,8 @@ class ColloquialAudioVerificationTests(unittest.TestCase):
                     self.assertGreater(report["metrics"]["wer"], 0)
                     self.assertTrue(report["metrics"]["alignment"])
                     self.assertEqual(report["text_confirmation_method"], "double_metaphone")
-                    self.assertEqual(report["phonetic_comparison"]["method"], "double_metaphone_v2")
+                    self.assertEqual(report["phonetic_comparison"]["method"],
+                                     f"double_metaphone_v{PHONETIC_MATCH_VERSION}")
                     self.assertEqual([change["operation"] for change in report["phonetic_comparison"]["alignment"]],
                                      ["colloquial", "substitute"])
                     self.assertEqual(judge.calls, [])

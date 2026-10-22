@@ -18,7 +18,7 @@ import unicodedata
 from .letter_names import make_letter_name_matcher
 
 
-PHONETIC_MATCH_VERSION = 3
+PHONETIC_MATCH_VERSION = 4
 _MAX_ALIGNMENT_STATES = 20_000
 _ALPHABETIC_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*\Z")
 _PROTECTED = frozenset("""
@@ -56,6 +56,7 @@ either every few many more most much other same some several enough another
 # function words or invent implied auxiliaries (e.g. "what are you"). Keep
 # them inside the alignment so surrounding names and coverage are checked too.
 _COLLOQUIAL_EXPANSIONS = {
+    "ya": ("you",),
     "what'cha": ("what", "you"),
     "whatcha": ("what", "you"),
     "whatchu": ("what", "you"),

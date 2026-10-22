@@ -4,7 +4,9 @@ import builtins
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.renderer.phonetic_match import phonetic_equivalence, require_phonetic_matcher
+from epub_tts_narrator.renderer.phonetic_match import (
+    PHONETIC_MATCH_VERSION, phonetic_equivalence, require_phonetic_matcher,
+)
 
 
 class PhoneticMatchTests(unittest.TestCase):
@@ -23,7 +25,7 @@ class PhoneticMatchTests(unittest.TestCase):
                 with self.subTest(expected=expected, actual=actual):
                     report = phonetic_equivalence(f"Ask {expected} to wait.", f"Ask {actual} to wait.")
                     self.assertIsNotNone(report)
-                    self.assertEqual(report["method"], "double_metaphone_v3")
+                    self.assertEqual(report["method"], f"double_metaphone_v{PHONETIC_MATCH_VERSION}")
                     self.assertEqual(report["implementation"], "Metaphone")
                     self.assertEqual(report["version"], "0.6")
                     self.assertEqual(len(report["alignment"]), 1)
