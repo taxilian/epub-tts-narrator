@@ -182,7 +182,8 @@ class ChapterExecutor:
         clips, acceptance = _render_chapter_chunks(
             chapter, registered, engine, engine_identity, verifier, config, work,
             notify=notify, total_chapters=spec["total_chapters"],
-            take_locks=self._take_locks, take_locks_guard=self._take_locks_guard)
+            take_locks=self._take_locks, take_locks_guard=self._take_locks_guard,
+            paragraph_split_available=False)
         context = {"version": 1, "spec_hash": digest(spec),
                    "source_fingerprint": spec["source_fingerprint"],
                    "total_chapters": spec["total_chapters"],

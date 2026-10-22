@@ -168,7 +168,7 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
-                  generate_repaired=None, resolution_episode=None):
+                  generate_repaired=None, resolution_episode=None, paragraph_split_available=False):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -293,7 +293,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         resolution_session = RecurringResolution(
             directory, request, text, resolver, settings,
             can_rewrite=generate_repaired is not None,
-            can_split=(request.get("kind") == "paragraph_speech"
+            can_split=((request.get("kind") == "paragraph_speech" and paragraph_split_available)
                        or (request.get("kind") == "speech" and split_recovery_text(text) is not None)))
         rewrite = resolution_session.active_rewrite()
 
@@ -1257,7 +1257,7 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
 
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
                   config, work, take_locks, take_locks_guard, *, notify, retry_budget=None,
-                  speech_cache=None):
+                  speech_cache=None, paragraph_split_available=False):
     """Render one complete performance; publication and ordering stay upstream."""
     if chunk["silent_control"]:
         return dict(chunk, wav_path=None), None
@@ -1317,7 +1317,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                verifier, config, notify=notify, retry_budget=retry_budget,
                                                seed_identity=identity,
                                                generate_repaired=generate_repaired or synthesize_part,
-                                               resolution_episode=resolution_episode)
+                                               resolution_episode=resolution_episode,
+                                               paragraph_split_available=paragraph_split_available)
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
@@ -1403,7 +1404,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
 def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, config, work, *, notify,
                            total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None,
-                           speech_cache=None):
+                           speech_cache=None, paragraph_split_available=False):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
     if retry_budget is None:
@@ -1429,7 +1430,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                 return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
                                      engine_identity, verifier, config, work, take_locks,
                                      take_locks_guard, notify=task_notify, retry_budget=retry_budget,
-                                     speech_cache=speech_cache)
+                                     speech_cache=speech_cache, paragraph_split_available=paragraph_split_available)
 
         if parallel == 1:
             results = [run(index) for index in range(len(chunks))]
@@ -1480,7 +1481,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             clips, acceptance = _render_chapter_chunks(
                 chapter, voices, engine, engine_identity, verifier, config, work,
                 notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget,
-                speech_cache=speech_cache)
+                speech_cache=speech_cache, paragraph_split_available=True)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
             stop_if_requested()
