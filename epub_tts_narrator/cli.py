@@ -310,6 +310,7 @@ def main(argv=None):
         from .audition_scripts import prepare_document_samples
         from .narration_boundaries import repair_narration_boundaries
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
+        from .speech_normalization import normalize_document_speech, normalization_pending
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         original = _completed_directory(directory)[0]
@@ -332,7 +333,7 @@ def main(argv=None):
         revised = repair_narration_boundaries(revised, progress=print)
         remaining = unassigned_segments(revised)
         print(f"Resuming saved analysis in {directory}; {len(remaining)} unassigned spoken passage(s).")
-        if not remaining and revised == original:
+        if not remaining and revised == original and not normalization_pending(revised):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
             print("Saved analysis is complete; no model calls or file changes are needed.")
@@ -345,9 +346,11 @@ def main(argv=None):
             raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
         settings = config["analysis"]
         targets = automatic_completion_targets(revised, retry_exhausted=True) if remaining else []
+        requests = None
         if targets:
             print(f"Checking remaining speakers in {len(targets)} source block(s); "
                   "saved assignments will be retained.", file=sys.stderr, flush=True)
+        if targets or normalization_pending(revised):
             cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
@@ -355,15 +358,19 @@ def main(argv=None):
                 raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             model_cache = announce_cache(cache)
             client = OpenAICompatibleClient(**config["provider"])
-            print(f"Resolving speakers with {client.model} at {client.base_url}; unfinished book passages will be sent to this endpoint.", file=sys.stderr)
+            print(f"Updating analysis with {client.model} at {client.base_url}; book passages will be sent to this endpoint.", file=sys.stderr)
             requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                       max_request_chars=settings["max_request_chars"],
                                       progress=lambda message: print(message, file=sys.stderr))
+        if targets:
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
                                         target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
             revised = repair_narration_boundaries(revised, progress=print)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config))
+        revised = normalize_document_speech(revised, requests,
+            workers=min(5, settings["attribution_workers"]),
+            progress=lambda message: print(message, file=sys.stderr))
         if revised != original:
             # Prepared books already have creative scripts. Newly assigned
             # dialogue can improve their auditions without another model call.
@@ -374,7 +381,7 @@ def main(argv=None):
             print(f"Original analysis files and revision journal: {result['backup_directory']}")
             print(f"Updated saved analysis and chapter scripts in {directory}.")
         else:
-            print("No speaker decisions changed; saved files are unchanged.")
+            print("No analysis changes; saved files are unchanged.")
         return _speaker_completion_status(revised)
 
     try:
@@ -520,7 +527,8 @@ def main(argv=None):
                                   "series_identity_scan_requests_minimum": series_scans,
                                   "attribution_review": attribution_review,
                                   "attribution_review_scan_requests": review_scans,
-                                  "baseline_model_requests": base_requests + identity_scans + series_scans + review_scans,
+                                  "speech_spelling_scan_requests_minimum": 1 if source["blocks"] else 0,
+                                  "baseline_model_requests": base_requests + identity_scans + series_scans + review_scans + bool(source["blocks"]),
                                   "note": ("Before cache reuse and bounded validation repairs; character count is not a token estimate. "
                                            + f"Baseline includes {reconciliation_rounds} cumulative cast reconciliation round(s). "
                                            + ("Baseline includes identity scans. Identity case count is unknown before analysis: "
@@ -540,7 +548,9 @@ def main(argv=None):
                                               if series_scans else "")
                                            + (" Baseline includes attribution review scans. Add three jury requests per review batch "
                                               "that proposes corrections; the number is unknown before review."
-                                              if attribution_review else " Attribution review is disabled.")),
+                                              if attribution_review else " Attribution review is disabled.")
+                                           + " Baseline includes one spoken-spelling scan; the final segment count determines additional bounded batches."
+                                             " Add three independent reviews for each batch proposing spelling edits."),
                                   "exclusions": source["exclusions"]}
                 if registry is not None:
                     planned["series"] = {"series_id": registry["series_id"], "books": len(context["prior_books"]),
@@ -572,13 +582,20 @@ def main(argv=None):
             if args.edits:
                 document = apply_edits(document, read_json(args.edits))
             from .audition_scripts import prepare_document_samples
+            from .speech_normalization import normalize_document_speech
             sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                              max_request_chars=settings["max_request_chars"],
                                              progress=lambda message: print(message, file=sys.stderr))
+            document = normalize_document_speech(document, sample_requests,
+                workers=min(5, settings["attribution_workers"]),
+                progress=lambda message: print(message, file=sys.stderr))
             document = prepare_document_samples(document, sample_requests,
                 workers=min(5, settings["attribution_workers"]),
                 progress=lambda message: print(message, file=sys.stderr))
             document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config))
+            document = normalize_document_speech(document, sample_requests,
+                workers=min(5, settings["attribution_workers"]),
+                progress=lambda message: print(message, file=sys.stderr))
             # Human choices may make additional real dialogue available. All
             # creative scripts already exist, so this refresh makes no calls.
             document = prepare_document_samples(document, None,

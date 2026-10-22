@@ -537,6 +537,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=Client()), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
+                patch("epub_tts_narrator.speech_normalization.normalize_document_speech", side_effect=lambda doc, *args, **kwargs: deepcopy(doc)), \
                 patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
                 patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")), \
                 patch("sys.stdin", input_stream), \
@@ -639,6 +640,9 @@ class SpeakerDecisionTests(unittest.TestCase):
         def prepare(doc, *args, **kwargs):
             events.append("auditions")
             return doc
+        def normalize(doc, *args, **kwargs):
+            events.append("spelling")
+            return doc
         with patch("epub_tts_narrator.cli.load_config", return_value=config), \
                 patch("epub_tts_narrator.cli.source_from", return_value=document["source"]), \
                 patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
@@ -647,10 +651,11 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.analyze", side_effect=analyze), \
                 patch("epub_tts_narrator.cli.prompt_speaker_decisions", side_effect=decide), \
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
+                patch("epub_tts_narrator.speech_normalization.normalize_document_speech", side_effect=normalize), \
                 patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
             self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
-        self.assertEqual(events, ["automatic", "auditions", "decisions", "auditions", "publish"])
+        self.assertEqual(events, ["automatic", "spelling", "auditions", "decisions", "spelling", "auditions", "publish"])
 
 
 if __name__ == "__main__":

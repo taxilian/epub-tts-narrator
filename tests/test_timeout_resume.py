@@ -236,7 +236,7 @@ class TimeoutResumeTests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         self.assertIn(first.failed_key, resumed.attempted)
         self.assertTrue(saved.keys().isdisjoint(resumed.attempted))
-        self.assertEqual(set(resumed.attempted.values()), {"attribute", "audition_script"})
+        self.assertEqual(set(resumed.attempted.values()), {"attribute", "audition_script", "speech_spelling_scan"})
         self.assertEqual(continuation_directories(second_book), [first_book.resolve()])
         self.assertTrue((second_book / "manifest.json").is_file())
         self.assertEqual(validate_document(json.loads((second_book / "analysis.json").read_text())), [])

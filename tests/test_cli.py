@@ -26,6 +26,9 @@ class NarrativeClient:
 
     def complete(self, system, payload):
         type(self).calls += 1
+        if payload.get("mode") == "speech_spelling_scan":
+            return {"segments": [{"segment_id": row["segment_id"], "edits": []}
+                                 for row in payload["target_segments"]]}
         if payload.get("mode") == "audition_script":
             return script_response()
         if payload.get("mode") == "attribution_review_scan":
@@ -39,6 +42,29 @@ class NarrativeClient:
             "basis": "explicit", "reason": "Narrative prose.", "evidence": [], "candidates": [],
             "review_required": False, "delivery": {"direction": "", "evidence": []},
         }]} for unit in payload["target_units"]]}
+
+
+class StyledNarrativeClient(NarrativeClient):
+    """Propose one source spelling edit and independently approve it."""
+
+    def complete(self, system, payload):
+        if payload.get("mode") == "speech_spelling_scan":
+            segments = []
+            for row in payload["target_segments"]:
+                edits = []
+                if "Nooooooo" in row["text"]:
+                    start = row["text"].index("Nooooooo")
+                    edits.append({"start": start, "end": start + len("Nooooooo"),
+                                  "original": "Nooooooo", "replacement": "No",
+                                  "direction": "Draw out the vowel in No.",
+                                  "reason": "Repeated vowel spelling conveys a prolonged exclamation."})
+                segments.append({"segment_id": row["segment_id"], "edits": edits})
+            return {"segments": segments}
+        if payload.get("mode") == "speech_spelling_review":
+            return {"votes": [{"edit_id": proposal["edit_id"], "verdict": "approve",
+                               "reason": "The same word is retained with its prolonged delivery."}
+                              for proposal in payload["proposals"]]}
+        return super().complete(system, payload)
 
 
 class CLITests(unittest.TestCase):
@@ -60,14 +86,34 @@ class CLITests(unittest.TestCase):
             status = main([str(a) for a in args])
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def make_epub(self):
+    def make_epub(self, paragraph="The rain stopped."):
         path = self.root / "story.epub"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("mimetype", "application/epub+zip")
             archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
             archive.writestr("content.opf", '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Story</dc:title><dc:identifier id="id">test</dc:identifier><dc:language>en</dc:language></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>')
-            archive.writestr("one.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>The rain stopped.</p></body></html>')
+            archive.writestr("one.xhtml", f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>{paragraph}</p></body></html>')
         return path
+
+    def test_fresh_analyze_exports_reviewed_spoken_spelling_without_changing_source(self):
+        output = self.root / "styled-book"
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", StyledNarrativeClient):
+            status, _, stderr = self.run_cli("analyze", self.make_epub("Nooooooo!"),
+                                           "-o", output, "--config", self.config)
+        self.assertEqual(status, 0, stderr)
+        analysis = read_json(output / "analysis.json")
+        source = next(row for row in analysis["source"]["blocks"] if row["text"] == "Nooooooo!")
+        segment = next(row for row in analysis["segments"] if row["block_id"] == source["id"])
+        self.assertEqual(segment["text"], "Nooooooo!")
+        self.assertEqual(segment["spoken_text"], "No!")
+        self.assertEqual((segment["start"], segment["end"]), (0, len(source["text"])))
+        decisions = analysis["provenance"]["speech_normalization"]["decisions"]
+        self.assertEqual(len(decisions[0]["votes"]), 3)
+        manifest = read_json(output / "manifest.json")
+        script = [json.loads(line) for entry in manifest["files"]["scripts"]
+                  for line in (output / entry["path"]).read_text().splitlines()]
+        rendered = next(row for row in script if row["block_id"] == source["id"])
+        self.assertEqual(rendered["spoken_text"], "No!")
 
     def test_cli_extract_analyze_cached_export_round_trip(self):
         epub = self.make_epub()
@@ -76,16 +122,17 @@ class CLITests(unittest.TestCase):
         self.assertEqual(self.run_cli("extract", epub, "-o", source)[0], 0)
         status, stdout, stderr = self.run_cli("plan", source)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 4)
+        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 5)
+        self.assertEqual(json.loads(stdout)["speech_spelling_scan_requests_minimum"], 1)
         self.assertEqual(json.loads(stdout)["identity_scan_requests"], 1)
         NarrativeClient.calls = 0
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", source, "-o", output, "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 5)
+            self.assertEqual(NarrativeClient.calls, 6)
             status, _, stderr = self.run_cli("analyze", source, "-o", self.root / "second.json", "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 5)
+            self.assertEqual(NarrativeClient.calls, 6)
         self.assertEqual(self.run_cli("validate", output, "--ready")[0], 0)
         bundle = self.root / "bundle"
         self.assertEqual(self.run_cli("export", output, "-o", bundle)[0], 0)
@@ -125,7 +172,7 @@ class CLITests(unittest.TestCase):
                     base = batches + 2 if whole_book else 2 * batches + 1
                     self.assertEqual(result["identity_consensus"], consensus)
                     self.assertEqual(result["identity_scan_requests"], scans)
-                    self.assertEqual(result["baseline_model_requests"], base + scans)
+                    self.assertEqual(result["baseline_model_requests"], base + scans + 1)
                     if consensus:
                         self.assertIn("unknown before analysis", result["note"])
                         self.assertIn("series matches", result["note"])
@@ -139,7 +186,7 @@ class CLITests(unittest.TestCase):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config,
                                            "-o", self.root / "without-consensus.json")
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 4)
+        self.assertEqual(NarrativeClient.calls, 5)
 
     def test_plan_counts_configured_cumulative_reconciliation_rounds(self):
         source_path = self.root / "long-source.json"
@@ -165,7 +212,7 @@ class CLITests(unittest.TestCase):
                         base = batches + 1 if whole_book else 2 * batches
                         scans = (1 if whole_book else batches) if consensus else 0
                         self.assertEqual(result["cast_reconciliation_rounds"], rounds)
-                        self.assertEqual(result["baseline_model_requests"], base + rounds + scans)
+                        self.assertEqual(result["baseline_model_requests"], base + rounds + scans + 1)
 
     def test_analyze_passes_file_configured_reconciliation_rounds(self):
         self.config.write_text('[provider]\nmodel = "test-model"\n'
@@ -177,7 +224,7 @@ class CLITests(unittest.TestCase):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config, "-o", output)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 6)
+        self.assertEqual(NarrativeClient.calls, 7)
         self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_rounds"], 2)
         self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_notes"], ["", "Check source context."])
 
@@ -207,7 +254,7 @@ class CLITests(unittest.TestCase):
                         self.assertEqual(result["series_identity_scan_requests_minimum"], expected)
                         self.assertEqual(result["series"]["books"], int(prior_books))
                         base = result["analysis_batches"] + 2 if whole_book else 2 * result["analysis_batches"] + 1
-                        self.assertEqual(result["baseline_model_requests"], base + result["identity_scan_requests"] + expected)
+                        self.assertEqual(result["baseline_model_requests"], base + result["identity_scan_requests"] + expected + 1)
                         if expected:
                             self.assertIn("nonempty discovered cast", result["note"])
                             self.assertIn("empty cast needs no scan", result["note"])
@@ -237,7 +284,7 @@ class CLITests(unittest.TestCase):
         plan = json.loads(stdout)
         self.assertTrue(plan["attribution_review"])
         self.assertEqual(plan["attribution_review_scan_requests"], 1)
-        self.assertEqual(plan["baseline_model_requests"], 5)
+        self.assertEqual(plan["baseline_model_requests"], 6)
         self.assertIn("three jury requests per review batch", plan["note"])
         observed = {}
 

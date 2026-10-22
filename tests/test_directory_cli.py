@@ -1,6 +1,7 @@
 """The normal CLI needs one global config and immutable per-book handoffs."""
 
 import contextlib
+from copy import deepcopy
 import io
 import json
 import os
@@ -26,6 +27,13 @@ class ContinuityClient(FakeClient):
         self.model, self.base_url = model, base_url
         self.identity = {"model": model, "base_url": base_url}
         self.fail_reconciliation = False
+
+    def complete(self, system, payload):
+        if payload.get("mode") == "speech_spelling_scan":
+            self.calls.append((system, deepcopy(payload)))
+            return {"segments": [{"segment_id": row["segment_id"], "edits": []}
+                                 for row in payload["target_segments"]]}
+        return super().complete(system, payload)
 
     def discover(self, payload):
         result = super().discover(payload)

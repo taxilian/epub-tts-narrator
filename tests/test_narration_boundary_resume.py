@@ -90,13 +90,20 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
 
     def run_cli(self, *args, command="analyze"):
         output, error = StringIO(), StringIO()
+        client = FakeClient()
+        client.model, client.base_url = "fixture", "http://offline.invalid/v1"
         with (patch("sys.stdin", StringIO()), contextlib.redirect_stdout(output),
               contextlib.redirect_stderr(error),
               patch("epub_tts_narrator.cli.analyze", side_effect=AssertionError("Must reuse saved analysis")),
-              patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider,
+              patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client) as provider,
               patch("epub_tts_narrator.cli.JevClient") as judge):
             status = main([command, *map(str, args), "--config", str(self.config)])
-        provider.assert_not_called()
+        # Old bundles need the new spelling pass, but known speaker/cast work
+        # must not be repeated. A completed second run makes no model calls.
+        self.assertLessEqual(provider.call_count, 1)
+        self.assertTrue(all(payload.get("mode") == "speech_spelling_scan" for _, payload in client.calls))
+        if command == "resolve-speakers":
+            provider.assert_not_called()
         judge.assert_not_called()
         return status, output.getvalue(), error.getvalue()
 

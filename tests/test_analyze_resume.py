@@ -21,6 +21,7 @@ from epub_tts_narrator.pipeline import CachedRequests, analyze, fingerprint, wri
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
+from epub_tts_narrator.speech_normalization import normalize_document_speech, normalization_pending
 import test_directory_cli as directory_fixtures
 from test_pipeline import FakeClient
 
@@ -37,12 +38,17 @@ class CompletionClient:
 
     def __init__(self, *, fail_after=None, uncertain=False):
         self.calls = []
+        self.normalization_calls = []
         self.fail_after = fail_after
         self.uncertain = uncertain
 
     def complete(self, system, payload):
+        if payload.get("mode") == "speech_spelling_scan":
+            self.normalization_calls.append(deepcopy(payload))
+            return {"segments": [{"segment_id": row["segment_id"], "edits": []}
+                                 for row in payload["target_segments"]]}
         if payload.get("mode") != "speaker_completion":
-            raise AssertionError("A resumed analysis must only request missing speaker decisions")
+            raise AssertionError("A resumed analysis must only complete speakers or prepare spoken spelling")
         if self.fail_after is not None and len(self.calls) >= self.fail_after:
             raise ProviderError("Fixture timeout")
         self.calls.append(deepcopy(payload))
@@ -73,6 +79,8 @@ class TruncatedCompletionClient(CompletionClient):
         self.failed_block = failed_block
 
     def complete(self, system, payload):
+        if payload.get("mode") == "speech_spelling_scan":
+            return super().complete(system, payload)
         if (payload["reviewer_id"] == "speaker_completion_3"
                 and (self.failed_block is None or payload["target_units"][0]["block_id"] == self.failed_block)):
             self.calls.append(deepcopy(payload))
@@ -104,7 +112,7 @@ class AnalyzeResumeTests(unittest.TestCase):
                                '[analysis]\nattribution_workers=1\nrepair_attempts=0\n')
 
     def seed(self, number=1, *, missing=True, missing_all=False, parent=None, prepared=False,
-             advisory=False, completed_jury=False):
+             advisory=False, completed_jury=False, normalized=True):
         epub = directory_fixtures.DirectoryCLITests.make_epub(self, number)
         source = source_from(epub)
         document = analyze(source, FakeClient(), self.root / "seed-cache", identity_consensus=False,
@@ -126,6 +134,9 @@ class AnalyzeResumeTests(unittest.TestCase):
         if completed_jury:
             document = complete_speakers(document, CachedRequests(
                 CompletionClient(uncertain=True), self.root / "completed-jury-cache", repair_attempts=0), workers=1)
+        if normalized:
+            document = normalize_document_speech(document, CachedRequests(
+                CompletionClient(), self.root / "normalization-seed-cache", repair_attempts=0), workers=1)
         publish_directory(document, registry, path, export_bundle, continue_from=parent)
         (path / "voices").mkdir()
         (path / "voices" / "reference.wav").write_bytes(b"Existing voice remains unchanged")
@@ -251,6 +262,46 @@ class AnalyzeResumeTests(unittest.TestCase):
             provider.assert_not_called()
             self.assertIn("no model calls or file changes", output)
             self.assertEqual(self.snapshot(path), before)
+
+    def test_completed_legacy_book_gets_spelling_scan_once_without_reanalysis_or_new_voices(self):
+        _, path, original = self.seed(missing=False, normalized=False)
+        self.assertTrue(normalization_pending(original))
+        client = CompletionClient()
+        status, _, error, provider = self.run_cli(path, client=client)
+        self.assertEqual(status, 0, error)
+        provider.assert_called_once()
+        self.assertFalse(client.calls, "A complete legacy book needs no speaker jury")
+        self.assertTrue(client.normalization_calls)
+        updated = _completed_directory(path)[0]
+        self.assertEqual(updated["source"], original["source"])
+        self.assertEqual(updated["cast"], original["cast"])
+        self.assertFalse(normalization_pending(updated))
+        self.assertEqual((path / "voices/reference.wav").read_bytes(), b"Existing voice remains unchanged")
+        before = self.snapshot(path)
+        status, output, error, provider = self.run_cli(path)
+        self.assertEqual(status, 0, error)
+        provider.assert_not_called()
+        self.assertIn("no model calls or file changes", output)
+        self.assertEqual(self.snapshot(path), before)
+
+    def test_spelling_timeout_preserves_completed_legacy_book_and_can_resume(self):
+        _, path, original = self.seed(missing=False, normalized=False)
+        before = self.snapshot(path)
+        class InterruptedSpellingClient(CompletionClient):
+            def complete(self, system, payload):
+                if payload.get("mode") == "speech_spelling_scan":
+                    raise ProviderError("Fixture spelling timeout")
+                return super().complete(system, payload)
+        status, _, error, _ = self.run_cli(path, client=InterruptedSpellingClient())
+        self.assertEqual(status, 1, error)
+        self.assertIn("Resume cache", error)
+        self.assertEqual(self.snapshot(path), before)
+        retry = CompletionClient()
+        status, _, error, _ = self.run_cli(path, client=retry)
+        self.assertEqual(status, 0, error)
+        self.assertFalse(retry.calls)
+        self.assertTrue(retry.normalization_calls)
+        self.assertEqual(_completed_directory(path)[0]["source"], original["source"])
 
     def test_wrong_epub_cannot_overwrite_existing_book_or_call_model(self):
         _, path, _ = self.seed()
@@ -447,7 +498,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual(saved["source"], original["source"])
         self.assertEqual(saved["cast"], original["cast"])
 
-    def test_source_bound_attribution_edits_apply_without_model_calls(self):
+    def test_source_bound_attribution_edits_skip_speaker_jury_and_refresh_spelling_context(self):
         _, path, document = self.seed()
         row = unassigned_segments(document)[0]
         role = next(item for item in document["cast"]["roles"] if item["kind"] == "dialogue")
@@ -455,9 +506,11 @@ class AnalyzeResumeTests(unittest.TestCase):
         write_json(edits, {"source_fingerprint": fingerprint(document["source"]),
                            "cast_fingerprint": fingerprint(document["cast"]),
                            "assignments": [{"segment_id": row["id"], "role_id": role["id"]}]})
-        status, _, error, provider = self.run_cli(path, "--edits", edits)
+        client = CompletionClient()
+        status, _, error, provider = self.run_cli(path, "--edits", edits, client=client)
         self.assertEqual(status, 0, error)
-        provider.assert_not_called()
+        self.assertFalse(client.calls, "A saved human speaker choice must not run another speaker jury")
+        self.assertTrue(client.normalization_calls)
         updated = _completed_directory(path)[0]
         self.assertFalse(unassigned_segments(updated))
         self.assertEqual(updated["cast"], document["cast"])
