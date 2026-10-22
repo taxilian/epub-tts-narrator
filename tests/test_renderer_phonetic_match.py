@@ -23,7 +23,7 @@ class PhoneticMatchTests(unittest.TestCase):
                 with self.subTest(expected=expected, actual=actual):
                     report = phonetic_equivalence(f"Ask {expected} to wait.", f"Ask {actual} to wait.")
                     self.assertIsNotNone(report)
-                    self.assertEqual(report["method"], "double_metaphone_v1")
+                    self.assertEqual(report["method"], "double_metaphone_v2")
                     self.assertEqual(report["implementation"], "Metaphone")
                     self.assertEqual(report["version"], "0.6")
                     self.assertEqual(len(report["alignment"]), 1)

@@ -16,7 +16,7 @@ import sys
 import unicodedata
 
 
-PHONETIC_MATCH_VERSION = 1
+PHONETIC_MATCH_VERSION = 2
 _MAX_ALIGNMENT_STATES = 20_000
 _ALPHABETIC_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*\Z")
 _PROTECTED = frozenset("""
@@ -49,6 +49,16 @@ there here so such only also even still yet just too very all any both each
 either every few many more most much other same some several enough another
 """.split())
 
+# Coalesced speech can have different phonetic codes when a recognizer spells
+# out the words. These are exact, bounded expansions, not permission to drop
+# function words or invent implied auxiliaries (e.g. "what are you"). Keep
+# them inside the alignment so surrounding names and coverage are checked too.
+_COLLOQUIAL_EXPANSIONS = {
+    "what'cha": ("what", "you"),
+    "whatcha": ("what", "you"),
+    "whatchu": ("what", "you"),
+}
+
 
 def _load_double_metaphone():
     try:
@@ -71,7 +81,8 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
     """Return an audited full-transcript match, or leave it for other checks.
 
     Match a word to one word or to two/three whitespace-separated words using
-    complete Double Metaphone primary/alternate keys. Multiword keys concatenate
+    complete Double Metaphone primary/alternate keys or an explicit colloquial
+    expansion. Multiword keys concatenate
     each word's own encoding, preserving every boundary sound. Numbers,
     negations, short/non-Latin words, punctuation-spanning joins and unmatched
     words cannot be excused by this check. Exact transcripts return ``None``.
@@ -140,6 +151,28 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             # into a neighboring name to make an otherwise bad passage fit.
             yield i + 1, j + 1, None
             return
+        for reverse in (False, True):
+            form = actual[j] if reverse else expected[i]
+            expansion = _COLLOQUIAL_EXPANSIONS.get(form)
+            if expansion is None:
+                continue
+            source, words, spans, start = ((expected_source, expected, expected_spans, i)
+                                          if reverse else
+                                          (actual_source, actual, actual_spans, j))
+            size = len(expansion)
+            if tuple(words[start:start + size]) != expansion:
+                continue
+            if any(not source[spans[index - 1][1]:spans[index][0]].isspace()
+                   for index in range(start + 1, start + size)):
+                continue
+            end_i, end_j = (i + size, j + 1) if reverse else (i + 1, j + size)
+            yield end_i, end_j, {
+                "operation": "colloquial", "rule": "_".join(expansion),
+                "expected_start": i, "expected_end": end_i,
+                "actual_start": j, "actual_end": end_j,
+                "expected": expected[i:end_i], "actual": actual[j:end_j],
+                "expansion": list(expansion),
+            }
         for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
             multi = left_size != right_size
             if multi:
@@ -183,8 +216,11 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             changes.reverse()
             if not changes:
                 return None
-            changed_expected = {word for change in changes for word in change["expected"]}
-            changed_actual = {word for change in changes for word in change["actual"]}
+            # Explicit expansions already preserve the same lexical content;
+            # only uncertain sound matches can disguise moved exact words.
+            phonetic_changes = [change for change in changes if change["operation"] != "colloquial"]
+            changed_expected = {word for change in phonetic_changes for word in change["expected"]}
+            changed_actual = {word for change in phonetic_changes for word in change["actual"]}
             if changed_expected & changed_actual:
                 # An exact word displaced into another changed span is a
                 # reorder, even if all those words happen to sound alike.
