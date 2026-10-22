@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "git-commit": {
+      "source": "hamstudy/git-commit-skill",
+      "sourceType": "github",
+      "skillPath": "skills/git-commit/SKILL.md",
+      "computedHash": "a90fcc06c5a781b70d1e6358def788dd33abb83c72d504efc38a292e9d080eca"
+    },
+    "improve-agentic-prompts": {
+      "source": "hamstudy/agentic-loop-prompt-skill",
+      "sourceType": "github",
+      "skillPath": "improve-agentic-prompts/SKILL.md",
+      "computedHash": "65f8cef7aa1aae3deb0277e1007d4ee7ee9289db63c24e22bb4dec5b61d66fed"
+    },
+    "unit-testing": {
+      "source": "hamstudy/unit-testing-skill",
+      "sourceType": "github",
+      "skillPath": "plugins/unit-testing/skills/unit-testing/SKILL.md",
+      "computedHash": "7da59aa21215a2f6fb18d80506cde91ecddbe27b911a9eff168438b7a2b244b7"
+    }
+  }
+}

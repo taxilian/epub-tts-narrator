@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unit Testing"
+  short_description: "Write resilient behavior-focused unit tests"
+  default_prompt: "Use $unit-testing to add meaningful unit tests for this behavior change."
