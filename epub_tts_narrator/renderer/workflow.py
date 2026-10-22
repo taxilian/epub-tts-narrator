@@ -1264,7 +1264,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
 
-    def take(text, generate, request, *, synthesize_part=None):
+    def take(text, generate, request, *, synthesize_part=None, generate_repaired=None):
         set_phase(notify, "checking saved audio")
         identity = speech_cache.identity(request)
         key = digest(identity)
@@ -1314,7 +1314,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                     try:
                         result = verified_take(text, generate, directory, request,
                                                verifier, config, notify=notify, retry_budget=retry_budget,
-                                               seed_identity=identity, generate_repaired=synthesize_part,
+                                               seed_identity=identity,
+                                               generate_repaired=generate_repaired or synthesize_part,
                                                resolution_episode=resolution_episode)
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
@@ -1338,10 +1339,22 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         turns = [{"text": turn["spoken_text"], "voice": voices[turn["segment"]["voice_id"]],
                   "direction": turn["segment"].get("delivery", {}).get("direction", "")}
                  for turn in chunk["paragraph_turns"]]
+        from .speech_identity import paragraph_rewrite_turn
+        repaired_turn = paragraph_rewrite_turn(
+            request, {voice["asset_hash"]: voice for voice in voices.values()})
+        generate_repaired = None
+        if repaired_turn is not None:
+            def generate_repaired(text, path, seed):
+                from .engines import format_dialogue
+                repaired = [dict(repaired_turn, text=text)]
+                formatted, _, _ = format_dialogue(repaired)
+                metadata = engine.synthesize_dialogue(repaired, path, seed=seed)
+                return {"synthesis_text": formatted, **metadata}
         notify(f"  Chunk {number}/{total}: checking paragraph cache "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
-            lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request)
+            lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request,
+            generate_repaired=generate_repaired)
         acceptance = dict(chunk_id=chunk["chunk_id"], **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance

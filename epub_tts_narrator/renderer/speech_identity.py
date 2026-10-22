@@ -231,6 +231,42 @@ def _check_recorded_text(metadata, expected):
                 raise ValueError("Recorded synthesis text differs from the prepared speech input")
 
 
+def paragraph_rewrite_turn(request, voices_by_asset):
+    """Return one equivalent turn only for an already uniform performance.
+
+    This is a synthesis input, never a replacement source chunk. Exact voice
+    assets and directions must agree, and the normal formatter must prove that
+    collapsing the source turns changes neither the text nor the speaker tags.
+    """
+    if (request.get("kind") != "paragraph_speech"
+            or request.get("engine", {}).get("engine") not in _DRAMA_ENGINES):
+        return None
+    chunk, assets = request.get("chunk", {}), request.get("voice_assets", {})
+    turns = chunk.get("paragraph_turns")
+    if not isinstance(turns, list) or len(turns) < 2 or not isinstance(assets, Mapping):
+        return None
+    prepared, bindings = [], []
+    for turn in turns:
+        if not isinstance(turn, Mapping) or not isinstance(turn.get("segment"), Mapping):
+            return None
+        asset = assets.get(turn["segment"].get("voice_id"))
+        direction = _direction(turn)
+        bindings.append((asset, direction))
+        prepared.append({"text": _text(turn.get("spoken_text"), "text"),
+                         "voice": _voice(asset, voices_by_asset), "direction": direction})
+    if (any(binding != bindings[0] for binding in bindings[1:])
+            or "".join(turn["text"] for turn in prepared) != chunk.get("spoken_text")):
+        return None
+    collapsed = dict(prepared[0], text=chunk["spoken_text"])
+    original, _, original_metadata = format_dialogue(prepared)
+    combined, _, combined_metadata = format_dialogue([collapsed])
+    if (original != combined or original_metadata["rendered_turn_count"] != 1
+            or original_metadata["speaker_count"] != 1
+            or combined_metadata["rendered_turn_count"] != 1):
+        return None
+    return collapsed
+
+
 def _resolved_generation_identity(request, voices_by_asset, metadata):
     """Validate an audited pronunciation input without relabelling its source.
 
@@ -243,7 +279,7 @@ def _resolved_generation_identity(request, voices_by_asset, metadata):
 
     marker = metadata["speech_resolution"]
     chunk = request["chunk"]
-    if (request["kind"] != "speech" or not isinstance(marker, Mapping)
+    if (request["kind"] not in {"speech", "paragraph_speech"} or not isinstance(marker, Mapping)
             or set(marker) != {"version", "original_text", "tts_text", "audit", "failures"}
             or type(marker["version"]) is not int or marker["version"] != 1
             or marker["original_text"] != chunk.get("spoken_text")
@@ -266,6 +302,17 @@ def _resolved_generation_identity(request, voices_by_asset, metadata):
 
     actual_request = deepcopy(dict(request))
     actual_request["chunk"]["spoken_text"] = marker["tts_text"]
+    if request["kind"] == "paragraph_speech":
+        collapsed = paragraph_rewrite_turn(request, voices_by_asset)
+        if collapsed is None:
+            raise ValueError("Paragraph pronunciation input changes its voice or delivery")
+        _, _, expected_metadata = format_dialogue([dict(collapsed, text=marker["tts_text"])])
+        for field in ("speaker_count", "turn_count", "rendered_turn_count", "turn_directions"):
+            if metadata.get(field) != expected_metadata[field]:
+                raise ValueError("Recorded paragraph pronunciation formatting differs from its audited input")
+        turn = deepcopy(chunk["paragraph_turns"][0])
+        turn["spoken_text"] = marker["tts_text"]
+        actual_request["chunk"]["paragraph_turns"] = [turn]
     actual_request.pop("synthesis_identity", None)
     actual_metadata = dict(metadata)
     actual_metadata.pop("speech_resolution")
