@@ -16,7 +16,7 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.chapter_client import (
     ChapterClient, ChapterClientError, PROTOCOL, _cached_artifacts_present,
-    _render_remote_locked, _selection, _voice_assets, _wait_jobs,
+    _read_job, _render_remote_locked, _save_job, _selection, _submit_chapter, _voice_assets, _wait_jobs,
     _validate_metadata, assemble_remote,
 )
 from epub_tts_narrator.renderer.cli import main
@@ -262,6 +262,125 @@ class ChapterOrchestrationTests(unittest.TestCase):
             artifacts.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
         record = {"spec": spec, "selection": {"chapter": spec["chapter"]}, "artifacts": artifacts}
         return folder, record
+
+    def resume_fixture(self, *, changed=True):
+        selection = _selection(self.bundle, self.plan["chapters"][0], self.config,
+                               {key: "a" * 64 for key in self.plan["voice_ids"]})
+        old = {**deepcopy(selection), "renderer_fingerprint": "e" * 64}
+        current = {**deepcopy(selection), "renderer_fingerprint": ("f" if changed else "e") * 64}
+        folder = self.root / "resume"
+        folder.mkdir()
+        saved = {"format": PROTOCOL, "version": 1, "id": digest(old), "selection": selection,
+                 "spec": old, "last_event": 7, "state": "failed"}
+        _save_job(folder, saved)
+        return folder, selection, saved, current
+
+    def test_unchanged_renderer_retries_same_job_without_archiving(self):
+        folder, selection, saved, current = self.resume_fixture(changed=False)
+        client = Mock()
+        client.request.side_effect = [{"id": saved["id"], "state": "failed"},
+                                      {"id": saved["id"], "state": "queued"}]
+        record, status = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+        self.assertEqual(record["id"], saved["id"])
+        self.assertEqual(status["state"], "queued")
+        self.assertEqual(client.request.call_args_list[0].args,
+                         ("POST", "v1/jobs", {"spec": saved["spec"], "idempotency_key": digest(saved["spec"])}))
+        self.assertEqual(client.request.call_args_list[1].args[:2], ("POST", f"v1/jobs/{saved['id']}/retry"))
+        self.assertFalse((folder / "history").exists())
+
+    def test_changed_failed_renderer_preserves_history_and_voice_selection(self):
+        folder, selection, saved, current = self.resume_fixture()
+        (folder / "chapter.m4a").write_bytes(b"previous partial download")
+        client = Mock()
+        client.request.side_effect = [
+            {"id": saved["id"], "state": "failed", "spec_hash": digest(saved["spec"])},
+            {"id": digest(current), "state": "queued", "spec_hash": digest(current)},
+        ]
+        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+        self.assertEqual(record["spec"], current)
+        self.assertEqual(record["selection"], selection)
+        self.assertEqual(record["spec"]["voice_bindings"], saved["spec"]["voice_bindings"])
+        history = folder / record["previous_job"]["archive"]
+        self.assertEqual((history / "chapter.m4a").read_bytes(), b"previous partial download")
+        archived = _read_job(history, selection)
+        self.assertEqual(archived["id"], saved["id"])
+        self.assertEqual(archived["last_event"], 7)
+        self.assertFalse((folder / "chapter.m4a").exists())
+        self.assertEqual(_read_job(folder, selection)["id"], record["id"])
+        self.assertEqual(len(client.request.call_args_list), 2)
+
+    def test_completed_old_renderer_downloads_without_resubmission(self):
+        folder, selection, saved, current = self.resume_fixture()
+        files = fixture_artifacts(saved["spec"])
+        artifacts = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
+                      "url": f"https://objects.example/{name}"} for name, data in files.items()]
+        client = Mock()
+        client.request.return_value = {"id": saved["id"], "state": "completed",
+                                       "spec_hash": digest(saved["spec"]), "artifacts": artifacts}
+        client.download.side_effect = lambda artifact, target: target.write_bytes(files[artifact["name"]])
+        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+        client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
+        self.assertEqual(record["spec"], saved["spec"])
+        self.assertTrue(_cached_artifacts_present(folder, record, require_masters=False))
+        self.assertFalse((folder / "chapter.flac").exists())
+        self.assertFalse((folder / "history").exists())
+
+    def test_unconfirmed_old_job_never_replaces_receipt_or_partial_downloads(self):
+        folder, selection, saved, current = self.resume_fixture()
+        partial = folder / "chapter.m4a"
+        partial.write_bytes(b"retain old audio")
+        receipt = (folder / "job.json").read_bytes()
+        for response in [ChapterClientError("HTTP 400"),
+                         {"id": saved["id"], "state": "unknown", "spec_hash": digest(saved["spec"])},
+                         {"id": saved["id"], "state": "failed", "spec_hash": "0" * 64}]:
+            with self.subTest(response=response):
+                client = Mock()
+                client.request.side_effect = [response]
+                with self.assertRaises(ChapterClientError):
+                    _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+                client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
+                self.assertEqual((folder / "job.json").read_bytes(), receipt)
+                self.assertEqual(partial.read_bytes(), b"retain old audio")
+                self.assertFalse((folder / "history").exists())
+
+    def test_lost_replacement_response_reuses_persisted_spec_before_archiving(self):
+        folder, selection, saved, current = self.resume_fixture()
+        partial = folder / "chapter.m4a"
+        partial.write_bytes(b"retain until acknowledgement")
+        client = Mock()
+        client.request.side_effect = [
+            {"id": saved["id"], "state": "failed", "spec_hash": digest(saved["spec"])},
+            ChapterClientError("lost response"),
+        ]
+        with self.assertRaisesRegex(ChapterClientError, "lost response"):
+            _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+        pending = _read_job(folder, selection)
+        self.assertEqual(pending["id"], saved["id"])
+        self.assertEqual(pending["replacement_spec"], current)
+        self.assertEqual(partial.read_bytes(), b"retain until acknowledgement")
+        self.assertFalse((folder / "history").exists())
+        first_payload = client.request.call_args.args[2]
+        client.request.reset_mock()
+        client.request.side_effect = [{"id": digest(current), "state": "queued", "spec_hash": digest(current)}]
+        record, _ = _submit_chapter(client, folder, selection, pending, current, Mock(), include_masters=False)
+        client.request.assert_called_once_with("POST", "v1/jobs", first_payload)
+        self.assertEqual((folder / record["previous_job"]["archive"] / "chapter.m4a").read_bytes(),
+                         b"retain until acknowledgement")
+
+    def test_active_old_renderer_is_observed_and_migrated_only_after_failure(self):
+        folder, selection, saved, current = self.resume_fixture()
+        client = Mock()
+        old_status = {"id": saved["id"], "spec_hash": digest(saved["spec"])}
+        client.request.side_effect = [{**old_status, "state": "generating"},
+                                      {**old_status, "state": "failed"},
+                                      {"id": digest(current), "state": "queued", "spec_hash": digest(current)}]
+        with patch("epub_tts_narrator.renderer.chapter_client._wait_jobs",
+                   side_effect=ChapterClientError("old worker failed")) as wait:
+            record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+        self.assertEqual(wait.call_args.args[1], {saved["id"]: (folder, saved)})
+        self.assertEqual(record["id"], digest(current))
+        self.assertEqual([call.args[:2] for call in client.request.call_args_list],
+                         [("GET", f"v1/jobs/{saved['id']}"), ("GET", f"v1/jobs/{saved['id']}"), ("POST", "v1/jobs")])
 
     def test_downloaded_metadata_requires_complete_speech_and_exact_source_mapping(self):
         def both(files, change):

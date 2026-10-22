@@ -287,6 +287,97 @@ def _read_job(folder, selection):
     return record
 
 
+def _archive_job(folder, record):
+    """Preserve the previous receipt and partial downloads after replacement ACK."""
+    history = _regular_directory(folder / "history" / (_safe_id(record["id"]) + "-" + digest(record)))
+    receipt = history / "job.json"
+    expected = dict(record, record_sha256=digest(record))
+    if receipt.exists():
+        if read_json(regular_file(receipt)) != expected:
+            raise ChapterClientError("Previous chapter history changed; retained files were not replaced")
+    else:
+        write_json(receipt, expected)
+    for name in ARTIFACT_NAMES:
+        source, destination = folder / name, history / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        regular_file(source)
+        if destination.exists() or destination.is_symlink():
+            if file_hash(regular_file(destination)) != file_hash(source):
+                raise ChapterClientError("Previous chapter artifact history changed; retained files were not replaced")
+            source.unlink()
+        else:
+            os.replace(source, destination)
+    return history.relative_to(folder).as_posix()
+
+
+def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, include_masters):
+    """Resume the same job, or reconcile a terminal job from an older renderer."""
+    spec = current_spec if saved is None else saved["spec"]
+    replacement = saved.get("replacement_spec") if saved is not None else None
+    if saved is not None and replacement is None and spec["renderer_fingerprint"] != current_spec["renderer_fingerprint"]:
+        def observe():
+            status = client.request("GET", f"v1/jobs/{saved['id']}")
+            if status.get("id") != saved["id"] or status.get("spec_hash") != digest(spec):
+                raise ChapterClientError("Service did not confirm the saved chapter's identity; no replacement submitted")
+            return status
+        status = observe()
+        if status.get("state") in {"queued", "generating", "assembling"}:
+            # A live old worker may still finish. Do not duplicate or cancel it.
+            # If it fails during observation, the same command can migrate it.
+            try:
+                _wait_jobs(client, {saved["id"]: (folder, saved)}, notify, include_masters=include_masters)
+            except ChapterClientError:
+                status = observe()
+                if status.get("state") not in {"failed", "cancelled"}:
+                    raise
+            else:
+                return saved, {"id": saved["id"], "state": "completed"}
+        if status.get("state") in {"complete", "completed"}:
+            _completed_download(client, folder, saved, status, include_masters=include_masters)
+            return saved, status
+        if status.get("state") not in {"failed", "cancelled"}:
+            raise ChapterClientError("Saved chapter state is not safely resumable; no replacement submitted")
+        # Save intent before the mutation. A lost response must resubmit this
+        # exact spec/key even if capabilities change again on the next run.
+        saved = deepcopy(saved)
+        saved["state"] = status["state"]
+        saved["replacement_spec"] = deepcopy(current_spec)
+        _save_job(folder, saved)
+        replacement = saved["replacement_spec"]
+    if replacement is not None:
+        if (not isinstance(replacement, dict)
+                or {key: value for key, value in replacement.items() if key != "renderer_fingerprint"} != selection):
+            raise ChapterClientError("Saved replacement specification differs from the chapter selection")
+        spec = replacement
+    validate_spec(spec)
+    status = client.request("POST", "v1/jobs", {"spec": spec, "idempotency_key": digest(spec)})
+    job_id = _safe_id(status.get("id"))
+    if saved is not None and replacement is None and saved["id"] != job_id:
+        raise ChapterClientError("Service did not preserve the saved job's idempotency key")
+    record = saved if saved is not None and replacement is None else {
+        "format": PROTOCOL, "version": 1, "id": job_id,
+        "selection": selection, "spec": spec, "last_event": 0}
+    if replacement is not None:
+        if job_id == saved["id"] or status.get("spec_hash") != digest(spec):
+            raise ChapterClientError("Service did not confirm the replacement chapter's identity; previous files retained")
+        archive = _archive_job(folder, saved)
+        record["previous_job"] = {"id": saved["id"], "archive": archive}
+        record["state"] = status.get("state")
+        _save_job(folder, record)
+        notify(f"Chapter {selection['chapter']['number']}: resumed with the updated renderer; previous job history retained.")
+        if spec["renderer_fingerprint"] != current_spec["renderer_fingerprint"]:
+            # Reconciled an older ambiguous submission. Observe that known job
+            # before considering another replacement; never lose its receipt.
+            return _submit_chapter(client, folder, selection, record, current_spec, notify,
+                                   include_masters=include_masters)
+    if status.get("state") in {"failed", "cancelled"}:
+        status = client.request("POST", f"v1/jobs/{job_id}/retry", {})
+    record["state"] = status.get("state")
+    _save_job(folder, record)
+    return record, status
+
+
 def _event(record, event, notify):
     if not isinstance(event, dict):
         raise ChapterClientError("Invalid chapter progress event")
@@ -682,23 +773,14 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only)
             fingerprint = capabilities.get("renderer_fingerprint")
             if fingerprint is not None:
                 spec["renderer_fingerprint"] = fingerprint
-            if saved is not None:
-                # Pin retries to the original complete spec even after a server restart.
-                spec = saved["spec"]
             validate_spec(spec)
-            status = client.request("POST", "v1/jobs", {"spec": spec, "idempotency_key": digest(spec)})
-            job_id = _safe_id(status.get("id"))
-            if saved is not None and saved["id"] != job_id:
-                raise ChapterClientError("Service did not preserve the saved job's idempotency key")
-            record = saved or {"format": PROTOCOL, "version": 1, "id": job_id,
-                               "selection": selection, "spec": spec, "last_event": 0}
-            if status.get("state") in {"failed", "cancelled"}:
-                status = client.request("POST", f"v1/jobs/{job_id}/retry", {})
-            record["state"] = status.get("state")
-            _save_job(folder, record)
-            pending[job_id] = (folder, record)
+            record, status = _submit_chapter(client, folder, selection, saved, spec, notify,
+                                             include_masters=not chapters_only)
             cached[chapter["id"]] = (folder, record)
-            notify(f"Scheduled chapter {chapter['number']} / {len(bundle['chapters'])}: {job_id}")
+            if _cached_artifacts_present(folder, record, require_masters=not chapters_only):
+                continue
+            pending[record["id"]] = (folder, record)
+            notify(f"Scheduled chapter {chapter['number']} / {len(bundle['chapters'])}: {record['id']}")
         _wait_jobs(client, pending, notify, include_masters=not chapters_only)
     if chapters_only:
         completed = []
