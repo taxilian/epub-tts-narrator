@@ -205,6 +205,30 @@ class RunpodLifecycleTests(unittest.TestCase):
             with redirect_stdout(StringIO()), patch("sys.stderr", new=StringIO()), self.assertRaises(SystemExit):
                 self.args("update", "--stop-delay", delay)
 
+    def test_encode_chapters_only_reports_actual_downloaded_paths(self):
+        deployment = self.deployment()
+        bundle = {"chapters": [{}, {}, {}]}
+        config = {"render": {"output_dir": "/unused/audiobook"}}
+        deployment.prepare_encode = Mock(return_value=(bundle, config))
+        result = {"chapters": [{"number": 1, "audio_file": None},
+                               {"number": 3, "audio_file": "/work/remote-chapters/fixture/chapter.m4a"}]}
+        args = self.args("encode", "book", "--chapters-only")
+        with patch("epub_tts_narrator.renderer.chapter_client.render_remote", return_value=result) as render:
+            self.assertIs(deployment.encode(args), result)
+        render.assert_called_once_with(bundle, config, notify=self.notify, chapters_only=True)
+        self.assertEqual([call.args[0] for call in self.notify.call_args_list], [
+            "Completed chapter audio:", "  Chapter 1 / 3: empty chapter (no speech)",
+            "  Chapter 3 / 3: /work/remote-chapters/fixture/chapter.m4a"])
+
+    def test_encode_audiobook_still_reports_published_output_directory(self):
+        deployment = self.deployment()
+        deployment.prepare_encode = Mock(return_value=({"chapters": [{}]},
+                                                       {"render": {"output_dir": "/audio/book"}}))
+        result = {"status": "complete"}
+        with patch("epub_tts_narrator.renderer.chapter_client.render_remote", return_value=result):
+            self.assertIs(deployment.encode(self.args("encode", "book")), result)
+        self.notify.assert_called_once_with("Completed audiobook: /audio/book")
+
     def test_create_spec_uses_persistent_volume_and_exposes_only_required_ports(self):
         deployment = self.deployment()
         deployment.provision()

@@ -10,12 +10,58 @@ registered as FLAC once, finished chapters are M4A/AAC, and lossless chapter
 masters are FLAC. JSON sidecars preserve source links and timing. No WAV download
 or upload route exists.
 
-This implementation has local integration tests with real FFmpeg and test-only
-speech/recognition fixtures. It has **not** been benchmarked or auditioned on
-Runpod/NVIDIA hardware. Deployment and GPU billing are separate from installing
-this code.
+Local integration tests use real FFmpeg and test-only speech/recognition
+fixtures. A short deployment test exercises the live synthesis, verification,
+and storage configuration; it does not establish full-book throughput or a
+comparison between GPU models. Installing this package alone does not allocate
+compute; the managed Runpod bootstrap command creates paid resources.
 
-## Client setup
+## Managed Runpod client
+
+Use the [Runpod deployment setup](deploy/runpod/README.md) with your normal
+global configuration and a private `runpod.local.toml` override. The managed
+commands supply the service URL and application bearer key automatically;
+you do not need the manual `[remote_chapters]` configuration below.
+
+```sh
+# Initial deployment: install committed code, dependencies and models, test, stop.
+.venv-renderer/bin/audiobook-render runpod bootstrap --source local
+
+# Deploy subsequent committed changes, update dependencies/configuration, test, stop.
+.venv-renderer/bin/audiobook-render runpod update --source local
+
+# Render a selected manifest chapter into a separate remote cache, then stop.
+.venv-renderer/bin/audiobook-render runpod encode books/book-01 --chapters 3 \
+  --chapters-only --work-dir books/book-01/render-work-remote
+
+# Render missing chapters and package the complete book with its EPUB cover.
+.venv-renderer/bin/audiobook-render runpod encode books/book-01 \
+  --work-dir books/book-01/render-work-remote -o audio/book-01 \
+  --epub books/book-01.epub
+```
+
+Bootstrap and Update default to `--source github`, using the configured
+repository and ref. Use `--source local` for committed changes that have not
+been published there: it transfers committed HEAD, excluding uncommitted files
+and private configuration. Encode uses the installed revision; run Update after
+committing a code change. Chapter numbers refer to the analysis manifest and
+can include a cover, title page, or other front matter before the first story
+chapter. Keep the same work directory when resuming.
+
+Each managed operation stops compute on completion, error, or interruption.
+`--stop-delay 300` adds a fixed five-minute grace period with the client still
+attached; Ctrl-C ends it immediately. The deployment lock remains held during
+that delay, so it is not an idle window for starting a second CLI operation.
+The server's separate `[runpod].idle_timeout_seconds` setting defaults to 600
+seconds and is an additional fallback when no work is pending.
+
+Stopping releases the GPU. Restarting depends on capacity on the Pod's machine,
+and every new inference process must load the model into GPU memory again.
+The persistent network volume retains model files, environments, registered
+voices, and accepted checkpoints, so unchanged models are not downloaded again.
+Storage remains billed while compute is stopped.
+
+## Manual client setup
 
 Install the optional transport dependency into the existing environment:
 
@@ -41,9 +87,9 @@ variables. There is no book-specific or series-specific server configuration.
 Use the existing render commands:
 
 ```sh
-.venv-renderer/bin/audiobook-render render dist-runs/soulship-fresh/book-01 --chapters 6 --chapters-only
-.venv-renderer/bin/audiobook-render render dist-runs/soulship-fresh/book-01 --chapters 6-8 --chapters-only
-.venv-renderer/bin/audiobook-render assemble dist-runs/soulship-fresh/book-01
+.venv-renderer/bin/audiobook-render render books/book-01 --chapters 6 --chapters-only
+.venv-renderer/bin/audiobook-render render books/book-01 --chapters 6-8 --chapters-only
+.venv-renderer/bin/audiobook-render assemble books/book-01
 ```
 
 `assemble` requires all selected chapters; use `--chapters 6-8` to package just
@@ -53,9 +99,12 @@ ASR model for remote rendering. Create and audition missing voices with `cast`
 before submitting remote jobs.
 
 The CLI prints the exact path for each completed M4A. Downloaded files live in
-`BOOK/render-work/remote-chapters/<selection-hash>/`. The normal audiobook output
-directory still holds the final M4B, chapter files, cover, and book-wide sync
-JSON. Original voice samples and inherited book/series selections are untouched.
+`WORK/remote-chapters/<selection-hash>/chapter.m4a`, where `WORK` is `--work-dir`
+or its default `BOOK/render-work`. With `--chapters-only`, `-o` does not receive
+chapter copies. When packaging an M4B, `-o` (default `BOOK/audiobook`) receives
+`book.m4b`, `chapters/chapter-NNNN.m4a`, and book-wide sync JSON. Supply `--epub`
+with the analyzed EPUB to include its cover when no EPUB path is configured.
+Original voice samples and inherited book/series selections are untouched.
 
 `--chapters-only` downloads M4A and JSON. FLAC masters remain on the server until
 final book assembly needs them. M4B packaging decodes those lossless masters
@@ -213,4 +262,6 @@ the failure. Simply exiting the Python process is not used to stop billing.
 Persistent storage continues to cost money after GPU compute stops. This is an
 application-level idle monitor: a crashed process cannot execute its shutdown
 callback, so an independent provider watchdog is still advisable for unattended
-deployments. No paid resources are provisioned by these commands.
+deployments. The manual `serve-chapters` command does not provision resources;
+managed `runpod bootstrap` does, and the other lifecycle operations can start
+existing paid compute.

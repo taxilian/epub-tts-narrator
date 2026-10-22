@@ -516,7 +516,13 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         bundle, config = self.prepare_encode(args)
         from .chapter_client import render_remote
         result = render_remote(bundle, config, notify=self.notify, chapters_only=args.chapters_only)
-        self.notify(f"Completed {'chapters' if args.chapters_only else 'audiobook'}: {config['render']['output_dir']}")
+        if args.chapters_only:
+            self.notify("Completed chapter audio:")
+            for chapter in result["chapters"]:
+                location = chapter.get("audio_file") or "empty chapter (no speech)"
+                self.notify(f"  Chapter {chapter['number']} / {len(bundle['chapters'])}: {location}")
+        else:
+            self.notify(f"Completed audiobook: {config['render']['output_dir']}")
         return result
 
     def prepare_encode(self, args):
