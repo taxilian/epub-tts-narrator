@@ -174,12 +174,57 @@ class ParagraphWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(self.engine.dialogue_calls, [])
         self.assertEqual([call["text"] for call in self.engine.speech_calls],
-                         [member["spoken_text"] for member in members])
+                         ['Wow, this is amazing",', 'she said,', 'Why should we do that again?'])
         self.assertEqual([call["voice_hash"] for call in self.engine.speech_calls],
                          [digest("voice_lena"), digest("voice_mara"), digest("voice_lena")])
         self.assertEqual(len(accepted), 3)
         self.assertEqual([clip["source_ranges"] for clip in clips],
                          [member["source_ranges"] for member in members])
+
+    def test_speech_trims_only_edges_and_retains_source_and_verification_records(self):
+        from test_renderer_paragraphs import passages
+        source = ' \t“ ‘He said, "Don’t go," and waited.’ ”\n'
+        members = passages([source], voices=["voice_lena"], offset=17)
+        original = deepcopy(members)
+        chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=members)
+        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": "lena"}}
+
+        clips, accepted = _render_chapter_chunks(
+            chapter, voices, self.engine, self.engine.identity, self.verifier,
+            self.config, self.root / "work", notify=self.messages.append,
+        )
+
+        self.assertEqual(self.engine.speech_calls[0]["text"], 'He said, "Don’t go," and waited.')
+        self.assertEqual(members, original)
+        self.assertEqual(clips[0]["source_ranges"], [{"start": 17, "end": 17 + len(source)}])
+        self.assertEqual(clips[0]["spoken_text"], source)
+        record = next(iter(self.accepted_clips().values()))
+        self.assertEqual(record["request"]["chunk"], original[0])
+        self.assertEqual(record["report"]["expected_text"], source)
+        self.assertEqual(record["engine_metadata"]["synthesis_text"], self.engine.speech_calls[0]["text"])
+        self.assertTrue(accepted[0]["report"]["passed"])
+
+    def test_old_accepted_quoted_speech_is_reused_after_edge_trimming_changes(self):
+        from test_renderer_paragraphs import passages
+        members = passages([' “Keep the lantern burning.” '], voices=["voice_lena"])
+        chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=members)
+        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": "lena"}}
+
+        # Reproduce a valid take generated before edge trimming was introduced.
+        with patch("epub_tts_narrator.renderer.workflow.trim_speech_text", side_effect=lambda text: text):
+            first = _render_chapter_chunks(
+                chapter, voices, self.engine, self.engine.identity, self.verifier,
+                self.config, self.root / "work", notify=self.messages.append,
+            )
+        before = self.accepted_clips()
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("regenerated accepted speech")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("reverified accepted speech")):
+            resumed = _render_chapter_chunks(
+                chapter, voices, self.engine, self.engine.identity, self.verifier,
+                self.config, self.root / "work", notify=self.messages.append,
+            )
+        self.assertEqual(resumed, first)
+        self.assertEqual(self.accepted_clips(), before)
 
     def test_migration_replaces_only_mixed_cached_paragraph_and_rebuilds_chapter(self):
         def legacy_groups(*args, **kwargs):

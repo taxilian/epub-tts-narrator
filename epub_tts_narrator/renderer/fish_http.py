@@ -18,6 +18,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .engines import EngineError, _directed_text, _seed, _text, format_dialogue
 from .diagnostics import safe_error_text
+from .speech_text import trim_speech_text
 
 
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
@@ -56,6 +57,36 @@ def validate_wire_text(text: str, speakers: set[int | None]) -> None:
             raise EngineError("whisper controls must be paired and not nested")
     if depth:
         raise EngineError("whisper controls must be paired")
+
+
+def trim_wire_text(text: str, speakers: set[int | None]) -> str:
+    """Trim validated Fish turn bodies without removing speaker/delivery tags."""
+    validate_wire_text(text, speakers)
+
+    def body(value):
+        value = trim_speech_text(value)
+        value = re.sub(r"<whisper>(.*?)</whisper>",
+                       lambda match: "<whisper>" + trim_speech_text(match.group(1)) + "</whisper>",
+                       value, flags=re.S)
+        prefix = re.match(r"(?:\[(?:nervous|sighs|laughs)\]\s*)+", value)
+        if prefix:
+            value = prefix.group().rstrip() + " " + trim_speech_text(value[prefix.end():])
+        return value
+
+    parts, previous, tag = [], 0, ""
+    for match in SPEAKER_TAG.finditer(text):
+        target = body(text[previous:match.start()])
+        if target or tag:
+            _text(SUPPORTED_CONTROLS.sub("", target), "text")
+            parts.append((tag + " " + target).strip())
+        tag, previous = match.group(), match.end()
+    target = body(text[previous:])
+    if target or tag:
+        _text(SUPPORTED_CONTROLS.sub("", target), "text")
+        parts.append((tag + " " + target).strip())
+    result = "\n".join(parts)
+    validate_wire_text(result, speakers)
+    return result
 
 
 def read_reference(voice: Mapping[str, Any]) -> tuple[bytes, str]:
@@ -177,10 +208,11 @@ class FishHTTPEngine:
         raise EngineError("Fish HTTP rendering uses saved reference voices; create voices with the cast tool")
 
     def synthesize(self, text, voice, output_path, *, seed, direction=""):
-        _text(text, "text")
+        text = _text(trim_speech_text(_text(text, "text")), "text")
         directed, metadata = _directed_text(text, direction)
         blob, transcript = read_reference(voice)
         return {**self._request(directed, [{"audio": blob, "text": transcript}], output_path, seed),
+                "synthesis_text": directed,
                 **metadata}
 
     def synthesize_dialogue(self, turns, output_path, *, seed):
@@ -191,7 +223,8 @@ class FishHTTPEngine:
         for index, voice in enumerate(voices):
             blob, transcript = read_reference(voice)
             references.append({"audio": blob, "text": f"<|speaker:{index}|> {transcript}"})
-        return {**self._request(text, references, output_path, seed), **metadata}
+        return {**self._request(text, references, output_path, seed),
+                "synthesis_text": text, **metadata}
 
     def _request(self, text, references, output_path, seed):
         _seed(seed)

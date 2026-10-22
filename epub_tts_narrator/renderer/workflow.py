@@ -22,6 +22,7 @@ from .diagnostics import configured_secrets, safe_error_text
 from .quality import validation_key as make_validation_key, validate_audio
 from .progress import ChapterProgress, format_duration, set_phase
 from .retry_budget import SpeechRetryBudget, generation_attempts
+from .speech_text import trim_speech_text
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
 
@@ -1024,6 +1025,9 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         return dict(chunk, wav_path=str(wav)), acceptance
 
     direction = chunk["segment"].get("delivery", {}).get("direction", "")
+    # Formatting at the edges is not speech. Keep the original chunk for
+    # verification, request/cache identity, and source synchronization.
+    synthesis_text = trim_speech_text(chunk["spoken_text"])
     speakers = chunk_speakers(chunk)
     lanes = []
     for lane_number, speaker in enumerate(speakers, 1):
@@ -1035,9 +1039,11 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
         notify(f"  Chunk {number}/{total}{lane_label}: "
                f"{'checking saved take' if cached else 'preparing speech'} ({speaker['voice_id']})")
-        wav, accepted = take(chunk["spoken_text"],
-            lambda path, seed, v=voice: engine.synthesize(
-                chunk["spoken_text"], v, path, seed=seed, direction=direction), request)
+        def generate(path, seed, v=voice):
+            metadata = engine.synthesize(synthesis_text, v, path, seed=seed, direction=direction)
+            return {"synthesis_text": synthesis_text, **metadata}
+
+        wav, accepted = take(chunk["spoken_text"], generate, request)
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:

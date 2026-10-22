@@ -264,6 +264,18 @@ class RendererBundleTests(unittest.TestCase):
                 self.assertTrue(plan["errors"] or any(not chunk["silent_control"] for chunk in chunks),
                                 "Meaningful text must be spoken or explicitly blocked, never dropped")
 
+    def test_quote_only_passages_keep_source_positions_without_requesting_speech(self):
+        for text in (' ” ', '\t"\n', ' “ ‘ ’ ” ', '« »'):
+            with self.subTest(text=text):
+                bundle = load_bundle(self.export(book_with_text(text)))
+                plan = make_plan(bundle, self.config)
+                chunks = plan["chapters"][0]["chunks"]
+                self.assertEqual(plan["errors"], [])
+                self.assertEqual(plan["voice_ids"], [])
+                self.assertTrue(all(chunk["silent_control"] for chunk in chunks))
+                self.assertEqual(''.join(chunk["spoken_text"] for chunk in chunks), text)
+                self.assertEqual(chunks[0]["source_ranges"], [{"start": 0, "end": len(text)}])
+
     def test_checksum_and_symlink_fail_closed_before_reading_book(self):
         target = self.export()
         (target / "cast.json").write_text("{}")

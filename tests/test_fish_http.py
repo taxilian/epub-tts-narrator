@@ -21,6 +21,8 @@ import wave
 
 from epub_tts_narrator.renderer.engines import EngineError
 from epub_tts_narrator.renderer.fish_http import FishHTTPEngine, FishHTTPError
+from epub_tts_narrator.renderer.fish_http import trim_wire_text
+from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.server import make_server, serve
 
 
@@ -70,6 +72,31 @@ class FakeEngine:
 
     def warmup(self):
         self.warmup_thread = threading.get_ident()
+
+
+class SpeechTargetTests(unittest.TestCase):
+    def test_alternating_wrapping_marks_and_unicode_whitespace_leave_interior_exact(self):
+        interior = 'Don\'t  call the children’s room "empty"…!'
+        for left, right in (("'", "'"), ('"', '"'), ("‘", "’"), ("“", "”"),
+                            ("«", "»"), ("‹", "›"), ("„", "“")):
+            with self.subTest(left=left, right=right):
+                source = f"\u2003{left} \t{left}{interior}{right}\n {right}\u00a0"
+                self.assertEqual(trim_speech_text(source), interior)
+                self.assertEqual(trim_speech_text(trim_speech_text(source)), interior)
+        self.assertEqual(trim_speech_text(' ” \t\n\u2003« '), "")
+
+    def test_each_wire_target_is_trimmed_inside_tags_and_prefix_controls(self):
+        source = ('<|speaker:0|> [nervous] “ Hello. ”\n'
+                  '<|speaker:1|> “ <whisper> « Stay here. » </whisper> ”')
+        expected = ('<|speaker:0|> [nervous] Hello.\n'
+                    '<|speaker:1|> <whisper>Stay here.</whisper>')
+        self.assertEqual(trim_wire_text(source, {0, 1}), expected)
+
+    def test_empty_or_invalid_wire_turns_are_rejected_even_with_valid_neighbors(self):
+        for invalid in ('<|speaker:1|> “”', '<|speaker:1|> <whisper> “” </whisper>',
+                        '<|speaker:1|> [nervous] “”', '<|speaker:1|> [unknown] Hi.'):
+            with self.subTest(invalid=invalid), self.assertRaises(EngineError):
+                trim_wire_text('<|speaker:0|> Valid words.\n' + invalid, {0, 1})
 
 
 @unittest.skipUnless(importlib.util.find_spec("msgpack"), "requires msgpack")
@@ -184,6 +211,14 @@ class NativeDrama3TransportTests(unittest.TestCase):
         self.assertEqual((self.root / "native.wav").read_bytes(), wav_bytes())
         self.assertEqual(client.identity["protocol"], "fish-native-drama3-wav-v1")
         self.assertEqual(client.identity["request_options"]["fixed_top_k"], 30)
+
+    def test_http_target_quotes_are_trimmed_before_controls_but_reference_is_unchanged(self):
+        voice = {**self.voice, "reference_text": ' “Saved reference.” '}
+        self.client().synthesize(' \u2003“ Don\'t call it "easy". ” ', voice,
+                                 self.root / "trimmed.wav", seed=3, direction="whisper")
+        payload, _ = self.payload()
+        self.assertEqual(payload["text"], '<whisper>Don\'t call it "easy".</whisper>')
+        self.assertEqual(payload["references"][0]["text"], ' “Saved reference.” ')
 
     def test_native_dialogue_keeps_individual_reference_speaker_bindings(self):
         client = self.client(protocol="fish_native_drama3")

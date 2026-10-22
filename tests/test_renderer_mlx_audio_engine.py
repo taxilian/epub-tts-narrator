@@ -3,6 +3,7 @@
 from copy import deepcopy
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -149,6 +150,46 @@ class MLXAudioEngineTests(unittest.TestCase):
         self.assertEqual(self.written[0]["subtype"], "FLOAT")
         self.assertEqual(list(self.root.glob(".take-*")), [])
 
+    def test_wrapping_quotes_cannot_form_a_second_runtime_generation_chunk(self):
+        try:
+            runtime = importlib.metadata.distribution("mlx-audio")
+        except importlib.metadata.PackageNotFoundError:
+            self.skipTest("requires installed MLX-Audio chunker; no model or GPU needed")
+        path = runtime.locate_file("mlx_audio/tts/models/fish_drama3/chunking.py")
+        if not path.is_file():
+            self.skipTest("installed MLX-Audio has no Drama 3 chunker")
+        spec = importlib.util.spec_from_file_location("runtime_chunking_for_test", path)
+        chunker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(chunker)
+        # Reproduce the real 299-byte first chunk plus orphan three-byte quote
+        # with synthetic text instead of embedding a passage from the book.
+        source = '“' + ("The travelers planned their journey. " * 9)[:292] + '….” '
+        self.assertEqual(len(source.encode("utf-8")), 303)
+        self.split.side_effect = chunker.split_text
+
+        def generate(**request):
+            chunks = chunker.split_text(request["text"])
+            for index, chunk in enumerate(chunks):
+                self.assertTrue(any(char.isalnum() for char in chunk), repr(chunk))
+                yield self.segment(index=index, final=index == len(chunks) - 1)
+
+        self.model.generate.side_effect = generate
+        result = self.engine.synthesize(source, self.voice, self.output, seed=1)
+        self.assertEqual(result["chunk_count"], 1)
+        self.assertEqual(self.model.generate.call_args.kwargs["text"], source[1:-2])
+        self.assertEqual(result["synthesis_text"], source[1:-2])
+
+    def test_synthesis_strips_only_target_edges_and_retains_reference_text(self):
+        self.voice["reference_text"] = ' “Saved reference.” '
+        before = deepcopy(self.voice)
+        self.generate(self.segment())
+        self.engine.synthesize(' « Don\'t say "never". » ', self.voice, self.output,
+                               seed=1, direction="whispering")
+        request = self.model.generate.call_args.kwargs
+        self.assertEqual(request["text"], '<whisper>Don\'t say "never".</whisper>')
+        self.assertEqual(request["ref_text"], [' “Saved reference.” '])
+        self.assertEqual(self.voice, before)
+
     def test_all_text_chunks_are_concatenated_in_order_before_publication(self):
         self.generate(self.segment(audio=[0.1] * 8, final=False),
                       self.segment(audio=[0.2] * 6, index=1), chunks=2)
@@ -173,7 +214,7 @@ class MLXAudioEngineTests(unittest.TestCase):
         result = self.engine.synthesize_dialogue(turns, self.output, seed=9)
 
         request = self.model.generate.call_args.kwargs
-        self.assertEqual(request["text"], "<|speaker:0|> He looked back. \n"
+        self.assertEqual(request["text"], "<|speaker:0|> He looked back.\n"
                          "<|speaker:1|> <whisper>Stay here.</whisper>\n"
                          "<|speaker:0|> Then he left.")
         self.assertEqual(request["ref_text"], ["<|speaker:0|> The narrator reference.",

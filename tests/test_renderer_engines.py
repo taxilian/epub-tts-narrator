@@ -119,6 +119,44 @@ class RendererEngineTests(unittest.TestCase):
         self.assertTrue(kwargs["single_chunk"])
         self.assertNotIn("accept", kwargs)
 
+    def test_synthesis_trims_wrapping_quotes_before_applying_delivery(self):
+        source = '\u2003“ \' Hello, don\'t call it "easy". \' ”\n'
+        expected = '<whisper>Hello, don\'t call it "easy".</whisper>'
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value="saved-voice"):
+            result = self.engine.synthesize(source, {}, self.output, seed=1, direction="whisper")
+        self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(result["synthesis_text"], expected)
+
+    def test_quote_only_synthesis_is_rejected_before_loading_reference(self):
+        with patch.object(self.engine, "_reference") as reference:
+            with self.assertRaisesRegex(EngineError, "nonempty"):
+                self.engine.synthesize(' \u2003“ \' ”\n', {}, self.output, seed=1)
+        reference.assert_not_called()
+        self.model.generate.assert_not_called()
+
+    def test_dialogue_trims_each_turn_without_losing_word_boundaries(self):
+        voice = self.dialogue_voice("narrator")
+        turns = [{"text": text, "voice": voice} for text in (
+            ' “He look', 'ed ', ' “back.” ', ' "Don\'t move." ',
+        )]
+        before = deepcopy(turns)
+        expected = '<|speaker:0|> He looked back. Don\'t move.'
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value=FakeReference(voice["reference_text"], object())):
+            self.engine.synthesize_dialogue(turns, self.output, seed=1)
+        self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(turns, before)
+
+    def test_fish_wire_trims_each_target_body_inside_delivery_controls(self):
+        voice = {**self.dialogue_voice("narrator"), "speaker": 0}
+        text = '<|speaker:0|> “ Hello. ”\n<|speaker:0|> <whisper> « Stay here. » </whisper>'
+        expected = '<|speaker:0|> Hello.\n<|speaker:0|> <whisper>Stay here.</whisper>'
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value=FakeReference(voice["reference_text"], object())):
+            self.engine.synthesize_fish(text, [voice], self.output, seed=1)
+        self.assertEqual(self.model.generate.call_args.args, (expected,))
+
     def dialogue_voice(self, name):
         return {
             "kind": "reference", "voice_id": name, "asset_hash": name,
@@ -190,7 +228,7 @@ class RendererEngineTests(unittest.TestCase):
         load.assert_not_called()
         self.model.generate.assert_not_called()
 
-    def test_dialogue_combines_adjacent_same_voice_and_applied_direction_without_text_changes(self):
+    def test_dialogue_combines_adjacent_same_voice_and_applied_direction_preserving_words(self):
         narrator = self.dialogue_voice("narrator")
         character = self.dialogue_voice("character")
         turns = [
@@ -201,7 +239,7 @@ class RendererEngineTests(unittest.TestCase):
             {"text": "here.", "voice": character, "direction": "whispering"},
         ]
         expected = (
-            "<|speaker:0|> He looked back. \n"
+            "<|speaker:0|> He looked back.\n"
             "<|speaker:1|> Hello.\n"
             "<|speaker:1|> <whisper>Stay here.</whisper>"
         )

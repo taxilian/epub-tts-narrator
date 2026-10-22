@@ -26,7 +26,8 @@ from .engines import (
     EngineError, _checkpoint_fingerprints, _directed_text, _seed, _text,
     format_dialogue,
 )
-from .fish_http import read_reference, validate_wire_text
+from .fish_http import read_reference, trim_wire_text
+from .speech_text import trim_speech_text
 
 
 class MLXAudioDrama3Engine:
@@ -173,7 +174,8 @@ class MLXAudioDrama3Engine:
         seed: int, direction: str = "",
     ) -> dict[str, Any]:
         _seed(seed)
-        engine_text, delivery = _directed_text(_text(text, "text"), direction)
+        text = _text(trim_speech_text(_text(text, "text")), "text")
+        engine_text, delivery = _directed_text(text, direction)
         return {
             **self._generate_audio(engine_text, [voice], [None], output_path, seed=seed),
             **delivery,
@@ -198,7 +200,7 @@ class MLXAudioDrama3Engine:
         speakers = [voice.get("speaker") for voice in voices]
         if any(s is not None and (type(s) is not int or not 0 <= s <= 15) for s in speakers):
             raise EngineError("Reference speaker IDs must be integers from 0 through 15")
-        validate_wire_text(text, set(speakers))
+        text = trim_wire_text(text, set(speakers))
         return self._generate_audio(text, voices, speakers, output_path, seed=seed)
 
     def _generate_audio(
@@ -306,4 +308,5 @@ class MLXAudioDrama3Engine:
             "sample_rate": rate, "sample_count": len(audio),
             "duration_seconds": len(audio) / rate, "seed": seed,
             "chunk_count": len(chunks), "token_counts": token_counts,
+            "synthesis_text": text,
         }

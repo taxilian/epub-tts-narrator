@@ -27,6 +27,7 @@ from .drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION,
     generate_scene_voice, validate_scene_fields,
 )
+from .speech_text import trim_speech_text
 
 
 DRAMA3_RUNTIME_VERSION = "0.1.1+epub.1"
@@ -387,7 +388,7 @@ class Drama3MLXEngine:
         self, text: str, output_path: Path, *, seed: int,
         references: list[Any], direction: str = "",
     ) -> dict[str, Any]:
-        text = _text(text, "text")
+        text = _text(trim_speech_text(_text(text, "text")), "text")
         _seed(seed)
         engine_text, delivery = _directed_text(text, direction)
         return {
@@ -421,6 +422,7 @@ class Drama3MLXEngine:
         return {
             **metadata,
             "seed": seed,
+            "synthesis_text": engine_text,
         }
 
     def _save_segment(self, segment: Any, model: Any, expected_text: str,
@@ -507,7 +509,7 @@ class Drama3MLXEngine:
         self, text: str, voice: dict[str, Any], output_path: Path, *,
         seed: int, direction: str = "",
     ) -> dict[str, Any]:
-        _text(text, "text")
+        text = _text(trim_speech_text(_text(text, "text")), "text")
         _seed(seed)
         return self._generate(
             text, output_path, seed=seed, references=[self._reference(voice)],
@@ -549,9 +551,9 @@ class Drama3MLXEngine:
         Only the HTTP adapter uses this entry point. It validates the limited
         control vocabulary before allowing request text into the model.
         """
-        from .fish_http import validate_wire_text
+        from .fish_http import trim_wire_text
         _seed(seed)
-        validate_wire_text(text, {voice.get("speaker") for voice in voices})
+        text = trim_wire_text(text, {voice.get("speaker") for voice in voices})
         references = []
         for voice in voices:
             reference = self._reference(voice)
@@ -575,7 +577,11 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
     for index, turn in enumerate(turns):
         if not isinstance(turn, dict) or not isinstance(turn.get("voice"), dict):
             raise EngineError(f"dialogue turn {index + 1} must contain a saved voice")
-        text = _text(turn.get("text"), f"dialogue turn {index + 1} text")
+        label = f"dialogue turn {index + 1} text"
+        source_text = _text(turn.get("text"), label)
+        text = _text(trim_speech_text(source_text), label)
+        start = source_text.index(text)
+        leading, trailing = source_text[:start], source_text[start + len(text):]
         _, delivery = _directed_text(text, turn.get("direction", ""))
         voice = turn["voice"]
         if voice.get("kind") != "reference":
@@ -607,14 +613,21 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
         turn_directions.append({"speaker_id": speaker_id, **delivery})
         # Segment boundaries often separate narration from quotations by
         # the same character. Preserve a single natural performance unless
-        # the actual voice or supported delivery control changes. Append
-        # source text exactly, without inventing or stripping whitespace.
+        # the actual voice or supported delivery control changes. Retain word
+        # boundaries removed by edge trimming, while actual adjoining fragments
+        # ("look" + "ed") remain one word.
         if (rendered_turns
                 and rendered_turns[-1]["speaker_id"] == speaker_id
                 and rendered_turns[-1]["applied_control"] == delivery["applied_control"]):
-            rendered_turns[-1]["text"] += text
+            previous = rendered_turns[-1]
+            boundary = previous["trailing_boundary"] + leading
+            separate = (any(char.isspace() for char in boundary)
+                        or bool(boundary and previous["text"][-1].isalnum() and text[0].isalnum()))
+            previous["text"] += (" " if separate else "") + text
+            previous["trailing_boundary"] = trailing
         else:
-            rendered_turns.append({"speaker_id": speaker_id, "text": text, **delivery})
+            rendered_turns.append({"speaker_id": speaker_id, "text": text,
+                                   "trailing_boundary": trailing, **delivery})
     lines = []
     for turn in rendered_turns:
         # Adjacent literal fragments must not form a control tag when
