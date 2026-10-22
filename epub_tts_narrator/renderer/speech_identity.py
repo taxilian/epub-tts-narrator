@@ -214,7 +214,8 @@ def _direction(chunk):
     delivery = segment.get("delivery", {})
     if not isinstance(delivery, Mapping) or not isinstance(delivery.get("direction", ""), str):
         raise ValueError("Speech delivery must contain a direction string")
-    return delivery.get("direction", "")
+    from ..spoken_text import effective_delivery
+    return effective_delivery(segment)
 
 
 def _check_recorded_text(metadata, expected):
@@ -358,6 +359,11 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
             # Local workflow records the trimmed target before controls; HTTP
             # records the final directed text. Both describe this exact input.
             _check_recorded_text(engine_metadata, (text, directed))
+            if (engine_metadata is not None and delivery["applied_control"] == "style_prefix"
+                    and engine_metadata.get("synthesis_text") != directed
+                    and not (engine_metadata.get("applied_control") == "style_prefix"
+                             and engine_metadata.get("direction") == direction)):
+                raise ValueError("Saved speech does not confirm the requested delivery style")
             if (engine_metadata is not None and "applied_control" in engine_metadata
                     and engine_metadata["applied_control"] != delivery["applied_control"]):
                 raise ValueError("Recorded delivery differs from the prepared speech input")

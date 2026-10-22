@@ -367,6 +367,9 @@ def _slice(item, start, end):
         # Bracket metadata is derived again after all source spans are assembled.
         result.pop("spoken_text", None)
         result.pop("performance", None)
+        # Spelling edits use offsets relative to the unsplit segment. A
+        # subsequent normalization pass must review them against the new span.
+        result.pop("speech_normalization", None)
     return result
 
 

@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import wave
 
+from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import EngineError
 from epub_tts_narrator.renderer.fish_http import FishHTTPEngine, FishHTTPError
 from epub_tts_narrator.renderer.fish_http import trim_wire_text
@@ -103,9 +104,16 @@ class SpeechTargetTests(unittest.TestCase):
 
     def test_empty_or_invalid_wire_turns_are_rejected_even_with_valid_neighbors(self):
         for invalid in ('<|speaker:1|> “”', '<|speaker:1|> <whisper> “” </whisper>',
-                        '<|speaker:1|> [nervous] “”', '<|speaker:1|> [unknown] Hi.'):
+                        '<|speaker:1|> [nervous] “”', '<|speaker:1|> [nested [style]] Hi.',
+                        '<|speaker:1|> [two\nlines] Hi.',
+                        '<|speaker:1|> [' + 'a' * (MAX_DELIVERY_CHARACTERS + 1) + '] Hi.'):
             with self.subTest(invalid=invalid), self.assertRaises(EngineError):
                 trim_wire_text('<|speaker:0|> Valid words.\n' + invalid, {0, 1})
+
+    def test_style_prefix_survives_transport_while_quotes_are_trimmed(self):
+        source = '<|speaker:0|> [sibilant with prolonged s sounds] “ This is stupid. ”'
+        self.assertEqual(trim_wire_text(source, {0}),
+                         '<|speaker:0|> [sibilant with prolonged s sounds] This is stupid.')
 
 
 @unittest.skipUnless(importlib.util.find_spec("msgpack"), "requires msgpack")
@@ -229,6 +237,14 @@ class NativeDrama3TransportTests(unittest.TestCase):
         payload, _ = self.payload()
         self.assertEqual(payload["text"], '<whisper>Don\'t call it "easy".</whisper>')
         self.assertEqual(payload["references"][0]["text"], ' “Saved reference.” ')
+
+    def test_http_style_prefix_retains_reference_voice(self):
+        direction = "a strong rural drawl"
+        self.client().synthesize("Well, I do not know.", self.voice,
+                                 self.root / "styled.wav", seed=3, direction=direction)
+        payload, _ = self.payload()
+        self.assertEqual(payload["text"], "[a strong rural drawl] Well, I do not know.")
+        self.assertEqual(payload["references"], [{"audio": wav_bytes(), "text": "Reference words."}])
 
     def test_http_parenthesis_fragments_are_cleaned_without_changing_reference(self):
         voice = {**self.voice, "reference_text": "(A saved reference)."}

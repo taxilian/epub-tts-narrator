@@ -64,7 +64,8 @@ def validate_render_settings(settings):
 
 
 def _leaf(chunk, bindings):
-    from .bundle import chunk_speakers, ranges, spoken_mapping
+    from .bundle import chunk_speakers
+    from epub_tts_narrator.spoken_text import build_spoken, effective_delivery, spoken_source_ranges
     from .quality import normalize_words
     row = chunk.get("segment")
     if not isinstance(row, dict):
@@ -76,11 +77,13 @@ def _leaf(chunk, bindings):
     if (not isinstance(text, str) or type(start) is not int or type(end) is not int
             or not 0 <= start <= end or end - start != len(text)):
         raise ValueError("Invalid source segment text or offsets")
-    spoken, mapping = spoken_mapping(row)
+    if "speech_normalization" in row and "spoken_text" not in row:
+        raise ValueError("Normalized speech requires its saved spoken text")
+    spoken, _ = build_spoken(row)
     a, b = chunk.get("spoken_start"), chunk.get("spoken_end")
     if (type(a) is not int or type(b) is not int or not 0 <= a <= b <= len(spoken)
             or chunk["spoken_text"] != spoken[a:b]
-            or chunk.get("source_ranges") != ranges(mapping[a:b])):
+            or chunk.get("source_ranges") != spoken_source_ranges(row, a, b)):
         raise ValueError("Chapter speech must map exactly to its source text")
     if chunk.get("silent_control") is not (not normalize_words(chunk["spoken_text"])):
         raise ValueError("Invalid silent passage marker")
@@ -90,9 +93,7 @@ def _leaf(chunk, bindings):
         raise ValueError("Chapter performers need nonempty role and voice IDs")
     if not chunk["silent_control"] and (not speakers or any(s["voice_id"] not in bindings for s in speakers)):
         raise ValueError("Every spoken passage needs a registered voice")
-    delivery = row.get("delivery", {})
-    if not isinstance(delivery, dict) or not isinstance(delivery.get("direction", ""), str):
-        raise ValueError("Invalid delivery direction")
+    effective_delivery(row)
     if not isinstance(row.get("performance", {}), dict):
         raise ValueError("Invalid passage performance")
 

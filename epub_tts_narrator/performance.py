@@ -74,6 +74,10 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
                          text=original["text"][start-original["start"]:end-original["start"]])
             piece.pop("performance", None)
             piece.pop("spoken_text", None)
+            if start != original["start"] or end != original["end"]:
+                # Edits are relative to the original segment; a new boundary
+                # needs a fresh source-bound normalization pass.
+                piece.pop("speech_normalization", None)
             enclosing = next((span for span in spans if span["start"] <= start < end <= span["end"]), None)
             if enclosing:
                 piece["performance"] = {
@@ -83,6 +87,10 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
                     "exit": enclosing["last"] and end == enclosing["end"],
                 }
                 piece["spoken_text"] = piece["text"].translate(str.maketrans("", "", "[]"))
+            if "speech_normalization" in piece:
+                from .spoken_text import build_spoken
+                piece.pop("spoken_text", None)
+                piece["spoken_text"] = build_spoken(piece)[0]
             segments.append(piece)
     result["segments"] = segments
     result.setdefault("provenance", {})["bracket_delivery"] = {

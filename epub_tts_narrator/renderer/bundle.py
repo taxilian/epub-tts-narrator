@@ -9,6 +9,7 @@ import re
 from epub_tts_narrator.contracts import validate_document, review_items
 from epub_tts_narrator.cli import script_partitions
 from epub_tts_narrator.pipeline import fingerprint
+from epub_tts_narrator.spoken_text import build_spoken, spoken_source_ranges
 from .common import digest, file_hash, read_json, regular_file
 from .quality import normalize_words
 
@@ -97,7 +98,11 @@ def load_bundle(directory):
 
 
 def spoken_mapping(row):
-    """Map spoken code points to canonical block offsets, without guessing edits."""
+    """Legacy character mapping for unchanged speech and bracket deletion.
+
+    Approved spelling edits use spoken_source_ranges instead: replacements
+    cannot truthfully be mapped character by character.
+    """
     text = row["text"]
     spoken = row.get("spoken_text", text)
     if spoken == text:
@@ -181,7 +186,7 @@ def make_plan(bundle, config):
             continue
         chunks = []
         for row in item["rows"]:
-            spoken, mapping = spoken_mapping(row)
+            spoken, _ = build_spoken(row)
             speakers = chunk_speakers({"segment": row})
             if normalize_words(spoken) and not speakers:
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
@@ -190,7 +195,7 @@ def make_plan(bundle, config):
                 speech = spoken[start:end]
                 chunk = {
                     "segment": row, "spoken_text": speech, "spoken_start": start, "spoken_end": end,
-                    "source_ranges": ranges(mapping[start:end]),
+                    "source_ranges": spoken_source_ranges(row, start, end),
                     "silent_control": not normalize_words(speech),
                 }
                 chunk["chunk_id"] = digest({"source": bundle["manifest"]["source_fingerprint"],

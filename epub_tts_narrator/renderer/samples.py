@@ -11,7 +11,7 @@ from collections import Counter
 import re
 import unicodedata
 
-from .bundle import ranges, spoken_mapping
+from epub_tts_narrator.spoken_text import build_spoken, effective_delivery, spoken_source_ranges
 
 
 SELECTION_VERSION = 4
@@ -227,13 +227,14 @@ def _candidate_data(bundle, voice_id, canonical_id):
                     or any(item != role_id for item in alternatives)):
                 rejected["uncertain_attribution"] += 1
                 continue
-            if _EXTREME.search(row.get("delivery", {}).get("direction", "")):
-                rejected["extreme_delivery"] += 1
-                continue
             try:
-                spoken, mapping = spoken_mapping(row)
+                direction = effective_delivery(row)
+                spoken, _ = build_spoken(row)
             except (ValueError, KeyError):
                 rejected["unsupported_source_mapping"] += 1
+                continue
+            if _EXTREME.search(direction):
+                rejected["extreme_delivery"] += 1
                 continue
             found = False
             speech_start, speech_end = (
@@ -258,7 +259,7 @@ def _candidate_data(bundle, voice_id, canonical_id):
                     "segment_id": row["id"], "segment_ids": [row["id"]],
                     "voice_id": original_voice, "role_id": role_id,
                     "segment_kind": row["kind"], "block_id": row["block_id"],
-                    "source_ranges": ranges(mapping[start:end]),
+                    "source_ranges": spoken_source_ranges(row, start, end),
                     "spoken_start": start, "spoken_end": end,
                     "word_count": len(words), "short_sample": len(words) < _TARGET_MIN_WORDS,
                     "attribution_basis": attribution["basis"],

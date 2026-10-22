@@ -113,9 +113,17 @@ Balanced square-bracket passages are split at their source boundaries after spea
 {"kind":"bracketed","group_id":"bracket:b000099:381","direction":"Give this text a slight audible change in delivery.","delimiters":"omit","enter":true,"exit":true}
 ```
 
-`text` always retains the exact brackets and source offsets. `spoken_text` supplies the same text with square brackets omitted; no words or other punctuation may change. The TTS consumer should synthesize `spoken_text` when present, otherwise `text`, and apply the delivery direction using its own engine settings. An empty `spoken_text` is a control-only segment and needs no audio. Do not speak the words “open bracket” or “close bracket.”
+`text` always retains the exact brackets and source offsets. Without speech normalization, `spoken_text` supplies the same text with square brackets omitted; no words or other punctuation may change. Approved spelling edits below compose with bracket omission. The TTS consumer should synthesize `spoken_text` when present, otherwise `text`, and apply the delivery direction using its own engine settings. An empty `spoken_text` is a control-only segment and needs no audio. Do not speak the words “open bracket” or “close bracket.”
 
 `group_id` joins pieces of one bracket passage across existing speaker segments or paragraphs. `enter` and `exit` identify its outer boundaries. Nested brackets form one delivery group. The cue does not create a new character, force a different voice, or impose fixed silence around a skill name inside a sentence. Unbalanced brackets remain literal and create review issues; groups never cross chapter boundaries. Direction is configurable in `[performance_policy]` as `bracketed_text`.
+
+## Spoken spelling normalization
+
+A segment may include `speech_normalization: {"version": 1, "edits": [...]}` together with `spoken_text`. Each edit has `start`, `end`, `original`, `replacement`, `direction`, and `reason`. Edit offsets are Unicode code points relative to the segment's exact `text`, ordered, nonoverlapping, and end-exclusive; `original` must equal that source slice. Replacements contain ordinary spelling, while `direction` contains a plain acoustic instruction. They cannot contain engine markup. The original `text`, source block, and segment offsets never change.
+
+The complete `spoken_text` must be exactly reproducible from approved edits and any bracket-delimiter omission. It cannot be an arbitrary rewritten passage. Analysis records proposals, three independent verdicts per edit, decisions, and input/output fingerprints in `provenance.speech_normalization`. Boundary changes invalidate affected segment edits so they can be reconsidered against the new spans.
+
+The renderer combines distinct edit directions with existing `delivery.direction`, supplies the derived words to both TTS and verification, and retains source ranges. Unchanged spoken characters map precisely to the original source. A replacement maps to its entire original source span, including when a speech chunk cuts through that replacement; it does not invent character-level alignment between spellings of different lengths. Synchronization retains both the normalized spoken text and original source ranges.
 
 ## Series continuity
 

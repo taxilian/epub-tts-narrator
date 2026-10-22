@@ -99,10 +99,15 @@ perform silence/content validation and decide whether to retry before accepting
 or publishing the take.
 
 Untrusted book text cannot insert square-bracket directions or angle tags.
-Explicit delivery directions use a small documented allowlist: whisper,
-nervous, sigh, and laugh (with simple spelling variants). Other plain-text
-directions are reported as unapplied. Source text is never silently deleted
-to make it acceptable to the model.
+Explicit delivery directions retain the existing whisper, nervous, sigh, and
+laugh controls. Other plain directions use Drama 3's documented `[style] text`
+prefix with the same saved reference voice. This supports instructions such as
+prolonged sibilants, regional drawl, and sustained vowels. Composed directions
+are limited to 1,200 characters; nested markup and control characters are
+rejected. See the [Drama 3 control syntax](https://arxiv.org/html/2610.18010v1#A3).
+Sending a style instruction does not guarantee perceptual adherence; listening
+is still needed to evaluate that. Verification expects only the spoken words.
+Source text is never silently deleted to make it acceptable to the model.
 
 The probe script can also test separate main-token and codebook top-k caps
 through `drama3_sampling.py`. This is an experimental proxy, not part of the

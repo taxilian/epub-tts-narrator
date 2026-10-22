@@ -249,7 +249,15 @@ class _Validator:
                 overlaps_brackets = any(span["start"] < end and span["end"] > start for span in bracket_spans)
                 if overlaps_brackets and "performance" not in segment:
                     self.error(f"{path}.performance", "required for source bracket text under bracket delivery policy")
-            if "performance" in segment or "spoken_text" in segment:
+            if "speech_normalization" in segment:
+                from .spoken_text import build_spoken, effective_delivery
+                self.string(segment.get("spoken_text"), f"{path}.spoken_text", nonempty=False)
+                try:
+                    build_spoken(segment)
+                    effective_delivery(segment)
+                except ValueError as exc:
+                    self.error(f"{path}.speech_normalization", str(exc))
+            if "performance" in segment or ("spoken_text" in segment and "speech_normalization" not in segment):
                 if not self.require_bracket_delivery:
                     self.error(f"{path}.performance", "requires provenance.bracket_delivery")
                 performance = self.object(segment.get("performance"), f"{path}.performance")
@@ -262,7 +270,8 @@ class _Validator:
                 for flag in ("enter", "exit"):
                     self.boolean(performance.get(flag), f"{path}.performance.{flag}")
                 self.string(segment.get("spoken_text"), f"{path}.spoken_text", nonempty=False)
-                if valid_text and segment.get("spoken_text") != segment["text"].translate(str.maketrans("", "", "[]")):
+                if (valid_text and "speech_normalization" not in segment
+                        and segment.get("spoken_text") != segment["text"].translate(str.maketrans("", "", "[]"))):
                     self.error(f"{path}.spoken_text", "may only omit square bracket delimiters from exact text")
                 enclosing = next((span for span in bracket_spans
                                   if valid_offsets and span["start"] <= start < end <= span["end"]), None)

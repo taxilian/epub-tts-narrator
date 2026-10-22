@@ -150,6 +150,17 @@ class MLXAudioEngineTests(unittest.TestCase):
         self.assertEqual(self.written[0]["subtype"], "FLOAT")
         self.assertEqual(list(self.root.glob(".take-*")), [])
 
+    def test_freeform_style_is_delivered_with_the_same_reference_voice(self):
+        self.generate(self.segment())
+        before = deepcopy(self.voice)
+        result = self.engine.synthesize("No!", self.voice, self.output, seed=42,
+                                        direction="shout with a sustained vowel")
+        request = self.model.generate.call_args.kwargs
+        self.assertEqual(request["text"], "[shout with a sustained vowel] No!")
+        self.assertEqual(request["ref_text"], [self.voice["reference_text"]])
+        self.assertEqual(self.voice, before)
+        self.assertTrue(result["direction_applied"])
+
     def test_wrapping_quotes_cannot_form_a_second_runtime_generation_chunk(self):
         try:
             runtime = importlib.metadata.distribution("mlx-audio")
@@ -241,13 +252,14 @@ class MLXAudioEngineTests(unittest.TestCase):
         result = self.engine.synthesize_dialogue(turns, self.output, seed=9)
 
         request = self.model.generate.call_args.kwargs
-        self.assertEqual(request["text"], "<|speaker:0|> He looked back.\n"
+        self.assertEqual(request["text"], "<|speaker:0|> He looked\n"
+                         "<|speaker:0|> [warmly] back.\n"
                          "<|speaker:1|> <whisper>Stay here.</whisper>\n"
                          "<|speaker:0|> Then he left.")
         self.assertEqual(request["ref_text"], ["<|speaker:0|> The narrator reference.",
                                                "<|speaker:1|> The character reference."])
         self.assertEqual(result["speaker_count"], 2)
-        self.assertEqual(result["rendered_turn_count"], 3)
+        self.assertEqual(result["rendered_turn_count"], 4)
         self.assertEqual(turns, original)
 
     def test_http_inline_reference_speaker_ids_and_controls_are_preserved(self):

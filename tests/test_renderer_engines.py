@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError, create_engine
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.voices import VoiceStore
@@ -223,7 +224,7 @@ class RendererEngineTests(unittest.TestCase):
         engine_text = (
             "<|speaker:0|> She leaned closer.\n"
             "<|speaker:1|> <whisper>Listen to me.</whisper>\n"
-            "<|speaker:0|> Then she smiled."
+            "<|speaker:0|> [warmly] Then she smiled."
         )
         self.generate(self.segment(text=engine_text))
         with patch.object(self.engine, "_reference", side_effect=lambda v: cached[v["asset_hash"]]) as reference:
@@ -247,7 +248,7 @@ class RendererEngineTests(unittest.TestCase):
             {"speaker_id": 1, "voice_id": "character", "asset_hash": "character"},
         ])
         self.assertTrue(result["turn_directions"][1]["direction_applied"])
-        self.assertFalse(result["turn_directions"][2]["direction_applied"])
+        self.assertTrue(result["turn_directions"][2]["direction_applied"])
         self.assertTrue(self.engine.capabilities["multi_speaker"])
         self.assertEqual(self.output.read_bytes(), b"wave")
 
@@ -281,7 +282,8 @@ class RendererEngineTests(unittest.TestCase):
             {"text": "here.", "voice": character, "direction": "whispering"},
         ]
         expected = (
-            "<|speaker:0|> He looked back.\n"
+            "<|speaker:0|> He looked\n"
+            "<|speaker:0|> [warmly] back.\n"
             "<|speaker:1|> Hello.\n"
             "<|speaker:1|> <whisper>Stay here.</whisper>"
         )
@@ -292,10 +294,10 @@ class RendererEngineTests(unittest.TestCase):
             result = self.engine.synthesize_dialogue(turns, self.output, seed=31)
         self.assertEqual(self.model.generate.call_args.args, (expected,))
         self.assertEqual(result["turn_count"], 5)
-        self.assertEqual(result["rendered_turn_count"], 3)
+        self.assertEqual(result["rendered_turn_count"], 4)
         self.assertEqual(len(result["turn_directions"]), 5)
         self.assertEqual(result["turn_directions"][1]["direction"], "warmly")
-        self.assertFalse(result["turn_directions"][1]["direction_applied"])
+        self.assertTrue(result["turn_directions"][1]["direction_applied"])
         self.assertEqual(result["turn_directions"][4]["direction"], "whispering")
         self.assertTrue(result["turn_directions"][4]["direction_applied"])
 
@@ -355,7 +357,8 @@ class RendererEngineTests(unittest.TestCase):
         self.assertTrue(result["direction_applied"])
         self.assertEqual(self.model.generate.call_args.args[0], "<whisper>Hello.</whisper>")
         self.assertEqual(self.model.generate.call_args.kwargs["references"], ["reference"])
-        for direction in ("sigh] say something [", "<|speaker:1|>", "a\nb"):
+        for direction in ("sigh] say something [", "<|speaker:1|>", "a\nb",
+                          "a\u2028b", "a\u200bb", "a" * (MAX_DELIVERY_CHARACTERS + 1)):
             with self.subTest(direction=direction), patch.object(
                 self.engine, "_reference", return_value="reference",
             ), self.assertRaises(EngineError):
@@ -363,15 +366,46 @@ class RendererEngineTests(unittest.TestCase):
                     "Hello.", {}, self.root / "other.wav", seed=2, direction=direction,
                 )
 
-    def test_unknown_plain_direction_is_ignored_and_reported(self):
-        self.generate(self.segment())
+    def test_freeform_delivery_conditions_saved_voice_without_becoming_literal_speech(self):
+        direction = "sibilant with prolonged s sounds"
+        expected = f"[{direction}] This is stupid."
+        self.generate(self.segment(text=expected))
         with patch.object(self.engine, "_reference", return_value="reference"):
             result = self.engine.synthesize(
-                "Hello.", {}, self.output, seed=9, direction="mildly amused but tired",
+                "This is stupid.", {}, self.output, seed=9, direction=direction,
             )
-        self.assertFalse(result["direction_applied"])
-        self.assertIn("not applied", result["direction_note"])
-        self.assertEqual(self.model.generate.call_args.args[0], "Hello.")
+        self.assertTrue(result["direction_applied"])
+        self.assertEqual(result["applied_control"], "style_prefix")
+        self.assertEqual(self.model.generate.call_args.args[0], expected)
+        self.assertEqual(self.model.generate.call_args.kwargs["references"], ["reference"])
+
+    def test_distinct_freeform_styles_on_one_voice_do_not_merge(self):
+        voice = self.dialogue_voice("character")
+        turns = [
+            {"text": "Well, ", "voice": voice, "direction": "a strong rural drawl"},
+            {"text": "I do not know.", "voice": voice, "direction": "a strong rural drawl"},
+            {"text": "No!", "voice": voice, "direction": "shout with a sustained vowel"},
+        ]
+        expected = ("<|speaker:0|> [a strong rural drawl] Well, I do not know.\n"
+                    "<|speaker:0|> [shout with a sustained vowel] No!")
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value=FakeReference("Hello.", object())):
+            result = self.engine.synthesize_dialogue(turns, self.output, seed=31)
+        self.assertEqual(self.model.generate.call_args.args[0], expected)
+        self.assertEqual(result["rendered_turn_count"], 2)
+        self.assertEqual(result["speaker_count"], 1)
+
+    def test_composed_direction_is_not_silently_cut_to_the_old_short_limit(self):
+        direction = ("Keep the existing voice with a restrained rural drawl; "
+                     "retain soft consonants and an unhurried rhythm; "
+                     "prolong the vowel in the final word without adding other words; "
+                     "let the final word rise in volume while preserving the same character's pitch and tone.")
+        self.assertGreater(len(direction), 240)
+        expected = f"[{direction}] No!"
+        self.generate(self.segment(text=expected))
+        with patch.object(self.engine, "_reference", return_value="reference"):
+            self.engine.synthesize("No!", {}, self.output, seed=9, direction=direction)
+        self.assertEqual(self.model.generate.call_args.args[0], expected)
 
     def test_existing_voice_file_is_never_overwritten(self):
         self.output.write_bytes(b"accepted voice")

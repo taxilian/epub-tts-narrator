@@ -16,14 +16,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .engines import EngineError, _directed_text, _seed, _text, format_dialogue
+from ..spoken_text import MAX_DELIVERY_CHARACTERS
+from .engines import EngineError, _directed_text, _plain_direction, _seed, _text, format_dialogue
 from .diagnostics import safe_error_text
 from .speech_text import trim_speech_text
 
 
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
-SUPPORTED_CONTROLS = re.compile(r"</?whisper>|\[(?:nervous|sighs|laughs)\]")
+STYLE_CONTROL = rf"\[[^\[\]<>\r\n]{{1,{MAX_DELIVERY_CHARACTERS}}}\]"
+SUPPORTED_CONTROLS = re.compile(r"</?whisper>|" + STYLE_CONTROL)
 
 
 class FishHTTPError(EngineError):
@@ -41,7 +43,7 @@ def redact(message: str, key: str) -> str:
 
 
 def validate_wire_text(text: str, speakers: set[int | None]) -> None:
-    """Accept the small control vocabulary emitted by our rendering adapter."""
+    """Accept bounded, non-nested style controls emitted by the adapter."""
     if not isinstance(text, str) or len(text) > 100_000:
         raise EngineError("text must be a string of at most 100000 characters")
     for match in SPEAKER_TAG.finditer(text):
@@ -49,6 +51,9 @@ def validate_wire_text(text: str, speakers: set[int | None]) -> None:
         if speaker > 15 or speaker not in speakers:
             raise EngineError(f"Speaker {speaker} has no matching inline reference")
     stripped = SPEAKER_TAG.sub("", text)
+    for match in re.finditer(STYLE_CONTROL, stripped):
+        if not _plain_direction(match.group()[1:-1]):
+            raise EngineError("Style controls must contain a direction")
     _text(SUPPORTED_CONTROLS.sub("", stripped), "text")
     depth = 0
     for match in re.finditer(r"</?whisper>", text):
@@ -68,7 +73,7 @@ def trim_wire_text(text: str, speakers: set[int | None]) -> str:
         value = re.sub(r"<whisper>(.*?)</whisper>",
                        lambda match: "<whisper>" + trim_speech_text(match.group(1)) + "</whisper>",
                        value, flags=re.S)
-        prefix = re.match(r"(?:\[(?:nervous|sighs|laughs)\]\s*)+", value)
+        prefix = re.match(r"(?:" + STYLE_CONTROL + r"\s*)+", value)
         if prefix:
             value = prefix.group().rstrip() + " " + trim_speech_text(value[prefix.end():])
         return value

@@ -12,6 +12,7 @@ from threading import Lock
 from time import monotonic
 import unicodedata
 
+from ..spoken_text import effective_delivery
 from .assembly import extract_cover, normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
@@ -1337,7 +1338,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
         turns = [{"text": turn["spoken_text"], "voice": voices[turn["segment"]["voice_id"]],
-                  "direction": turn["segment"].get("delivery", {}).get("direction", "")}
+                  "direction": effective_delivery(turn["segment"])}
                  for turn in chunk["paragraph_turns"]]
         from .speech_identity import paragraph_rewrite_turn
         repaired_turn = paragraph_rewrite_turn(
@@ -1359,7 +1360,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance
 
-    direction = chunk["segment"].get("delivery", {}).get("direction", "")
+    direction = effective_delivery(chunk["segment"])
     # Formatting at the edges is not speech. Keep the original chunk for
     # verification, request/cache identity, and source synchronization.
     synthesis_text = trim_speech_text(chunk["spoken_text"])

@@ -21,8 +21,10 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import unicodedata
 from typing import Any, Protocol
 
+from ..spoken_text import MAX_DELIVERY_CHARACTERS
 from .drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION,
     generate_scene_voice, validate_scene_fields,
@@ -81,15 +83,31 @@ def _seed(value: int) -> None:
         raise EngineError("seed must be an integer from 0 through 4294967295")
 
 
-def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
-    """Apply only supported controls to already validated literal book text."""
+def _plain_direction(direction: str) -> str:
+    """Keep a description inside one non-nested Drama 3 style control."""
     if not isinstance(direction, str):
         raise EngineError("direction must be text")
     direction = direction.strip()
-    if len(direction) > 240 or any(char in direction for char in "[]<>\r\n"):
-        raise EngineError("direction must be a single plain-text phrase of at most 240 characters")
-    if any(ord(char) < 32 for char in direction):
+    if len(direction) > MAX_DELIVERY_CHARACTERS or any(char in direction for char in "[]<>\r\n"):
+        raise EngineError(
+            "direction must be a single plain-text phrase of at most "
+            f"{MAX_DELIVERY_CHARACTERS} characters"
+        )
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+           for char in direction):
         raise EngineError("direction contains control characters")
+    return direction
+
+
+def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
+    """Apply a non-spoken style prefix while retaining reference conditioning.
+
+    Drama 3 documents free natural-language ``[style] line`` controls in
+    https://arxiv.org/html/2610.18010v1#A3. The older exact controls remain
+    byte-identical for compatibility with verified takes. Applying a direction
+    records conditioning, not a claim that the model followed it perceptually.
+    """
+    direction = _plain_direction(direction)
     control = {
         "whisper": "whisper", "whispering": "whisper", "whispered": "whisper",
         "nervous": "nervous", "sigh": "sighs", "sighs": "sighs",
@@ -99,16 +117,16 @@ def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
         engine_text = f"<whisper>{text}</whisper>"
     elif control:
         engine_text = f"[{control}] {text}"
+    elif direction:
+        control = "style_prefix"
+        engine_text = f"[{direction}] {text}"
     else:
         engine_text = text
     return engine_text, {
         "direction": direction,
         "direction_applied": control is not None,
         "applied_control": control,
-        "direction_note": (
-            "Unsupported free-form direction was not applied"
-            if direction and control is None else ""
-        ),
+        "direction_note": "",
     }
 
 
@@ -622,7 +640,9 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
         # ("look" + "ed") remain one word.
         if (rendered_turns
                 and rendered_turns[-1]["speaker_id"] == speaker_id
-                and rendered_turns[-1]["applied_control"] == delivery["applied_control"]):
+                and rendered_turns[-1]["applied_control"] == delivery["applied_control"]
+                and (delivery["applied_control"] != "style_prefix"
+                     or rendered_turns[-1]["direction"] == delivery["direction"])):
             previous = rendered_turns[-1]
             boundary = previous["trailing_boundary"] + leading
             separate = (any(char.isspace() for char in boundary)

@@ -102,7 +102,7 @@ class SpeechIdentityTests(unittest.TestCase):
         plain = speech_request(voice)
         emotional = deepcopy(plain)
         emotional["chunk"]["segment"]["delivery"]["direction"] = "with resolve"
-        self.assertEqual(self.key(plain, voice), self.key(emotional, voice))
+        self.assertNotEqual(self.key(plain, voice), self.key(emotional, voice))
         whisper = deepcopy(plain)
         whisper["chunk"]["segment"]["delivery"]["direction"] = "whisper"
         synonym = deepcopy(whisper)
@@ -171,7 +171,7 @@ class SpeechIdentityTests(unittest.TestCase):
     def test_paragraph_reuses_equivalent_turns_after_role_and_voice_metadata_edits(self):
         first, second = reference(), reference("second")
         revised = {**first, "asset_hash": digest("revised"), "voice_id": "alias"}
-        original = paragraph_request([("Hello. ", first, ""), ("Stay here.", second, "whisper")])
+        original = paragraph_request([("Hello. ", first, "warmly"), ("Stay here.", second, "whisper")])
         changed = paragraph_request([("Hello. ", revised, "warmly"), ("Stay here.", second, "whispering")])
         changed["chunk"]["paragraph_turns"][0]["segment"]["block_id"] = "new-location"
         self.assertEqual(self.key(original, first, second), self.key(changed, revised, second))

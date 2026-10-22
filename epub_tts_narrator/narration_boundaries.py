@@ -172,6 +172,7 @@ unassigned with narration-role candidates. Explicit user decisions always win.
                          text=blocks[piece["block_id"]]["text"][start:end])
             piece.pop("performance", None)
             piece.pop("spoken_text", None)
+            piece.pop("speech_normalization", None)
             change = next((row for row in changes if row[0] <= start < end <= row[1]), None)
             if change:
                 left, right, narrator, candidates = change

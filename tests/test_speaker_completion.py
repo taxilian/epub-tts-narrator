@@ -210,6 +210,42 @@ class SpeakerCompletionTests(unittest.TestCase):
         self.assertEqual(validate_document(result), [])
         self.assertEqual(result["provenance"]["speaker_completion"]["unresolved_blocks"], 1)
 
+    def test_partial_completion_discards_only_stale_normalization_on_split_spans(self):
+        from epub_tts_narrator.spoken_text import build_spoken
+
+        document = missing_document(2)
+        for block, row in zip(document["source"]["blocks"], document["segments"]):
+            text = block["text"].replace("Hello", "Hellooo")
+            block["text"] = text
+            row.update(text=text, end=len(text), id=f"{block['id']}:0:{len(text)}")
+            start = text.index("Hellooo")
+            row["speech_normalization"] = {"version": 1, "edits": [{
+                "start": start, "end": start + len("Hellooo"), "original": "Hellooo",
+                "replacement": "Hello", "direction": "Prolong the final vowel.",
+                "reason": "Repeated vowel conveys an elongated greeting.",
+            }]}
+            row["spoken_text"] = build_spoken(row)[0]
+        self.assertEqual(validate_document(document), [])
+        original = deepcopy(document)
+
+        def shift(response, payload):
+            if payload["reviewer_id"] == REVIEWERS[1][0]:
+                response["segments"][0]["text"] += response["segments"][1]["text"][:2]
+                response["segments"][1]["text"] = response["segments"][1]["text"][2:]
+            return response
+
+        result = complete_speakers(document, Requests(shift), target_block_ids=["b1"],
+                                   retry_unresolved=True)
+
+        self.assertEqual(document, original)
+        self.assertEqual(validate_document(result), [])
+        first = [row for row in result["segments"] if row["block_id"] == "b1"]
+        self.assertEqual("".join(row["text"] for row in first), original["source"]["blocks"][0]["text"])
+        self.assertEqual([row["text"] for row in first if row["role_id"] is None], ["“H"])
+        self.assertTrue(all("speech_normalization" not in row for row in first))
+        self.assertEqual([row for row in result["segments"] if row["block_id"] == "b2"],
+                         [original["segments"][1]])
+
     def test_source_edits_unknown_roles_unseen_evidence_and_duplicate_outputs_fail_closed(self):
         mutations = [
             lambda row: row["segments"][1].update(text="Changed source"),
