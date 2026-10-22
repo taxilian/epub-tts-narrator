@@ -12,6 +12,7 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -161,8 +163,30 @@ def prepare(config, *, downloader=None):
     print("Models prepared. Start serve when ready; no service was started.", flush=True)
 
 
+def check_audio_decoder(*, decoder=None):
+    """Exercise the installed Whisper/PyAV combination without loading models."""
+    try:
+        if decoder is None:
+            from faster_whisper.audio import decode_audio
+            decoder = decode_audio
+        audio = io.BytesIO()
+        with wave.open(audio, "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(16000)
+            writer.writeframes(b"\xe8\x03" * 1600)
+        audio.seek(0)
+        decoded = decoder(audio, sampling_rate=16000)
+        if len(decoded) != 1600 or not any(decoded):
+            raise ValueError("the decoder did not preserve the PCM test samples")
+    except Exception as exc:
+        raise RuntimeError("Whisper audio decoder check failed; run a full worker update to repair "
+                           f"its dependencies: {exc}") from None
+
+
 def check(config):
     validate_worker(config)
+    check_audio_decoder()
     for repo, revision, directory in model_specs(config):
         try:
             names = required_model_files(repo, directory)

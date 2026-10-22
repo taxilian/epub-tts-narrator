@@ -2,3 +2,5 @@
 numpy>=2.2,<3
 soundfile>=0.13,<0.14
 huggingface-hub>=0.34,<1
+# faster-whisper's released decoder still passes metadata_errors, removed in PyAV 19.
+av>=11,<19

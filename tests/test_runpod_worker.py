@@ -52,6 +52,9 @@ class RunpodWorkerTests(unittest.TestCase):
             "name": "native", "type": "fish_http", "protocol": "fish_native_drama3",
             "url": worker.FISH_URL, "concurrency": 1, "api_key": ""}]
         self.downloader = Mock(side_effect=fake_download)
+        self.real_check_audio_decoder = worker.check_audio_decoder
+        self.decoder_check = patch.object(worker, "check_audio_decoder").start()
+        self.addCleanup(patch.stopall)
 
     def prepare(self):
         with patch("sys.stdout", new=io.StringIO()):
@@ -84,6 +87,35 @@ class RunpodWorkerTests(unittest.TestCase):
         self.config["huggingface"]["api_key"] = "file-key"
         self.prepare()
         self.assertTrue(all(call.kwargs["token"] == "file-key" for call in self.downloader.call_args_list))
+
+    def test_audio_decoder_preflight_uses_real_pcm_without_loading_a_model(self):
+        def decode(audio, sampling_rate):
+            self.assertEqual(sampling_rate, 16000)
+            with wave.open(audio, "rb") as reader:
+                self.assertEqual((reader.getnchannels(), reader.getsampwidth(), reader.getframerate()), (1, 2, 16000))
+                frames = reader.readframes(reader.getnframes())
+            return [int.from_bytes(frames[i:i + 2], "little", signed=True) / 32768
+                    for i in range(0, len(frames), 2)]
+        self.real_check_audio_decoder(decoder=decode)
+
+    def test_audio_decoder_dependency_failure_is_actionable(self):
+        decoder = Mock(side_effect=TypeError("open() got an unexpected keyword argument 'metadata_errors'"))
+        with self.assertRaisesRegex(RuntimeError, "full worker update.*metadata_errors"):
+            self.real_check_audio_decoder(decoder=decoder)
+
+    def test_worker_check_tests_audio_decoding_before_loading_models(self):
+        self.prepare()
+        self.decoder_check.side_effect = RuntimeError("incompatible decoder")
+        with self.assertRaisesRegex(RuntimeError, "incompatible decoder"), \
+                patch.object(worker, "required_model_files") as files:
+            worker.check(self.config)
+        self.decoder_check.assert_called_once_with()
+        files.assert_not_called()
+
+    def test_installed_whisper_can_decode_pcm_without_a_model(self):
+        if importlib.util.find_spec("faster_whisper") is None:
+            self.skipTest("faster-whisper is an optional worker dependency")
+        self.real_check_audio_decoder()
 
     def test_prepared_models_are_reused_without_download_requests(self):
         self.prepare()
