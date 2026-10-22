@@ -698,6 +698,7 @@ class CastingSession:
         prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
         text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         engine, designer = self._get_engine(), self._get_designer()
+        binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
         verifier = self._get_verifier()
         self._save_draft(voice_id, draft)
         voice_id = self.store.canonical_id(voice_id)
@@ -762,6 +763,7 @@ class CastingSession:
             "description_applied": True,
             "voice_design_supported": True,
             "designer": designer_identity(designer),
+            "engine": deepcopy(request["engine"]),
             "note": "The voice designer received the character description; listening determines casting suitability.",
             "seed": accepted["seed"], "request_hash": accepted["request_hash"],
             "verifier": deepcopy(verifier.identity), "quality": deepcopy(self.config["quality"]),
@@ -769,7 +771,7 @@ class CastingSession:
                                              purpose="reference"),
         }
         return self.store.publish_candidate(
-            voice_id, deepcopy(profile), wav, reference_text, engine.identity,
+            voice_id, deepcopy(profile), wav, reference_text, binding_identity,
             accepted["report"], metadata, candidate_id=nonce)
 
     def ensure_ready(self, voice_id):
@@ -923,7 +925,8 @@ class CastingSession:
                 if voice_prompt_description(draft["prompt"]) != voice_prompt_description(prompt) or not script_matches:
                     raise RenderBlocked("Casting attempt does not match the current prompt and sample text")
             engine, verifier = self._get_engine(), self._get_verifier()
-            self._check_engine(request.get("engine", {}), engine.identity)
+            binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
+            self._check_engine(request.get("engine", {}), binding_identity)
             self.notify(f"Rechecking saved voice sample for {voice_id}")
             report = validate_audio(wav, text, verifier, self.config["quality"], purpose="reference")
             if not report.get("passed"):
@@ -955,13 +958,14 @@ class CastingSession:
                     "voice_design_supported": True, "seed": record["seed"],
                     "request_hash": record["request_hash"], "recovered_from": provenance,
                     "designer": deepcopy(request.get("designer", {})),
+                    "engine": deepcopy(request["engine"]),
                     "verifier": deepcopy(verifier.identity), "quality": deepcopy(self.config["quality"]),
                     "validation_key": validation_key(
                         reference_text, verifier, self.config["quality"], purpose="reference"),
                     "note": "Recovered without resynthesis after rechecking the original saved take.",
                 }
                 candidate = self.store.publish_candidate(
-                    voice_id, deepcopy(request["profile"]), wav, reference_text, request["engine"],
+                    voice_id, deepcopy(request["profile"]), wav, reference_text, binding_identity,
                     report, metadata, candidate_id=candidate_id)
             elif (candidate["reference_sha256"] != audio_hash
                   or candidate["reference_text"] != reference_text
@@ -998,7 +1002,7 @@ class CastingSession:
         engine, verifier = self._get_engine(), self._get_verifier()
         created = candidate.get("created_with", {})
         identity = engine.identity
-        self._check_engine(created, identity)
+        self._check_engine(created, getattr(engine, "voice_binding_identity", identity))
         creation = candidate.get("creation", {})
         key = validation_key(candidate["reference_text"], verifier, self.config["quality"],
                              purpose="reference")
@@ -1036,6 +1040,19 @@ class CastingSession:
     def _check_engine(created, identity):
         if not isinstance(created, dict):
             raise RenderBlocked("Candidate has no playback engine identity")
+        # Older records and saved attempt requests carry the execution model.
+        # Normalize only known compatible Drama 3 ports when the current engine
+        # explicitly advertises the portable reference binding. Keep requests
+        # unchanged so interrupted casting still matches its original hash.
+        if (identity == {"engine": "drama3_mlx", "model": "fishaudio/drama-3"}
+                and created.get("engine") == "drama3_mlx_audio"):
+            from .drama3_models import get_drama3_model
+            try:
+                compatible = get_drama3_model(created.get("model")).runtime == "mlx_audio"
+            except ValueError:
+                compatible = False
+            if compatible:
+                created = {**created, **identity}
         if any(created.get(key) != identity.get(key) for key in ("engine", "model")):
             raise RenderBlocked("Candidate was created for a different engine or model")
         if ("checkpoint_files_sha256" in identity

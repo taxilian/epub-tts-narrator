@@ -256,6 +256,11 @@ class Drama3MLXEngine:
         }
 
     @property
+    def voice_binding_identity(self) -> dict[str, str]:
+        """Reference WAVs remain compatible across supported Drama 3 ports."""
+        return {"engine": "drama3_mlx", "model": "fishaudio/drama-3"}
+
+    @property
     def identity(self) -> dict[str, Any]:
         if self._identity is not None:
             return deepcopy(self._identity)

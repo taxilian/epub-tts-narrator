@@ -501,6 +501,7 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                              accepted["report"], {
                                  **accepted.get("engine_metadata", {}),
                                  "description_applied": True, "designer": designer_identity(source),
+                                 "engine": engine.identity,
                                  "requested_description": prompt,
                                  "requested_reference_text": text, "reference_text": reference_text,
                                  **({"sample_source": sample_source} if sample_source is not None else {}),
@@ -542,8 +543,11 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
             if not report["passed"]:
                 raise RenderBlocked("Reference recording failed verification: " + ", ".join(report["reasons"]))
             reference_text = report.get("reference_text", transcript)
-            return store.publish(voice_id, profile, wav, reference_text, engine.identity, report,
+            identity = engine.identity
+            binding_identity = getattr(engine, "voice_binding_identity", identity)
+            return store.publish(voice_id, profile, wav, reference_text, binding_identity, report,
                                  {"method": "supplied_reference", "description_applied": False,
+                                  "engine": identity,
                                   "requested_reference_text": transcript, "reference_text": reference_text,
                                   "verifier": verifier.identity, "quality": config["quality"]})
     finally:
