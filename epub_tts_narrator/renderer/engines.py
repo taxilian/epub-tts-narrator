@@ -594,10 +594,10 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
         if any(value is not None and not isinstance(value, str)
                for value in (asset_hash, checksum)):
             raise EngineError("saved voice reference identifiers must be text")
-        # A saved asset identifies a voice across aliases. Include its
-        # content binding so inconsistent external records cannot silently
-        # merge different references under one speaker tag.
-        key = (asset_hash, checksum or reference_path, transcript)
+        # Conditioning follows the reference content, not profile or selection
+        # metadata. Aliases and revised descriptions of identical references
+        # must retain the same speaker tag and natural adjacent-turn joins.
+        key = (checksum or reference_path, transcript)
         if key not in speaker_keys:
             if len(voices) >= DRAMA3_MAX_SPEAKERS:
                 raise EngineError("Drama 3 dialogue supports at most 16 distinct voices per request")

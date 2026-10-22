@@ -119,7 +119,8 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
     def test_interruption_before_first_fallback_child_persists_split_and_reuses_prior_audio(self):
         original = deepcopy(self.target())
         self.verifier.wrong_texts.add(original["spoken_text"])
-        first_child = original["paragraph_turns"][0]["spoken_text"]
+        from epub_tts_narrator.renderer.speech_text import trim_speech_text
+        first_child = trim_speech_text(original["paragraph_turns"][0]["spoken_text"])
         synthesize = self.engine.synthesize
 
         def interrupt(text, *args, **kwargs):
@@ -143,7 +144,8 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
 
     def test_failed_individual_child_gets_fresh_attempts_only_in_next_render_invocation(self):
         original = deepcopy(self.target())
-        child_text = original["paragraph_turns"][0]["spoken_text"]
+        from epub_tts_narrator.renderer.speech_text import trim_speech_text
+        child_text = trim_speech_text(original["paragraph_turns"][0]["spoken_text"])
         self.verifier.wrong_texts.update({original["spoken_text"], child_text})
         with self.assertRaisesRegex(RenderBlocked, "after 2 attempts"):
             self.chapters()

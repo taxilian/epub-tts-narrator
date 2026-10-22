@@ -170,7 +170,11 @@ class ChapterExecutor:
                     or not isinstance(voice.get("reference_text"), str) or not voice["reference_text"].strip()):
                 raise ValueError(f"Missing or changed registered voice: {voice_id}")
             path = regular_file(voice["reference_audio"]).resolve()
-            registered[voice_id] = dict(voice, voice_id=voice_id, kind="reference", reference_audio=str(path))
+            reference_hash = file_hash(path)
+            if voice.get("reference_sha256", reference_hash) != reference_hash:
+                raise ValueError(f"Registered voice audio changed: {voice_id}")
+            registered[voice_id] = dict(voice, voice_id=voice_id, kind="reference",
+                                        reference_audio=str(path), reference_sha256=reference_hash)
         if any("paragraph_turns" in chunk for chunk in chapter["chunks"]) and not getattr(
                 engine, "capabilities", {}).get("multi_speaker", False):
             raise ValueError("The configured server engine cannot render multi-speaker paragraphs")

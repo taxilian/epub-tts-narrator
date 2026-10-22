@@ -56,6 +56,22 @@ class SpeechRetryTests(unittest.TestCase):
         for path, contents in before.items():
             self.assertEqual(path.read_bytes(), contents, path.name)
 
+    def test_moving_speech_preserves_generation_seed_when_synthesis_identity_is_unchanged(self):
+        identity = {"text": self.text, "voice": "fixture-voice"}
+        records = []
+        for position in (1, 42):
+            _, record = verified_take(
+                self.text, self.generate, self.root / f"position-{position}",
+                {**self.request, "position": position}, self.verifier, self.config,
+                notify=self.messages.append, retry_budget=SpeechRetryBudget(),
+                seed_identity=identity,
+            )
+            records.append(record)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[0]["seed"], self.calls[1]["seed"])
+        self.assertNotEqual(records[0]["request_hash"], records[1]["request_hash"])
+        self.assertEqual([record["request"]["position"] for record in records], [1, 42])
+
     def test_rerun_generates_fresh_seeds_retains_failures_and_resumes_new_acceptance(self):
         self.verifier.wrong_texts.add(self.text)
         with self.assertRaises(SpeechVerificationFailed):

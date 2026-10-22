@@ -160,7 +160,7 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
 
 
 def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
-                  purpose="speech", resume_attempt=None, retry_budget=None):
+                  purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -287,7 +287,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
         result_path = directory / (prefix + ".json")
-        seed = _seed(config["render"]["seed"], request, attempt)
+        seed = _seed(config["render"]["seed"],
+                     request if seed_identity is None else seed_identity, attempt)
         report = None
         generation_ordinal = None
         metadata = {}
@@ -811,7 +812,14 @@ def _read_checkpoint(work, chapter):
         raise RenderBlocked(f"Invalid chapter checkpoint; inspect {path}: {exc}") from exc
 
 
-def _restore_chapter(work, chapter, record, context, voices, config):
+def _restore_chapter(work, chapter, record, context, voices, config, *, speech_cache=None):
+    if speech_cache is None:
+        from .speech_cache import SpeechCache
+        speech_cache = SpeechCache(work, voices)
+
+    def matches_request(request, accepted):
+        return accepted["request_hash"] == digest(request) or speech_cache.matches(request, accepted)
+
     if not _same_chapter_audio_context(record["context"], context):
         raise RenderBlocked(
             f"Completed {chapter['id']} is stale: source, selected voices, synthesis model, or "
@@ -843,7 +851,7 @@ def _restore_chapter(work, chapter, record, context, voices, config):
             speakers = chunk_speakers(chunk)
             if "paragraph_turns" in chunk:
                 request = _paragraph_request(chunk, voices, context["engine"], config)
-                if accepted["request_hash"] != digest(request):
+                if not matches_request(request, accepted):
                     raise ValueError("Paragraph verification does not match its source or voices")
             elif len(speakers) > 1:
                 lanes, mix = accepted.get("speaker_lanes"), accepted.get("mix")
@@ -874,11 +882,11 @@ def _restore_chapter(work, chapter, record, context, voices, config):
                     request = _speech_request(chunk, voices[speaker["voice_id"]], context["engine"],
                                               config, performer=speaker)
                     if (lane["role_id"] != speaker["role_id"] or lane["voice_id"] != speaker["voice_id"]
-                            or lane["request_hash"] != digest(request) or not _has_accepted_verification(lane)):
+                            or not matches_request(request, lane) or not _has_accepted_verification(lane)):
                         raise ValueError("A simultaneous speaker lacks matching verification")
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
-                if accepted["request_hash"] != digest(request):
+                if not matches_request(request, accepted):
                     raise ValueError("Chapter verification does not match the current plan")
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
@@ -1011,19 +1019,48 @@ def _failed_run(work, exc, notify):
 
 
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
-                  config, work, take_locks, take_locks_guard, *, notify, retry_budget=None):
+                  config, work, take_locks, take_locks_guard, *, notify, retry_budget=None,
+                  speech_cache=None):
     """Render one complete performance; publication and ordering stay upstream."""
     if chunk["silent_control"]:
         return dict(chunk, wav_path=None), None
+    if speech_cache is None:
+        from .speech_cache import SpeechCache
+        speech_cache = SpeechCache(work, voices)
 
     def take(text, generate, request):
-        key = digest(request)
+        identity = speech_cache.identity(request)
+        key = digest(identity)
         with take_locks_guard:
             lock = take_locks.setdefault(key, Lock())
         # Duplicate logical jobs must never race over the same attempt files.
         with lock:
-            return verified_take(text, generate, work / "clips" / key, request,
-                                 verifier, config, notify=notify, retry_budget=retry_budget)
+            try:
+                cached = speech_cache.find(identity)
+                if cached is not None:
+                    if not config["render"].get("keep_intermediate_audio", False):
+                        from .cleanup import clean_take_intermediates
+                        try:
+                            clean_take_intermediates(cached[0].parent)
+                        except (ValueError, OSError) as exc:
+                            notify("  Intermediate audio cleanup skipped; accepted speech is retained: "
+                                   + safe_error_text(exc, secrets=configured_secrets(config)))
+                    notify("  Reusing verified speech with matching text, voice, and generation settings.")
+                    return cached
+                # Full original requests remain the IDs of take/provenance
+                # directories. They are not the successful audio lookup key.
+                # Bind preparation semantics too: an old successful take with
+                # different engine input must not bypass the content lookup.
+                request = dict(request, synthesis_identity=identity)
+                result = verified_take(text, generate, work / "clips" / digest(request), request,
+                                       verifier, config, notify=notify, retry_budget=retry_budget,
+                                       seed_identity=identity)
+                speech_cache.remember(identity, result[1])
+                return result
+            except RenderBlocked:
+                raise
+            except ValueError as exc:
+                raise RenderBlocked(str(exc)) from exc
 
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
@@ -1080,7 +1117,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
 
 def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, config, work, *, notify,
-                           total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None):
+                           total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None,
+                           speech_cache=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
     if retry_budget is None:
@@ -1091,6 +1129,9 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
         raise ValueError("Shared take locks require both the mapping and its guard")
     if take_locks is None:
         take_locks, take_locks_guard = {}, Lock()
+    if speech_cache is None:
+        from .speech_cache import SpeechCache
+        speech_cache = SpeechCache(work, voices)
     parallel = getattr(engine, "max_inflight", getattr(engine, "max_parallel", 1))
     if type(parallel) is not int or parallel < 1:
         raise RenderBlocked("Render worker concurrency must be a positive integer")
@@ -1101,7 +1142,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             with progress.task(index) as task_notify:
                 return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
                                      engine_identity, verifier, config, work, take_locks,
-                                     take_locks_guard, notify=task_notify, retry_budget=retry_budget)
+                                     take_locks_guard, notify=task_notify, retry_budget=retry_budget,
+                                     speech_cache=speech_cache)
 
         if parallel == 1:
             results = [run(index) for index in range(len(chunks))]
@@ -1133,7 +1175,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
 
 
 def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
-                                verifier, config, work, *, notify, retry_budget=None):
+                                verifier, config, work, *, notify, retry_budget=None, speech_cache=None):
     """Split only exhausted paragraph performances, retaining verified work."""
     from .paragraph_recovery import record_paragraph_fallback
 
@@ -1146,7 +1188,8 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
         try:
             clips, acceptance = _render_chapter_chunks(
                 chapter, voices, engine, engine_identity, verifier, config, work,
-                notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget)
+                notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget,
+                speech_cache=speech_cache)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
             request, report = exc.request, exc.report
@@ -1216,6 +1259,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         voice_lock = None
         rendered, acceptance = [], []
         engine_identity, verifier_identity = engine.identity, verifier.identity
+        from .speech_cache import SpeechCache
+        speech_cache = SpeechCache(work, voices)
         for chapter_index, chapter in enumerate(plan["chapters"]):
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
@@ -1223,13 +1268,14 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
             saved = _read_checkpoint(work, chapter)
             if (saved is not None and _same_chapter_audio_context(saved["context"], context)
                     and _saved_chapter_clips_present(work, saved)):
-                composed, chapter_acceptance = _restore_chapter(work, chapter, saved, context, voices, config)
+                composed, chapter_acceptance = _restore_chapter(
+                    work, chapter, saved, context, voices, config, speech_cache=speech_cache)
                 notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             else:
                 notify(f"Rendering {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                     bundle, chapter, voices, engine, engine_identity, verifier, config, work,
-                    notify=notify, retry_budget=retry_budget)
+                    notify=notify, retry_budget=retry_budget, speech_cache=speech_cache)
                 if chapter != plan["chapters"][chapter_index]:
                     plan["chapters"][chapter_index] = chapter
                     write_json(work / "runs" / digest(plan) / "plan.json", plan)
@@ -1291,6 +1337,8 @@ def assemble(bundle, config, *, notify=print):
                                 + ". Run render --chapters-only first.")
         rendered, acceptance = [], []
         identities = None
+        from .speech_cache import SpeechCache
+        speech_cache = SpeechCache(work, voices)
         for chapter, record in zip(plan["chapters"], records):
             saved = record["context"]
             current = (saved["engine"], saved["verifier"])
@@ -1308,7 +1356,7 @@ def assemble(bundle, config, *, notify=print):
             for key in encoding_keys:
                 restore_context["settings"][key] = saved["settings"][key]
             composed, chapter_acceptance = _restore_chapter(
-                work, chapter, record, restore_context, voices, config)
+                work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
             if any(context["settings"][key] != saved["settings"][key]
                    for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
                 composed["encoded_path"] = None

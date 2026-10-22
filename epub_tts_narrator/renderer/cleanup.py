@@ -2,8 +2,8 @@
 
 Callers must hold the book audio-render lock and render-work lock for the whole
 operation. Voice stores and all reference/casting directories are outside this
-module's scope. The default keeps accepted and rejected normalized speech, mixes,
-and every chapter named by a completed-chapter checkpoint, so speech can resume.
+module's scope. The default keeps accepted and rejected normalized speech, the
+success index, mixes, and every chapter named by a checkpoint, so speech can resume.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _ATTEMPT_NUMBER = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})"
 _RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
 _ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})\.(?:wav|json)")
 _SPEECH = {"speech", "paragraph_speech"}
-_STORES = ("clips", "chapters", "mixes", "completed-chapters")
+_STORES = ("clips", "chapters", "mixes", "completed-chapters", "speech-cache")
 
 
 def _directory(path):
@@ -363,8 +363,42 @@ def _purge_cache(directory, plan, store, *, staging=False):
     plan.remove_directory(directory)
 
 
+def _speech_cache(work, plan, *, discard=False):
+    """Keep the success index normally; discard only its validated owned files.
+
+    An index can outlive deliberately deleted clip audio. Validate the index's
+    own binding without requiring its referenced waveform to remain available.
+    """
+    directory = work / "speech-cache"
+    if not _exists(directory):
+        return
+    _directory(directory)
+    for path in sorted(directory.iterdir()):
+        if path.name == ".DS_Store":
+            plan.check_file(path)
+        else:
+            if path.suffix != ".json" or not _hash(path.stem):
+                raise ValueError(f"Cleanup found an unrecognized speech cache index entry: {path}")
+            record = _signed(path, "audiobook-speech-cache", plan)
+            identity = record.get("identity")
+            if (set(record) != {"format", "version", "identity", "request_hash",
+                                "accepted_sha256", "audio_sha256"}
+                    or not isinstance(identity, dict) or digest(identity) != path.stem
+                    or identity.get("kind") not in _SPEECH
+                    or not all(_hash(record.get(key)) for key in
+                               ("request_hash", "accepted_sha256", "audio_sha256"))):
+                raise ValueError(f"Cleanup found invalid speech cache index metadata: {path}")
+        if discard:
+            plan.remove_file(path, "render_cache")
+    if discard:
+        plan.remove_directory(directory)
+
+
 def _purge(work, plan):
     for store in _STORES:
+        if store == "speech-cache":
+            _speech_cache(work, plan, discard=True)
+            continue
         directory = work / store
         if not _exists(directory):
             continue
@@ -393,9 +427,9 @@ def _purge(work, plan):
 def cleanup_work(work, *, dry_run=False, discard_render_cache=False):
     """Clean speech intermediates and obsolete chapters under caller-held locks.
 
-    ``discard_render_cache=True`` explicitly removes the four speech/chapter
-    cache stores, requiring speech regeneration on the next render. It never
-    traverses voice stores, casting/reference candidates, or published output.
+    ``discard_render_cache=True`` explicitly removes speech/chapter cache stores
+    and the successful speech index, requiring regeneration on the next render.
+    It never traverses voice stores, casting/reference candidates, or published output.
     Every path to remove is listed in the report; in dry-run mode its counts
     describe what would be removed. No changes occur until preflight succeeds.
     """
@@ -407,6 +441,7 @@ def cleanup_work(work, *, dry_run=False, discard_render_cache=False):
     if discard_render_cache:
         _purge(work, plan)
     else:
+        _speech_cache(work, plan)
         clips = work / "clips"
         if _exists(clips):
             _directory(clips)

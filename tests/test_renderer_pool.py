@@ -410,7 +410,36 @@ class PoolWorkflowTests(unittest.TestCase):
         self.assertEqual(clips[0]["wav_path"], clips[1]["wav_path"])
         self.assertEqual(reports[0], reports[1])
 
-    def test_simultaneous_lanes_keep_independent_verification_and_resume(self):
+    def test_concurrent_identical_speech_at_different_positions_keeps_both_current_mappings(self):
+        self.config["render"]["paragraph_synthesis"] = False
+        plan = make_render_plan(self.bundle, self.config)
+        original = deepcopy(next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"]))
+        moved = deepcopy(original)
+        moved["chunk_id"] = "moved-chunk"
+        moved["segment"].update(id="moved-segment", block_id="moved-block", sequence=90)
+        moved["segment"]["start"] += 100
+        moved["segment"]["end"] += 100
+        moved["source_ranges"] = [{"start": item["start"] + 100, "end": item["end"] + 100}
+                                   for item in moved["source_ranges"]]
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in plan["voice_ids"]}
+
+        clips, reports = _render_chapter_chunks({"chunks": [original, moved]}, voices, self.pool,
+            self.pool.identity, self.pool.wrap_verifier(self.verifier), self.config,
+            self.root / "work", notify=lambda _: None)
+
+        self.assertGreater(self.pool.max_parallel, 1)
+        self.assertEqual(sum(len(engine.speech_calls) for engine in self.engines), 1)
+        self.assertEqual(len(self.verifier.calls), 1)
+        self.assertEqual(clips[0]["wav_path"], clips[1]["wav_path"])
+        self.assertEqual([report["chunk_id"] for report in reports], [original["chunk_id"], "moved-chunk"])
+        self.assertEqual(reports[0]["request_hash"], reports[1]["request_hash"])
+        for expected, clip in zip((original, moved), clips):
+            self.assertEqual(clip["segment"], expected["segment"])
+            self.assertEqual(clip["source_ranges"], expected["source_ranges"])
+        self.assertEqual(len(self.accepted()), 1)
+
+    def test_simultaneous_lanes_with_identical_reference_content_share_verified_audio_and_resume(self):
         self.config["render"]["paragraph_synthesis"] = False
         plan = make_render_plan(self.bundle, self.config)
         chunk = deepcopy(next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"]))
@@ -423,11 +452,13 @@ class PoolWorkflowTests(unittest.TestCase):
         args = ({"chunks": [chunk]}, voices, self.pool, self.pool.identity,
                 self.pool.wrap_verifier(self.verifier), self.config, self.root / "work")
         clips, reports = _render_chapter_chunks(*args, notify=lambda _: None)
-        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 2)
+        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 1)
         lanes = reports[0]["speaker_lanes"]
         self.assertEqual([lane["voice_id"] for lane in lanes], ["voice_mara", "voice_lena"])
+        self.assertEqual([lane["role_id"] for lane in lanes], ["mara_dialogue", "lena_dialogue"])
         self.assertTrue(all(lane["report"]["passed"] for lane in lanes))
-        self.assertNotEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
+        self.assertEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
+        self.assertEqual(lanes[0]["audio_sha256"], lanes[1]["audio_sha256"])
         self.assertEqual(reports[0]["report"]["method"], "independently_verified_simultaneous_lanes")
         with patch.object(self.pool, "synthesize", side_effect=AssertionError("regenerated lanes")):
             resumed = _render_chapter_chunks(*args, notify=lambda _: None)

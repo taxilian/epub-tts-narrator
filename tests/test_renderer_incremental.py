@@ -14,6 +14,7 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
 from audition_fixtures import prepare_document
 from test_chapter_export import chapter_document
@@ -129,6 +130,63 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(before, self.output_bytes())
         self.assertEqual(counts, self.model_counts())
 
+    def test_source_reidentification_reuses_speech_and_publishes_current_locations(self):
+        self.run_render()
+        counts = self.model_counts()
+        # Re-extracting or moving source content can change every source ID,
+        # without changing any of the requested performances.
+        for block in self.document["source"]["blocks"]:
+            block["id"] = "moved-" + block["id"]
+        for chapter in self.document["source"]["chapters"]:
+            chapter["block_ids"] = ["moved-" + identifier for identifier in chapter["block_ids"]]
+        for segment in self.document["segments"]:
+            segment["block_id"] = "moved-" + segment["block_id"]
+            segment["id"] = "moved-" + segment["id"]
+        self.save_revision()
+
+        self.run_render()
+
+        self.assertEqual(self.model_counts(), counts)
+        sync = read_json(self.output / "sync.json")
+        self.assertTrue(all(row["segment_id"].startswith("moved-") for row in sync["segments"]))
+        self.assertTrue(all(row["block_id"].startswith("moved-") for row in sync["segments"]))
+        # The new chapter checkpoint must also restore without synthesizing.
+        self.run_render()
+        self.assertEqual(self.model_counts(), counts)
+
+    def test_attribution_explanation_edits_reuse_speech(self):
+        self.run_render()
+        counts = self.model_counts()
+        self.document["segments"][1]["attribution"]["reason"] = "A corrected explanation only."
+        self.save_revision()
+
+        self.run_render()
+
+        self.assertEqual(self.model_counts(), counts)
+
+    def test_moving_a_passage_to_another_chapter_reuses_audio_and_rebuilds_timing(self):
+        self.run_render()
+        counts = self.model_counts()
+        before = read_json(self.output / "sync.json")
+        old = next(row for row in before["segments"] if row["segment_id"] == "s2")
+        order = [0, 2, 3, 1, 4]
+        self.document["source"]["blocks"] = [self.document["source"]["blocks"][i] for i in order]
+        self.document["segments"] = [self.document["segments"][i] for i in order]
+        self.document["source"]["chapters"][0]["block_ids"] = [
+            row["id"] for row in self.document["source"]["blocks"]]
+        self.save_revision()
+
+        self.run_render()
+
+        self.assertEqual(self.model_counts(), counts)
+        after = read_json(self.output / "sync.json")
+        moved = next(row for row in after["segments"] if row["segment_id"] == "s2")
+        self.assertNotEqual(old["chapter_id"], moved["chapter_id"])
+        self.assertNotEqual(old["book_start_frame"], moved["book_start_frame"])
+        self.assertEqual(old["source_text"], moved["source_text"])
+        self.run_render()
+        self.assertEqual(self.model_counts(), counts)
+
     def test_splitting_a_dialogue_tag_does_not_regenerate_later_unchanged_speech(self):
         passage = '"Wow, this is amazing," she said, "Why should we do that again?"'
         self.document["source"]["blocks"][1]["text"] = passage
@@ -150,7 +208,7 @@ class IncrementalRendererTests(unittest.TestCase):
         # that bookkeeping change must not be treated as different speech.
         self.assertEqual(self.model_counts(), (counts[0], counts[1] + 3, counts[2] + 3))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]],
-                         [segment["text"] for segment in repaired])
+                         [trim_speech_text(segment["text"]) for segment in repaired])
         self.assertEqual(read_json(self.checkpoint(2))["audio_file"], unaffected_chapter)
         self.assertEqual(file_hash(unaffected_chapter), unaffected_audio)
 

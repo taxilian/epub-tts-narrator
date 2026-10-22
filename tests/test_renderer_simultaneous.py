@@ -166,6 +166,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         document = read_json(EXAMPLE / "reviewed.json")
         self.group_text = "“We are ready. Let us begin,”"
+        self.group_spoken = "We are ready. Let us begin,"
         tag = " Mara and Lena said together."
         block_id = "b000007"
         document["source"]["chapters"].append({"id": "ch0002", "title": "Unison Pilot",
@@ -214,12 +215,15 @@ class SimultaneousWorkflowTests(unittest.TestCase):
             "aliases": {"voice_lena": "voice_mara"},
         })
         self.run_render(chapters_only=True)
-        first, second = self.engine.speech_calls[:2]
-        self.assertEqual(first["voice_hash"], second["voice_hash"])
+        performances = [call for call in self.engine.speech_calls if call["text"] == self.group_spoken]
+        self.assertEqual(len(performances), 1)
         record = read_json(self.root / "work" / "completed-chapters" / "chapter-0002.json")
         lanes = record["acceptance"][0]["speaker_lanes"]
         self.assertEqual([lane["voice_id"] for lane in lanes], ["voice_mara", "voice_lena"])
-        self.assertNotEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
+        self.assertEqual([lane["role_id"] for lane in lanes], ["mara_dialogue", "lena_dialogue"])
+        self.assertEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
+        self.assertEqual(lanes[0]["audio_sha256"], lanes[1]["audio_sha256"])
+        self.assertTrue(all(lane["report"]["passed"] for lane in lanes))
         assemble(self.bundle, self.config, notify=lambda _: None)
         self.assertTrue((self.root / "output" / "book.m4b").is_file())
 
@@ -273,7 +277,8 @@ class SimultaneousWorkflowTests(unittest.TestCase):
     def test_each_performer_is_verified_and_source_sync_is_shared_once(self):
         self.run_render()
         first, second = self.engine.speech_calls[:2]
-        self.assertEqual(first["text"], second["text"])
+        self.assertEqual(first["text"], self.group_spoken)
+        self.assertEqual(second["text"], self.group_spoken)
         self.assertNotEqual(first["voice_hash"], second["voice_hash"])
         output = self.root / "output"
         acceptance = read_json(output / "verification.json")[0]
@@ -283,7 +288,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         sync = read_json(output / "sync.json")
         group = sync["segments"][0]
         self.assertEqual(group["chapter_end_frame"] - group["chapter_start_frame"], 66150)
-        self.assertEqual(group["source_text"], first["text"])
+        self.assertEqual(group["source_text"], self.group_text)
         self.assertEqual([lane["book_end_frame"] for lane in group["speaker_lanes"]], [44100, 66150])
         self.assertEqual(group["book_end_frame"], 66150)
         self.assertEqual([lane["voice_id"] for lane in group["speaker_lanes"]], ["voice_mara", "voice_lena"])
@@ -310,7 +315,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.engine.interrupt_speech_number = None
         self.run_render(chapters_only=True)
         self.assertEqual(first_request.read_bytes(), first_bytes)
-        first_text = self.group_text
+        first_text = self.group_spoken
         first_voice = self.engine.speech_calls[0]["voice_hash"]
         self.assertEqual(sum(row["text"] == first_text and row["voice_hash"] == first_voice
                              for row in self.engine.speech_calls), 1)

@@ -59,6 +59,18 @@ class CleanupTests(unittest.TestCase):
         write_json(path, dict(record, record_sha256=digest(record)))
         return path
 
+    def speech_index(self, directory, record):
+        identity = {"version": 1, "kind": "speech", "text": record["request"]["text"],
+                    "voice": {"kind": "reference", "reference_sha256": "a" * 64,
+                              "reference_text": "Reference transcript."}}
+        entry = {"format": "audiobook-speech-cache", "version": 1, "identity": identity,
+                 "request_hash": record["request_hash"],
+                 "accepted_sha256": file_hash(directory / "accepted.json"),
+                 "audio_sha256": record["audio_sha256"]}
+        path = self.work / "speech-cache" / (digest(identity) + ".json")
+        write_json(path, dict(entry, record_sha256=digest(entry)))
+        return path
+
     def snapshot(self):
         return {str(path.relative_to(self.work)): path.read_bytes()
                 for path in self.work.rglob("*") if path.is_file() and not path.is_symlink()}
@@ -420,12 +432,13 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
 
     def test_finder_metadata_does_not_block_cleanup_and_is_deleted_only_with_its_cache(self):
-        take, _ = self.take()
+        take, accepted = self.take()
+        index = self.speech_index(take, accepted)
         current = self.chapter(checkpoint="current")
         obsolete = self.chapter(name="Obsolete")
         mixes = self.work / "mixes"
         mixes.mkdir()
-        directories = [self.work, self.work / "clips", self.work / "chapters", mixes,
+        directories = [self.work, index.parent, self.work / "clips", self.work / "chapters", mixes,
                        self.work / "completed-chapters", take, current, obsolete]
         for path in directories:
             (path / ".DS_Store").write_bytes(b"Finder metadata")
@@ -450,7 +463,100 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(target.read_bytes(), b"protected reference")
 
-    def test_explicit_discard_removes_only_four_stores_including_failed_speech(self):
+    def test_default_cleanup_retains_success_index_and_explicit_discard_removes_it(self):
+        directory, record = self.take()
+        index = self.speech_index(directory, record)
+        index_bytes = index.read_bytes()
+        reference = self.work / "voices" / "reference.wav"
+        reference.parent.mkdir()
+        reference.write_bytes(b"keep the original voice")
+        cleanup_work(self.work)
+        self.assertEqual(index.read_bytes(), index_bytes)
+        self.assertTrue((directory / record["audio_file"]).is_file())
+        preview = cleanup_work(self.work, discard_render_cache=True, dry_run=True)
+        self.assertIn(str(index.relative_to(self.work)), [item["path"] for item in preview["files"]])
+        self.assertEqual(index.read_bytes(), index_bytes)
+        result = cleanup_work(self.work, discard_render_cache=True)
+        self.assertEqual(result["files"], preview["files"])
+        self.assertFalse(index.parent.exists())
+        self.assertFalse(directory.exists())
+        self.assertEqual(reference.read_bytes(), b"keep the original voice")
+
+    def test_stale_success_index_can_be_discarded_after_its_audio_was_removed(self):
+        directory, record = self.take()
+        index = self.speech_index(directory, record)
+        (directory / record["audio_file"]).unlink()
+        cleanup_work(self.work, discard_render_cache=True)
+        self.assertFalse(index.exists())
+        self.assertFalse(directory.exists())
+
+    def test_invalid_success_index_aborts_before_removing_other_cache_files(self):
+        directory, record = self.take()
+        index = self.speech_index(directory, record)
+        original = read_json(index)
+        variants = [{**original, "record_sha256": "0" * 64}]
+        for changes in ({"identity": {"kind": "create_voice"}},
+                        {"request_hash": "../voices"}, {"accepted_sha256": "invalid"},
+                        {"audio_sha256": None}):
+            changed = {key: value for key, value in {**original, **changes}.items()
+                       if key != "record_sha256"}
+            variants.append(dict(changed, record_sha256=digest(changed)))
+        for variant in variants:
+            write_json(index, variant)
+            before = self.snapshot()
+            for discard in (False, True):
+                with self.subTest(variant=variant, discard=discard), self.assertRaises(ValueError):
+                    cleanup_work(self.work, discard_render_cache=discard)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_unknown_or_symlinked_success_index_entries_abort_all_cleanup(self):
+        directory, record = self.take()
+        index = self.speech_index(directory, record)
+        target = self.work / "voices" / "reference.wav"
+        target.parent.mkdir()
+        target.write_bytes(b"protected voice")
+        unknown = index.parent / "reference.wav"
+        for form in ("file", "directory", "symlink"):
+            if form == "file":
+                unknown.write_bytes(b"unrecognized file")
+            elif form == "directory":
+                unknown.mkdir()
+            else:
+                unknown.symlink_to(target)
+            before = self.snapshot()
+            for discard in (False, True):
+                with self.subTest(form=form, discard=discard), self.assertRaises(ValueError):
+                    cleanup_work(self.work, discard_render_cache=discard)
+                self.assertEqual(self.snapshot(), before)
+            if form == "directory":
+                unknown.rmdir()
+            else:
+                unknown.unlink()
+        contents = index.read_bytes()
+        index.unlink()
+        index.symlink_to(target)
+        for discard in (False, True):
+            with self.subTest(discard=discard), self.assertRaises(ValueError):
+                cleanup_work(self.work, discard_render_cache=discard)
+            self.assertTrue(index.is_symlink())
+            self.assertEqual(target.read_bytes(), b"protected voice")
+        index.unlink()
+        index.write_bytes(contents)
+
+    def test_symlinked_success_index_store_is_never_traversed(self):
+        directory, record = self.take()
+        index = self.speech_index(directory, record)
+        moved = self.work / "voices"
+        index.parent.rename(moved)
+        index.parent.symlink_to(moved, target_is_directory=True)
+        before = self.snapshot()
+        for discard in (False, True):
+            with self.subTest(discard=discard), self.assertRaises(ValueError):
+                cleanup_work(self.work, discard_render_cache=discard)
+            self.assertEqual(self.snapshot(), before)
+            self.assertTrue(index.parent.is_symlink())
+
+    def test_explicit_discard_removes_only_render_stores_including_failed_speech(self):
         self.take(accepted=False)
         self.chapter(checkpoint="current")
         mixture = self.work / "mixes" / ("a" * 64)
