@@ -204,6 +204,60 @@ class RunpodAPITests(unittest.TestCase):
             self.api.list_pods()
         self.assertEqual(self.opener.open.call_count, 1)
 
+    def test_known_host_capacity_error_is_sanitized_and_not_retried(self):
+        body = json.dumps({
+            "detail": "There are not enough free GPUs on the host machine to start this pod.",
+            "extra": "fixture-explicit-key private-provider-text",
+        }).encode()
+        self.opener.open.side_effect = HTTPError(
+            "https://private.invalid", 400, "private-provider-text", {}, BytesIO(body))
+        with self.assertRaisesRegex(RunpodAPIError, "assigned host has no free GPU capacity") as caught:
+            self.api.start_pod("pod_1")
+        self.assertEqual(caught.exception.status, 400)
+        self.assertFalse(caught.exception.ambiguous)
+        self.assertFalse(caught.exception.retryable)
+        self.assertNotIn("fixture-explicit-key", str(caught.exception))
+        self.assertNotIn("private-provider-text", str(caught.exception))
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_unknown_or_malformed_error_body_keeps_generic_rejection(self):
+        for body in (b"not JSON fixture-explicit-key", b"[]", b"null", b'{}', b'\xff', b'[' * 2000,
+                     b'{"detail":"fixture-explicit-key"}',
+                     b'{"detail":"There are not enough free GPUs on the host machine to start this pod. secret"}'):
+            with self.subTest(body=body):
+                self.opener.open.reset_mock()
+                self.opener.open.side_effect = HTTPError(
+                    "https://private.invalid", 400, "secret-detail", {}, BytesIO(body))
+                with self.assertRaises(RunpodAPIError) as caught:
+                    self.api.start_pod("pod_1")
+                self.assertEqual(str(caught.exception), "Runpod rejected the request settings (HTTP 400)")
+                self.assertFalse(caught.exception.ambiguous)
+                self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_error_body_read_is_bounded_and_read_failures_preserve_status(self):
+        for body in (b"x" * (16 * 1024 + 1), OSError("fixture-explicit-key")):
+            with self.subTest(body=type(body).__name__):
+                error = HTTPError("https://private.invalid", 400, "secret-detail", {}, BytesIO())
+                error.read = Mock(side_effect=body) if isinstance(body, Exception) else Mock(return_value=body)
+                self.opener.open.side_effect = error
+                with self.assertRaises(RunpodAPIError) as caught:
+                    self.api.start_pod("pod_1")
+                error.read.assert_called_once_with(16 * 1024 + 1)
+                self.assertTrue(error.closed)
+                self.assertEqual(str(caught.exception), "Runpod rejected the request settings (HTTP 400)")
+                self.assertFalse(caught.exception.ambiguous)
+
+    def test_capacity_detail_does_not_override_ambiguous_server_failure(self):
+        body = json.dumps({
+            "detail": "There are not enough free GPUs on the host machine to start this pod."}).encode()
+        self.opener.open.side_effect = HTTPError(
+            "https://private.invalid", 500, "secret-detail", {}, BytesIO(body))
+        with self.assertRaises(RunpodAmbiguousOutcome) as caught:
+            self.api.start_pod("pod_1")
+        self.assertEqual(caught.exception.status, 500)
+        self.assertEqual(self.opener.open.call_count, 1)
+
     def test_invalid_or_incomplete_create_success_is_ambiguous(self):
         for raw in (b"", b"html fixture-secret", b"[]", b"null", b'{}', b'{"id":"../../escape"}'):
             with self.subTest(raw=raw):

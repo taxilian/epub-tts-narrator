@@ -22,6 +22,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 _V1 = "https://rest.runpod.io/v1"
 _V2 = "https://api.runpod.io/v2"
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_ERROR_BYTES = 16 * 1024
+_HOST_CAPACITY_DETAIL = "There are not enough free GPUs on the host machine to start this pod."
 _TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
@@ -195,8 +197,13 @@ class RunpodAPI:
                 return result
             except HTTPError as exc:
                 status = exc.code
-                exc.close()
-                failure = self._http_error(status, mutation)
+                try:
+                    error_body = exc.read(_MAX_ERROR_BYTES + 1)
+                except (URLError, OSError, HTTPException):
+                    error_body = b""
+                finally:
+                    exc.close()
+                failure = self._http_error(status, mutation, error_body=error_body)
             except (URLError, OSError, HTTPException):
                 if mutation:
                     failure = RunpodAmbiguousOutcome(
@@ -221,11 +228,23 @@ class RunpodAPI:
         return RunpodAPIError("Runpod returned an unreadable or unexpected response")
 
     @staticmethod
-    def _http_error(status, mutation):
+    def _http_error(status, mutation, *, error_body=b""):
         if mutation and (status >= 500 or status == 408 or 300 <= status < 400):
             return RunpodAmbiguousOutcome(
                 f"Runpod did not confirm the request (HTTP {status}). It may have succeeded; "
                 "check saved resources before retrying.", status=status)
+        if status == 400 and mutation and len(error_body) <= _MAX_ERROR_BYTES:
+            try:
+                problem = json.loads(error_body)
+            except (ValueError, UnicodeError, RecursionError):
+                problem = None
+            # Translate only this exact observed provider diagnosis. No
+            # arbitrary provider text or echoed request values are exposed.
+            if isinstance(problem, dict) and problem.get("detail") == _HOST_CAPACITY_DETAIL:
+                return RunpodAPIError(
+                    "Runpod cannot restart this Pod because its assigned host has no free GPU capacity "
+                    "(HTTP 400). The Pod remains stopped; retry later or replace the Pod while keeping "
+                    "its existing network volume.", status=status)
         detail = {
             400: "rejected the request settings", 401: "rejected the API key",
             403: "denied permission for this operation", 404: "could not find the requested resource",
