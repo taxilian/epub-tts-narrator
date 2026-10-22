@@ -6,7 +6,10 @@ from copy import deepcopy
 from io import StringIO
 import json
 from pathlib import Path
+import shlex
 import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -354,42 +357,110 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(deployment.url, "https://pod_fixture-9001.proxy.runpod.net")
         self.assertEqual(self.api.create_pod.call_args.args[0]["ports"], ["22/tcp", "9001/http"])
 
+    def test_startup_repairs_restored_ssh_key_permissions_before_launch(self):
+        deployment = self.deployment()
+        saved, restored = self.directory / "saved host keys", self.directory / "local ssh"
+        saved.mkdir()
+        restored.mkdir()
+        for algorithm in ("ed25519", "rsa"):
+            for suffix in ("", ".pub"):
+                key = saved / f"ssh_host_{algorithm}_key{suffix}"
+                key.write_text("fixture key")
+                key.chmod(0o666)
+        receipt = self.directory / "launch.json"
+        starter = self.directory / "start fixture.sh"
+        starter.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} - <<'PY'\nimport json\nfrom pathlib import Path\n"
+            f"directory = Path({str(restored)!r})\n"
+            "modes = {key.name: key.stat().st_mode & 0o777 for key in directory.iterdir()}\n"
+            "assert all(mode == (0o644 if name.endswith('.pub') else 0o600) "
+            "for name, mode in modes.items()), modes\n"
+            f"Path({str(receipt)!r}).write_text(json.dumps(modes))\nPY\n")
+        starter.chmod(0o700)
+        script = deployment.startup_command()[2]
+        script = script.replace("/workspace/.epub-tts-runtime/ssh-host-keys", shlex.quote(str(saved)))
+        script = script.replace("/etc/ssh/", shlex.quote(str(restored)) + "/")
+        script = script.replace("/start.sh", shlex.quote(str(starter)))
+        # The fixture must restore its existing keys; never run the machine's
+        # ssh-keygen even if a regression selects the generation branch.
+        script = script.replace("ssh-keygen -A", "false")
+        subprocess.run(["bash", "-c", script], check=True, capture_output=True, timeout=10)
+        modes = json.loads(receipt.read_text())
+        self.assertEqual(len(modes), 4)
+        for name in modes:
+            self.assertEqual((restored / name).read_text(), "fixture key")
+            self.assertEqual((saved / name).stat().st_mode & 0o777, 0o666)
+
     def test_changed_port_updates_stopped_pod_without_replacing_volume(self):
         deployment = self.deployment()
         deployment.state["pod_id"] = "pod_fixture"
-        pod = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"]}
-        updated = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8082/http"]}
+        pod = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"],
+               "dockerStartCmd": deployment.startup_command()}
+        updated = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8082/http"],
+                   "dockerStartCmd": deployment.startup_command()}
         self.api.get_pod.return_value = updated
-        self.assertEqual(deployment.configure_ports(pod), updated)
+        self.assertEqual(deployment.configure_runtime(pod), updated)
         self.api.update_pod.assert_called_once_with("pod_fixture", {"ports": ["22/tcp", "8082/http"]})
         self.api.create_pod.assert_not_called()
         self.api.create_volume.assert_not_called()
         self.api.start_pod.assert_not_called()
         self.api.stop_pod.assert_not_called()
 
-    def test_unchanged_port_does_not_mutate_running_worker(self):
+    def test_unchanged_runtime_does_not_mutate_running_worker(self):
         deployment = self.deployment()
-        pod = {"desiredStatus": "RUNNING", "ports": ["8082/http", "22/tcp"]}
-        self.assertIs(deployment.configure_ports(pod), pod)
+        pod = {"desiredStatus": "RUNNING", "ports": ["8082/http", "22/tcp"],
+               "dockerStartCmd": deployment.startup_command()}
+        self.assertIs(deployment.configure_runtime(pod), pod)
         self.api.update_pod.assert_not_called()
         self.api.stop_pod.assert_not_called()
+
+    def test_changed_startup_stops_before_patching_only_command(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        pod = {"desiredStatus": "RUNNING", "ports": deployment.service_ports(),
+               "dockerStartCmd": ["bash", "-lc", "old startup"]}
+        updated = {"desiredStatus": "EXITED", "ports": deployment.service_ports(),
+                   "dockerStartCmd": deployment.startup_command()}
+        calls = Mock()
+        deployment.stop = calls.stop
+        calls.attach_mock(self.api.update_pod, "update")
+        self.api.get_pod.return_value = updated
+        self.assertEqual(deployment.configure_runtime(pod), updated)
+        self.assertEqual([call[0] for call in calls.mock_calls], ["stop", "update"])
+        self.api.update_pod.assert_called_once_with("pod_fixture", {"cmd": deployment.startup_command()})
+        self.api.create_volume.assert_not_called()
+        self.api.create_pod.assert_not_called()
+        self.api.start_pod.assert_not_called()
 
     def test_uncertain_port_update_is_read_back_without_retrying(self):
         deployment = self.deployment()
         deployment.state["pod_id"] = "pod_fixture"
         self.api.update_pod.side_effect = RunpodAmbiguousOutcome("uncertain")
-        old = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"]}
+        old = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"],
+               "dockerStartCmd": deployment.startup_command()}
         self.api.get_pod.return_value = old
-        with self.assertRaisesRegex(RuntimeError, "port update was not confirmed"):
-            deployment.configure_ports(old)
+        with self.assertRaisesRegex(RuntimeError, "runtime update was not confirmed"):
+            deployment.configure_runtime(old)
         self.assertEqual(self.api.update_pod.call_count, 1)
+        self.api.start_pod.assert_not_called()
+
+    def test_runtime_update_requires_readback_of_command_and_ports(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        old = {"desiredStatus": "EXITED", "ports": ["22/tcp", "8081/http"],
+               "dockerStartCmd": ["bash", "-lc", "old startup"]}
+        self.api.get_pod.return_value = {**old, "ports": deployment.service_ports()}
+        with self.assertRaisesRegex(RuntimeError, "runtime update was not confirmed"):
+            deployment.configure_runtime(old)
+        self.api.update_pod.assert_called_once_with("pod_fixture", {
+            "ports": deployment.service_ports(), "cmd": deployment.startup_command()})
         self.api.start_pod.assert_not_called()
 
     def test_dead_supervisor_fails_launch_without_waiting_full_timeout(self):
         from epub_tts_narrator.renderer.chapter_client import ChapterClientError
         deployment = self.deployment()
         deployment.state["pod_id"] = "pod_fixture"
-        deployment.ssh = Mock(side_effect=[b"", b"", b"Worker supervisor exited.\n", b"Bind failed.\n"])
+        deployment.ssh = Mock(side_effect=[b"", b"", b"SSH warning.\nEPUB_TTS_WORKER_STATUS=EXITED\n", b"Bind failed.\n"])
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
             client.return_value.request.side_effect = ChapterClientError("unavailable")
             with self.assertRaisesRegex(RuntimeError, "exited during startup"):
@@ -397,6 +468,22 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(client.return_value.request.call_count, 1)
         self.assertIn("tail -n 60", deployment.ssh.call_args.args[0])
         self.sleep.assert_not_called()
+
+    def test_healthy_supervisor_ignores_ssh_warning_output(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        warning = (b"WARNING: connection is not using a post-quantum key exchange algorithm.\n"
+                   b"Banner mentions EPUB_TTS_WORKER_STATUS=EXITED without reporting it.\n"
+                   b"EPUB_TTS_WORKER_STATUS=RUNNING\n")
+        deployment.ssh = Mock(side_effect=[b"", b"", warning])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
+            client.return_value.request.side_effect = [ChapterClientError("loading"), {}]
+            deployment.launch()
+        self.assertEqual(client.return_value.request.call_count, 2)
+        self.assertEqual(deployment.ssh.call_count, 3)
+        self.assertFalse(any("tail -n 60" in call.args[0] for call in deployment.ssh.call_args_list))
+        self.sleep.assert_called_once_with(5)
 
     def test_missing_or_invalid_ssh_endpoint_is_not_used(self):
         self.assertEqual(ssh_endpoint({"publicIp": "203.0.113.7", "portMappings": {"22": 10341}}),

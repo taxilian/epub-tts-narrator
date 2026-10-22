@@ -255,12 +255,6 @@ class Deployment:
                 raise ValueError("Persistent volume must be in the selected GPU datacenter")
             self.state["volume_id"] = volume_id
             self.save()
-        # Persist SSH host keys so restarting a cleared container does not
-        # invalidate the client's pinned host identity.
-        startup = ("set -eu; keys=/workspace/.epub-tts-runtime/ssh-host-keys; "
-                   "mkdir -p \"$keys\"; chmod 700 \"$keys\"; "
-                   "if test -f \"$keys/ssh_host_ed25519_key\"; then cp -p \"$keys\"/ssh_host_* /etc/ssh/; "
-                   "else ssh-keygen -A; cp -p /etc/ssh/ssh_host_* \"$keys\"/; fi; exec /start.sh")
         # v1 validates datacenter IDs against a stale enum. v2 accepts the
         # current catalog's IDs and retains explicit placement beside the
         # existing network volume. Secure on-demand Pods expose a public IP.
@@ -269,7 +263,7 @@ class Deployment:
                 "dataCenterIds": [self.cfg["data_center_id"]],
                 "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
                 "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
-                "env": {"PUBLIC_KEY": self._public_key()}, "cmd": ["bash", "-lc", startup]}
+                "env": {"PUBLIC_KEY": self._public_key()}, "cmd": self.startup_command()}
         self.state["pod_creation_pending"] = True
         self.save()
         try:
@@ -297,21 +291,39 @@ class Deployment:
     def service_ports(self):
         return ["22/tcp", f"{self.cfg['service_port']}/http"]
 
-    def configure_ports(self, pod):
-        """Reconcile a changed service port without replacing persistent storage."""
-        ports = self.service_ports()
-        if set(pod.get("ports") or []) == set(ports):
+    @staticmethod
+    def startup_command():
+        # Network storage may restore permissive modes even when the original
+        # keys were private. Fix the local copies before sshd reads them.
+        startup = ("set -eu; keys=/workspace/.epub-tts-runtime/ssh-host-keys; "
+                   "mkdir -p \"$keys\"; chmod 700 \"$keys\"; "
+                   "if test -f \"$keys/ssh_host_ed25519_key\"; then cp -p \"$keys\"/ssh_host_* /etc/ssh/; "
+                   "else ssh-keygen -A; cp -p /etc/ssh/ssh_host_* \"$keys\"/; fi; "
+                   "chmod 600 /etc/ssh/ssh_host_*_key; chmod 644 /etc/ssh/ssh_host_*_key.pub; "
+                   "exec /start.sh")
+        return ["bash", "-lc", startup]
+
+    def configure_runtime(self, pod):
+        """Reconcile startup and service ports without replacing persistent storage."""
+        ports, command = self.service_ports(), self.startup_command()
+        changes = {}
+        if set(pod.get("ports") or []) != set(ports):
+            changes["ports"] = ports
+        if pod.get("dockerStartCmd") != command:
+            changes["cmd"] = command
+        if not changes:
             return pod
         if pod.get("desiredStatus") not in {"EXITED", "STOPPED"}:
             self.stop()
-        self.notify(f"Configuring chapter service on port {self.cfg['service_port']}…")
+        self.notify(f"Configuring worker startup and chapter service on port {self.cfg['service_port']}…")
         try:
-            self.api.update_pod(self.pod_id, {"ports": ports})
+            self.api.update_pod(self.pod_id, changes)
         except RunpodAmbiguousOutcome:
             pass  # Read back before deciding whether another operation is safe.
         updated = self.api.get_pod(self.pod_id)
-        if set(updated.get("ports") or []) != set(ports):
-            raise RuntimeError("Worker port update was not confirmed; no replacement worker was created")
+        if (set(updated.get("ports") or []) != set(ports)
+                or updated.get("dockerStartCmd") != command):
+            raise RuntimeError("Worker runtime update was not confirmed; no replacement worker was created")
         if updated.get("desiredStatus") not in {"EXITED", "STOPPED"}:
             self.stop()
             updated = self.api.get_pod(self.pod_id)
@@ -324,7 +336,7 @@ class Deployment:
         actual = pod.get("costPerHr")
         if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
             raise ValueError("Worker's current rate exceeds runpod.max_hourly_price")
-        pod = self.configure_ports(pod)
+        pod = self.configure_runtime(pod)
         if pod.get("desiredStatus") != "RUNNING":
             self.notify(f"Starting worker {self.pod_id}…")
             try:
@@ -481,12 +493,13 @@ try:
     running = running and (proc / 'stat').read_text().rpartition(') ')[2].split()[0] != 'Z'
 except (OSError, ValueError, IndexError):
     running = False
-if not running:
-    print('Worker supervisor exited before the chapter service became ready.')
+print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=EXITED')
 '''
-                stopped = self.ssh("python3 -c " + shlex.quote(check) + " " + pid + " " +
-                                   shlex.quote(self.cfg["app_dir"] + "/deploy/runpod/worker.py"), timeout=30)
-                if stopped.strip():
+                probe = self.ssh("python3 -c " + shlex.quote(check) + " " + pid + " " +
+                                 shlex.quote(self.cfg["app_dir"] + "/deploy/runpod/worker.py"), timeout=30)
+                # SSH diagnostics share this stream with the probe's stdout.
+                # Only our exact status line identifies an exited supervisor.
+                if b"EPUB_TTS_WORKER_STATUS=EXITED" in probe.splitlines():
                     self.ssh(f"tail -n 60 {log}")
                     raise RuntimeError("Chapter worker exited during startup; see diagnostics above")
                 time.sleep(5)
