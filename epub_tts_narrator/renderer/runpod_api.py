@@ -1,11 +1,10 @@
 """Small, file-credential-only Runpod management client.
 
-Pod creation, configuration updates, and the GPU/data-center catalog use v2, whose placement fields
-support current datacenters. Other resource management retains v1. Hosts are
-fixed, redirects and ambient HTTP proxies are disabled, and provider error
-bodies are never exposed. A failed
-mutation is never retried here: callers must reconcile uncertain outcomes
-before creating another paid resource.
+Pod creation, configuration, lifecycle actions, and the GPU/data-center catalog
+use v2. Pod reads and volume management retain v1. Hosts are fixed, redirects
+and ambient HTTP proxies are disabled, and provider error bodies are never
+exposed. A failed mutation is never retried here: callers must reconcile
+uncertain outcomes before creating another paid resource.
 """
 
 from __future__ import annotations
@@ -112,10 +111,20 @@ class RunpodAPI:
                              v2=True, expected=dict, require_id=True)
 
     def start_pod(self, pod_id):
-        return self._request("POST", f"/pods/{_resource_id(pod_id)}/start", allow_empty=True)
+        return self._pod_action(pod_id, "start")
 
     def stop_pod(self, pod_id):
-        return self._request("POST", f"/pods/{_resource_id(pod_id)}/stop", allow_empty=True)
+        return self._pod_action(pod_id, "stop")
+
+    def _pod_action(self, pod_id, action):
+        pod_id = _resource_id(pod_id)
+        result = self._request("POST", f"/pods/{pod_id}/action", spec={"action": action},
+                               v2=True, expected=dict, require_id=True)
+        # v2 start/stop return the updated Pod. An empty response or another
+        # resource's response cannot confirm this action; observe before retry.
+        if result["id"] != pod_id:
+            raise self._invalid_response(True)
+        return result
 
     def list_volumes(self):
         return self._request("GET", "/networkvolumes", expected=list)

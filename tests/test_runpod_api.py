@@ -63,15 +63,41 @@ class RunpodAPITests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), spec)
         self.assertEqual(self.opener.open.call_count, 1)
 
-    def test_start_stop_accept_empty_acknowledgement(self):
-        self.opener.open.return_value = response(raw=b"", status=200)
-        self.assertIsNone(self.api.start_pod("pod_1"))
-        self.assertEqual(self.opener.open.call_args.args[0].full_url, "https://rest.runpod.io/v1/pods/pod_1/start")
-        self.opener.open.return_value = response(raw=b"", status=204)
-        self.assertIsNone(self.api.stop_pod("pod_1"))
-        request = self.opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod_1/stop")
-        self.assertEqual(request.data, b"")
+    def test_start_stop_use_v2_actions_and_return_updated_pod(self):
+        for action, status in (("start", "STARTING"), ("stop", "EXITED")):
+            with self.subTest(action=action):
+                self.opener.open.reset_mock()
+                payload = {"id": "pod_1", "status": status, "futureField": "preserved"}
+                self.opener.open.return_value = response(payload)
+                self.assertEqual(getattr(self.api, action + "_pod")("pod_1"), payload)
+                request = self.opener.open.call_args.args[0]
+                self.assertEqual(request.full_url, "https://api.runpod.io/v2/pods/pod_1/action")
+                self.assertEqual(request.method, "POST")
+                self.assertEqual(request.headers["Content-type"], "application/json")
+                self.assertEqual(json.loads(request.data), {"action": action})
+                self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_actions_require_confirmation_for_requested_pod_without_retry(self):
+        for action in (self.api.start_pod, self.api.stop_pod):
+            for raw in (b"", b"{}", b"[]", b'{"id":"another_pod"}', b'{"id":"../../escape"}'):
+                with self.subTest(action=action.__name__, raw=raw):
+                    self.opener.open.reset_mock()
+                    self.opener.open.return_value = response(raw=raw)
+                    with self.assertRaises(RunpodAmbiguousOutcome):
+                        action("pod_1")
+                    self.assertEqual(self.opener.open.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_action_server_error_does_not_retry_or_fall_back_to_v1(self):
+        for action in (self.api.start_pod, self.api.stop_pod):
+            with self.subTest(action=action.__name__):
+                self.opener.open.reset_mock()
+                self.opener.open.side_effect = HTTPError(
+                    "https://private.invalid", 500, "secret-detail", {}, BytesIO())
+                with self.assertRaises(RunpodAmbiguousOutcome):
+                    action("pod_1")
+                self.assertEqual(self.opener.open.call_count, 1)
+        self.sleep.assert_not_called()
 
     def test_update_pod_only_sends_requested_fields_without_starting(self):
         spec = {"ports": ["22/tcp", "8082/http"]}
