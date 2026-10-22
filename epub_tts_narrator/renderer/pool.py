@@ -140,6 +140,8 @@ class RenderPool:
         return _SerializedVerifier(verifier, self.local_lock, self._local_runtime)
 
     def _execute(self, method, *args, **kwargs):
+        from .interrupts import stop_if_requested
+        stop_if_requested()
         if self._closed:
             raise EngineError("The render pool is closed")
         notify = generation_notifier()
@@ -149,6 +151,9 @@ class RenderPool:
             name = worker.settings["name"]
             report_worker_activity(notify, "assigned", name)
             def run():
+                # A job may have waited for a worker or the local model thread.
+                # Do not start it after cancellation; already-running jobs drain.
+                stop_if_requested()
                 started = monotonic()
                 report_worker_activity(notify, "started", name)
                 try:

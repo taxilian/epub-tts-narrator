@@ -12,6 +12,7 @@ import tempfile
 
 from .assembly import _wave_info
 from .common import digest, file_hash, read_json, write_json
+from .interrupts import run_subprocess
 
 
 class SampleNormalizer:
@@ -45,7 +46,7 @@ class SampleNormalizer:
             command += ["-map_metadata", "-1", "-ac", "1", "-ar", "44100",
                         "-c:a", "pcm_s16le", "-f", "wav", str(output)]
         try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL,
+            result = run_subprocess(command, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     timeout=120, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:

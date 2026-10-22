@@ -219,6 +219,7 @@ def doctor(config):
 def main(argv=None):
     args = parser().parse_args(argv)
     engine = verifier = None
+    interrupts = None
     try:
         if args.command == "runpod":
             from .runpod import run_command
@@ -420,7 +421,11 @@ def main(argv=None):
                 lock.rmdir()
             print("Persistent voices are saved. Audition their reference WAVs with the voices command.")
         else:
+            from .interrupts import RenderInterrupts, stop_if_requested
+            interrupts = RenderInterrupts()
+            interrupts.__enter__()
             result = render(bundle, config, engine, verifier, chapters_only=args.chapters_only)
+            stop_if_requested()
             if args.chapters_only:
                 print(f"Completed chapter audio: {Path(config['render']['work_dir']) / 'chapters'}")
                 if isinstance(result, dict):
@@ -442,13 +447,17 @@ def main(argv=None):
         print("Interrupted; verified clips are retained for resume.", file=sys.stderr)
         return 130
     finally:
-        for component in (verifier, engine):
-            close = getattr(component, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except (ValueError, RuntimeError, OSError) as exc:
-                    print(f"Renderer cleanup warning: {exc}", file=sys.stderr)
+        try:
+            for component in (verifier, engine):
+                close = getattr(component, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except (ValueError, RuntimeError, OSError) as exc:
+                        print(f"Renderer cleanup warning: {exc}", file=sys.stderr)
+        finally:
+            if interrupts is not None:
+                interrupts.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

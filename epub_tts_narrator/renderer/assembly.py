@@ -26,6 +26,7 @@ from epub_tts_narrator.epub import (
     MAX_ARCHIVE_BYTES, _Archive, _parse_xml, _resolve_href, _tag,
 )
 from .pacing import audio_edges, punctuation_pause
+from .interrupts import run_subprocess
 
 
 def _hash(path: Path) -> str:
@@ -35,7 +36,7 @@ def _hash(path: Path) -> str:
 
 def _run(arguments: list[str], *, timeout: int = 3600) -> str:
     try:
-        result = subprocess.run(arguments, stdin=subprocess.DEVNULL,
+        result = run_subprocess(arguments, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:

@@ -521,7 +521,6 @@ class VoiceStore:
                              report, metadata, candidate_id=candidate_id)
 
     def lock(self):
+        from .run_locks import acquire_directory_lock
         self._prepare_directory(self.directory)
-        path = self.directory / ".lock"
-        path.mkdir()
-        return path
+        return acquire_directory_lock(self.directory / ".lock")

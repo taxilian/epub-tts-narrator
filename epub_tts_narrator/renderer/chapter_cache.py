@@ -13,6 +13,7 @@ import tempfile
 
 from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_speakers
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .interrupts import run_subprocess
 
 
 def chapter_settings(render):
@@ -61,7 +62,7 @@ def _loudness_pass(source, audio_filter, destination, settings):
         command += ["-map_metadata", "-1", "-ac", "1", "-ar", str(settings["sample_rate"]),
                     "-c:a", "pcm_s16le", "-f", "wav", str(destination)]
     try:
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        result = run_subprocess(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=3600, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError(f"Unable to normalize chapter with FFmpeg: {exc}") from exc

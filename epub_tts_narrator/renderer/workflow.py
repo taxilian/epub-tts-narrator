@@ -19,10 +19,12 @@ from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
+from .interrupts import stop_if_requested
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
 from .progress import (ChapterProgress, format_duration, generation_activity,
                        report_worker_activity, set_phase)
 from .retry_budget import SpeechRetryBudget, generation_attempts
+from .run_locks import acquire_directory_lock
 from .speech_text import trim_speech_text
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import default_voice_prompt
@@ -298,6 +300,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         nonlocal rewrite
         if resolution_session is None:
             return None
+        stop_if_requested()
         result = resolution_session.consider(record, notify=notify)
         if result is None:
             return None
@@ -432,6 +435,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
+                    # A running take finishes its quality checks and cache
+                    # publication. Cancellation only prevents starting a new one.
+                    stop_if_requested()
                     if fresh_speech:
                         generation_ordinal = retry_budget.claim(
                             directory, request_hash, attempts,
@@ -541,6 +547,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             elif report.get("text_confirmation_method") in {"phonetic_primary", "phonetic_secondary"}:
                 notify("  Three pronunciation reviews resolved the spelling differences; full word coverage passed.")
             return finish(wav, record)
+        stop_if_requested()
         if pending_confirmation(report):
             stop_for_confirmation()
         if report.get("retryable") is False:
@@ -555,6 +562,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         else:
             label = f"Attempt {attempt}/{attempts}"
         notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
+        stop_if_requested()
         resolved = resolve_failure(record)
         if resolved is not None:
             return resolved
@@ -776,7 +784,7 @@ def _lock_book_audio(bundle):
     """Coordinate analysis revisions even when render work is outside the book."""
     lock = Path(bundle["directory"]) / ".audio-render.lock"
     try:
-        lock.mkdir()
+        lock = acquire_directory_lock(lock)
     except FileExistsError as exc:
         raise RenderBlocked(
             f"Another process may be rendering or assembling this book. If it was forcibly terminated, "
@@ -1133,7 +1141,7 @@ def _start_run(work, plan, mode):
     work.mkdir(parents=True, exist_ok=True)
     lock = work / ".render.lock"
     try:
-        lock.mkdir()
+        lock = acquire_directory_lock(lock)
     except FileExistsError as exc:
         raise RenderBlocked(
             f"Another render/assembly may be running. If it was forcibly terminated, confirm it has "
@@ -1162,7 +1170,7 @@ def cleanup_render_work(bundle, config, *, dry_run=False, discard_render_cache=F
         raise RenderBlocked("Cleanup work directory must be a directory")
     lock = work / ".render.lock"
     try:
-        lock.mkdir()
+        lock = acquire_directory_lock(lock)
     except FileExistsError as exc:
         raise RenderBlocked("Another render, assembly, or cleanup may be running; "
                             f"retry after it finishes: {lock}") from exc
@@ -1177,7 +1185,8 @@ def cleanup_render_work(bundle, config, *, dry_run=False, discard_render_cache=F
 
 
 def _failed_run(work, exc, notify):
-    write_json(work / "status.json", {"status": "blocked", "error": str(exc), "error_type": type(exc).__name__})
+    status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "blocked"
+    write_json(work / "status.json", {"status": status, "error": str(exc), "error_type": type(exc).__name__})
     notify(f"Verified clips and completed chapters are retained in {work}. Rerun the same command to resume.")
 
 
@@ -1297,6 +1306,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                     if result is None:
                         # Preserve the persisted strategy and verified parts;
                         # never generate more whole takes on this resume path.
+                        stop_if_requested()
                         result = recover_speech(text, synthesize_part, directory, request,
                                                 verifier, config, notify=notify, retry_budget=retry_budget,
                                                 resolution_episode=resolution_episode)
@@ -1307,6 +1317,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                seed_identity=identity, generate_repaired=synthesize_part,
                                                resolution_episode=resolution_episode)
                     except SpeechVerificationFailed as exc:
+                        stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
                                 or (exc.report.get("reasons") != ["text_mismatch"]
                                     and exc.report.get("resolution_action") != "split")
@@ -1399,6 +1410,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     with ChapterProgress(chapter.get("number", 1), total_chapters or chapter.get("number", 1), chunks,
                          notify=notify, parallel=getattr(engine, "max_parallel", parallel)) as progress:
         def run(index):
+            stop_if_requested()
             with progress.task(index) as task_notify:
                 return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
                                      engine_identity, verifier, config, work, take_locks,
@@ -1413,6 +1425,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             pending, next_index = {}, 0
             try:
                 while next_index < len(chunks) and len(pending) < parallel:
+                    stop_if_requested()
                     pending[executor.submit(run, next_index)] = next_index
                     next_index += 1
                 while pending:
@@ -1422,7 +1435,9 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                     for future in finished:
                         index = pending.pop(future)
                         results[index] = future.result()
+                    stop_if_requested()
                     while next_index < len(chunks) and len(pending) < parallel:
+                        stop_if_requested()
                         pending[executor.submit(run, next_index)] = next_index
                         next_index += 1
             finally:
@@ -1431,6 +1446,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                 # In-flight remote/local jobs may still publish verified clips.
                 # Drain before render() can release book/cache locks, even on Ctrl-C.
                 executor.shutdown(wait=True, cancel_futures=True)
+        stop_if_requested()
         return [result[0] for result in results], [result[1] for result in results if result[1] is not None]
 
 
@@ -1445,6 +1461,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
                    "audio_too_quiet", "excessive_silence", "internal_silence_stall",
                    "excessive_clipping"}
     while True:
+        stop_if_requested()
         try:
             clips, acceptance = _render_chapter_chunks(
                 chapter, voices, engine, engine_identity, verifier, config, work,
@@ -1452,6 +1469,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
                 speech_cache=speech_cache)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
+            stop_if_requested()
             request, report = exc.request, exc.report
             reasons = report.get("reasons", [])
             chunk = request.get("chunk", {})
@@ -1506,23 +1524,25 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     and any(store.load(voice_id) is None for voice_id in plan["voice_ids"])):
                 from .voice_design import create_designer
                 designer = create_designer(deepcopy(settings))
-            voices = {
-                voice_id: ensure_voice(
+            voices = {}
+            for voice_id in plan["voice_ids"]:
+                stop_if_requested()
+                voices[voice_id] = ensure_voice(
                     store, voice_id, profiles.get(store.canonical_id(voice_id), profiles[voice_id]),
                     engine, verifier, config, work, notify=notify, designer=designer, bundle=bundle)
-                for voice_id in plan["voice_ids"]
-            }
         finally:
             close = getattr(designer, "close", None)
             if callable(close):
                 close()
         voice_lock.rmdir()
         voice_lock = None
+        stop_if_requested()
         rendered, acceptance = [], []
         engine_identity, verifier_identity = engine.identity, verifier.identity
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
         for chapter_index, chapter in enumerate(plan["chapters"]):
+            stop_if_requested()
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
@@ -1542,6 +1562,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     plan["chapters"][chapter_index] = chapter
                     write_json(work / "runs" / digest(plan) / "plan.json", plan)
                 context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
+                stop_if_requested()
                 composed = prepare_chapter(
                     dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                     clips, work / "chapters", book=bundle["source"]["book"],
@@ -1552,6 +1573,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
             notify(f"Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
                    f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready).")
+        stop_if_requested()
         if chapters_only:
             result = {
                 "format": "audiobook-chapters", "version": 1, "status": "chapters_complete",

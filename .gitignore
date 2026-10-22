@@ -46,6 +46,10 @@ models/
 .analysis-revisions/
 .analysis-update.lock/
 .audio-render.lock/
+.audio-render.lock.lease
+.render.lock/
+.render.lock.lease
+.lock.lease
 .audition-scripts.lock/
 audition-scripts.json
 voices/
