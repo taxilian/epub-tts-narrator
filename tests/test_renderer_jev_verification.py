@@ -68,18 +68,20 @@ class JevReferenceVerificationTests(unittest.TestCase):
     write_audio = consensus.ReferenceConsensusTests.write_audio
     check = consensus.ReferenceConsensusTests.check
 
-    def wrapped(self, actual=SPLIT, secondary=SPLIT, judge=None):
+    def wrapped(self, actual=ALTERNATE, secondary=ALTERNATE, judge=None):
         recognizer = IndependentVerifier(primary=actual, secondary=secondary)
         return ReferenceTextJudgingVerifier(recognizer, judge or Judge()), recognizer
 
     def test_equivalent_compound_splits_keep_recognized_reference_text_and_full_audit(self):
         judge = Judge()
-        verifier, recognizer = self.wrapped(judge=judge)
+        verifier, recognizer = self.wrapped(SPLIT, SPLIT, judge)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
         self.assertEqual(report["reference_text"], SPLIT)
-        self.assertEqual(report["text_judge"], judge.response)
-        self.assertEqual(judge.calls, [(SCRIPT, SPLIT, None)])
+        self.assertNotIn("text_judge", report)
+        self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 2)
+        self.assertGreater(report["metrics"]["wer"], 0)
+        self.assertEqual(judge.calls, [])
         self.assertEqual(recognizer.calls, [("reference", self.audio)])
 
     def test_different_uncertain_unavailable_and_failed_judges_reject(self):
@@ -88,7 +90,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 judge = Judge(decision if decision != "exception" else "equivalent")
                 if decision == "exception":
                     judge.error = RuntimeError("PRIVATE_API_KEY PRIVATE_REQUEST_TEXT")
-                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(SPLIT), judge)
+                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(ALTERNATE), judge)
                 report = self.check(verifier, expected=SCRIPT)
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["reasons"], ["text_mismatch"])
@@ -136,7 +138,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
             report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
         evaluate.assert_called_once()
-        self.assertEqual(evaluate.call_args.args[0], {"requested_passage": SCRIPT, "recognized_passage": SPLIT})
+        self.assertEqual(evaluate.call_args.args[0], {"requested_passage": SCRIPT, "recognized_passage": ALTERNATE})
         self.assertEqual(recognizer.calls, [("reference", self.audio)])
         self.assertEqual(report["text_judge"]["comparisons"][0]["transcripts"], ["primary"])
 
@@ -209,7 +211,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
             with self.subTest(index=index):
                 judge = Judge()
                 judge.mutate = lambda record: mutation(dict(record, decision="unavailable", error_code="transport_error"))
-                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(SPLIT), judge)
+                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(ALTERNATE), judge)
                 report = self.check(verifier, expected=SCRIPT)
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["text_judge"]["error_code"], "invalid_judge_record")
@@ -233,14 +235,14 @@ class JevReferenceVerificationTests(unittest.TestCase):
             lambda r: dict(r, comparisons=[dict(r["comparisons"][0], transcripts=[])]),
             lambda r: dict(r, comparisons=[dict(r["comparisons"][0], transcripts=["secondary"])]),
             lambda r: dict(r, comparisons=[dict(r["comparisons"][0], requested_passage=SCRIPT + " Changed.")]),
-            lambda r: dict(r, comparisons=[dict(r["comparisons"][0], recognized_passage=ALTERNATE)]),
+            lambda r: dict(r, comparisons=[dict(r["comparisons"][0], recognized_passage=SPLIT)]),
             lambda r: dict(r, comparisons=[dict(r["comparisons"][0], policy_version=6)]),
         )
         for index, mutation in enumerate(mutations):
             with self.subTest(index=index):
                 judge = Judge()
                 judge.mutate = mutation
-                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(SPLIT), judge)
+                verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(ALTERNATE), judge)
                 report = self.check(verifier, expected=SCRIPT)
                 self.assertFalse(report["passed"], report)
                 self.assertNotIn("reference_text", report)
@@ -288,15 +290,15 @@ class JevReferenceVerificationTests(unittest.TestCase):
 
     def test_approved_primary_does_not_trigger_optional_secondary(self):
         judge = Judge()
-        verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(SPLIT), judge)
+        verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(ALTERNATE), judge)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
-        self.assertEqual(judge.calls, [(SCRIPT, SPLIT, None)])
+        self.assertEqual(judge.calls, [(SCRIPT, ALTERNATE, None)])
         judge.calls.clear()
-        verifier, recognizer = self.wrapped(SPLIT, "Completely unrelated secondary recognition.", judge)
+        verifier, recognizer = self.wrapped(ALTERNATE, "Completely unrelated secondary recognition.", judge)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
-        self.assertEqual(judge.calls, [(SCRIPT, SPLIT, None)])
+        self.assertEqual(judge.calls, [(SCRIPT, ALTERNATE, None)])
         self.assertEqual(recognizer.calls, [("reference", self.audio)])
 
     def test_secondary_confirmation_rescues_uncertain_primary_and_keeps_both_audits(self):
@@ -340,7 +342,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
         speech = self.check(verifier, expected=SCRIPT, purpose="speech")
         self.assertTrue(speech["passed"], speech)
         self.assertEqual(recognizer.calls, [("speech", self.audio)])
-        self.assertEqual(judge.calls, [(SCRIPT, SPLIT, None)])
+        self.assertEqual(judge.calls, [(SCRIPT, ALTERNATE, None)])
         judge.calls.clear()
         self.write_audio(amplitude=0)
         silent = self.check(verifier, expected=SCRIPT)

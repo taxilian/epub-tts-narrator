@@ -20,7 +20,7 @@ class ReferenceBoundaryTests(unittest.TestCase):
     write_audio = consensus.ReferenceConsensusTests.write_audio
     check = consensus.ReferenceConsensusTests.check
 
-    def test_talim_split_requires_independent_agreement_and_preserves_raw_diagnostics(self):
+    def test_talim_split_preserves_raw_diagnostics_without_another_recognizer(self):
         verifier = consensus.IndependentVerifier(primary=ACTUAL, secondary=ACTUAL)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
@@ -33,16 +33,13 @@ class ReferenceBoundaryTests(unittest.TestCase):
         for key, value in original.items():
             self.assertEqual(report["metrics"][key], value)
         self.assertEqual(report["reference_comparison"], compare_reference_words(SCRIPT, ACTUAL))
-        self.assertEqual(report["corroboration"]["decision"], "agreed_reference_transcript")
-        eligibility = report["corroboration"]["eligibility"]
-        self.assertEqual(eligibility["substitutions"], 0)
-        self.assertEqual(eligibility["boundary_changes"], 1)
-        self.assertEqual(eligibility["variation_count"], 1)
-        self.assertTrue(eligibility["alignment"])
-        self.assertEqual(verifier.calls, [
-            ("reference", self.audio), ("corroboration", self.audio)])
+        self.assertNotIn("corroboration", report)
+        spacing = report["word_boundary_comparison"]
+        self.assertEqual(spacing["boundary_changes"], 1)
+        self.assertTrue(spacing["alignment"])
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_bounded_two_or_three_part_split_and_join_can_be_corroborated(self):
+    def test_bounded_two_or_three_part_split_and_join_are_complete_transcript_matches(self):
         for source, actual in (
             ("moonstone", "moon stone"),
             ("moon stone", "moonstone"),
@@ -56,43 +53,44 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 report = self.check(verifier, expected=expected)
                 self.assertTrue(report["passed"], report)
                 self.assertEqual(report["reference_text"], spoken)
-                self.assertEqual(report["corroboration"]["eligibility"]["boundary_changes"], 1)
-                self.assertEqual(len(verifier.calls), 2)
+                self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 1)
+                self.assertEqual(len(verifier.calls), 1)
 
-    def test_missing_or_failed_secondary_never_accepts_boundary_variation(self):
+    def test_spacing_match_does_not_depend_on_secondary_availability(self):
         primary_only = consensus.PrimaryVerifier(ACTUAL)
         report = self.check(primary_only, expected=SCRIPT)
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "unavailable")
-        self.assertNotIn("reference_text", report)
+        self.assertTrue(report["passed"], report)
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(report["reference_text"], ACTUAL)
         for result in (RuntimeError("decoder unavailable"), None,
                        {"text": ACTUAL, "segments": []}):
             with self.subTest(result=result):
                 verifier = consensus.IndependentVerifier(primary=ACTUAL, secondary=ACTUAL)
                 verifier.secondary = result
                 report = self.check(verifier, expected=SCRIPT)
-                self.assertFalse(report["passed"], report)
-                self.assertEqual(report["corroboration"]["decision"], "verification_failed")
-                self.assertNotIn("reference_text", report)
+                self.assertTrue(report["passed"], report)
+                self.assertNotIn("corroboration", report)
+                self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_disagreeing_secondary_does_not_accept_boundary_variation(self):
+    def test_spacing_match_does_not_request_optional_secondary(self):
         verifier = consensus.IndependentVerifier(
             primary=ACTUAL, secondary=ACTUAL.replace("familiar", "unfamiliar"))
         report = self.check(verifier, expected=SCRIPT)
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "disagreed")
-        self.assertNotIn("reference_text", report)
+        self.assertTrue(report["passed"], report)
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(report["reference_text"], ACTUAL)
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_exact_secondary_requested_script_can_resolve_boundary_variation(self):
+    def test_reference_retains_primary_spacing_without_copying_secondary_words(self):
         verifier = consensus.IndependentVerifier(primary=ACTUAL, secondary=SCRIPT)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "secondary_matches_requested")
-        self.assertEqual(report["reference_text"], SCRIPT)
-        self.assertFalse(report["reference_text_adjusted"])
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(report["reference_text"], ACTUAL)
+        self.assertTrue(report["reference_text_adjusted"])
         self.assertEqual(report["transcript"], ACTUAL)
 
-    def test_boundary_eligibility_does_not_define_global_spelling_equivalence(self):
+    def test_spacing_acceptance_does_not_rewrite_raw_word_comparisons(self):
         for expected, actual in (("Sourcepalace", "Source Palace"),
                                  ("nowhere", "now here"),
                                  ("cannot", "can not"),
@@ -104,10 +102,10 @@ class ReferenceBoundaryTests(unittest.TestCase):
         secondary = primary.replace("nowhere", "now here")
         verifier = consensus.IndependentVerifier(primary=primary, secondary=secondary)
         report = self.check(verifier, expected=expected)
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "disagreed")
-        self.assertGreater(report["corroboration"]["primary_comparison"]["wer"], 0)
-        self.assertGreater(report["corroboration"]["requested_comparison"]["wer"], 0)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 1)
+        self.assertGreater(report["reference_comparison"]["wer"], 0)
+        self.assertNotIn("corroboration", report)
 
     def test_real_missing_or_added_words_still_skip_secondary(self):
         for actual in (ACTUAL + " Again.", ACTUAL.replace("familiar with", "familiar"),
@@ -146,32 +144,28 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 report = self.check(verifier, expected=expected)
                 self.assertTrue(report["passed"], report)
                 self.assertEqual(report["metrics"]["wer"], 2 / word_count)
-                self.assertEqual(len(verifier.calls), 2)
+                self.assertEqual(len(verifier.calls), 1)
 
-    def test_two_compound_splits_above_ten_percent_require_full_independent_agreement(self):
+    def test_two_complete_compound_splits_do_not_depend_on_raw_wer_or_secondary(self):
         expected = (
             "The bloodbeast waited quietly just outside the station while the captain checked every locked "
             "door and window. A sourcevow bound the traveler to remain nearby until the night train "
             "arrived with fresh supplies for the village."
         )
         actual = expected.replace("bloodbeast", "blood beast").replace("sourcevow", "source vow")
-        for secondary, accepted in ((actual, True), (expected, True),
-                                    (actual.replace("quietly", "quickly"), False)):
+        for secondary in (actual, expected, actual.replace("quietly", "quickly")):
             with self.subTest(secondary=secondary):
                 verifier = consensus.IndependentVerifier(primary=actual, secondary=secondary)
                 report = self.check(verifier, expected=expected)
-                self.assertEqual(report["passed"], accepted, report)
+                self.assertTrue(report["passed"], report)
                 self.assertEqual(report["metrics"]["expected_word_count"], 36)
                 self.assertEqual(report["metrics"]["wer"], 4 / 36)
-                self.assertEqual(report["corroboration"]["eligibility"]["boundary_changes"], 2)
-                self.assertEqual(report["corroboration"]["eligibility"]["substitutions"], 0)
-                self.assertEqual(verifier.calls, [("reference", self.audio), ("corroboration", self.audio)])
-                if not accepted:
-                    self.assertNotIn("reference_text", report)
+                self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 2)
+                self.assertEqual(verifier.calls, [("reference", self.audio)])
         primary_only = consensus.PrimaryVerifier(actual)
         report = self.check(primary_only, expected=expected)
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "unavailable")
+        self.assertTrue(report["passed"], report)
+        self.assertNotIn("corroboration", report)
 
     def test_short_direct_substrings_and_unrelated_thank_you_never_gain_boundary_eligibility(self):
         for expected, actual in (
@@ -190,26 +184,27 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
                 self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_boundary_only_exception_never_relaxes_book_speech(self):
+    def test_complete_spacing_match_also_applies_to_book_speech(self):
         expected = "The bloodbeast heard the sourcevow."
         actual = "The blood beast heard the source vow."
         verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
         report = self.check(verifier, expected=expected, purpose="speech")
-        self.assertFalse(report["passed"], report)
+        self.assertTrue(report["passed"], report)
         self.assertNotIn("corroboration", report)
         self.assertEqual(verifier.calls, [("speech", self.audio)])
 
-    def test_high_wer_boundary_only_changes_still_obey_four_change_limit(self):
+    def test_complete_spacing_matches_are_not_limited_by_old_corroboration_budget(self):
         for count in (4, 5):
             with self.subTest(count=count):
                 expected = " ".join(["Sourcepalace"] * count)
                 actual = expected.replace("Sourcepalace", "Source Palace")
                 verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
                 report = self.check(verifier, expected=expected)
-                self.assertEqual(report["passed"], count == 4, report)
-                self.assertEqual(len(verifier.calls), 2 if count == 4 else 1)
+                self.assertTrue(report["passed"], report)
+                self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], count)
+                self.assertEqual(len(verifier.calls), 1)
 
-    def test_four_boundary_changes_can_be_corroborated_but_five_cannot(self):
+    def test_complete_spacing_matches_keep_every_boundary_change_in_audit(self):
         for count in (4, 5):
             with self.subTest(count=count):
                 expected = " ".join(["steady"] * 100 + ["Sourcepalace"] * count)
@@ -217,12 +212,9 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
                 report = self.check(verifier, expected=expected)
                 self.assertLessEqual(report["metrics"]["wer"], 0.1)
-                self.assertEqual(report["passed"], count == 4, report)
-                if count == 4:
-                    self.assertEqual(report["corroboration"]["eligibility"]["variation_count"], count)
-                else:
-                    self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
-                self.assertEqual(len(verifier.calls), 2 if count == 4 else 1)
+                self.assertTrue(report["passed"], report)
+                self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], count)
+                self.assertEqual(len(verifier.calls), 1)
 
     def test_substitutions_and_boundaries_share_the_four_variation_limit(self):
         expected = " ".join(["steady"] * 100 + ["Sourcepalace", "quiet", "bright", "warm", "calm"])
@@ -245,11 +237,13 @@ class ReferenceBoundaryTests(unittest.TestCase):
                     self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
                 self.assertEqual(len(verifier.calls), 2 if count == 3 else 1)
 
-    def test_book_speech_remains_strict_for_the_same_talim_recording(self):
+    def test_book_speech_accepts_talim_spacing_with_original_word_alignment(self):
         verifier = consensus.IndependentVerifier(primary=ACTUAL, secondary=ACTUAL)
         report = self.check(verifier, expected=SCRIPT, purpose="speech")
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["reasons"], ["text_mismatch"])
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual(report["word_boundary_comparison"]["boundary_changes"], 1)
+        self.assertTrue(report["words"])
         self.assertNotIn("corroboration", report)
         self.assertNotIn("reference_comparison", report)
         self.assertEqual(verifier.calls, [("speech", self.audio)])

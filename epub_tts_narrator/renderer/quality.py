@@ -29,7 +29,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 6
+QUALITY_VERSION = 7
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -220,6 +220,74 @@ _REFERENCE_COMPOUND = re.compile(
 _NUMBER_COMPONENTS = frozenset(_SMALL + _TENS + [
     "hundred", "thousand", "million", "billion", "trillion", "minus", "plus",
 ])
+
+
+def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | None:
+    """Explain complete transcripts differing only in bounded word spacing.
+
+    Join/split one alphabetic word and two or three adjacent pieces of at least
+    two letters. The pieces must be separated by whitespace in the original
+    text. Hyphens (e.g. re-sign/resign), apostrophes, numbers and changes to any
+    letters still need ordinary verification. No insertion, deletion or
+    substitution edge exists; even one other discrepancy rejects this shortcut.
+    """
+    def tokens(text):
+        text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
+        words, spans = [], []
+        for match in _LEXEMES.finditer(text):
+            normalized = normalize_words(match.group())
+            words.extend(normalized)
+            spans.extend([(match.start(), match.end(), match.group())] * len(normalized))
+        return text, words, spans
+
+    expected_source, expected, expected_spans = tokens(expected_text)
+    actual_source, actual, actual_spans = tokens(actual_text)
+    if len(expected) > 2000 or len(actual) > 4000:
+        raise ValueError("text exceeds per-chunk verification token limit")
+    if not expected or expected == actual or "".join(expected) != "".join(actual):
+        return None
+
+    def pieces(source, words, spans, start, size):
+        end = start + size
+        if end > len(words):
+            return None
+        selected = words[start:end]
+        if any(not word.isalpha() or len(word) < 2 or word in _NUMBER_COMPONENTS
+               for word in selected):
+            return None
+        if any(not span[2].isalpha() for span in spans[start:end]):
+            return None
+        if any(not source[spans[index - 1][1]:spans[index][0]].isspace()
+               for index in range(start + 1, end)):
+            return None
+        return "".join(selected)
+
+    i = j = 0
+    changes = []
+    while i < len(expected) and j < len(actual):
+        if expected[i] == actual[j]:
+            i, j = i + 1, j + 1
+            continue
+        left = pieces(expected_source, expected, expected_spans, i, 1)
+        right = pieces(actual_source, actual, actual_spans, j, 1)
+        match = None
+        for size in (2, 3):
+            if left is not None and left == pieces(actual_source, actual, actual_spans, j, size):
+                match = (i + 1, j + size, "split")
+                break
+            if right is not None and right == pieces(expected_source, expected, expected_spans, i, size):
+                match = (i + size, j + 1, "join")
+                break
+        if match is None:
+            return None
+        end_i, end_j, operation = match
+        changes.append({"operation": operation, "expected_start": i, "expected_end": end_i,
+                        "actual_start": j, "actual_end": end_j,
+                        "expected": expected[i:end_i], "actual": actual[j:end_j]})
+        i, j = end_i, end_j
+    if i != len(expected) or j != len(actual):
+        return None
+    return {"method": "word_spacing_v1", "boundary_changes": len(changes), "alignment": changes}
 
 
 def compare_reference_words(expected_text: str, actual_text: str, *,
@@ -647,7 +715,7 @@ def _judge_reference(verifier, report, secondary_transcript):
 
 
 def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
-    """Ask JEV about every mismatch; another recognizer is a recovery option."""
+    """Ask JEV about non-spacing mismatches; another recognizer can recover."""
     expected, primary = report["expected_text"], report["transcript"]
 
     def accept(transcript, method):
@@ -689,6 +757,12 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
         report.pop("text_judge_source", None)
         corroboration["decision"] = "secondary_matches_requested"
         return accept(secondary, "secondary_exact")
+    spacing = word_spacing_equivalence(expected, secondary)
+    if spacing is not None:
+        report.pop("text_judge_source", None)
+        report["word_boundary_comparison"] = spacing
+        corroboration["decision"] = "secondary_matches_requested_spacing"
+        return accept(secondary, "secondary_word_spacing")
     secondary_report = {"expected_text": expected, "transcript": secondary}
     confirmed = _judge_reference(verifier, secondary_report, None)
     report["text_judge"] = secondary_report["text_judge"]
@@ -767,8 +841,9 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     transcription failures and content mismatches produce a JSON-safe failure
     report, which can be retained alongside a rejected synthesis attempt.
     References do not require timing alignment that cloning never consumes.
-    When JEV is enabled, every nonexact transcript in either purpose reaches it for
-    approval. Hard acoustic checks still apply; unusable optional word timing
+    Exact word-spacing differences are accepted with their original audit.
+    Other nonexact transcripts reach JEV when enabled. Hard acoustic checks
+    still apply; unusable optional word timing
     is omitted with a warning rather than causing speech regeneration.
     """
     purpose = _validate_purpose(purpose)
@@ -833,7 +908,14 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         return report
     if purpose == "reference":
         report["reference_comparison"] = compare_reference_words(expected_text, transcript)
-    if metrics["wer"] != 0 and getattr(verifier, "reference_judge_identity", None) is not None:
+    spacing = word_spacing_equivalence(expected_text, transcript) if metrics["wer"] != 0 else None
+    if spacing is not None:
+        report["word_boundary_comparison"] = spacing
+        report["verified_transcript"] = transcript
+        report["text_confirmation_method"] = "word_spacing"
+        if purpose == "reference":
+            report.update(reference_text=transcript, reference_text_adjusted=transcript != expected_text)
+    elif metrics["wer"] != 0 and getattr(verifier, "reference_judge_identity", None) is not None:
         if not _confirm_text_variation(Path(path), verifier, report):
             reasons.append("text_mismatch")
     elif purpose == "reference":
