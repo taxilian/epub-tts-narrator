@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 11
+QUALITY_VERSION = 12
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -770,8 +770,10 @@ def text_confirmation_unavailable(report):
 
 
 def _confirm_phonetics(verifier, report, transcript, source):
-    """Ask the fallback only about bounded substitutions after JEV uncertainty."""
-    if report.get("text_judge", {}).get("decision") != "uncertain":
+    """Resolve a negative text score only within complete reviewable coverage."""
+    if report.get("text_judge", {}).get("decision") not in {"uncertain", "different"}:
+        return False
+    if report.get("text_judge_skipped") is not None:
         return False
     identity = getattr(verifier, "phonetic_review_identity", None)
     review = getattr(verifier, "review_phonetics", None)

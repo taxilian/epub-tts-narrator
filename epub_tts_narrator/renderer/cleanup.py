@@ -21,7 +21,7 @@ _HASH = re.compile(r"[0-9a-f]{64}")
 _ATTEMPT_NUMBER = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})"
 _RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
 _ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})\.(?:wav|json)")
-_SPEECH = {"speech", "paragraph_speech"}
+_SPEECH = {"speech", "paragraph_speech", "speech_recovery_part"}
 _STORES = ("clips", "chapters", "mixes", "completed-chapters", "speech-cache")
 
 

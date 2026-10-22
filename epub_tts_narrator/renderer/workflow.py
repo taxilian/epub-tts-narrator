@@ -177,7 +177,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
     fresh_speech = (retry_budget is not None and purpose == "speech"
-                    and (request.get("kind") == "speech"
+                    and (request.get("kind") in {"speech", "speech_recovery_part"}
                          or (request.get("kind") == "paragraph_speech" and retry_budget.retry_paragraphs)))
     request_hash = digest(request)
     set_phase(notify, "checking saved audio")
@@ -435,7 +435,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             if judgment.get("decision") == "equivalent":
                 notify("  JEV accepted the transcript as plausible recognition of the requested speech.")
             elif report.get("text_confirmation_method") in {"phonetic_primary", "phonetic_secondary"}:
-                notify("  Phonetic reviewers confirmed the pronunciation variants after JEV uncertainty.")
+                notify("  Three pronunciation reviews resolved the spelling differences; full word coverage passed.")
             return finish(wav, record)
         if pending_confirmation(report):
             stop_for_confirmation()
@@ -1081,7 +1081,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
 
-    def take(text, generate, request):
+    def take(text, generate, request, *, synthesize_part=None):
         identity = speech_cache.identity(request)
         key = digest(identity)
         with take_locks_guard:
@@ -1105,9 +1105,25 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 # Bind preparation semantics too: an old successful take with
                 # different engine input must not bypass the content lookup.
                 request = dict(request, synthesis_identity=identity)
-                result = verified_take(text, generate, work / "clips" / digest(request), request,
-                                       verifier, config, notify=notify, retry_budget=retry_budget,
-                                       seed_identity=identity)
+                directory = work / "clips" / digest(request)
+                from .speech_recovery import recovery_available, recover_speech, split_recovery_text
+                if synthesize_part is not None and recovery_available(
+                        directory, request, text, verifier, config):
+                    # A persisted alternate strategy resumes its verified parts
+                    # instead of spending another batch on the same full text.
+                    result = recover_speech(text, synthesize_part, directory, request,
+                                            verifier, config, notify=notify, retry_budget=retry_budget)
+                else:
+                    try:
+                        result = verified_take(text, generate, directory, request,
+                                               verifier, config, notify=notify, retry_budget=retry_budget,
+                                               seed_identity=identity)
+                    except SpeechVerificationFailed as exc:
+                        if (synthesize_part is None or exc.report.get("reasons") != ["text_mismatch"]
+                                or split_recovery_text(text) is None):
+                            raise
+                        result = recover_speech(text, synthesize_part, directory, request,
+                                                verifier, config, notify=notify, retry_budget=retry_budget)
                 speech_cache.remember(identity, result[1])
                 return result
             except RenderBlocked:
@@ -1144,7 +1160,13 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             metadata = engine.synthesize(synthesis_text, v, path, seed=seed, direction=direction)
             return {"synthesis_text": synthesis_text, **metadata}
 
-        wav, accepted = take(chunk["spoken_text"], generate, request)
+        def synthesize_part(text, path, seed, v=voice):
+            prepared = trim_speech_text(text)
+            metadata = engine.synthesize(prepared, v, path, seed=seed, direction=direction)
+            return {"synthesis_text": prepared, **metadata}
+
+        wav, accepted = take(chunk["spoken_text"], generate, request,
+                             synthesize_part=synthesize_part)
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:

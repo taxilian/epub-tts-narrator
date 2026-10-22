@@ -105,12 +105,13 @@ class PhoneticFallbackTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
         self.assertNotIn("phonetic_reviews", report)
 
-    def test_definite_jev_rejection_cannot_be_overridden(self):
+    def test_negative_jev_score_can_be_resolved_with_complete_coverage_and_majority(self):
         verifier, _, client = self.wrapped(decision="different")
         report = self.check(verifier, expected=REQUESTED, purpose="speech")
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(client.calls, [])
-        self.assertNotIn("phonetic_reviews", report)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(report["text_judge"]["decision"], "different")
+        self.assertEqual(report["phonetic_reviews"][0]["decision"], "accepted")
 
     def test_word_coverage_negation_and_quantity_guards_precede_fallback(self):
         cases = (

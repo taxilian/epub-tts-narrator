@@ -31,13 +31,58 @@ class SubstitutionPairsTests(unittest.TestCase):
     def test_unfamiliar_names_reach_review_without_being_locally_approved(self):
         for requested, heard in (("Derrins", "darins"), ("Derrins", "Darren’s"),
                                   ("Maelin", "Maylin"), ("Nerys", "Nerris"),
-                                  ("Jasper", "Jasmine"), ("flower", "flour")):
+                                  ("flower", "flour")):
             with self.subTest(requested=requested, heard=heard):
                 pairs = substitution_pairs(requested, heard)
                 self.assertEqual(pairs[0]["expected_word"], requested)
                 self.assertEqual(pairs[0]["recognized_word"], heard)
                 self.assertEqual(pairs[0]["word_index"], 0)
                 self.assertNotIn("plausible", pairs[0])
+
+    def test_multiword_sound_candidates_bind_the_complete_original_spans(self):
+        for requested, heard in (("Insang", "In saying"), ("Vandire", "Van Dyer"),
+                                  ("admitted", "admit it"),
+                                  ("moonlightflour", "moon light flower")):
+            for left, right in ((requested, heard), (heard, requested)):
+                expected = f"Before noon, “{left}” was heard beside the gate."
+                actual = f"Before noon, “{right}” was heard beside the gate."
+                with self.subTest(expected=expected, actual=actual):
+                    pairs = substitution_pairs(expected, actual)
+                    self.assertEqual(len(pairs), 1)
+                    pair = pairs[0]
+                    self.assertEqual(pair["expected_word"], left)
+                    self.assertEqual(pair["recognized_word"], right)
+                    self.assertEqual(pair["word_index"], 2)
+                    self.assertEqual(pair["expected_start"], 2)
+                    self.assertEqual(pair["expected_end"], 2 + len(left.split()))
+                    self.assertEqual(pair["actual_start"], 2)
+                    self.assertEqual(pair["actual_end"], 2 + len(right.split()))
+                    self.assertEqual(expected[pair["expected_source_start"]:pair["expected_source_end"]], left)
+                    self.assertEqual(actual[pair["recognized_source_start"]:pair["recognized_source_end"]], right)
+                    self.assertIn(left, pair["requested_context"])
+                    self.assertIn(right, pair["recognized_context"])
+                    self.assertIn("was heard beside", pair["recognized_context"])
+                    self.assertNotIn("the gate", pair["recognized_context"])
+
+    def test_multiple_boundary_candidates_keep_their_own_shifted_positions(self):
+        expected = "Insang greeted Vandire before everyone else arrived at the city gate."
+        actual = "In saying greeted Van Dyer before everyone else arrived at the city gate."
+        pairs = substitution_pairs(expected, actual)
+        self.assertEqual([(p["expected_start"], p["expected_end"], p["actual_start"], p["actual_end"])
+                          for p in pairs], [(0, 1, 0, 2), (2, 3, 3, 5)])
+        self.assertEqual([p["id"] for p in pairs], ["pair_1", "pair_2"])
+        self.assertEqual(pairs[1]["expected_word"], "Vandire")
+        self.assertEqual(pairs[1]["recognized_word"], "Van Dyer")
+
+    def test_proven_boundaries_and_contractions_need_no_model_vote(self):
+        for expected, actual in (("What'cha said I can't do?", "What you said I can not do?"),
+                                 ("The sourcepalace glowed.", "The source palace glowed.")):
+            self.assertIsNone(substitution_pairs(expected, actual))
+        expected = "Insang said I can't leave before sunrise."
+        actual = "In saying said I can not leave before sunrise."
+        pairs = substitution_pairs(expected, actual)
+        self.assertEqual([(p["expected_word"], p["recognized_word"]) for p in pairs],
+                         [("Insang", "In saying")])
 
     def test_original_casing_offsets_context_and_normalized_number_expansion(self):
         requested = "Before sunset 24 people followed Nerys along the narrow river into town."
@@ -68,6 +113,11 @@ class SubstitutionPairsTests(unittest.TestCase):
             ("Nerys gave Maren a parcel by the old gate.", "Maren gave Nerys a parcel by the old gate."),
             ("Wait by the green gate beside the long road.", "Wait by the gate green beside the long road."),
             ("Nerys left before sunrise.", "Nerris left."),
+            ("Jasper waited beside the gate.", "Jasmine waited beside the gate."),
+            ("Insang Mortuary Services! What does it—", "In saying Mortuary Services! What is it?"),
+            ("Insang left quietly before sunrise.", "In saying left before sunrise."),
+            ("Insang left before sunrise.", "In saying left before sunrise today."),
+            ("Insang left before sunrise.", "In, saying left before sunrise."),
         )
         for expected, heard in cases:
             with self.subTest(expected=expected, heard=heard):
@@ -130,6 +180,40 @@ class PronunciationReviewerTests(unittest.TestCase):
         reviewer = PronunciationReviewer(Client(answers))
         self.assertEqual(reviewer.review(expected, heard)["decision"], "rejected")
 
+    def test_multiword_review_has_three_bound_votes_and_coverage_failure_makes_no_call(self):
+        expected = "“Insang Mortuary Services! What does it—”"
+        actual = "In saying mortuary services! What does it?"
+        client = Client((True, False, True))
+        reviewer = PronunciationReviewer(client)
+        record = reviewer.review(expected, actual)
+        self.assertEqual(record["decision"], "accepted")
+        self.assertTrue(validate_review(record, expected, actual, reviewer.identity))
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(record["pairs"][0]["expected_word"], "Insang")
+        self.assertEqual(record["pairs"][0]["recognized_word"], "In saying")
+        self.assertEqual(record["pairs"][0]["coverage_operation"], "phonetic_group")
+        self.assertEqual(record["pairs"][0]["coverage_rule"], "complete_group_sound")
+        self.assertEqual(reviewer.identity["coverage_version"], 1)
+        self.assertNotIn("JEV", PROMPT)
+        for bad in (actual.replace("does", "is"), actual.replace("What ", ""),
+                    actual + " Thanks."):
+            with self.subTest(bad=bad):
+                rejected = reviewer.review(expected, bad)
+                self.assertEqual(rejected["decision"], "ineligible")
+                self.assertEqual(rejected["votes"], [])
+                self.assertEqual(len(client.calls), 3)
+
+    def test_whole_passage_is_rechecked_when_an_audit_is_validated(self):
+        expected = "Insang waited beside the gate while everyone else hurried across the courtyard."
+        actual = expected.replace("Insang", "In saying")
+        reviewer = PronunciationReviewer(Client())
+        record = reviewer.review(expected, actual)
+        self.assertTrue(validate_review(record, expected, actual, reviewer.identity))
+        # The changed ending is outside the three-word context sent for Insang.
+        actual = actual.replace("the courtyard", "")
+        record["transcript"] = actual
+        self.assertFalse(validate_review(record, expected, actual, reviewer.identity))
+
     def test_ineligible_passages_never_call_provider(self):
         client = Client()
         reviewer = PronunciationReviewer(client)
@@ -183,6 +267,12 @@ class PronunciationReviewerTests(unittest.TestCase):
             lambda x: x.update(identity={}), lambda x: x.update(prompt="different prompt"),
             lambda x: x.update(expected_text=self.heard), lambda x: x.update(transcript=self.expected),
             lambda x: x["pairs"][0].update(word_index=3),
+            lambda x: x["pairs"][0].update(expected_start=3),
+            lambda x: x["pairs"][0].update(actual_end=2),
+            lambda x: x["pairs"][0].update(expected_source_start=1),
+            lambda x: x["pairs"][0].update(recognized_source_end=1),
+            lambda x: x["pairs"][0].update(coverage_operation="spelling_boundary"),
+            lambda x: x["pairs"][0].update(coverage_rule="invented"),
             lambda x: x["pairs"][0].update(recognized_word="Jasmine"),
             lambda x: x["votes"].pop(), lambda x: x["votes"][1].update(reviewer=1),
             lambda x: x["votes"][0]["pairs"][0].update(plausible=1),
