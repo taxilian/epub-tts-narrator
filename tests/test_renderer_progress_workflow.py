@@ -58,7 +58,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         result = self.chapters(bundle)
 
         self.assertEqual([chapter["number"] for chapter in result["chapters"]], [2])
-        self.assertTrue(any("Rendering chapter 2 / 2:" in line for line in self.messages))
+        self.assertTrue(any("Processing chapter 2 / 2:" in line for line in self.messages))
         completion = next(line for line in self.messages if "Completed chapter 2 / 2" in line)
         self.assertIn("run elapsed", completion)
         self.assertIn("1 / 1 selected chapters ready", completion)
@@ -74,6 +74,37 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertTrue(any("Reusing completed chapter 2 / 2:" in line for line in self.messages))
         self.assertTrue(any("Completed chapter 2 / 2" in line and "run elapsed" in line
                             for line in self.messages))
+
+    def test_logs_distinguish_new_synthesis_from_reusing_clips_during_recomposition(self):
+        bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+        self.engine = ParagraphFixtureEngine()
+        self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
+
+        self.chapters(bundle)
+
+        generated = [line for line in self.messages if line.strip().startswith("Generating ")
+                     and ", attempt " in line]
+        self.assertEqual(len(generated), len(self.engine.speech_calls) + len(self.engine.dialogue_calls))
+        self.assertTrue(any("Generating speech, attempt 1/2" in line for line in generated))
+        self.assertTrue(any("Generating paragraph, attempt 1/2" in line for line in generated))
+
+        self.config["render"]["sentence_pause_ms"] += 20
+        self.messages.clear()
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("regenerated speech")), \
+             patch.object(self.engine, "synthesize_dialogue", side_effect=AssertionError("regenerated paragraph")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("reverified accepted audio")):
+            result = self.chapters(bundle)
+
+        self.assertEqual(result["status"], "chapters_complete")
+        self.assertTrue(any("checking speech cache" in line for line in self.messages))
+        self.assertTrue(any("checking paragraph cache" in line for line in self.messages))
+        self.assertTrue(any("Reusing verified speech" in line for line in self.messages))
+        self.assertFalse(any("Generating " in line or "Rendering chapter" in line
+                             or "preparing speech" in line or "preparing paragraph" in line
+                             for line in self.messages))
 
     def test_take_phase_matches_work_and_cached_audio_has_no_generation_phase(self):
         text = "The lantern shone above the quiet harbor."

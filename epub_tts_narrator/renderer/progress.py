@@ -64,7 +64,6 @@ class ChapterProgress:
         self.total_chapters = total_chapters
         self._weights = [0 if chunk.get("silent_control") else len(chunk.get("spoken_text", ""))
                          for chunk in chunks]
-        self._paragraphs = ["paragraph_turns" in chunk for chunk in chunks]
         self._notify = notify
         self._custom_notify = notify is not print
         self._stream = stream if stream is not None else (sys.stdout if notify is print else None)
@@ -126,8 +125,7 @@ class ChapterProgress:
                 raise IndexError("Progress block index is outside the chapter")
             if index in self._active or index in self._done:
                 raise RuntimeError("Progress block is already running or complete")
-            kind = "paragraph" if self._paragraphs[index] else "speech"
-            self._active[index] = _Task(f"preparing {kind}", self._clock())
+            self._active[index] = _Task("checking saved audio", self._clock())
             if self._tty:
                 self._show(force=True)
         try:

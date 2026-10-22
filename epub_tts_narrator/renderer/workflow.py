@@ -381,6 +381,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     kind = "paragraph" if request.get("kind") == "paragraph_speech" else "speech"
                     current_attempt = generation_ordinal if fresh_speech else attempt
                     set_phase(notify, f"generating {kind}, attempt {current_attempt}/{attempts}", generated=True)
+                    if purpose == "speech":
+                        notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
                     metadata = generate(raw, seed)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
@@ -1112,13 +1114,10 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
-        directory = work / "clips" / digest(request)
         turns = [{"text": turn["spoken_text"], "voice": voices[turn["segment"]["voice_id"]],
                   "direction": turn["segment"].get("delivery", {}).get("direction", "")}
                  for turn in chunk["paragraph_turns"]]
-        cached = (directory / "accepted.json").is_file()
-        notify(f"  Chunk {number}/{total}: "
-               f"{'checking saved paragraph' if cached else 'preparing paragraph'} "
+        notify(f"  Chunk {number}/{total}: checking paragraph cache "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request)
@@ -1136,11 +1135,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         voice = voices[speaker["voice_id"]]
         request = _speech_request(chunk, voice, engine_identity, config,
                                   performer=speaker if len(speakers) > 1 else None)
-        directory = work / "clips" / digest(request)
-        cached = (directory / "accepted.json").is_file()
         lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
-        notify(f"  Chunk {number}/{total}{lane_label}: "
-               f"{'checking saved take' if cached else 'preparing speech'} ({speaker['voice_id']})")
+        notify(f"  Chunk {number}/{total}{lane_label}: checking speech cache ({speaker['voice_id']})")
         def generate(path, seed, v=voice):
             metadata = engine.synthesize(synthesis_text, v, path, seed=seed, direction=direction)
             return {"synthesis_text": synthesis_text, **metadata}
@@ -1321,7 +1317,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     work, chapter, saved, context, voices, config, speech_cache=speech_cache)
                 notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             else:
-                notify(f"Rendering {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
+                notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                     bundle, chapter, voices, engine, engine_identity, verifier, config, work,
                     notify=notify, retry_budget=retry_budget, speech_cache=speech_cache)

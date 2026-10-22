@@ -50,7 +50,7 @@ class ProgressTests(unittest.TestCase):
                 with progress.task(2):
                     self.clock.advance(5)
                 self.assertIn("Blocks 1 / 3 complete", self.messages[-1])
-                self.assertIn("#1 preparing paragraph 00:05", self.messages[-1])
+                self.assertIn("#1 checking saved audio 00:05", self.messages[-1])
             with progress.task(1):
                 pass
         self.assertIn("Chapter 6 / 35", self.messages[-1])
