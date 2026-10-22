@@ -1,8 +1,9 @@
 """Small, file-credential-only Runpod management client.
 
-Resource management uses the v1 REST API. The read-only GPU/data-center
-catalog is available only in v2. Hosts are fixed, redirects and ambient HTTP
-proxies are disabled, and provider error bodies are never exposed. A failed
+Pod creation and the GPU/data-center catalog use v2, whose placement fields
+support current datacenters. Other resource management retains v1. Hosts are
+fixed, redirects and ambient HTTP proxies are disabled, and provider error
+bodies are never exposed. A failed
 mutation is never retried here: callers must reconcile uncertain outcomes
 before creating another paid resource.
 """
@@ -98,7 +99,8 @@ class RunpodAPI:
         return self._request("GET", f"/pods/{_resource_id(pod_id)}", query=expansions, expected=dict)
 
     def create_pod(self, spec):
-        return self._request("POST", "/pods", spec=spec, expected=dict, require_id=True)
+        """Create from the v2 nested request schema; return its cost/status fields."""
+        return self._request("POST", "/pods", spec=spec, v2=True, expected=dict, require_id=True)
 
     def start_pod(self, pod_id):
         return self._request("POST", f"/pods/{_resource_id(pod_id)}/start", allow_empty=True)

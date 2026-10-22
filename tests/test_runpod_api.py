@@ -46,14 +46,18 @@ class RunpodAPITests(unittest.TestCase):
         self.assertEqual(self.api.get_pod("pod_1"), payload)
         self.assertEqual(self.opener.open.call_args.args[0].full_url, "https://rest.runpod.io/v1/pods/pod_1")
 
-    def test_create_pod_sends_json_once(self):
-        spec = {"name": "fixture", "imageName": "fixture/image:version", "networkVolumeId": "vol_1",
-                "ports": ["22/tcp", "8081/http"], "dockerStartCmd": ["/start.sh"],
+    def test_create_pod_uses_v2_and_preserves_create_price(self):
+        spec = {"name": "fixture", "image": "fixture/image@sha256:" + "a" * 64,
+                "gpu": {"id": "fixture-gpu", "count": 1, "minCudaVersion": "12.9"},
+                "dataCenterIds": ["US-CO-1"],
+                "mounts": {"network": [{"volumeId": "vol_1", "path": "/workspace"}]},
+                "ports": ["22/tcp", "8081/http"], "cmd": ["/start.sh"],
                 "env": {"PUBLIC_KEY": "fixture-public-key"}}
-        self.opener.open.return_value = response({"id": "new_pod"}, status=201)
-        self.assertEqual(self.api.create_pod(spec), {"id": "new_pod"})
+        payload = {"id": "new_pod", "cost": 2.49, "status": "PROVISIONING", "dataCenterId": "US-CO-1"}
+        self.opener.open.return_value = response(payload, status=201)
+        self.assertEqual(self.api.create_pod(spec), payload)
         request = self.opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods")
+        self.assertEqual(request.full_url, "https://api.runpod.io/v2/pods")
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.headers["Content-type"], "application/json")
         self.assertEqual(json.loads(request.data), spec)

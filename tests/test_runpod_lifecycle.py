@@ -41,7 +41,7 @@ class RunpodLifecycleTests(unittest.TestCase):
             "dataCenters": [{"id": "US-FIXTURE-1", "availability": "HIGH"}],
         }]}
         self.api.create_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
-        self.api.create_pod.return_value = {"id": "pod_fixture", "costPerHr": "2.0", "desiredStatus": "RUNNING"}
+        self.api.create_pod.return_value = {"id": "pod_fixture", "cost": 2.0, "status": "PROVISIONING"}
         self.notify = Mock()
         self.sleep = patch("epub_tts_narrator.renderer.runpod.time.sleep").start()
         self.addCleanup(patch.stopall)
@@ -206,11 +206,18 @@ class RunpodLifecycleTests(unittest.TestCase):
         deployment = self.deployment()
         deployment.provision()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["networkVolumeId"], "volume_fixture")
-        self.assertEqual(spec["volumeMountPath"], "/workspace")
+        self.assertEqual(spec["mounts"], {"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]})
+        self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
+        self.assertEqual(spec["image"], self.settings["deployment"]["image"])
+        self.assertEqual(spec["disk"], self.settings["deployment"]["container_disk_gb"])
+        self.assertEqual(spec["cloud"], "SECURE")
         self.assertEqual(spec["ports"], ["22/tcp", "8081/http"])
-        self.assertFalse(spec["interruptible"])
-        self.assertEqual(spec["gpuCount"], 1)
+        self.assertNotIn("interruptible", spec)
+        self.assertNotIn("supportPublicIp", spec)
+        self.assertEqual(spec["gpu"], {"id": self.settings["deployment"]["gpu_type_id"],
+                                       "count": 1, "minCudaVersion": "12.9"})
+        self.assertEqual(spec["cmd"][:2], ["bash", "-lc"])
+        self.assertIn("exec /start.sh", spec["cmd"][2])
         self.assertEqual(spec["env"], {"PUBLIC_KEY": "ssh-ed25519 fixture-public-key"})
         self.assertNotIn("fixture-provider-secret", json.dumps(spec))
         self.assertNotIn("fixture-ceph-secret", json.dumps(spec))
@@ -257,6 +264,20 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertNotIn("pod_creation_pending", deployment.state)
         self.assertEqual(deployment.state["volume_id"], "volume_fixture")
 
+    def test_retry_with_current_datacenter_reuses_saved_volume(self):
+        self.settings["deployment"]["data_center_id"] = "US-CO-1"
+        self.api.catalog_gpus.return_value["gpus"][0]["dataCenters"] = [
+            {"id": "US-CO-1", "availability": "HIGH"}]
+        self.api.get_volume.return_value = {"id": "saved_volume", "dataCenterId": "US-CO-1"}
+        deployment = self.deployment()
+        deployment.state["volume_id"] = "saved_volume"
+        deployment.provision()
+        self.api.create_volume.assert_not_called()
+        self.api.get_volume.assert_called_once_with("saved_volume")
+        spec = self.api.create_pod.call_args.args[0]
+        self.assertEqual(spec["dataCenterIds"], ["US-CO-1"])
+        self.assertEqual(spec["mounts"]["network"][0]["volumeId"], "saved_volume")
+
     def test_volume_timeout_is_reconciled_before_another_volume_creation(self):
         deployment = self.deployment()
         self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
@@ -267,7 +288,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.list_volumes.return_value = [{"name": name, "id": "recovered_volume", "dataCenterId": "US-FIXTURE-1"}]
         deployment.provision()
         self.api.create_volume.assert_called_once()
-        self.assertEqual(self.api.create_pod.call_args.args[0]["networkVolumeId"], "recovered_volume")
+        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"]["network"][0]["volumeId"], "recovered_volume")
 
     def test_pending_pod_recovery_does_not_depend_on_current_stock(self):
         deployment = self.deployment()
@@ -283,10 +304,20 @@ class RunpodLifecycleTests(unittest.TestCase):
 
     def test_actual_create_price_above_cap_retains_id_for_cleanup(self):
         deployment = self.deployment()
-        self.api.create_pod.return_value["costPerHr"] = "100.0"
+        self.api.create_pod.return_value["cost"] = 100.0
         with self.assertRaisesRegex(RuntimeError, "rate exceeds"):
             deployment.provision()
         self.assertEqual(deployment.pod_id, "pod_fixture")
+        self.assertNotIn("pod_creation_pending", deployment.state)
+
+    def test_v1_reconciled_create_price_still_enforces_cap(self):
+        deployment = self.deployment()
+        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("uncertain")
+        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
+        self.api.list_pods.return_value = [{"name": name, "id": "recovered_pod", "costPerHr": "100.0"}]
+        with self.assertRaisesRegex(RuntimeError, "rate exceeds"):
+            deployment.provision()
+        self.assertEqual(deployment.pod_id, "recovered_pod")
         self.assertNotIn("pod_creation_pending", deployment.state)
 
     def test_stop_polls_after_ambiguous_response_before_retrying(self):

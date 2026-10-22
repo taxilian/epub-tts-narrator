@@ -261,13 +261,15 @@ class Deployment:
                    "mkdir -p \"$keys\"; chmod 700 \"$keys\"; "
                    "if test -f \"$keys/ssh_host_ed25519_key\"; then cp -p \"$keys\"/ssh_host_* /etc/ssh/; "
                    "else ssh-keygen -A; cp -p /etc/ssh/ssh_host_* \"$keys\"/; fi; exec /start.sh")
-        spec = {"name": name, "imageName": self.cfg["image"], "cloudType": "SECURE",
-                "computeType": "GPU", "gpuTypeIds": [self.cfg["gpu_type_id"]], "gpuCount": 1,
-                "dataCenterIds": [self.cfg["data_center_id"]], "networkVolumeId": volume_id,
-                "volumeMountPath": "/workspace", "containerDiskInGb": self.cfg["container_disk_gb"],
-                "ports": ["22/tcp", "8081/http"], "supportPublicIp": True,
-                "env": {"PUBLIC_KEY": self._public_key()}, "interruptible": False,
-                "dockerStartCmd": ["bash", "-lc", startup]}
+        # v1 validates datacenter IDs against a stale enum. v2 accepts the
+        # current catalog's IDs and retains explicit placement beside the
+        # existing network volume. Secure on-demand Pods expose a public IP.
+        spec = {"name": name, "image": self.cfg["image"], "cloud": "SECURE",
+                "gpu": {"id": self.cfg["gpu_type_id"], "count": 1, "minCudaVersion": "12.9"},
+                "dataCenterIds": [self.cfg["data_center_id"]],
+                "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
+                "disk": self.cfg["container_disk_gb"], "ports": ["22/tcp", "8081/http"],
+                "env": {"PUBLIC_KEY": self._public_key()}, "cmd": ["bash", "-lc", startup]}
         self.state["pod_creation_pending"] = True
         self.save()
         try:
@@ -287,7 +289,7 @@ class Deployment:
         self.save()
         # Provider pricing is authoritative; stop before installing if it differs
         # from the user's configured spending ceiling.
-        actual = pod.get("costPerHr")
+        actual = pod.get("cost", pod.get("costPerHr"))
         if actual is not None and float(actual) > self.cfg["max_hourly_price"]:
             raise RuntimeError("Created worker's rate exceeds configured cap; stopping immediately")
         self.notify(f"Created worker {self.pod_id}; persistent volume {volume_id}.")
