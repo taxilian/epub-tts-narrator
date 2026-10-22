@@ -376,6 +376,66 @@ class ChapterOrchestrationTests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(before, {path: path.read_bytes() for path in folder.iterdir()})
 
+    def _render_local_revision_fixture(self):
+        from epub_tts_narrator.renderer.book_context import voice_store
+        from epub_tts_narrator.renderer.workflow import render
+        from test_renderer_workflow import FixtureEngine, FixtureVerifier
+        engine = FixtureEngine({})
+        render(self.bundle, self.config, engine, FixtureVerifier(engine.fixture_transcripts),
+               notify=lambda _: None, chapters_only=True)
+        self.store = voice_store(self.bundle, self.config)
+        self.plan = make_render_plan(self.bundle, self.config)
+        self.plan["chapters"][0]["chunks"][0]["segment"]["delivery"]["direction"] = "gently"
+
+    def test_changed_local_chapter_renders_remote_revision_and_reuses_unchanged_local_chapter(self):
+        self._render_local_revision_fixture()
+        retained = {path: path.read_bytes() for name in ("clips", "chapters", "completed-chapters")
+                    for path in (self.root / "work" / name).rglob("*") if path.is_file()}
+        client = self.fake_client()(self.config["remote_chapters"])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        submitted = [payload["spec"]["chapter"]["number"] for _, path, payload in client.calls
+                     if path == "v1/jobs"]
+        self.assertEqual(submitted, [1])
+        self.assertEqual(len(result["chapters"]), 2)
+        self.assertEqual(retained, {path: path.read_bytes() for path in retained})
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            resumed = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                            notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        self.assertEqual(result, resumed)
+
+    def test_stale_local_checkpoint_does_not_hide_corrupted_chapter_audio(self):
+        self._render_local_revision_fixture()
+        checkpoint = read_json(self.root / "work" / "completed-chapters" / "chapter-0001.json")
+        audio = self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter.wav"
+        audio.write_bytes(audio.read_bytes()[:-2] + b"xx")
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            with self.assertRaisesRegex(ChapterClientError, "PCM failed integrity"):
+                _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+
+    def test_stale_local_checkpoint_does_not_hide_corrupted_accepted_clip(self):
+        self._render_local_revision_fixture()
+        accepted_path = next((self.root / "work" / "clips").glob("*/accepted.json"))
+        accepted = read_json(accepted_path)
+        audio = accepted_path.parent / accepted["audio_file"]
+        audio.write_bytes(audio.read_bytes()[:-2] + b"xx")
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            with self.assertRaisesRegex(ChapterClientError, "Cached audio changed"):
+                _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+
+    def test_assembly_does_not_automatically_render_stale_local_chapter(self):
+        from epub_tts_narrator.renderer.chapter_client import _local_chapter
+        self._render_local_revision_fixture()
+        voices = {key: self.store.load(key) for key in self.plan["voice_ids"]}
+        with self.assertRaisesRegex(ChapterClientError, "is stale"):
+            _local_chapter(self.bundle, self.plan["chapters"][0], self.config, voices)
+
     def test_existing_flac_is_copied_byte_for_byte_without_reencoding(self):
         original_ids, assets = _voice_assets({"voice": self.voice}, self.root / "first", FFMPEG)
         source = assets[original_ids["voice"]]["path"]
@@ -470,6 +530,38 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.assertEqual(list((self.root / "work" / "remote-chapters").rglob("*.wav")), [])
         self.assertEqual(list(self.root.glob(".remote-audiobook-*")), [])
         self.assertEqual(engine.voice_calls, [])
+
+        # A revised script updates the same complete audiobook, retaining the
+        # unchanged remote chapter and the server's accepted unchanged clips.
+        previous = read_json(self.root / "output" / "render.json")
+        self.config["_publication_expected"] = digest(previous)
+        unchanged_chapter = file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a")
+        self.plan["chapters"][0]["chunks"][0]["segment"]["delivery"]["direction"] = "gently"
+        self.bundle["bundle_hash"] = digest({"old": self.bundle["bundle_hash"], "revision": 1})
+        self.plan["bundle_hash"] = self.bundle["bundle_hash"]
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
+            revised = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                            notify=lambda _: None, chapters_only=False)
+        self.assertEqual(len(engine.speech_calls), calls_before_assembly + 1)
+        self.assertNotEqual(revised["remote_jobs"]["chapter-0001"], previous["remote_jobs"]["chapter-0001"])
+        self.assertEqual(revised["remote_jobs"]["chapter-0002"], previous["remote_jobs"]["chapter-0002"])
+        self.assertEqual(revised, read_json(self.root / "output" / "render.json"))
+        self.assertEqual(revised["bundle_hash"], self.bundle["bundle_hash"])
+        self.assertEqual(unchanged_chapter, file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a"))
+        self.assertEqual(len(probe_audio(book, ffprobe=FFPROBE)["chapters"]), 2)
+        self.assertEqual(list(self.root.glob(".output.previous-*")), [])
+
+        # A caller that observed an earlier publication must not replace a newer
+        # result, even when every remote chapter is already downloaded.
+        from epub_tts_narrator.renderer.workflow import RenderBlocked
+        preserved = {path: path.read_bytes() for path in (self.root / "output").rglob("*") if path.is_file()}
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            with self.assertRaisesRegex(RenderBlocked, "changed during rendering"):
+                _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                      notify=lambda _: None, chapters_only=False)
+        factory.assert_not_called()
+        self.assertEqual(preserved, {path: path.read_bytes() for path in preserved})
+        self.assertEqual(list(self.root.glob(".remote-audiobook-*")), [])
 
 
 class ChapterCLITests(unittest.TestCase):

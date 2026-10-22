@@ -550,32 +550,33 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
         lock.rmdir()
 
 
-def _publish(stage, destination):
-    """Publish the complete directory in one rename, keeping partial books hidden."""
-    destination = Path(destination)
-    reservation = destination.parent / ("." + destination.name + ".publish.lock")
+def _publish(stage, destination, **kwargs):
+    """Install a finished book, preserving the previous output until it is ready."""
+    from .publication import publish
     try:
-        reservation.mkdir()
-    except FileExistsError as exc:
-        raise RenderBlocked(
-            f"Another process may be publishing this output. If it was forcibly terminated, "
-            f"confirm it has stopped before removing the stale lock: {reservation}") from exc
-    try:
-        if destination.exists() or destination.is_symlink():
-            raise RenderBlocked("Output already exists; choose a new output directory")
-        os.rename(stage, destination)
-    finally:
-        reservation.rmdir()
+        publish(stage, destination, **kwargs)
+    except ValueError as exc:
+        raise RenderBlocked(str(exc)) from exc
 
 
 def make_render_plan(bundle, config, *, multi_speaker=True):
     """Group new paragraphs while preserving legacy accepted chunk boundaries."""
     plan = make_plan(bundle, config)
+    work = config["render"].get("work_dir")
+    requests = []
+    if work:
+        from .incremental_identity import (accepted_requests, completed_chunks,
+                                           reanchor_export_sequences)
+        try:
+            requests = accepted_requests(work)
+            plan = reanchor_export_sequences(
+                plan, requests, completed=completed_chunks(work, plan["chapters"]))
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
     if not multi_speaker or not config["render"].get("paragraph_synthesis", True):
         return plan
     from .paragraphs import group_paragraphs
     preserved, preserved_groups = set(), []
-    work = config["render"].get("work_dir")
     if work:
         from .paragraph_recovery import load_paragraph_fallbacks
         try:
@@ -583,13 +584,9 @@ def make_render_plan(bundle, config, *, multi_speaker=True):
             preserved.update(fallback_members)
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved paragraph recovery: {exc}") from exc
-        for path in (Path(work) / "clips").glob("*/accepted.json"):
+        for request in requests:
             # A deleted WAV still preserves its request boundary: only that
             # deliberately removed clip should need regeneration on resume.
-            record = read_json(regular_file(path))
-            if not isinstance(record, dict) or not isinstance(record.get("request"), dict):
-                raise RenderBlocked(f"Invalid accepted synthesis record: {path}")
-            request = record.get("request", {})
             if request.get("kind") == "speech":
                 chunk = request.get("chunk", {})
                 if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str):
@@ -620,8 +617,14 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True):
     if plan["errors"]:
         raise RenderBlocked("\n".join(plan["errors"]))
     output = Path(config["render"]["output_dir"])
-    if not chapters_only and (output.exists() or output.is_symlink()):
-        raise RenderBlocked("Output already exists; choose a new output directory")
+    if not chapters_only:
+        from .publication import published_book, check_selection
+        try:
+            previous = published_book(output, bundle["source"]["book"]["id"])
+            check_selection(previous, (c["id"] for c in plan["chapters"]), partial=plan["partial_book"])
+        except ValueError as exc:
+            raise RenderBlocked(str(exc)) from exc
+        config["_publication_expected"] = digest(previous) if previous is not None else None
     epub = config["render"]["epub"]
     if epub and file_hash(epub) != bundle["source"]["book"]["id"]:
         raise RenderBlocked("Configured EPUB does not match the analyzed book")
@@ -699,9 +702,11 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
 
 def _same_chapter_audio_context(saved, current):
     """Compare inputs that affect audio, retaining old verification provenance."""
-    verification_fields = {"verifier", "verification_config_hash", "quality", "quality_version"}
-    return ({key: value for key, value in saved.items() if key not in verification_fields}
-            == {key: value for key, value in current.items() if key not in verification_fields})
+    # chapter_hash still binds this chapter's full plan. A revision elsewhere
+    # changes bundle_hash without changing any of this chapter's audio inputs.
+    ignored = {"verifier", "verification_config_hash", "quality", "quality_version", "bundle_hash"}
+    return ({key: value for key, value in saved.items() if key not in ignored}
+            == {key: value for key, value in current.items() if key not in ignored})
 
 
 def _has_accepted_verification(record):
@@ -863,8 +868,20 @@ def _save_checkpoint(work, chapter, composed, context, acceptance):
 
 def _package(bundle, config, plan, store, voices, rendered, acceptance,
              engine_identity, verifier_identity, *, notify):
+    from .publication import published_book, publication_key
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        previous = published_book(output, bundle["source"]["book"]["id"])
+    except ValueError as exc:
+        raise RenderBlocked(str(exc)) from exc
+    expected = config.get("_publication_expected", digest(previous) if previous is not None else None)
+    if (digest(previous) if previous is not None else None) != expected:
+        raise RenderBlocked("Published output changed during rendering; rerun to use its current state")
+    key = publication_key(bundle, config, plan, voices, rendered, acceptance, engine_identity, verifier_identity)
+    if previous is not None and previous.get("publication_key") == key:
+        notify(f"Audiobook unchanged; reusing {output / 'book.m4b'}")
+        return previous
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
@@ -888,6 +905,7 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
         write_json(stage / "verification.json", acceptance)
         result = {
             "format": "audiobook-render", "version": 1, "status": "complete",
+            "publication_key": key,
             "bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
             "partial_book": plan["partial_book"], "series_id": store.series_id,
             "voice_assets": {key: value["asset_hash"] for key, value in voices.items()},
@@ -904,7 +922,7 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
             },
         }
         write_json(stage / "render.json", result)
-        _publish(stage, output)
+        _publish(stage, output, expected=expected)
     notify(f"Audiobook ready: {output / 'book.m4b'}")
     return result
 

@@ -546,19 +546,34 @@ def _wait_jobs(client, jobs, notify, *, include_masters=True):
             connection.close()
 
 
-def _local_chapter(bundle, chapter, config, voices):
+def _local_chapter(bundle, chapter, config, voices, *, allow_stale=False):
     """Retain already accepted local chapters when existing validation agrees."""
-    from .workflow import _chapter_context, _read_checkpoint, _restore_chapter, RenderBlocked
+    from .workflow import (
+        _chapter_context, _read_checkpoint, _restore_chapter,
+        _same_chapter_audio_context, _saved_chapter_clips_present, RenderBlocked,
+    )
     record = _read_checkpoint(config["render"]["work_dir"], chapter)
     if record is None:
         return None
     context = _chapter_context(bundle, chapter, config, voices,
                                record["context"]["engine"], record["context"]["verifier"])
     try:
+        if allow_stale and not _same_chapter_audio_context(record["context"], context):
+            # A deliberate script/voice/settings revision can replace a complete
+            # local chapter remotely. Inspect its retained files first so the
+            # revision does not silently hide corrupted local audio.
+            from .chapter_cache import load_chapter
+            _saved_chapter_clips_present(config["render"]["work_dir"], record)
+            composed = load_chapter(Path(config["render"]["work_dir"]) / "chapters" / record["cache_key"],
+                                    ffprobe=config["render"]["ffprobe"])
+            if (composed["context"] != record["context"]
+                    or composed["settings"] != record["context"]["settings"]):
+                raise ValueError("Chapter cache and checkpoint disagree")
+            return {"stale": True}
         composed, acceptance = _restore_chapter(config["render"]["work_dir"], chapter,
                                                 record, context, voices, config)
         return {"composed": composed, "acceptance": acceptance}
-    except RenderBlocked as exc:
+    except (RenderBlocked, ValueError, KeyError, TypeError, OSError) as exc:
         raise ChapterClientError(f"Existing local chapter {chapter['number']} cannot be reused: {exc}. "
                                  "Keep or restore its accepted cache before choosing a remote rerender") from exc
 
@@ -616,19 +631,23 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only)
     local_clip_ids = _partial_local_chunk_ids(work)
     cached, unfinished, local = {}, [], {}
     for chapter in plan["chapters"]:
-        local_result = _local_chapter(bundle, chapter, config, voices)
-        if local_result is not None:
+        local_result = _local_chapter(bundle, chapter, config, voices, allow_stale=True)
+        stale_local = local_result is not None and local_result.get("stale") is True
+        if local_result is not None and not stale_local:
             local[chapter["id"]] = local_result
             notify(f"Reusing accepted local chapter {chapter['number']} / {len(bundle['chapters'])}")
             continue
         selection = _selection(bundle, chapter, config, bindings)
         folder = _regular_directory(root / digest(selection))
         saved = _read_job(folder, selection)
-        if saved is None and _has_partial_local_speech(chapter, local_clip_ids):
+        if saved is None and not stale_local and _has_partial_local_speech(chapter, local_clip_ids):
             raise ChapterClientError(
                 f"Chapter {chapter['number']} has accepted local speech but no completed local chapter. "
                 "Partial local clip migration to the chapter service is not supported yet; the local cache is retained. "
                 "Finish this chapter with local rendering first, or deliberately choose a new --work-dir to render it remotely")
+        if stale_local:
+            notify(f"Chapter {chapter['number']} changed; rendering the revision remotely. "
+                   "Previous local audio is retained.")
         if (saved is not None and not chapters_only
                 and _cached_artifacts_present(folder, saved, require_masters=False)
                 and not _cached_artifacts_present(folder, saved)):
@@ -816,6 +835,8 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                   "files_sha256": {path.relative_to(stage).as_posix(): file_hash(path)
                                    for path in sorted(stage.rglob("*")) if path.is_file()}}
         write_json(stage / "render.json", result)
-        _publish(stage, output)
+        publication = ({"expected": config["_publication_expected"]}
+                       if "_publication_expected" in config else {})
+        _publish(stage, output, **publication)
     notify(f"Audiobook ready: {output / 'book.m4b'}")
     return result
