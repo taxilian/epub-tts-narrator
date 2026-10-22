@@ -353,7 +353,7 @@ def main(argv=None):
                 f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
         else:
             engine = create_engine(config["engine"])
-        verifier = create_verifier(config["verification"], config.get("jev"))
+        verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
         if workers:
             verifier = engine.wrap_verifier(verifier)
         if args.command == "import-voice":

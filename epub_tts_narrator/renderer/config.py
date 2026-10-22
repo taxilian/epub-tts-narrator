@@ -22,6 +22,7 @@ DEFAULTS = {
     "verification": {
         "type": "mlx_whisper", "model": None, "language": "en",
         "reference_model": None,
+        "phonetic_fallback": "analysis",
         "device": "cpu", "compute_type": "int8", "cpu_threads": 4,
     },
     "voice_design": {
@@ -285,7 +286,12 @@ def load_config(path=None, *, require_verifier=True):
         if section in ANALYZER_DEFAULTS and section not in DEFAULTS:
             if not isinstance(values, dict):
                 raise ValueError("Invalid analyzer configuration section; expected a table")
-            known_settings(values, ANALYZER_DEFAULTS[section], section=section)
+            known = known_settings(values, ANALYZER_DEFAULTS[section], section=section)
+            if section == "provider":
+                from epub_tts_narrator.config import _validate
+                for key, value in known.items():
+                    _validate(section, key, value)
+                result[section] = {**ANALYZER_DEFAULTS[section], **known}
             continue
         if section not in result or not isinstance(values, dict):
             raise ValueError("Unknown configuration section or invalid table")
@@ -305,6 +311,9 @@ def load_config(path=None, *, require_verifier=True):
                 result[section][key] = default
     result["quality"] = validate_policy(result["quality"])
     result["jev"] = validate_jev_settings(result["jev"])
+    if (not isinstance(result["verification"]["phonetic_fallback"], str)
+            or result["verification"]["phonetic_fallback"] not in {"analysis", "off"}):
+        raise ValueError("verification.phonetic_fallback must be analysis or off")
     result["huggingface"] = validate_huggingface_settings(result["huggingface"])
     validate_distributed_settings(result)
     validate_chapter_settings(result)

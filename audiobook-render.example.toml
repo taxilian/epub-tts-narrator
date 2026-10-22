@@ -66,22 +66,25 @@ type = "auto"
 type = "mlx_whisper"
 model = "./models/whisper-large-v3-turbo"
 language = "en"
+# On uncertain JEV results, review bounded word substitutions with the existing
+# [provider] analysis model (three votes; two required per word). No audio sent.
+# Set to "off" to disable; without a configured analysis model it is inactive.
+phonetic_fallback = "analysis"
 # Optional second recognizer for small wording discrepancies in voice samples.
 # Download the model first; book passages always use the strict speech policy.
 # reference_model = "./models/parakeet-tdt-0.6b-v3"
 
 # Optional global JEV section, already included in epub-tts-narrator.example.toml.
 # Keep exactly one [jev] table in the combined config; uncomment only if absent.
-# Checks every bounded changed phrase after complete alignment and independent ASR.
-# Only changed phrases and short source context are sent to JEV.
-# No audio is sent, and audiobook passage verification remains unchanged.
+# JEV receives the complete requested and recognized passages, never audio.
+# The optional phonetic fallback sends word pairs and short context to [provider].
 # [jev]
 # enabled = false
 # api_key = "YOUR_JEV_API_KEY"
 # model = "jev-latest"
 # Pin an evaluated model version for repeatability.
 # timeout_seconds = 30
-# threshold = 0.90
+# threshold = 0.75
 
 [voices]
 # Scripts use substantial source excerpts or prepared character-specific text.

@@ -19,7 +19,7 @@ from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
-from .quality import validation_key as make_validation_key, validate_audio
+from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
 from .progress import ChapterProgress, format_duration, set_phase
 from .retry_budget import SpeechRetryBudget, generation_attempts
 from .speech_text import trim_speech_text
@@ -109,6 +109,10 @@ def _verification_failure_detail(report):
     }.get(judge_decision)
     if judge_explanation and not report.get("text_judge_skipped"):
         details.append(judge_explanation)
+    reviews = report.get("phonetic_reviews", [])
+    if (isinstance(reviews, list) and reviews and isinstance(reviews[-1], dict)
+            and reviews[-1].get("decision") == "rejected"):
+        details.append("phonetic reviewers rejected the pronunciation match; full votes are in the attempt report")
     skipped = report.get("text_judge_skipped")
     if isinstance(skipped, str):
         details.append("JEV not called: " + skipped.replace("_", " "))
@@ -188,12 +192,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         return wav, record
 
     def pending_confirmation(report):
-        judge = report.get("text_judge") if isinstance(report, dict) else None
-        return isinstance(judge, dict) and judge.get("decision") == "unavailable"
+        return text_confirmation_unavailable(report)
 
     def stop_for_confirmation():
         raise VerificationUnavailable(
-            "JEV text confirmation is unavailable. Saved audio was retained; "
+            "Speech text confirmation is unavailable. Saved audio was retained; "
             "rerun the same command to retry verification without regenerating it. "
             f"Inspect {directory}"
         )
@@ -416,6 +419,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             judgment = report.get("text_judge", {})
             if judgment.get("decision") == "equivalent":
                 notify("  JEV accepted the transcript as plausible recognition of the requested speech.")
+            elif report.get("text_confirmation_method") in {"phonetic_primary", "phonetic_secondary"}:
+                notify("  Phonetic reviewers confirmed the pronunciation variants after JEV uncertainty.")
             return finish(wav, record)
         if pending_confirmation(report):
             stop_for_confirmation()
@@ -1138,7 +1143,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             if (request.get("kind") != "paragraph_speech"
                     or not isinstance(reasons, list) or not reasons
                     or any(reason not in recoverable for reason in reasons)
-                    or report.get("text_judge", {}).get("decision") == "unavailable"
+                    or text_confirmation_unavailable(report)
                     or not any(item == chunk for item in chapter["chunks"])):
                 raise
             # Record before any child generation so an interruption cannot

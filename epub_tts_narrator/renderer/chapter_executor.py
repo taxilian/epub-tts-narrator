@@ -113,7 +113,8 @@ class ChapterExecutor:
                 self._engine = create_render_engine(runtime_config)
             if self._verifier is None:
                 from .chapter_verification import create_chapter_verifier
-                self._verifier = create_chapter_verifier(self.config["verification"], self.config.get("jev"))
+                self._verifier = create_chapter_verifier(
+                    self.config["verification"], self.config.get("jev"), self.config.get("provider"))
             if not self._wrapped:
                 wrap = getattr(self._engine, "wrap_verifier", None)
                 if callable(wrap):

@@ -16,7 +16,7 @@ import uuid
 
 from .common import digest, file_hash, read_json, write_json
 from .diagnostics import configured_secrets, safe_error_text
-from .quality import validate_audio, validation_key
+from .quality import validate_audio, validation_key, text_confirmation_unavailable
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
                            default_voice_prompt as _default_voice_prompt, voice_prompt_description)
@@ -39,10 +39,9 @@ def _validate_text(value, label, limit):
 
 
 def _require_available_confirmation(report):
-    judge = report.get("text_judge") if isinstance(report, dict) else None
-    if isinstance(judge, dict) and judge.get("decision") == "unavailable":
+    if text_confirmation_unavailable(report):
         raise VerificationUnavailable(
-            "JEV text confirmation is unavailable. The saved voice was retained; "
+            "Speech text confirmation is unavailable. The saved voice was retained; "
             "rerun the same command to retry verification without regenerating it."
         )
 
@@ -406,7 +405,8 @@ class CastingSession:
                 self._model_setup.ensure("verification")
             if self._verifier_factory is None:
                 from .verification import create_verifier
-                self._verifier = create_verifier(self.config["verification"], self.config.get("jev"))
+                self._verifier = create_verifier(
+                    self.config["verification"], self.config.get("jev"), self.config.get("provider"))
             else:
                 self._verifier = self._verifier_factory(
                     self.config["verification"]["model"], language=self.config["verification"]["language"])
@@ -586,8 +586,7 @@ class CastingSession:
             try:
                 record = read_record(path)
                 report = record.get("report", {})
-                judge = report.get("text_judge") if isinstance(report, dict) else None
-                if (not isinstance(judge, dict) or judge.get("decision") != "unavailable"
+                if (not text_confirmation_unavailable(report)
                         or report.get("purpose") != "reference" or report.get("passed") is not False):
                     continue
                 previous = record.get("request")

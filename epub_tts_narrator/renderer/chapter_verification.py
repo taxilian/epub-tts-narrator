@@ -104,11 +104,11 @@ class FasterWhisperVerifier:
             self._model = None
 
 
-def create_chapter_verifier(settings, jev_settings=None):
+def create_chapter_verifier(settings, jev_settings=None, provider_settings=None):
     """Retain the same secondary recognition and JEV policy on a Linux worker."""
     if settings.get("type", "mlx_whisper") == "mlx_whisper":
         from .verification import create_verifier
-        return create_verifier(settings, jev_settings)
+        return create_verifier(settings, jev_settings, provider_settings)
     if settings.get("type") != "faster_whisper":
         raise ValueError("Unsupported chapter verifier type")
 
@@ -123,5 +123,7 @@ def create_chapter_verifier(settings, jev_settings=None):
         verifier = ReferenceCorroboratingVerifier(verifier, create(settings["reference_model"]))
     if jev_settings and jev_settings.get("enabled"):
         from epub_tts_narrator.jev import JevTranscriptJudge
-        verifier = ReferenceTextJudgingVerifier(verifier, JevTranscriptJudge(jev_settings))
+        from .verification import create_phonetic_reviewer
+        verifier = ReferenceTextJudgingVerifier(
+            verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
     return verifier

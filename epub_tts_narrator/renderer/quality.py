@@ -714,6 +714,48 @@ def _judge_reference(verifier, report, secondary_transcript):
     return decision == "equivalent" and probabilities["roughly_same"] >= threshold
 
 
+def text_confirmation_unavailable(report):
+    """Provider outages must pause verification, never spend another TTS take."""
+    if not isinstance(report, dict):
+        return False
+    judge = report.get("text_judge", {})
+    reviews = report.get("phonetic_reviews", [])
+    return ((isinstance(judge, dict) and judge.get("decision") == "unavailable")
+            or (isinstance(reviews, list) and any(
+                isinstance(row, dict) and row.get("decision") == "unavailable" for row in reviews)))
+
+
+def _confirm_phonetics(verifier, report, transcript, source):
+    """Ask the fallback only about bounded substitutions after JEV uncertainty."""
+    if report.get("text_judge", {}).get("decision") != "uncertain":
+        return False
+    identity = getattr(verifier, "phonetic_review_identity", None)
+    review = getattr(verifier, "review_phonetics", None)
+    if not isinstance(identity, dict) or not callable(review):
+        return False
+    from .phonetic_review import substitution_pairs, validate_review
+    expected = report["expected_text"]
+    if substitution_pairs(expected, transcript) is None:
+        return False
+    unavailable = {"identity": identity, "decision": "unavailable", "source": source,
+                   "error_code": "invalid_phonetic_review"}
+    try:
+        result = review(expected, transcript)
+        accepted = validate_review(result, expected, transcript, identity)
+        # Retain rejected/unavailable records from the trusted local reviewer;
+        # only the complete strictly validated consensus can approve audio.
+        if not isinstance(result, dict) or result.get("identity") != identity:
+            result = unavailable
+        elif result.get("decision") == "accepted" and not accepted:
+            result = unavailable
+        elif result.get("decision") not in {"accepted", "rejected", "unavailable"}:
+            result = unavailable
+    except Exception:
+        result, accepted = unavailable, False
+    report.setdefault("phonetic_reviews", []).append({**result, "source": source})
+    return accepted
+
+
 def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
     """Ask JEV about non-spacing mismatches; another recognizer can recover."""
     expected, primary = report["expected_text"], report["transcript"]
@@ -733,7 +775,9 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
     report["text_judge_source"] = "primary"
     if _judge_reference(verifier, report, None):
         return accept(primary, "jev_primary")
-    if report.get("text_judge", {}).get("decision") == "unavailable":
+    if _confirm_phonetics(verifier, report, primary, "primary"):
+        return accept(primary, "phonetic_primary")
+    if text_confirmation_unavailable(report):
         return False
     decode = getattr(verifier, "corroborate_reference", None)
     if not callable(decode):
@@ -768,6 +812,9 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
     report["text_judge"] = secondary_report["text_judge"]
     report["text_judge_source"] = "secondary"
     corroboration["decision"] = "jev_confirmed_variations" if confirmed else "not_confirmed"
+    if not confirmed and _confirm_phonetics(verifier, report, secondary, "secondary"):
+        corroboration["decision"] = "phonetic_confirmed_variations"
+        return accept(secondary, "phonetic_secondary")
     return accept(secondary, "jev_secondary") if confirmed else False
 
 
