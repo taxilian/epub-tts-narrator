@@ -106,6 +106,8 @@ class FasterWhisperVerifier:
 
 def create_chapter_verifier(settings, jev_settings=None, provider_settings=None):
     """Retain the same secondary recognition and JEV policy on a Linux worker."""
+    from .phonetic_match import require_phonetic_matcher
+    require_phonetic_matcher()
     if settings.get("type", "mlx_whisper") == "mlx_whisper":
         from .verification import create_verifier
         return create_verifier(settings, jev_settings, provider_settings)

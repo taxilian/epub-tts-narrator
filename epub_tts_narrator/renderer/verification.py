@@ -79,6 +79,8 @@ def create_phonetic_reviewer(settings, provider_settings):
 
 
 def create_verifier(settings, jev_settings=None, provider_settings=None):
+    from .phonetic_match import require_phonetic_matcher
+    require_phonetic_matcher()
     kind = settings.get("type", "mlx_whisper")
     if kind == "faster_whisper":
         # Casting, imports, and ordinary local rendering use this same factory.

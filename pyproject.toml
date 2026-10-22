@@ -11,9 +11,10 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+verification = ["Metaphone==0.6"]
 remote = ["msgpack>=1.1,<2", "websockets>=15,<16"]
 chapter-server = ["msgpack>=1.1,<2", "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "boto3>=1.35,<2"]
-cuda-verification = ["faster-whisper>=1.1,<2"]
+cuda-verification = ["faster-whisper>=1.1,<2", "Metaphone==0.6"]
 
 [project.scripts]
 epub-tts-narrator = "epub_tts_narrator.cli:main"

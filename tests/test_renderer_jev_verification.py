@@ -304,24 +304,24 @@ class JevReferenceVerificationTests(unittest.TestCase):
     def test_secondary_confirmation_rescues_uncertain_primary_and_keeps_both_audits(self):
         from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
-        verifier, recognizer = self.wrapped("Chessed!", "Jase!", judge)
+        verifier, recognizer = self.wrapped("Chessed!", "Chase!", judge)
         def evaluate(state, questions):
-            score = {"Chessed!": .4, "Jase!": .95}[state["recognized_passage"]]
+            score = {"Chessed!": .4, "Chase!": .95}[state["recognized_passage"]]
             return {"model": "jev-fixture", "usage": {"input_tokens": 20, "output_tokens": 2},
                     "answers": {"roughly_same": {"type": "noul", "noul": score}}}
         with patch.object(judge._client, "evaluate", side_effect=evaluate) as evaluate_mock:
             report = self.check(verifier, expected="Jas!")
         self.assertTrue(report["passed"], report)
         self.assertEqual(report["transcript"], "Chessed!")
-        self.assertEqual(report["verified_transcript"], "Jase!")
-        self.assertEqual(report["reference_text"], "Jase!")
+        self.assertEqual(report["verified_transcript"], "Chase!")
+        self.assertEqual(report["reference_text"], "Chase!")
         self.assertEqual(report["text_judge_source"], "secondary")
         self.assertEqual(report["text_judge"]["decision"], "equivalent")
         self.assertEqual(report["text_judge_history"][0]["recognizer"], "primary")
         self.assertEqual(report["text_judge_history"][0]["judgment"]["decision"], "uncertain")
         self.assertEqual(recognizer.calls, [("reference", self.audio), ("corroboration", self.audio)])
         self.assertEqual([call.args[0]["recognized_passage"] for call in evaluate_mock.call_args_list],
-                         ["Chessed!", "Jase!"])
+                         ["Chessed!", "Chase!"])
 
     def test_identical_uncertain_secondary_does_not_repeat_the_same_judgment(self):
         from epub_tts_narrator.jev import JevTranscriptJudge

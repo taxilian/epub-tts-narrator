@@ -78,7 +78,7 @@ class RelaxedJevTests(unittest.TestCase):
         evaluate.assert_called_once()
         self.assertEqual(report["text_judge"]["decision"], "different")
 
-    def test_only_exact_text_and_acoustic_failures_skip_jev(self):
+    def test_exact_text_and_acoustic_failures_skip_jev_but_content_changes_do_not(self):
         for primary, score in ((SCRIPT, .99), ("Thank you.", .01),
                                (SCRIPT.removesuffix(" arrive... maybe."), .01)):
             judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
@@ -93,18 +93,30 @@ class RelaxedJevTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         evaluate.assert_not_called()
 
-    def test_names_go_directly_to_jev_and_bad_secondary_cannot_veto(self):
-        for heard in ("Chase!", "Jazz!", "Jace!", "A completely different phrase."):
-            judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
-            recognizer = consensus.IndependentVerifier(heard, "Chessed.")
-            verifier = ReferenceTextJudgingVerifier(recognizer, judge)
-            with patch.object(judge._client, "evaluate", return_value=answer(.99)) as evaluate:
-                report = self.check(verifier, expected="Jas!", purpose="speech")
-            self.assertTrue(report["passed"], report)
-            evaluate.assert_called_once()
-            self.assertEqual(recognizer.calls, [("speech", self.audio)])
-            self.assertEqual(evaluate.call_args.args[0]["recognized_passage"], heard)
-            self.assertNotIn("judgment_eligibility", report)
+    def test_primary_local_or_jev_acceptance_cannot_be_vetoed_by_bad_secondary(self):
+        cases = (("Chase!", "jev"), ("Jazz!", "local"), ("Jace!", "local"),
+                 ("A completely different phrase.", "jev"))
+        for heard, route in cases:
+            with self.subTest(heard=heard, route=route):
+                judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
+                recognizer = consensus.IndependentVerifier(heard, "Chessed.")
+                verifier = ReferenceTextJudgingVerifier(recognizer, judge)
+                # A local match remains accepted even if the unused judge would
+                # reject it; the unrelated secondary transcript is never requested.
+                with patch.object(judge._client, "evaluate", return_value=answer(.01 if route == "local" else .99)) as evaluate:
+                    report = self.check(verifier, expected="Jas!", purpose="speech")
+                self.assertTrue(report["passed"], report)
+                self.assertEqual(recognizer.calls, [("speech", self.audio)])
+                self.assertNotIn("judgment_eligibility", report)
+                if route == "local":
+                    evaluate.assert_not_called()
+                    self.assertEqual(report["text_confirmation_method"], "double_metaphone")
+                    self.assertTrue(report["phonetic_comparison"])
+                    self.assertNotIn("text_judge", report)
+                else:
+                    evaluate.assert_called_once()
+                    self.assertEqual(report["text_confirmation_method"], "jev_primary")
+                    self.assertEqual(evaluate.call_args.args[0]["recognized_passage"], heard)
 
     def test_many_small_differences_need_only_one_whole_passage_judgment(self):
         source = " ".join(f"mmm word{index}" for index in range(40))

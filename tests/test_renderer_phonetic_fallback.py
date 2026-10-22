@@ -22,8 +22,10 @@ from test_renderer_verification_factory import fake_primary
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 
 
-REQUESTED = "Derrins walked through the station and quietly closed the door behind him."
-RECOGNIZED = REQUESTED.replace("Derrins", "Darin's")
+# This missing consonant has different phonetic keys, so it still exercises
+# the model fallback. Name spellings now pass the earlier local comparison.
+REQUESTED = "Derrins walked through the library and quietly closed the door behind him."
+RECOGNIZED = REQUESTED.replace("library", "libary")
 
 
 class PairClient:
@@ -77,8 +79,8 @@ class PhoneticFallbackTests(unittest.TestCase):
                 self.assertEqual(audit["source"], "primary")
                 self.assertEqual([vote["pairs"][0]["plausible"] for vote in audit["votes"]],
                                  [True, False, True])
-                self.assertEqual(audit["pairs"][0]["expected_word"], "Derrins")
-                self.assertEqual(audit["pairs"][0]["recognized_word"], "Darin's")
+                self.assertEqual(audit["pairs"][0]["expected_word"], "library")
+                self.assertEqual(audit["pairs"][0]["recognized_word"], "libary")
                 if purpose == "reference":
                     self.assertEqual(report["reference_text"], RECOGNIZED)
                 else:

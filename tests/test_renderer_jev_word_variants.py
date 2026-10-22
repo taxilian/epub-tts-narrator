@@ -37,13 +37,13 @@ class JevWordVariantTests(unittest.TestCase):
 
     def test_confirmed_spelling_and_pronunciation_variants_keep_actual_reference_words(self):
         cases = (
-            ("She put the doll on the shelf.", "She put the dull on the shelf."),
-            ("Givve me the book.", "Give me the book."),
-            ("I will recieve the book.", "I will receive the book."),
-            ("Meet me at the libary.", "Meet me at the library."),
-            ("Meet me at the library.", "Meet me at the libary."),
+            ("She put the doll on the shelf.", "She put the dull on the shelf.", "local"),
+            ("Givve me the book.", "Give me the book.", "local"),
+            ("I will recieve the book.", "I will receive the book.", "local"),
+            ("Meet me at the libary.", "Meet me at the library.", "jev"),
+            ("Meet me at the library.", "Meet me at the libary.", "jev"),
         )
-        for source, heard in cases:
+        for source, heard, route in cases:
             with self.subTest(source=source, heard=heard):
                 expected, actual = source + CONTEXT, heard + CONTEXT
                 verifier, recognizer, judge = self.wrapped(actual)
@@ -56,7 +56,14 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertTrue(report["reference_text_adjusted"])
                 self.assertGreater(report["reference_comparison"]["wer"], 0)
                 self.assertEqual(recognizer.calls, [("reference", self.audio)])
+                if route == "local":
+                    evaluate.assert_not_called()
+                    self.assertEqual(report["text_confirmation_method"], "double_metaphone")
+                    self.assertTrue(report["phonetic_comparison"])
+                    self.assertNotIn("text_judge", report)
+                    continue
                 evaluate.assert_called_once()
+                self.assertEqual(report["text_confirmation_method"], "jev_primary")
                 state = evaluate.call_args.args[0]
                 self.assertEqual(set(state), {"requested_passage", "recognized_passage"})
                 self.assertEqual(state["requested_passage"], expected)
@@ -111,8 +118,8 @@ class JevWordVariantTests(unittest.TestCase):
                                  {"requested_passage": expected, "recognized_passage": actual})
 
     def test_uncertain_word_variant_remains_rejected(self):
-        expected = "Givve me the book." + CONTEXT
-        verifier, _, judge = self.wrapped(expected.replace("Givve", "Give"))
+        expected = "Meet me at the libary." + CONTEXT
+        verifier, _, judge = self.wrapped(expected.replace("libary", "library"))
         with patch.object(judge._client, "evaluate", return_value=self.response(.60)) as evaluate:
             report = self.check(verifier, expected=expected)
 
@@ -121,22 +128,31 @@ class JevWordVariantTests(unittest.TestCase):
         self.assertNotIn("reference_text", report)
         evaluate.assert_called_once()
 
-    def test_short_names_are_judged_without_character_distance_or_substring_gates(self):
-        cases = (("Doll!", "Dull!"), ("Jas!", "Chase!"), ("Jas!", "Jazz!"), ("Jas!", "Jace!"), ("Jas, wait.", "Jas"))
+    def test_short_names_use_local_matches_and_judge_remaining_differences(self):
+        cases = (("Doll!", "Dull!", "local"), ("Jas!", "Chase!", "jev"),
+                 ("Jas!", "Jazz!", "local"), ("Jas!", "Jace!", "local"),
+                 ("Jas, wait.", "Jas", "jev"))
         for purpose in ("reference", "speech"):
-            for expected, heard in cases:
+            for expected, heard, route in cases:
                 with self.subTest(purpose=purpose, expected=expected, heard=heard):
                     verifier, recognizer, judge = self.wrapped(heard)
                     with patch.object(judge._client, "evaluate", return_value=self.response(.95)) as evaluate:
                         report = self.check(verifier, expected=expected, purpose=purpose)
                     self.assertTrue(report["passed"], report)
+                    self.assertEqual(recognizer.calls, [(purpose, self.audio)])
+                    if route == "local":
+                        evaluate.assert_not_called()
+                        self.assertEqual(report["text_confirmation_method"], "double_metaphone")
+                        self.assertNotIn("text_judge", report)
+                        continue
                     evaluate.assert_called_once()
+                    self.assertEqual(report["text_confirmation_method"], "jev_primary")
                     self.assertEqual(evaluate.call_args.args[0],
                                      {"requested_passage": expected, "recognized_passage": heard})
 
     def test_jev_confirmed_word_variant_is_also_accepted_for_audiobook_speech(self):
-        expected = "Givve me the book." + CONTEXT
-        verifier, recognizer, judge = self.wrapped(expected.replace("Givve", "Give"))
+        expected = "Meet me at the libary." + CONTEXT
+        verifier, recognizer, judge = self.wrapped(expected.replace("libary", "library"))
         with patch.object(judge._client, "evaluate", return_value=self.response(.99)) as evaluate:
             report = self.check(verifier, expected=expected, purpose="speech")
 

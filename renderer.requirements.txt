@@ -3,6 +3,7 @@
 ./vendor/drama3-mlx
 mlx-audio>=0.6.1,<0.7
 mlx-whisper==0.4.3
+Metaphone==0.6
 soundfile==0.13.1
 packaging>=24.0
 msgpack>=1.1,<2
