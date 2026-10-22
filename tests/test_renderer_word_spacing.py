@@ -101,14 +101,14 @@ class WordSpacingVerificationTests(unittest.TestCase):
                     else:
                         self.assertTrue(report["words"])
 
-    def test_other_differences_still_reach_judge_even_with_a_valid_compound_change(self):
+    def test_missing_negation_blocks_judge_even_with_a_valid_compound_change(self):
         expected = "We were not over taking the cart."
         actual = "We were overtaking the cart."
         judge = Judge("different")
         verifier = ReferenceTextJudgingVerifier(consensus.PrimaryVerifier(actual), judge)
         report = self.check(verifier, expected=expected, purpose="speech")
         self.assertFalse(report["passed"], report)
-        self.assertEqual(judge.calls, [(expected, actual, None)])
+        self.assertEqual(judge.calls, [])
         self.assertNotIn("word_boundary_comparison", report)
 
     def test_acoustic_failure_cannot_be_excused_by_perfect_spacing_equivalence(self):
@@ -133,7 +133,7 @@ class WordSpacingVerificationTests(unittest.TestCase):
                 self.assertEqual(report["text_confirmation_method"], "secondary_word_spacing")
                 self.assertEqual(report["verified_transcript"], secondary)
                 self.assertEqual(report["transcript"], primary)
-                self.assertEqual(judge.calls, [(expected, primary, None)])
+                self.assertEqual(judge.calls, [])
                 self.assertEqual(report["text_judge_history"][0]["judgment"]["decision"], "different")
                 if purpose == "speech":
                     self.assertEqual(report["words"], [])

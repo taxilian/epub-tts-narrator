@@ -19,7 +19,7 @@ from .provider import _transient_transport
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
-POLICY_VERSION = 10
+POLICY_VERSION = 11
 DEFAULTS = {"enabled": False, "api_key": None, "model": "jev-latest",
             "timeout_seconds": 30.0, "threshold": 0.75}
 _MODEL = re.compile(r"jev(?:[._-][A-Za-z0-9][A-Za-z0-9._-]{0,120})?\Z")
@@ -226,7 +226,7 @@ QUESTIONS = {
             "false": "Spoken content is missing, extra, repeated, or different, beyond such variations.",
         }},
 }
-_STRATEGY = "whole_spoken_passages"
+_STRATEGY = "coverage_gated_whole_spoken_passages"
 _POLICY_IDENTITY = {"name": "transcript_spoken_passages", "version": POLICY_VERSION, "strategy": _STRATEGY,
                     "questions_sha256": sha256(json.dumps(QUESTIONS, sort_keys=True).encode("utf-8")).hexdigest(),
                     "policy_sha256": sha256(json.dumps({"questions": QUESTIONS, "strategy": _STRATEGY,
@@ -285,6 +285,14 @@ class JevTranscriptJudge:
             if not comparisons:
                 return dict(record, decision="equivalent", method="deterministic_spoken_comparison",
                             probabilities={"roughly_same": 1.0})
+            from .renderer.speech_coverage import speech_coverage
+            coverage = [speech_coverage(row["requested_passage"], row["recognized_passage"])
+                        for row in comparisons]
+            record["speech_coverage"] = [dict(check, transcripts=row["transcripts"])
+                                         for row, check in zip(comparisons, coverage)]
+            if not any(check["passed"] for check in coverage):
+                return dict(record, decision="different", method="spoken_text_eligibility",
+                            error_code="incomplete_spoken_coverage")
             # Compare the whole passage: isolated mismatch fragments make minor
             # recognition differences appear disproportionately significant.
             # Retain the exact instructions alongside the compared passages so
@@ -304,7 +312,10 @@ class JevTranscriptJudge:
                     record["model"] = result["model"]
                 elif record["model"] != result["model"]:
                     return dict(record, error_code="model_changed")
-            roughly_same = max(comparison["probability"] for comparison in comparisons)
+            # Preserve every raw score above, but a high score for an incomplete
+            # transcript must not approve a different, low-scoring transcript.
+            roughly_same = max(comparison["probability"] for comparison, check in zip(comparisons, coverage)
+                               if check["passed"])
             decision = "equivalent" if roughly_same >= self.threshold else "different" if roughly_same <= 1 - self.threshold else "uncertain"
             record.update(decision=decision)
             return record

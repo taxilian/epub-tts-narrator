@@ -96,9 +96,8 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertNotIn("reference_text", report)
                 self.assertEqual(report["text_judge"]["decision"], "different")
                 self.assertEqual(recognizer.calls, [("reference", self.audio)])
-                evaluate.assert_called_once()
 
-    def test_entire_passage_including_missing_or_added_words_reaches_judge(self):
+    def test_missing_or_added_words_reject_before_judge_despite_valid_spelling_change(self):
         expected = "Givve me the book." + CONTEXT
         corrected = expected.replace("Givve", "Give")
         for actual in (corrected.replace("the captain checked", "checked"),
@@ -113,9 +112,7 @@ class JevWordVariantTests(unittest.TestCase):
                 self.assertEqual(recognizer.calls, [("reference", self.audio)])
                 self.assertEqual(report["text_judge"]["decision"], "different")
                 self.assertNotIn("reference_text", report)
-                evaluate.assert_called_once()
-                self.assertEqual(evaluate.call_args.args[0],
-                                 {"requested_passage": expected, "recognized_passage": actual})
+                evaluate.assert_not_called()
 
     def test_uncertain_word_variant_remains_rejected(self):
         expected = "Meet me at the libary." + CONTEXT
@@ -130,8 +127,7 @@ class JevWordVariantTests(unittest.TestCase):
 
     def test_short_names_use_local_matches_and_judge_remaining_differences(self):
         cases = (("Doll!", "Dull!", "local"), ("Jas!", "Chase!", "jev"),
-                 ("Jas!", "Jazz!", "local"), ("Jas!", "Jace!", "local"),
-                 ("Jas, wait.", "Jas", "jev"))
+                 ("Jas!", "Jazz!", "local"), ("Jas!", "Jace!", "local"))
         for purpose in ("reference", "speech"):
             for expected, heard, route in cases:
                 with self.subTest(purpose=purpose, expected=expected, heard=heard):

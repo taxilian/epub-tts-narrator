@@ -86,7 +86,7 @@ class LocalPhoneticVerificationTests(unittest.TestCase):
                         self.assertIn("text_mismatch", report["reasons"])
                         self.assertNotIn("phonetic_comparison", report)
                         self.assertNotIn("verified_transcript", report)
-                        self.assertEqual(judge.calls, [(expected, actual, None)] if enabled else [])
+                        self.assertEqual(judge.calls, [])
 
     def test_silence_stops_before_recognition_or_local_phonetic_check(self):
         self.write_audio(amplitude=0)
@@ -120,7 +120,7 @@ class LocalPhoneticVerificationTests(unittest.TestCase):
                 self.assertEqual(report["verified_transcript"], secondary)
                 self.assertGreater(report["metrics"]["wer"], 0)
                 self.assertTrue(report["phonetic_comparison"])
-                self.assertEqual(judge.calls, [(expected, primary, None)])
+                self.assertEqual(judge.calls, [])
                 self.assertEqual(recognizer.calls, [(purpose, self.audio), ("corroboration", self.audio)])
                 self.assertEqual(report["text_judge_history"][0]["judgment"]["decision"], "different")
                 if purpose == "reference":

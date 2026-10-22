@@ -115,7 +115,10 @@ def _verification_failure_detail(report):
         details.append("phonetic reviewers rejected the pronunciation match; full votes are in the attempt report")
     skipped = report.get("text_judge_skipped")
     if isinstance(skipped, str):
-        details.append("JEV not called: " + skipped.replace("_", " "))
+        if skipped == "incomplete_spoken_coverage":
+            details.append("coverage check failed: missing, extra, or nonmatching words; JEV cannot override this")
+        else:
+            details.append("JEV not called: " + skipped.replace("_", " "))
     error = report.get("provider_error") or report.get("error")
     if error:
         details.append(safe_error_text(error))

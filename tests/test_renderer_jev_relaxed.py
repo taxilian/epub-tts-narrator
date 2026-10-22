@@ -29,41 +29,34 @@ class RelaxedJevTests(unittest.TestCase):
     write_audio = consensus.ReferenceConsensusTests.write_audio
     check = consensus.ReferenceConsensusTests.check
 
-    def test_reported_hum_cases_reach_jev_for_samples_and_chapters(self):
-        cases = [
-            (SCRIPT.replace("Mmm... ", ""), SCRIPT.replace("Mmm... ", "")),
-            (SCRIPT.replace("Mmm", "Hmm"), SCRIPT.replace("Mmm... still", "Hmm. It's still")),
-        ]
+    def test_missing_hum_cannot_be_approved_for_samples_or_chapters(self):
+        primary = SCRIPT.replace("Mmm... ", "")
         for purpose in ("reference", "speech"):
-            for primary, secondary in cases:
-                for score in (.99, .4):
-                    with self.subTest(purpose=purpose, primary=primary, score=score):
-                        judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
-                        recognizer = consensus.IndependentVerifier(primary, secondary)
-                        verifier = ReferenceTextJudgingVerifier(recognizer, judge)
-                        with patch.object(judge._client, "evaluate", return_value=answer(score)) as evaluate:
-                            report = self.check(verifier, expected=SCRIPT, purpose=purpose)
-                        self.assertGreater(evaluate.call_count, 0)
-                        self.assertEqual(report["passed"], score == .99, report)
-                        self.assertEqual(report["text_judge"]["probabilities"]["roughly_same"], score)
-                        self.assertEqual(report["transcript"], primary)
-                        self.assertEqual(report["expected_text"], SCRIPT)
-                        self.assertGreater(report["metrics"]["wer"], 0)
-                        if purpose == "speech":
-                            self.assertTrue(report["words"])
-                            self.assertNotIn("reference_text", report)
-                        elif score == .99:
-                            self.assertEqual(report["reference_text"], primary)
+            for score in (.99, .4):
+                with self.subTest(purpose=purpose, score=score):
+                    judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
+                    recognizer = consensus.IndependentVerifier(primary, primary)
+                    verifier = ReferenceTextJudgingVerifier(recognizer, judge)
+                    with patch.object(judge._client, "evaluate", return_value=answer(score)) as evaluate:
+                        report = self.check(verifier, expected=SCRIPT, purpose=purpose)
+                    self.assertFalse(report["passed"], report)
+                    self.assertEqual(report["text_judge"]["decision"], "different")
+                    self.assertEqual(report["transcript"], primary)
+                    self.assertEqual(report["expected_text"], SCRIPT)
+                    self.assertIn("text_mismatch", report["reasons"])
+                    self.assertNotIn("reference_text", report)
+                    evaluate.assert_not_called()
 
     def test_missing_secondary_does_not_prevent_jev_decision(self):
-        primary = SCRIPT.replace("Mmm... ", "")
+        expected = SCRIPT + " Meet me at the libary."
+        primary = expected.replace("libary", "library")
         for recognizer in (consensus.PrimaryVerifier(primary), consensus.IndependentVerifier(primary, primary)):
             if isinstance(recognizer, consensus.IndependentVerifier):
                 recognizer.secondary = RuntimeError("optional recognizer failed")
             judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
             verifier = ReferenceTextJudgingVerifier(recognizer, judge)
             with patch.object(judge._client, "evaluate", return_value=answer(.99)) as evaluate:
-                report = self.check(verifier, expected=SCRIPT)
+                report = self.check(verifier, expected=expected)
             self.assertTrue(report["passed"], report)
             self.assertGreater(evaluate.call_count, 0)
 
@@ -78,7 +71,7 @@ class RelaxedJevTests(unittest.TestCase):
         evaluate.assert_called_once()
         self.assertEqual(report["text_judge"]["decision"], "different")
 
-    def test_exact_text_and_acoustic_failures_skip_jev_but_content_changes_do_not(self):
+    def test_exact_text_acoustic_failures_and_clear_content_losses_skip_jev(self):
         for primary, score in ((SCRIPT, .99), ("Thank you.", .01),
                                (SCRIPT.removesuffix(" arrive... maybe."), .01)):
             judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
@@ -86,7 +79,7 @@ class RelaxedJevTests(unittest.TestCase):
             with patch.object(judge._client, "evaluate", return_value=answer(score)) as evaluate:
                 report = self.check(verifier, expected=SCRIPT, purpose="speech")
             self.assertEqual(report["passed"], primary == SCRIPT, report)
-            self.assertEqual(evaluate.call_count, 0 if primary == SCRIPT else 1)
+            evaluate.assert_not_called()
         self.write_audio(amplitude=0)
         with patch.object(judge._client, "evaluate") as evaluate:
             report = self.check(verifier, expected=SCRIPT, purpose="speech")
@@ -94,8 +87,7 @@ class RelaxedJevTests(unittest.TestCase):
         evaluate.assert_not_called()
 
     def test_primary_local_or_jev_acceptance_cannot_be_vetoed_by_bad_secondary(self):
-        cases = (("Chase!", "jev"), ("Jazz!", "local"), ("Jace!", "local"),
-                 ("A completely different phrase.", "jev"))
+        cases = (("Chase!", "jev"), ("Jazz!", "local"), ("Jace!", "local"))
         for heard, route in cases:
             with self.subTest(heard=heard, route=route):
                 judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
@@ -119,8 +111,8 @@ class RelaxedJevTests(unittest.TestCase):
                     self.assertEqual(evaluate.call_args.args[0]["recognized_passage"], heard)
 
     def test_many_small_differences_need_only_one_whole_passage_judgment(self):
-        source = " ".join(f"mmm word{index}" for index in range(40))
-        heard = source.replace("mmm ", "")
+        source = " ".join(f"The libary holds volume {index}." for index in range(40))
+        heard = source.replace("libary", "library")
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
         verifier = ReferenceTextJudgingVerifier(consensus.PrimaryVerifier(heard), judge)
         with patch.object(judge._client, "evaluate", return_value=answer(.99)) as evaluate:
@@ -139,16 +131,17 @@ class RelaxedJevTests(unittest.TestCase):
             config = {"quality": {}, "render": {"max_attempts": 3, "seed": 42,
                        "sample_rate": 44100, "ffmpeg": "unused"}}
             judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
+            expected = SCRIPT + " Meet me at the libary."
             verifier = ReferenceTextJudgingVerifier(
-                consensus.PrimaryVerifier(SCRIPT.replace("Mmm... ", "")), judge)
+                consensus.PrimaryVerifier(expected.replace("libary", "library")), judge)
             with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
                        side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())), \
                     patch.object(judge._client, "evaluate", side_effect=[TimeoutError(), answer(.99)]) as evaluate:
                 with self.assertRaises(VerificationUnavailable):
-                    verified_take(SCRIPT, generate, directory, {"fixture": True}, verifier, config, purpose="speech")
+                    verified_take(expected, generate, directory, {"fixture": True}, verifier, config, purpose="speech")
                 self.assertEqual(len(generated), 1)
                 saved = Path(directory, "attempt-001.wav").read_bytes()
-                path, record = verified_take(SCRIPT, generate, directory, {"fixture": True},
+                path, record = verified_take(expected, generate, directory, {"fixture": True},
                                              verifier, config, purpose="speech")
             self.assertEqual(len(generated), 1)
             self.assertEqual(evaluate.call_count, 2)

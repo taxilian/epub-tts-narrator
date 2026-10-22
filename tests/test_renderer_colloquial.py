@@ -121,7 +121,7 @@ class ColloquialAudioVerificationTests(unittest.TestCase):
                     else:
                         self.assertNotIn("reference_text", report)
 
-    def test_missing_nearby_words_reach_jev_and_remain_rejected(self):
+    def test_missing_nearby_words_reject_before_jev(self):
         expected, actual = "Whatcha not doing, Dalley?", "What you doing, Dally?"
         for purpose in ("speech", "reference"):
             with self.subTest(purpose=purpose):
@@ -131,7 +131,7 @@ class ColloquialAudioVerificationTests(unittest.TestCase):
                                     expected=expected, purpose=purpose)
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["reasons"], ["text_mismatch"])
-                self.assertEqual(judge.calls, [(expected, actual, None)])
+                self.assertEqual(judge.calls, [])
                 self.assertNotIn("phonetic_comparison", report)
                 self.assertEqual(report["expected_text"], expected)
                 self.assertEqual(report["transcript"], actual)

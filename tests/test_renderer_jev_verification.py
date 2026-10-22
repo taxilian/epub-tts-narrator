@@ -14,12 +14,12 @@ from test_renderer_verification_factory import fake_primary, fake_reference
 
 
 SCRIPT = (
-    "The bloodbeast waited quietly just outside the station while the captain checked every locked "
+    "The bloodbeast waited quietly just outside the libary while the captain checked every locked "
     "door and window. A sourcevow bound the traveler to remain nearby until the night train "
     "arrived with fresh supplies for the village."
 )
 SPLIT = SCRIPT.replace("bloodbeast", "blood beast").replace("sourcevow", "source vow")
-ALTERNATE = SPLIT.replace("quietly", "quickly")
+ALTERNATE = SPLIT.replace("libary", "library")
 
 
 class Judge:
@@ -127,6 +127,42 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 self.assertEqual(audit["decision"], "equivalent" if passed else "uncertain")
                 self.assertEqual(audit["usage"], {"input_tokens": 80, "output_tokens": 4})
                 self.assertNotIn("fixture-private-key", json.dumps(audit, allow_nan=False))
+
+    def test_high_score_for_missing_words_cannot_override_uncertain_complete_recognition(self):
+        from epub_tts_narrator.jev import JevTranscriptJudge
+        missing = SCRIPT.replace("while the captain checked every locked door and window. ", "")
+        judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
+
+        def evaluate(state, questions):
+            score = .99 if state["recognized_passage"] == missing else .4
+            return {"model": "jev-fixture", "usage": {"input_tokens": 40, "output_tokens": 2},
+                    "answers": {"roughly_same": {"type": "noul", "noul": score}}}
+
+        with patch.object(judge._client, "evaluate", side_effect=evaluate):
+            decision = judge.judge(SCRIPT, missing, ALTERNATE)
+            self.assertNotEqual(decision["decision"], "equivalent", decision)
+            for purpose in ("reference", "speech"):
+                with self.subTest(purpose=purpose):
+                    verifier, _ = self.wrapped(missing, ALTERNATE, judge)
+                    report = self.check(verifier, expected=SCRIPT, purpose=purpose)
+                    self.assertFalse(report["passed"], report)
+                    self.assertIn("text_mismatch", report["reasons"])
+                    self.assertNotIn("reference_text", report)
+
+    def test_overpermissive_judge_adapter_cannot_override_missing_or_replaced_speech(self):
+        changed = (
+            SCRIPT.replace("the captain checked every locked door and window", "the captain checked"),
+            SCRIPT + " Everyone then walked away.",
+            SCRIPT.replace("captain", "doctor"),
+        )
+        for purpose in ("reference", "speech"):
+            for actual in changed:
+                with self.subTest(purpose=purpose, actual=actual):
+                    verifier = ReferenceTextJudgingVerifier(PrimaryVerifier(actual), Judge("equivalent"))
+                    report = self.check(verifier, expected=SCRIPT, purpose=purpose)
+                    self.assertFalse(report["passed"], report)
+                    self.assertIn("text_mismatch", report["reasons"])
+                    self.assertNotIn("reference_text", report)
 
     def test_approved_primary_needs_only_one_whole_passage_judgment(self):
         from epub_tts_narrator.jev import JevTranscriptJudge
@@ -266,7 +302,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertEqual(judge.calls, [])
         self.assertNotIn("text_judge", report)
 
-    def test_judge_decides_unrelated_or_truncated_text_without_a_distance_gate(self):
+    def test_unrelated_or_truncated_text_is_rejected_before_judge(self):
         for actual in ("Thank you.", SCRIPT.removesuffix(" village.") + "."):
             with self.subTest(actual=actual):
                 judge = Judge("different")
@@ -275,9 +311,9 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 report = self.check(verifier, expected=SCRIPT)
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["text_judge"]["decision"], "different")
-                self.assertEqual(judge.calls, [(SCRIPT, actual, None)])
+                self.assertEqual(judge.calls, [])
 
-    def test_negative_judgment_of_negation_or_numeric_changes_is_respected(self):
+    def test_negation_or_numeric_changes_cannot_reach_judge_override(self):
         expected = EXPECTED + " I will not wait for seven passengers."
         for actual in (expected.replace("not", "now"), expected.replace("seven", "eleven")):
             with self.subTest(actual=actual):
@@ -286,7 +322,7 @@ class JevReferenceVerificationTests(unittest.TestCase):
                 report = self.check(verifier, expected=expected)
                 self.assertFalse(report["passed"], report)
                 self.assertEqual(report["text_judge"]["decision"], "different")
-                self.assertEqual(judge.calls, [(expected, actual, None)])
+                self.assertEqual(judge.calls, [])
 
     def test_approved_primary_does_not_trigger_optional_secondary(self):
         judge = Judge()
@@ -304,33 +340,35 @@ class JevReferenceVerificationTests(unittest.TestCase):
     def test_secondary_confirmation_rescues_uncertain_primary_and_keeps_both_audits(self):
         from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
-        verifier, recognizer = self.wrapped("Chessed!", "Chase!", judge)
+        expected = "Jas visits the libary."
+        primary, secondary = "Jazz visits the library.", "Jace visits the library."
+        verifier, recognizer = self.wrapped(primary, secondary, judge)
         def evaluate(state, questions):
-            score = {"Chessed!": .4, "Chase!": .95}[state["recognized_passage"]]
+            score = {primary: .4, secondary: .95}[state["recognized_passage"]]
             return {"model": "jev-fixture", "usage": {"input_tokens": 20, "output_tokens": 2},
                     "answers": {"roughly_same": {"type": "noul", "noul": score}}}
         with patch.object(judge._client, "evaluate", side_effect=evaluate) as evaluate_mock:
-            report = self.check(verifier, expected="Jas!")
+            report = self.check(verifier, expected=expected)
         self.assertTrue(report["passed"], report)
-        self.assertEqual(report["transcript"], "Chessed!")
-        self.assertEqual(report["verified_transcript"], "Chase!")
-        self.assertEqual(report["reference_text"], "Chase!")
+        self.assertEqual(report["transcript"], primary)
+        self.assertEqual(report["verified_transcript"], secondary)
+        self.assertEqual(report["reference_text"], secondary)
         self.assertEqual(report["text_judge_source"], "secondary")
         self.assertEqual(report["text_judge"]["decision"], "equivalent")
         self.assertEqual(report["text_judge_history"][0]["recognizer"], "primary")
         self.assertEqual(report["text_judge_history"][0]["judgment"]["decision"], "uncertain")
         self.assertEqual(recognizer.calls, [("reference", self.audio), ("corroboration", self.audio)])
         self.assertEqual([call.args[0]["recognized_passage"] for call in evaluate_mock.call_args_list],
-                         ["Chessed!", "Chase!"])
+                         [primary, secondary])
 
     def test_identical_uncertain_secondary_does_not_repeat_the_same_judgment(self):
         from epub_tts_narrator.jev import JevTranscriptJudge
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
-        verifier, recognizer = self.wrapped("Chessed!", "Chessed!", judge)
+        verifier, recognizer = self.wrapped("library", "library", judge)
         response = {"model": "jev-fixture", "usage": {"input_tokens": 20, "output_tokens": 2},
                     "answers": {"roughly_same": {"type": "noul", "noul": .4}}}
         with patch.object(judge._client, "evaluate", return_value=response) as evaluate:
-            report = self.check(verifier, expected="Jas!")
+            report = self.check(verifier, expected="libary")
         self.assertFalse(report["passed"], report)
         self.assertEqual(report["text_judge"]["decision"], "uncertain")
         self.assertEqual(recognizer.calls, [("reference", self.audio), ("corroboration", self.audio)])

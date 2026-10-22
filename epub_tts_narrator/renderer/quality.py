@@ -30,7 +30,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 10
+QUALITY_VERSION = 11
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -694,6 +694,24 @@ def _judge_reference(verifier, report, secondary_transcript):
     identity = getattr(verifier, "reference_judge_identity", None)
     if identity is None:
         return True
+    # Enforce coverage here as well as in the client: an injected judge or a
+    # stale high score must not excuse an omitted clause. Each recognizer must
+    # independently cover the complete request; never stitch their fragments.
+    from .speech_coverage import speech_coverage
+    coverage = {transcript: speech_coverage(report["expected_text"], transcript)
+                for transcript in (report["transcript"], secondary_transcript)
+                if transcript is not None}
+    report["speech_coverage"] = [dict(check, transcript=transcript)
+                                 for transcript, check in coverage.items()]
+    if not any(check["passed"] for check in coverage.values()):
+        report["text_judge"] = {
+            "identity": identity, "decision": "different", "probabilities": {}, "model": None,
+            "policy_version": identity.get("policy_version") if isinstance(identity, dict) else None,
+            "threshold": identity.get("threshold") if isinstance(identity, dict) else None,
+            "method": "spoken_text_eligibility", "comparisons": [],
+            "error_code": "incomplete_spoken_coverage"}
+        report["text_judge_skipped"] = "incomplete_spoken_coverage"
+        return False
     unavailable = {"identity": identity, "decision": "unavailable", "probabilities": {},
                    "model": None, "error_code": "invalid_judge_record"}
     judge = getattr(verifier, "judge_reference", None)
@@ -723,7 +741,7 @@ def _judge_reference(verifier, report, secondary_transcript):
         report["text_judge"] = record if _valid_unavailable_judgment(record, report, secondary_transcript) else unavailable
         return False
     if (decision == "different" and record.get("method") == "spoken_text_eligibility"
-            and record.get("error_code") in ("outside_spoken_text_limits", "invalid_comparison")
+            and record.get("error_code") in ("outside_spoken_text_limits", "invalid_comparison", "incomplete_spoken_coverage")
             and record.get("model") is None and probabilities == {} and record.get("comparisons") == []):
         report["text_judge"] = record
         report["text_judge_skipped"] = record["error_code"]
@@ -735,7 +753,9 @@ def _judge_reference(verifier, report, secondary_transcript):
         report["text_judge"] = unavailable
         return False
     report["text_judge"] = record
-    return decision == "equivalent" and probabilities["roughly_same"] >= threshold
+    return decision == "equivalent" and any(
+        item["probability"] >= threshold and coverage[item["recognized_passage"]]["passed"]
+        for item in record["comparisons"])
 
 
 def text_confirmation_unavailable(report):
@@ -821,6 +841,8 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
         return False
     first_judgment = report.pop("text_judge")
     report["text_judge_history"] = [{"recognizer": "primary", "judgment": first_judgment}]
+    report["speech_coverage_history"] = report.pop("speech_coverage", [])
+    report.pop("text_judge_skipped", None)
     if compare_words(expected, secondary)["wer"] == 0:
         report.pop("text_judge_source", None)
         corroboration["decision"] = "secondary_matches_requested"
@@ -840,6 +862,9 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
     secondary_report = {"expected_text": expected, "transcript": secondary}
     confirmed = _judge_reference(verifier, secondary_report, None)
     report["text_judge"] = secondary_report["text_judge"]
+    report["speech_coverage"] = secondary_report["speech_coverage"]
+    if "text_judge_skipped" in secondary_report:
+        report["text_judge_skipped"] = secondary_report["text_judge_skipped"]
     report["text_judge_source"] = "secondary"
     corroboration["decision"] = "jev_confirmed_variations" if confirmed else "not_confirmed"
     if not confirmed and _confirm_phonetics(verifier, report, secondary, "secondary"):

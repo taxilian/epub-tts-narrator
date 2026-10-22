@@ -250,9 +250,9 @@ class JevTranscriptTests(unittest.TestCase):
         self.assertEqual(result["usage"], {"input_tokens": 84, "output_tokens": 12})
 
     def test_disagreeing_transcripts_each_receive_whole_passage_judgment(self):
-        expected = "Mmm... still warm here. Grandmother, is it morning yet? No? Good. I want to watch the light come through the snow clouds a little longer."
-        primary = expected.replace("Mmm", "Hmm")
-        secondary = expected.replace("Mmm... still", "Hmm... It's still")
+        expected = "I returned to the sourcepalace and waited by the window until the others arrived."
+        primary = expected.replace("sourcepalace", "source palace")
+        secondary = expected.replace("sourcepalace", "sourcepalass")
         for scores in ([.99, .47], [.47, .99], [.99, .99], [.01, .47]):
             with self.subTest(scores=scores):
                 judge = self.judge(scores)
@@ -271,20 +271,18 @@ class JevTranscriptTests(unittest.TestCase):
                     self.assertEqual(comparison["model"], result["model"])
                     self.assertEqual(comparison["policy_version"], POLICY_VERSION)
 
-    def test_missing_hum_is_judged_in_context_and_never_locally_approved(self):
+    def test_missing_hum_rejects_even_when_remote_judge_would_approve(self):
         expected = "Mmm... still warm here. Grandmother, is it morning yet? No? Good. I want to watch the light."
         actual = expected.removeprefix("Mmm... ")
-        for score, decision in ((.99, "equivalent"), (.01, "different"), (.5, "uncertain")):
+        for score in (.99, .01, .5):
             with self.subTest(score=score):
                 judge = self.judge(score)
                 result = judge.judge(expected, actual, actual)
-                self.assertEqual(result["decision"], decision)
-                self.assertEqual(len(judge._client._opener.calls), 1)
-                payload = json.loads(judge._client._opener.calls[0][0].data)
-                self.assertEqual(payload["state"], {"requested_passage": expected, "recognized_passage": actual})
+                self.assertEqual(result["decision"], "different")
+                self.assertEqual(judge._client._opener.calls, [])
 
     def test_homophones_stretched_consonants_and_short_hums_reach_jev(self):
-        for expected, actual in (("doll", "dull"), ("night", "knight"), ("two", "too"), ("Mmm", "Hmm"),
+        for expected, actual in (("doll", "dull"), ("night", "knight"), ("Mmm", "Hmm"),
                                   ("Ssssssnake", "snake"), ("sourcepalace", "source palace")):
             with self.subTest(expected=expected):
                 judge = self.judge()
@@ -298,17 +296,17 @@ class JevTranscriptTests(unittest.TestCase):
         self.assertEqual(result["decision"], "different")
         self.assertEqual(len(judge._client._opener.calls), 1)
 
-    def test_small_missing_words_and_audibly_changed_negation_reach_judge(self):
+    def test_small_missing_words_and_audibly_changed_negation_reject_before_judge(self):
         cases = (
             ("He carried the red bag beside the gate while the guards finished checking our supplies.", "red ", ""),
             ("I cannot cross the bridge until the soldiers finish inspecting the supplies and open the gate.", "cannot", "can"))
         for expected, source, replacement in cases:
             with self.subTest(source=source):
                 actual = expected.replace(source, replacement)
-                judge = self.judge(.01)
+                judge = self.judge(.99)
                 result = judge.judge(expected, actual)
                 self.assertEqual(result["decision"], "different")
-                self.assertEqual(len(judge._client._opener.calls), 1)
+                self.assertEqual(judge._client._opener.calls, [])
 
     def test_later_failure_or_model_change_preserves_partial_audit_without_approval(self):
         expected = "I returned to the sourcepalace and waited by the window until the others arrived."
@@ -360,18 +358,16 @@ class JevTranscriptTests(unittest.TestCase):
             self.assertEqual(len(judge._client._opener.calls), 0)
             self.assertEqual(result["comparisons"], [])
 
-    def test_missing_added_or_unrelated_speech_is_decided_by_jev_not_distance(self):
+    def test_missing_added_or_unrelated_speech_cannot_be_approved_by_jev(self):
         expected = "I returned to the sourcepalace and waited by the window until the others arrived."
         cases = (expected.replace("and waited by the window ", ""), expected + " Then everyone began to sing.",
                  "Thank you.", "I returned to the sourcepalace")
         for primary in cases:
             with self.subTest(primary=primary):
-                judge = self.judge(.01)
+                judge = self.judge(.99)
                 result = judge.judge(expected, primary)
                 self.assertEqual(result["decision"], "different")
-                self.assertEqual(result["method"], "jev_spoken_passage")
-                self.assertEqual(len(judge._client._opener.calls), 1)
-                self.assertEqual(result["comparisons"][0]["recognized_passage"], primary)
+                self.assertEqual(judge._client._opener.calls, [])
 
     def test_short_name_variations_are_judged_without_aliases_or_character_limits(self):
         for expected, actual in (("Jas", "chase"), ("Jas", "jazz"), ("Jas", "jace"),
@@ -404,7 +400,6 @@ class JevTranscriptTests(unittest.TestCase):
         self.assertEqual(first.identity, second.identity)
         self.assertNotEqual(first.identity, JevTranscriptJudge({"enabled": True, "api_key": SECRET, "threshold": .99}).identity)
         self.assertEqual(first.identity["policy_identity"]["version"], POLICY_VERSION)
-        self.assertEqual(first.identity["policy_identity"]["strategy"], "whole_spoken_passages")
         self.assertIn("policy_sha256", first.identity["policy_identity"])
         self.assertEqual(first.identity["endpoint"], ENDPOINT)
 
