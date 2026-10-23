@@ -247,6 +247,17 @@ class ChapterOrchestrationTests(unittest.TestCase):
                                       notify=lambda _: None, chapters_only=True)
         factory.assert_not_called()
 
+    def test_late_invalid_chapter_fails_before_compression_or_service_requests(self):
+        self.plan["chapters"][-1]["chunks"][0]["segment"]["delivery"] = {
+            "direction": "<|speaker:1|>", "evidence": []}
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory, \
+                patch("epub_tts_narrator.renderer.chapter_client._voice_assets") as assets:
+            with self.assertRaisesRegex(ChapterClientError, "Chapter 2 / 2.*delivery"):
+                _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        assets.assert_not_called()
+
     def metadata_fixture(self, *, spec=None, mutate=None, mutate_manifest=None):
         if spec is None:
             bindings = {key: "a" * 64 for key in self.plan["voice_ids"]}

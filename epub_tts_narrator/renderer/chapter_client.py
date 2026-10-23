@@ -268,6 +268,25 @@ def _selection(bundle, chapter, config, bindings):
             "render": _safe_render(config["render"])}
 
 
+def validate_remote_plan(bundle, config, plan):
+    """Validate every chapter before starting compute or sending any assets.
+
+    Real voice hashes and the worker fingerprint are bound at submission. Their
+    placeholders let us check the complete source/transport contract locally,
+    without compressing voices or making any request to the chapter service.
+    """
+    bindings = {voice_id: "0" * 64 for voice_id in plan["voice_ids"]}
+    for chapter in plan["chapters"]:
+        try:
+            spec = _selection(bundle, chapter, config, bindings)
+            spec["renderer_fingerprint"] = "0" * 64
+            validate_spec(spec)
+        except ValueError as exc:
+            raise ChapterClientError(
+                f"Chapter {chapter['number']} / {len(bundle['chapters'])} "
+                f"cannot be rendered remotely: {exc}") from exc
+
+
 def _save_job(folder, record):
     write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
 
@@ -716,6 +735,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only)
     missing = [key for key, value in voices.items() if value is None]
     if missing:
         raise ChapterClientError("Remote chapter rendering requires saved voices. Run cast first for: " + ", ".join(missing))
+    validate_remote_plan(bundle, config, plan)
     work = _regular_directory(config["render"]["work_dir"])
     root = _regular_directory(work / "remote-chapters")
     bindings, assets = _voice_assets(voices, work, config["render"]["ffmpeg"])

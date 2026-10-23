@@ -163,6 +163,66 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.launch.assert_not_called()
         fake.stop.assert_not_called()
 
+    def transport_preflight_fixture(self):
+        config = deepcopy(self.settings["renderer_config"])
+        chapters = []
+        for number in range(1, 22):
+            chapter_id = f"chapter-{number:04d}"
+            row = {"id": f"segment-{number}", "chapter_id": chapter_id, "block_id": f"block-{number}",
+                   "text": "Hello.", "start": 0, "end": 6, "kind": "dialogue",
+                   "voice_id": "voice_fixture", "role_id": "role_fixture",
+                   "delivery": {"direction": "", "evidence": []}}
+            chunks = [{"chunk_id": f"{number:032x}", "segment": row, "spoken_text": "Hello.",
+                       "spoken_start": 0, "spoken_end": 6, "source_ranges": [{"start": 0, "end": 6}],
+                       "silent_control": False}]
+            chapters.append({"id": chapter_id, "number": number, "title": f"Chapter {number}", "chunks": chunks})
+        bundle = {"source": {"book": {"id": "b" * 64, "title": "Fixture"}},
+                  "manifest": {"source_fingerprint": "a" * 64}, "chapters": deepcopy(chapters)}
+        plan = {"chapters": chapters, "voice_ids": ["voice_fixture"]}
+        store = Mock()
+        store.load.return_value = {"reference_audio": "/never-read-during-transport-validation.wav"}
+        return bundle, config, plan, store
+
+    def test_late_invalid_transport_chapter_fails_before_starting_paid_compute(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+
+        deployment = self.deployment()
+        deployment.state.update(pod_id="pod_fixture", bootstrapped=True)
+        deployment.start = Mock()
+        deployment.stop = Mock()
+        bundle, config, plan, store = self.transport_preflight_fixture()
+        plan["chapters"][-1]["chunks"][0]["segment"]["delivery"]["direction"] = "<|speaker_id_0|>"
+        with patch("epub_tts_narrator.renderer.runpod_config.build_client_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.bundle.load_bundle", return_value=bundle), \
+                patch("epub_tts_narrator.renderer.book_context.resolve_book_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.workflow._preflight", return_value=(config, plan, store)), \
+                patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client, \
+                patch("epub_tts_narrator.renderer.chapter_client._voice_assets") as conversions:
+            with self.assertRaisesRegex(ChapterClientError, "[Cc]hapter 21"):
+                self.run_fake(deployment, self.args("encode", "book"))
+        deployment.start.assert_not_called()
+        deployment.stop.assert_not_called()
+        client.assert_not_called()
+        conversions.assert_not_called()
+        self.assertEqual(self.api.mock_calls, [])
+
+    def test_transport_preflight_checks_full_valid_plan_without_audio_conversion(self):
+        deployment = self.deployment()
+        bundle, config, plan, store = self.transport_preflight_fixture()
+        before = deepcopy(plan)
+        with patch("epub_tts_narrator.renderer.runpod_config.build_client_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.bundle.load_bundle", return_value=bundle), \
+                patch("epub_tts_narrator.renderer.book_context.resolve_book_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.workflow._preflight", return_value=(config, plan, store)), \
+                patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client, \
+                patch("epub_tts_narrator.renderer.chapter_client._voice_assets") as conversions:
+            self.assertEqual(deployment.prepare_encode(self.args("encode", "book")), (bundle, config))
+        self.assertEqual(plan, before)
+        store.load.assert_called_once_with("voice_fixture")
+        client.assert_not_called()
+        conversions.assert_not_called()
+        self.assertEqual(self.api.mock_calls, [])
+
     def test_shutdown_failure_warns_about_billing_and_redacts_secrets(self):
         fake = self.fake_deployment()
         fake.stop.side_effect = RuntimeError("fixture-provider-secret fixture-ceph-secret fixture-worker-secret")

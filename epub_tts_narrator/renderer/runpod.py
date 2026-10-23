@@ -670,6 +670,7 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         from .book_context import resolve_book_config
         from .cli import chapter_numbers
         from .workflow import _preflight
+        from .chapter_client import validate_remote_plan
         if args.chapter_format not in (None, "m4a"):
             raise ValueError("Runpod chapter rendering produces M4A; use --chapter-format m4a")
         config = build_client_config(self.settings["renderer_config"], self.url, self.state["api_key"],
@@ -684,6 +685,7 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         missing = [voice_id for voice_id in plan["voice_ids"] if store.load(voice_id) is None]
         if missing:
             raise ValueError("Remote rendering requires saved voices; run cast first for: " + ", ".join(missing))
+        validate_remote_plan(bundle, config, plan)
         return bundle, config
 
 
