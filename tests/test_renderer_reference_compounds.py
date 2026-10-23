@@ -1,3 +1,5 @@
+"""Compound-word reference comparisons share fixtures from test_renderer_reference_consensus."""
+
 import unittest
 
 from epub_tts_narrator.renderer.quality import compare_reference_words, compare_words
@@ -78,32 +80,36 @@ class ReferenceCompoundValidationTests(unittest.TestCase):
     write_audio = consensus.ReferenceConsensusTests.write_audio
     check = consensus.ReferenceConsensusTests.check
 
-    def test_compound_only_discrepancy_requires_independent_decoding_and_saves_actual_text(self):
+    def test_compound_join_matching_source_boundaries_is_accepted_like_speech(self):
         actual = SCRIPT.replace("pack-mate", "packmate")
         verifier = IndependentVerifier(primary=actual, secondary=actual)
         report = self.check(verifier, expected=SCRIPT)
         self.assertTrue(report["passed"], report)
         self.assertGreater(report["metrics"]["wer"], 0)
         self.assertEqual(report["reference_comparison"]["wer"], 0)
+        self.assertEqual(report["text_confirmation_method"], "word_spacing")
         self.assertEqual(report["reference_text"], actual)
-        self.assertEqual(report["corroboration"]["decision"], "agreed_reference_transcript")
-        self.assertEqual(verifier.calls, [
-            ("reference", self.audio), ("corroboration", self.audio)])
+        self.assertTrue(report["reference_text_adjusted"])
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_compound_only_discrepancy_still_fails_without_independent_agreement(self):
+    def test_spacing_matched_primary_needs_no_secondary_agreement(self):
         actual = SCRIPT.replace("pack-mate", "packmate")
         verifier = IndependentVerifier(primary=actual, secondary=actual.replace("Earth", "Mars"))
         report = self.check(verifier, expected=SCRIPT)
-        self.assertFalse(report["passed"], report)
-        self.assertEqual(report["corroboration"]["decision"], "disagreed")
-        self.assertNotIn("reference_text", report)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["reference_text"], actual)
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_compound_normalization_never_relaxes_speech_checks(self):
+    def test_speech_applies_the_same_spacing_equivalence_as_references(self):
         actual = SCRIPT.replace("pack-mate", "packmate")
         verifier = IndependentVerifier(primary=actual, secondary=actual)
         report = self.check(verifier, expected=SCRIPT, purpose="speech")
-        self.assertFalse(report["passed"], report)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["text_confirmation_method"], "word_spacing")
         self.assertNotIn("reference_comparison", report)
+        self.assertNotIn("reference_text", report)
         self.assertNotIn("corroboration", report)
         self.assertEqual(verifier.calls, [("speech", self.audio)])
 

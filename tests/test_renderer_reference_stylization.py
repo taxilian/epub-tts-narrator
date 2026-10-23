@@ -1,3 +1,5 @@
+"""Stylized-spelling reference comparisons share fixtures from test_renderer_reference_consensus."""
+
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +30,18 @@ class ReferenceStylizationTests(unittest.TestCase):
         self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
         self.assertEqual(verifier.calls, [("reference", self.audio)])
         self.assertNotIn("reference_text", report)
+        return report
+
+    def assert_sounds_identical_acceptance(self, expected, actual):
+        """Reference verification uses the same phonetic equivalence as speech."""
+        verifier = consensus.IndependentVerifier(primary=actual, secondary=actual)
+        report = self.check(verifier, expected=expected)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["text_confirmation_method"], "double_metaphone")
+        self.assertEqual(report["reference_text"], actual)
+        self.assertTrue(report["reference_text_adjusted"])
+        self.assertNotIn("corroboration", report)
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
         return report
 
     def test_actual_hissing_script_requires_independent_agreement_and_keeps_evidence(self):
@@ -113,7 +127,7 @@ class ReferenceStylizationTests(unittest.TestCase):
         self.assertGreater(compare_words(expected, actual)["wer"], .1)
         self.assert_skips_secondary(expected, actual)
 
-    def test_natural_doubled_words_do_not_authorize_blanket_normalization(self):
+    def test_doubled_letter_variants_that_sound_identical_are_accepted_like_speech(self):
         for expected, actual in (
             ("The dessert is delicious.", "The desert is delicious."),
             ("The cannon is ready.", "The canon is ready."),
@@ -122,10 +136,10 @@ class ReferenceStylizationTests(unittest.TestCase):
             ("Llama ill still.", "Lama il stil."),
         ):
             with self.subTest(expected=expected):
-                self.assert_skips_secondary(expected, actual)
+                self.assert_sounds_identical_acceptance(expected, actual)
 
-    def test_vowels_are_not_consonant_stylization(self):
-        self.assert_skips_secondary("Oopen dooor soooon.", "Open dor son.")
+    def test_vowel_stretching_that_sounds_identical_is_accepted_like_speech(self):
+        self.assert_sounds_identical_acceptance("Oopen dooor soooon.", "Open dor son.")
 
     def test_triple_consonant_anchor_can_preserve_natural_double_letters(self):
         expected = "Bbbold rabbbits stabbbed."
