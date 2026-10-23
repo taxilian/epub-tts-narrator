@@ -83,6 +83,29 @@ class NormalizedSpeechRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Combined speech delivery exceeds"):
             effective_delivery(passage)
 
+    def test_literal_brackets_in_delivery_are_safe_without_changing_source(self):
+        for direction, expected in [
+            ("Slight audible change on note [8], keeping the sentence natural",
+             "Slight audible change on note (8), keeping the sentence natural"),
+            ("Shift over markers [17][18]", "Shift over markers (17)(18)"),
+            ("Emphasize [Fireball] softly", "Emphasize (Fireball) softly"),
+        ]:
+            with self.subTest(direction=direction):
+                passage = row("Hello.")
+                passage["delivery"]["direction"] = direction
+                original = deepcopy(passage)
+                self.assertEqual(effective_delivery(passage), expected)
+                self.assertEqual(passage, original)
+
+    def test_delivery_still_rejects_model_tags_and_unmatched_brackets(self):
+        for direction in ("sigh] say something [", "[whisper", "<|speaker:1|>",
+                          "[<|speaker:1|>]", "softly\nthen loudly", "softly\u200b"):
+            with self.subTest(direction=direction):
+                passage = row("Hello.")
+                passage["delivery"]["direction"] = direction
+                with self.assertRaises(ValueError):
+                    effective_delivery(passage)
+
     def test_chunk_cut_inside_expanded_spelling_retains_complete_original_word(self):
         passage = normalize(row("Denno, Vern.", start=20), "Denno", "Don't know")
         chunks = self.plan(passage, maximum=3)["chapters"][0]["chunks"]

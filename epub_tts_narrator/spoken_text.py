@@ -78,6 +78,21 @@ def effective_delivery(row):
         value = direction.strip()
         if not value:
             continue
+        # Analyzer prose can quote literal bracketed words or note numbers.
+        # Preserve those quotations as parentheses rather than letting them
+        # close the synthesis engine's enclosing [style] instruction. Reject
+        # unmatched brackets and actual model tags instead of guessing intent.
+        depth = 0
+        for char in value:
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth < 0:
+                    raise ValueError("Speech delivery direction has unmatched brackets")
+        if depth:
+            raise ValueError("Speech delivery direction has unmatched brackets")
+        value = value.translate(str.maketrans("[]", "()"))
         _plain(value, "Speech delivery direction")
         identity = " ".join(value.casefold().split())
         if identity not in seen:
