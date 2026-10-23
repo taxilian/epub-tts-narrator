@@ -26,7 +26,7 @@ coverage.xml
 htmlcov/
 
 # Model downloads and weights (never needed in the source repository).
-models/
+models
 .cache/
 *.safetensors
 *.gguf
@@ -38,7 +38,7 @@ models/
 /epubs/
 /runs/
 /old-runs/
-/dist-runs/
+/dist-runs
 /output/
 /outputs/
 *.audiobook/
