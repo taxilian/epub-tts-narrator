@@ -321,6 +321,27 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(requests.run("Fixture system", {"task": "Return a valid answer"}, validate), result)
                 self.assertEqual(len(client.calls), 2)
 
+    def test_validation_repair_progress_preserves_diagnostics_longer_than_240_characters(self):
+        class RepairClient(FakeClient):
+            def complete(self, system, payload):
+                self.calls.append(deepcopy(payload))
+                return {"answer": len(self.calls)}
+
+        diagnostic = ("Speech spelling scan batch 166/245: segments[19].edits[5]: "
+                      + "fixture spelling mismatch; " * 20
+                      + "Copy original exactly and use offsets relative to the segment text.")
+
+        def validate(response):
+            if response["answer"] == 1:
+                raise ValueError(diagnostic)
+            return response
+
+        client, progress = RepairClient(), []
+        requests = CachedRequests(client, self.cache, progress=progress.append)
+        self.assertEqual(requests.run("Fixture system", {"task": "repair"}, validate), {"answer": 2})
+        self.assertEqual(progress, ["Repairing validation 1/1: " + diagnostic])
+        self.assertEqual(client.calls[1]["correction"]["validator_error"], diagnostic)
+
     def test_analysis_forwards_validation_repair_progress(self):
         progress = []
         with self.assertRaisesRegex(ValueError, "Text changed"):

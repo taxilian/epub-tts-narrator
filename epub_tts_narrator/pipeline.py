@@ -912,7 +912,7 @@ class CachedRequests:
                                      f"Rejected model response: {failed_path.resolve()}") from exc
                 current = self._repair_payload(system, payload, result, exc)
                 with self.progress_lock:
-                    self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {str(exc)[:240]}")
+                    self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {exc}")
                 continue
             write_json(path, result, overwrite=True)
             return accepted
