@@ -46,6 +46,21 @@ def _require_available_confirmation(report):
         )
 
 
+def _recovery_inputs(request):
+    """Compare saved Gemini work across known wrappers, never rewrite it.
+
+    Gemini reuses its already-created remote voice even if another take is
+    needed. Other designers may create a new voice on retry, so their prompts
+    must remain exact. Recovered requests retain their original prompt/nonce.
+    """
+    result = {key: value for key, value in request.items() if key != "nonce"}
+    designer = result.get("designer")
+    if (isinstance(designer, dict) and designer.get("engine") == "gemini_voice_design"
+            and isinstance(result.get("prompt"), str)):
+        result["prompt"] = voice_prompt_description(result["prompt"])
+    return result
+
+
 class CastingSession:
     """Series-scoped casting operations shared by CLI and terminal UI."""
 
@@ -569,7 +584,7 @@ class CastingSession:
         saved = self.store.list_candidates(request["voice_id"])
         published_ids = {item["candidate_id"] for item in saved}
         published_hashes = {item.get("creation", {}).get("request_hash") for item in saved}
-        current = {key: value for key, value in request.items() if key != "nonce"}
+        current = _recovery_inputs(request)
         matches = []
         for directory in sorted(root.iterdir()):
             if directory.is_symlink():
@@ -597,7 +612,7 @@ class CastingSession:
                     raise ValueError("request checksum")
                 if previous["nonce"] in published_ids:
                     continue
-                if {key: value for key, value in previous.items() if key != "nonce"} != current:
+                if _recovery_inputs(previous) != current:
                     continue
                 attempt = record.get("attempt")
                 if (type(attempt) is not int or not 1 <= attempt <= 10
@@ -619,6 +634,26 @@ class CastingSession:
                         or generated.get("requested_description", previous["prompt"]) != previous["prompt"]
                         or generated.get("reference_text", previous["text"]) != previous["text"]):
                     raise ValueError("voice description")
+                if previous["prompt"] != request["prompt"]:
+                    # Another take may be needed after re-verification. Reusing
+                    # an older wrapper is safe only if Gemini will reuse the
+                    # already-created remote voice instead of designing anew.
+                    from .gemini_voice_design import GeminiVoiceError, _read_state, _VOICE_ID
+                    state_path = directory / "gemini-voice.json"
+                    if not (state_path.exists() or state_path.is_symlink()):
+                        state_path = directory / "gemini-voice-pending.json"
+                        if not (state_path.exists() or state_path.is_symlink()):
+                            continue
+                    fingerprint = digest({"designer": previous["designer"], "description": previous["prompt"]})
+                    try:
+                        state = _read_state(state_path, fingerprint)
+                    except GeminiVoiceError as exc:
+                        raise ValueError("Gemini voice state") from exc
+                    remote_id = state.get("voice_id")
+                    if (not isinstance(remote_id, str) or not _VOICE_ID.fullmatch(remote_id)
+                            or any(key in generated and generated[key] != remote_id
+                                   for key in ("remote_voice_id", "external_voice_id"))):
+                        raise ValueError("Gemini remote voice identity")
                 durable_request = directory / "casting-request.json"
                 if (durable_request.exists() or durable_request.is_symlink()) and read_record(durable_request) != previous:
                     raise ValueError("durable request checksum")
@@ -712,11 +747,6 @@ class CastingSession:
         }
         directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
         pending = None if fresh else self._pending_confirmation(request, directory.parent)
-        if not fresh and pending is None and voice_prompt_description(prompt) != prompt:
-            # A pre-context sample awaiting verification keeps its actual
-            # request and recording; this is recovery, not a new design.
-            legacy_request = dict(request, prompt=voice_prompt_description(prompt))
-            pending = self._pending_confirmation(legacy_request, directory.parent)
         if pending is not None:
             directory, request, resume_attempt = pending
             nonce = request["nonce"]

@@ -6,6 +6,7 @@ from copy import deepcopy
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,7 +19,9 @@ from epub_tts_narrator.renderer.cli import main, parser
 from epub_tts_narrator.renderer.common import read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
 from epub_tts_narrator.renderer.quality import validate_policy
-from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
+from epub_tts_narrator.renderer.voice_prompts import (
+    AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt, voice_prompt_description,
+)
 from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.config import load_config as load_analyzer_config
@@ -29,6 +32,11 @@ from test_renderer_voice_design_integration import (
 
 
 SECRET = "fixture-gemini-key-do-not-echo"
+LEGACY_CONTEXT = "audiobook narrator portraying a character in a book: "
+
+
+def legacy_voice_prompt(prompt):
+    return LEGACY_CONTEXT + voice_prompt_description(prompt)
 
 
 class GeminiSelectionTests(unittest.TestCase):
@@ -172,6 +180,102 @@ class GeminiFixtureDesigner(ReferenceDesigner):
     def create_voice(self, prompt, text, path, *, seed):
         result = super().create_voice(prompt, text, path, seed=seed)
         return {**result, "external_voice_id": "voice_fixture_gemini"}
+
+
+class GeminiContextUpgradeRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        from test_renderer_jev_casting_recovery import Fixture
+        normalize = patch("epub_tts_narrator.renderer.workflow.normalize_clip",
+                          side_effect=lambda raw, wav, **kwargs: shutil.copyfile(raw, wav))
+        normalize.start()
+        self.addCleanup(normalize.stop)
+        self.fixture = Fixture(self, gemini=True)
+        self.fixture.designer.identity["engine"] = "gemini_voice_design"
+
+    def test_old_context_pending_verification_keeps_recording_and_remote_voice(self):
+        fixture = self.fixture
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            path, record = fixture.pending()
+        self.assertTrue(record["request"]["prompt"].startswith(LEGACY_CONTEXT))
+        remote = path.parent / "gemini-voice.json"
+        original_remote, original_audio = remote.read_bytes(), (path.parent / record["audio_file"]).read_bytes()
+        fixture.verdict = "passed"
+        resumed = fixture.new_session()
+        with patch.object(resumed, "_prepare_gemini_request", side_effect=AssertionError("Must reuse the remote voice")):
+            selected = fixture.run(resumed)
+        self.assertEqual(len(fixture.designer.calls), 1)
+        self.assertEqual(selected["candidate_id"], record["request"]["nonce"])
+        self.assertEqual(selected["creation"]["requested_description"], record["request"]["prompt"])
+        self.assertEqual(read_json(path)["request"], record["request"])
+        self.assertEqual(remote.read_bytes(), original_remote)
+        self.assertEqual(Path(selected["reference_audio"]).read_bytes(), original_audio)
+
+    def test_old_context_selected_voice_is_reused_without_designing_again(self):
+        fixture = self.fixture
+        fixture.verdict = "passed"
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            selected = fixture.run()
+        original_audio = Path(selected["reference_audio"]).read_bytes()
+        resumed = fixture.new_session()
+        with patch.object(resumed, "_generate_locked", side_effect=AssertionError("Must retain the accepted voice")):
+            reused = fixture.run(resumed)
+        self.assertEqual(reused, selected)
+        self.assertEqual(Path(reused["reference_audio"]).read_bytes(), original_audio)
+        self.assertEqual(len(fixture.designer.calls), 1)
+
+    def test_explicit_regeneration_upgrades_old_context_and_creates_a_new_candidate(self):
+        fixture = self.fixture
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            path, record = fixture.pending()
+        previous = path.read_bytes()
+        fixture.verdict = "passed"
+        selected = fixture.run(fixture.new_session(), "regenerate")
+        self.assertEqual(len(fixture.designer.calls), 2)
+        self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
+        self.assertTrue(fixture.designer.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertEqual(path.read_bytes(), previous)
+
+    def test_non_gemini_pending_verification_uses_new_context_for_new_design(self):
+        from test_renderer_jev_casting_recovery import Fixture
+        fixture = Fixture(self, gemini=False)
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            path, record = fixture.pending()
+        previous = path.read_bytes()
+        fixture.verdict = "passed"
+        selected = fixture.run(fixture.new_session())
+        self.assertEqual(len(fixture.engine.calls), 2)
+        self.assertTrue(fixture.engine.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
+        self.assertEqual(selected["creation"]["requested_description"], fixture.engine.calls[-1][0])
+        self.assertEqual(path.read_bytes(), previous)
+
+    def test_old_context_without_remote_state_starts_new_design_with_current_context(self):
+        fixture = self.fixture
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            path, record = fixture.pending()
+        (path.parent / "gemini-voice.json").unlink()
+        original = path.read_bytes()
+        fixture.verdict = "passed"
+        selected = fixture.run(fixture.new_session())
+        self.assertEqual(len(fixture.designer.calls), 2)
+        self.assertTrue(fixture.designer.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_old_context_with_changed_remote_state_blocks_without_new_design(self):
+        fixture = self.fixture
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            path, _ = fixture.pending()
+        state_path = path.parent / "gemini-voice.json"
+        original = read_json(state_path)
+        for changed in ({**original, "voice_id": "voice_different_remote"},
+                        {**original, "request_fingerprint": "0" * 64}):
+            with self.subTest(changed=changed):
+                write_json(state_path, changed)
+                fixture.verdict = "passed"
+                with self.assertRaisesRegex(ValueError, "Cannot safely resume pending voice verification"):
+                    fixture.run(fixture.new_session())
+                self.assertEqual(len(fixture.designer.calls), 1)
 
 
 @unittest.skipUnless(FFMPEG, "FFmpeg is required for casting integration")
@@ -353,6 +457,23 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(read_json(pending.parent / "gemini-voice.json")["voice_id"], "voice_repaired")
         for path in self.root.rglob("*.json"):
             self.assertNotIn(SECRET, path.read_text())
+
+    def test_repaired_old_context_creation_retains_original_prompt_and_remote_id(self):
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
+            pending, calls = self.pending_remote_voice()
+        request_path = pending.parent / "casting-request.json"
+        request = read_json(request_path)
+        original_request = request_path.read_bytes()
+        state = read_json(pending)
+        state["voice_id"] = "voice_old_context_repaired"
+        write_json(pending, state)
+        designer = self.remote_designer([], calls)
+        selected = self.session(designer_factory=lambda _: designer).ensure_ready("voice_mara")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_old_context_repaired")
+        self.assertEqual(selected["creation"]["requested_description"], request["prompt"])
+        self.assertEqual(request_path.read_bytes(), original_request)
+        self.assertFalse(pending.exists())
 
     def test_repaired_remote_id_cannot_be_reused_for_changed_description(self):
         pending, calls = self.pending_remote_voice()

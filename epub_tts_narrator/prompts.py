@@ -17,7 +17,7 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v4
+VOICE PROFILE CONTRACT v5
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
@@ -29,8 +29,20 @@ only when helpful, a brief plain-language description of the fictional speaker.
 A direction such as 'sound like the protagonist' or a fictional species name is insufficient;
 describe the intended vocal presentation, resonance, texture, and phrasing.
 Choose a few distinctive, compatible traits rather than a repetitive list.
-Include age, gender presentation, or fictional context when they help establish
-the intended sound. Translate personality into vocal choices: precise consonants
+Frame every voice as an adult audiobook narrator performing a character or narration role.
+The character's age describes the portrayal, not the performer's age. For a
+child or adolescent character, explicitly request an adult performer's imitation
+of youthful vocal qualities, expressed through concrete pitch, resonance,
+articulation, and cadence; never request an actual child performer. Express
+youthfulness through audible qualities rather than an exact childhood age in
+the voice-creation direction. For example:
+'An adult narrator portraying a youthful feminine character with a light, bright
+register, clear consonants, and buoyant conversational phrasing.' Preserve the
+character's age in character metadata and source evidence; this performance
+framing does not change the character's identity or story facts. For mature and
+elderly roles, retain their intended vocal qualities within the same adult
+performer framing. Include gender presentation and fictional context when they
+help establish the intended sound. Translate personality into vocal choices: precise consonants
 and measured phrasing for a meticulous character, or a thin, reedy tone and dry
 rasp for an abrasive creature. Preserve unusual or harsh qualities when they are
 essential to the character. Include only story details that help define sound.
@@ -59,7 +71,7 @@ then furious when betrayed' is a story summary, not a vocal identity.
 Describe vocal presentation or perceived age only when supported by voice
 evidence or deliberately chosen as casting. Do not equate physical appearance,
 species, gender identity, nationality, or a name with an acoustic fact. No
-gender, pitch range, age, or accent is mandatory or a universal default. Put
+gender, pitch range, perceived character age, or accent is mandatory or a universal default. Put
 unsupported creative choices in traits with basis=casting and evidence=[];
 text-supported traits require exact source evidence. Keep the description
 consistent with these labeled traits, and keep quotations only in evidence.

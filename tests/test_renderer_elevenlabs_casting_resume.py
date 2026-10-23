@@ -18,6 +18,7 @@ from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.elevenlabs_voice_design import ElevenLabsVoiceDesigner, _publish
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import RenderBlocked
+from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt, voice_prompt_description
 from epub_tts_narrator.renderer.assembly import normalize_clip
 from epub_tts_narrator.cli import export_bundle
 from test_renderer_voice_design_integration import (
@@ -112,6 +113,21 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
         self.assertTrue(selected["verification"]["passed"])
         self.assertTrue(any("Resuming the saved ElevenLabs" in note for note in self.notices))
         self.assertEqual(len(list(self.root.rglob("casting-request.json"))), 1)
+
+    def test_old_context_unfinished_preview_uses_current_framing_for_new_design(self):
+        legacy = "audiobook narrator portraying a character in a book: "
+        with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt",
+                   side_effect=lambda prompt: legacy + voice_prompt_description(prompt)):
+            path, original = self.interrupted_request()
+        before = path.read_bytes()
+        selected = self.session().ensure_ready("voice_mara")
+        self.assertEqual(len(self.posts), 2)
+        self.assertNotEqual(selected["candidate_id"], original["nonce"])
+        self.assertEqual(self.posts[0]["voice_description"], original["prompt"])
+        self.assertEqual(self.posts[-1]["voice_description"], audiobook_voice_prompt(self.prompt))
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(self.prompt))
+        self.assertEqual(selected["creation"]["generated_voice_id"], "fixture_preview_2")
+        self.assertEqual(path.read_bytes(), before)
 
     def test_explicit_g11_does_not_resume_interrupted_preview(self):
         _, original = self.interrupted_request()

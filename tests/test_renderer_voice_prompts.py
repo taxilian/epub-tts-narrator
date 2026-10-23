@@ -4,7 +4,7 @@ import unittest
 
 from epub_tts_narrator.renderer.voice_prompts import (
     AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
-    default_voice_prompt,
+    default_voice_prompt, voice_prompt_description,
 )
 
 
@@ -13,8 +13,29 @@ class AudiobookVoicePromptTests(unittest.TestCase):
         direction = "  A thin, high rasp.\nKeep the character's urgent cadence.  "
         self.assertEqual(
             audiobook_voice_prompt(direction),
-            "audiobook narrator portraying a character in a book: " + direction,
+            AUDIOBOOK_VOICE_CONTEXT + " " + direction,
         )
+
+    def test_youthful_character_is_explicitly_an_adult_performance(self):
+        description = "A young girl's light, bright tone with crisp consonants and lively phrasing."
+        prompt = default_voice_prompt({"description": description})
+        self.assertTrue(prompt.startswith("Adult audiobook narrator"))
+        self.assertIn("adult performer's imitation", prompt)
+        self.assertTrue(prompt.endswith(description))
+
+    def test_old_context_is_upgraded_once_and_still_matches_its_description(self):
+        description = "A bright, youthful character with light resonance."
+        old = "audiobook narrator portraying a character in a book: " + description
+        new = audiobook_voice_prompt(old)
+        self.assertTrue(new.startswith("Adult audiobook narrator"))
+        self.assertEqual(new, audiobook_voice_prompt(description))
+        self.assertEqual(voice_prompt_description(old), description)
+        self.assertEqual(voice_prompt_description(new), description)
+        self.assertEqual(audiobook_voice_prompt(new), new)
+
+    def test_context_is_not_treated_as_a_description(self):
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            audiobook_voice_prompt(AUDIOBOOK_VOICE_CONTEXT + " ")
 
     def test_reapplying_context_does_not_duplicate_it(self):
         prompt = AUDIOBOOK_VOICE_CONTEXT + " A clear, measured voice."
