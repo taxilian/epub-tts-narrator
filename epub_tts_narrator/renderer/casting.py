@@ -12,6 +12,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import sys
 import uuid
 
 from .common import digest, file_hash, read_json, write_json
@@ -20,7 +21,7 @@ from .quality import validate_audio, validation_key, text_confirmation_unavailab
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
                            default_voice_prompt as _default_voice_prompt, voice_prompt_description)
-from .workflow import RenderBlocked, VerificationUnavailable, _seed, verified_take
+from .workflow import RenderBlocked, SpeechVerificationFailed, VerificationUnavailable, _seed, verified_take
 
 
 MAX_REFERENCE_CHARACTERS = 1000
@@ -82,6 +83,7 @@ class CastingSession:
         self._verifier = None
         self._designer = None
         self._samples = {}
+        self._cleanup_attempted = set()
         self._closed = False
         self._profiles = {voice["id"]: deepcopy(voice) for voice in bundle["cast"]["voices"]}
         if len(self._profiles) != len(bundle["cast"]["voices"]):
@@ -235,6 +237,7 @@ class CastingSession:
         """Save excerpt defaults without loading a model or replacing a voice."""
         prepared, seen = [], set()
         with self._locked():
+            self._retry_gemini_cleanup()
             for voice_id in self._profiles:
                 canonical = self.store.canonical_id(voice_id)
                 if canonical in seen:
@@ -452,14 +455,145 @@ class CastingSession:
         """Save a verified candidate without changing the active selection."""
         self._profile(voice_id)
         with self._locked():
+            self._retry_gemini_cleanup(voice_id)
             return self._generate_locked(voice_id)
+
+    def _release_gemini_voice(self, designer, directory, request, *, preserve_error=False):
+        """Finish one hosted voice's lifecycle without discarding its local take."""
+        release = getattr(designer, "release_voice", None)
+        if not callable(release):
+            return True
+        directory = Path(directory)
+        marker_path = directory / "gemini-cleanup-pending.json"
+        was_cleaned = (directory / "gemini-voice-cleanup.json").exists()
+        try:
+            released = release(directory)
+            if marker_path.is_symlink():
+                raise ValueError("Gemini cleanup retry marker must not be a symlink")
+            marker_path.unlink(missing_ok=True)
+        except (Exception, KeyboardInterrupt) as exc:
+            self._cleanup_attempted.add(str(marker_path))
+            detail = safe_error_text(exc, secrets=configured_secrets(self.config))
+            try:
+                if (directory.is_symlink() or not directory.is_dir()
+                        or marker_path.is_symlink() or digest(request) != directory.name):
+                    raise ValueError("Cannot safely save the Gemini cleanup retry marker")
+                marker = {
+                    "format": "audiobook-gemini-cleanup-pending", "version": 1,
+                    "request_hash": directory.name, "series_id": request["series_id"],
+                    "voice_id": request["voice_id"],
+                }
+                write_json(marker_path, dict(marker, sha256=digest(marker)))
+            except (OSError, ValueError, KeyError) as marker_error:
+                detail += "\nCleanup retry could not be saved: " + safe_error_text(
+                    marker_error, secrets=configured_secrets(self.config))
+            self.notify(
+                "Warning: Gemini remote voice cleanup failed. Saved local recordings remain available. "
+                f"Rerun the cast command to retry cleanup; inspect {directory}.\n{detail}")
+            if isinstance(exc, KeyboardInterrupt) and not preserve_error:
+                raise
+            return False
+        if released and not was_cleaned:
+            self.notify("Removed temporary Gemini voice(s): " + ", ".join(released)
+                        + ". Saved recordings remain available locally.")
+        return True
+
+    @contextmanager
+    def _gemini_cleanup_designer(self, request):
+        """Use the creation's model to reconcile an ambiguous remote outcome."""
+        identity = request.get("designer")
+        if (not isinstance(identity, dict) or identity.get("engine") != "gemini_voice_design"
+                or not isinstance(identity.get("model"), str)):
+            raise ValueError("Gemini cleanup requires the original designer identity")
+        if (self._designer is not None
+                and self._designer.identity.get("engine") == "gemini_voice_design"
+                and self._designer.identity.get("model") == identity["model"]):
+            yield self._designer
+            return
+        with self._using_voice_designer("gemini"):
+            self.config["voice_design"]["model"] = identity["model"]
+            from .voice_design import create_designer
+            factory = self._designer_factory or create_designer
+            self._designer = factory(deepcopy(self.config["voice_design"]))
+            yield self._designer
+
+    def _retry_gemini_cleanup(self, voice_id=None):
+        """Finish this book's hosted creations after success, failure, or a crash."""
+        from .gemini_voice_design import _read_state
+
+        root = Path(self.config["render"]["work_dir"]) / "casting-candidates"
+        target = self.store.canonical_id(voice_id) if voice_id is not None else None
+        directories = {path.parent for path in root.glob("*/gemini-cleanup-pending.json")}
+        for filename in ("gemini-voice-cleanup-request.json", "gemini-voice.json", "gemini-voice-pending.json"):
+            directories.update(path.parent for path in root.glob("*/" + filename)
+                               if not (path.parent / "gemini-voice-cleanup.json").exists())
+        for directory in sorted(directories):
+            marker_path = directory / "gemini-cleanup-pending.json"
+            if str(marker_path) in self._cleanup_attempted:
+                continue
+            try:
+                if (root.is_symlink() or directory.is_symlink()
+                        or not re.fullmatch(r"[0-9a-f]{64}", directory.name)):
+                    raise ValueError("Invalid Gemini cleanup directory")
+                request_path = directory / "casting-request.json"
+                from_attempt = not request_path.exists() and not request_path.is_symlink()
+                if from_attempt:
+                    request_path = next(iter(sorted(directory.glob("attempt-*.json"))), request_path)
+                if (request_path.is_symlink() or not request_path.is_file()
+                        or request_path.stat().st_size > MAX_PENDING_RECORD_BYTES):
+                    raise ValueError("Gemini cleanup requires its original casting request")
+                request = read_json(request_path)
+                if from_attempt:
+                    request = request.get("request") if isinstance(request, dict) else None
+                if (not isinstance(request, dict) or digest(request) != directory.name
+                        or request.get("kind") != "casting_candidate"
+                        or not isinstance(request.get("series_id"), str)
+                        or not isinstance(request.get("voice_id"), str)
+                        or not isinstance(request.get("designer"), dict)
+                        or request["designer"].get("engine") != "gemini_voice_design"
+                        or not isinstance(request["designer"].get("model"), str)):
+                    raise ValueError("Gemini cleanup does not match its casting request")
+                if (request["series_id"] != self.store.series_id
+                        or request.get("source_fingerprint") != self.bundle["manifest"]["source_fingerprint"]
+                        or target is not None and self.store.canonical_id(request["voice_id"]) != target):
+                    continue
+                if marker_path.exists() or marker_path.is_symlink():
+                    if (marker_path.is_symlink() or not marker_path.is_file()
+                            or marker_path.stat().st_size > MAX_PENDING_RECORD_BYTES):
+                        raise ValueError("Gemini cleanup retry marker must be a bounded regular file")
+                    marker = read_json(marker_path)
+                    if not isinstance(marker, dict) or set(marker) != {
+                            "format", "version", "request_hash", "series_id", "voice_id", "sha256"}:
+                        raise ValueError("Invalid Gemini cleanup retry marker")
+                    payload = {key: value for key, value in marker.items() if key != "sha256"}
+                    if (marker["format"] != "audiobook-gemini-cleanup-pending"
+                            or type(marker["version"]) is not int or marker["version"] != 1
+                            or marker["sha256"] != digest(payload)
+                            or marker["request_hash"] != directory.name
+                            or marker["series_id"] != request["series_id"]
+                            or marker["voice_id"] != request["voice_id"]):
+                        raise ValueError("Gemini cleanup retry identity or checksum changed")
+                fingerprint = digest({"designer": request["designer"], "description": request.get("prompt")})
+                for filename in ("gemini-voice.json", "gemini-voice-pending.json", "gemini-voice-cleanup-request.json"):
+                    state_path = directory / filename
+                    if state_path.exists() or state_path.is_symlink():
+                        _read_state(state_path, fingerprint)
+                self._cleanup_attempted.add(str(marker_path))
+                with self._gemini_cleanup_designer(request) as designer:
+                    if not callable(getattr(designer, "release_voice", None)):
+                        raise ValueError("Configured Gemini designer does not support remote voice cleanup")
+                    self._release_gemini_voice(designer, directory, request)
+            except (ValueError, RuntimeError, OSError) as exc:
+                self._cleanup_attempted.add(str(marker_path))
+                self.notify(f"Warning: Could not retry Gemini voice cleanup at {directory}: "
+                            + safe_error_text(exc, secrets=configured_secrets(self.config)))
 
     def _prepare_gemini_request(self, request, directory, *, fresh=False):
         """Reconnect interrupted work, or deliberately start a fresh voice.
 
-        Startup recovery retains an ambiguous creation's marker. Explicit
-        regeneration requests a new voice and preserves earlier attempt files
-        without reusing or requiring manual repair of their remote identities.
+        Startup releases earlier hosted creations while retaining their local
+        recordings. Explicit regeneration always requests a fresh voice. Legacy
+        repaired pending IDs remain recoverable if a designer has no cleanup API.
         """
         from .gemini_voice_design import (
             GeminiVoiceDesigner, _read_state, _write_state, _VOICE_ID,
@@ -470,7 +604,7 @@ class CastingSession:
             raise RenderBlocked("The casting candidate directory must not be a symlink")
         recoveries = []
         recovery_prompt = None
-        for pending_path in (() if fresh else sorted(root.glob("*/gemini-voice-pending.json"))):
+        for pending_path in sorted(root.glob("*/gemini-voice-pending.json")):
             previous_directory = pending_path.parent
             request_path = previous_directory / "casting-request.json"
             try:
@@ -501,7 +635,18 @@ class CastingSession:
                     "Inspect its casting request before generating another remote voice."
                 ) from None
             if (previous["series_id"] != request["series_id"]
+                    or previous.get("source_fingerprint") != request.get("source_fingerprint")
                     or self.store.canonical_id(previous["voice_id"]) != request["voice_id"]):
+                continue
+            retry_path = previous_directory / "gemini-cleanup-pending.json"
+            cleanup_path = previous_directory / "gemini-voice-cleanup.json"
+            designer = self._get_designer()
+            if cleanup_path.exists() or cleanup_path.is_symlink():
+                # The designer validates the tombstone before treating this as
+                # completed. Retained pending/state files are historical only.
+                with self._gemini_cleanup_designer(previous) as original_designer:
+                    if not self._release_gemini_voice(original_designer, previous_directory, previous):
+                        raise RenderBlocked(f"Gemini cleanup must finish before casting can resume: {previous_directory}")
                 continue
             fingerprint = digest({"designer": previous.get("designer"),
                                   "description": previous.get("prompt")})
@@ -512,7 +657,20 @@ class CastingSession:
             state = (_read_state(state_path, fingerprint)
                      if state_path.exists() or state_path.is_symlink() else pending)
             remote_id = state.get("voice_id")
-            if not isinstance(remote_id, str) or not _VOICE_ID.fullmatch(remote_id):
+            known_id = isinstance(remote_id, str) and _VOICE_ID.fullmatch(remote_id)
+            if fresh and known_id:
+                # Explicit recasting may proceed despite a known ID's failed
+                # deletion; its durable cleanup marker remains for next time.
+                continue
+            if (str(retry_path) in self._cleanup_attempted
+                    and (retry_path.exists() or (previous_directory / "gemini-voice-cleanup-request.json").exists())):
+                raise RenderBlocked(f"Gemini cleanup is still pending; inspect {previous_directory} before requesting another voice.")
+            if not known_id:
+                if callable(getattr(designer, "release_voice", None)):
+                    with self._gemini_cleanup_designer(previous) as original_designer:
+                        if not self._release_gemini_voice(original_designer, previous_directory, previous):
+                            raise RenderBlocked(f"Gemini cleanup must finish before requesting another voice: {previous_directory}")
+                    continue
                 display_name = "Audiobook voice " + digest(str(previous_directory.resolve()))[:16]
                 raise RenderBlocked(GeminiVoiceDesigner._pending_message(pending_path, display_name))
             if (previous.get("designer") != request["designer"]
@@ -746,62 +904,86 @@ class CastingSession:
             "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
         }
         directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
-        pending = None if fresh else self._pending_confirmation(request, directory.parent)
-        if pending is not None:
-            directory, request, resume_attempt = pending
-            nonce = request["nonce"]
-            self.notify(f"Retrying verification of the saved voice sample for {voice_id}; no new voice is being generated.")
-        else:
-            resume_attempt = None
-            if not fresh and self.config.get("voice_design", {}).get("type") == "elevenlabs":
-                unfinished = self._unfinished_elevenlabs_request(request, directory.parent)
-                if unfinished is not None:
-                    directory, request = unfinished
-                    nonce = request["nonce"]
-                    self.notify(f"Resuming the saved ElevenLabs voice request for {voice_id}.")
-        if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
-            request, directory = self._prepare_gemini_request(request, directory, fresh=fresh)
-        if self.config.get("voice_design", {}).get("type") == "elevenlabs":
-            durable_request = directory / "casting-request.json"
-            if durable_request.exists() or durable_request.is_symlink():
-                if (durable_request.is_symlink() or not durable_request.is_file()
-                        or durable_request.stat().st_size > MAX_PENDING_RECORD_BYTES
-                        or read_json(durable_request) != request):
-                    raise RenderBlocked("Saved ElevenLabs casting request changed")
+        try:
+            pending = None if fresh else self._pending_confirmation(request, directory.parent)
+            if pending is not None:
+                directory, request, resume_attempt = pending
+                nonce = request["nonce"]
+                self.notify(f"Retrying verification of the saved voice sample for {voice_id}; no new voice is being generated.")
             else:
-                write_json(durable_request, request)
-        prompt = request["prompt"]
-        if pending is None:
-            self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
-        wav, accepted = verified_take(
-            text, lambda path, seed: design_voice(designer, prompt, text, path, seed=seed),
-            directory,
-            request, verifier, self.config, notify=self.notify, purpose="reference", resume_attempt=resume_attempt,
-        )
-        if accepted.get("engine_metadata", {}).get("description_applied") is not True:
-            raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
-        reference_text = accepted["report"].get("reference_text", text)
-        metadata = {
-            **accepted.get("engine_metadata", {}),
-            "method": "casting_candidate", "candidate_id": nonce,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "requested_description": prompt,
-            "requested_reference_text": text,
-            "sample_source": deepcopy(draft["sample_source"]),
-            "reference_text": reference_text,
-            "description_applied": True,
-            "voice_design_supported": True,
-            "designer": designer_identity(designer),
-            "engine": deepcopy(request["engine"]),
-            "note": "The voice designer received the character description; listening determines casting suitability.",
-            "seed": accepted["seed"], "request_hash": accepted["request_hash"],
-            "verifier": deepcopy(verifier.identity), "quality": deepcopy(self.config["quality"]),
-            "validation_key": validation_key(reference_text, verifier, self.config["quality"],
-                                             purpose="reference"),
-        }
-        return self.store.publish_candidate(
-            voice_id, deepcopy(profile), wav, reference_text, binding_identity,
-            accepted["report"], metadata, candidate_id=nonce)
+                resume_attempt = None
+                if not fresh and self.config.get("voice_design", {}).get("type") == "elevenlabs":
+                    unfinished = self._unfinished_elevenlabs_request(request, directory.parent)
+                    if unfinished is not None:
+                        directory, request = unfinished
+                        nonce = request["nonce"]
+                        self.notify(f"Resuming the saved ElevenLabs voice request for {voice_id}.")
+            if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
+                request, directory = self._prepare_gemini_request(request, directory, fresh=fresh)
+            if self.config.get("voice_design", {}).get("type") == "elevenlabs":
+                durable_request = directory / "casting-request.json"
+                if durable_request.exists() or durable_request.is_symlink():
+                    if (durable_request.is_symlink() or not durable_request.is_file()
+                            or durable_request.stat().st_size > MAX_PENDING_RECORD_BYTES
+                            or read_json(durable_request) != request):
+                        raise RenderBlocked("Saved ElevenLabs casting request changed")
+                else:
+                    write_json(durable_request, request)
+            prompt = request["prompt"]
+            if pending is None:
+                self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
+            take_config = self.config
+            cleaned_pending = pending is not None and (directory / "gemini-voice-cleanup.json").exists()
+            if cleaned_pending:
+                # Recheck the existing WAV before deciding whether another
+                # voice is needed. Never synthesize from a deleted hosted ID.
+                from .gemini_voice_design import _read_state
+                cleanup = _read_state(directory / "gemini-voice-cleanup.json", digest({
+                    "designer": request["designer"], "description": request["prompt"]}))
+                if cleanup.get("remote_deleted") is not True:
+                    raise RenderBlocked("Invalid Gemini voice cleanup record")
+                take_config = deepcopy(self.config)
+                take_config["render"]["max_attempts"] = resume_attempt
+            try:
+                wav, accepted = verified_take(
+                    text, lambda path, seed: design_voice(designer, prompt, text, path, seed=seed),
+                    directory,
+                    request, verifier, take_config, notify=self.notify, purpose="reference", resume_attempt=resume_attempt,
+                )
+            except SpeechVerificationFailed:
+                if not cleaned_pending:
+                    raise
+                self.notify("The saved sample failed verification and its temporary Gemini voice was removed; "
+                            "creating a fresh voice sample.")
+                return self._generate_locked(voice_id, fresh=True)
+            if accepted.get("engine_metadata", {}).get("description_applied") is not True:
+                raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
+            reference_text = accepted["report"].get("reference_text", text)
+            metadata = {
+                **accepted.get("engine_metadata", {}),
+                "method": "casting_candidate", "candidate_id": nonce,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "requested_description": prompt,
+                "requested_reference_text": text,
+                "sample_source": deepcopy(draft["sample_source"]),
+                "reference_text": reference_text,
+                "description_applied": True,
+                "voice_design_supported": True,
+                "designer": designer_identity(designer),
+                "engine": deepcopy(request["engine"]),
+                "note": "The voice designer received the character description; listening determines casting suitability.",
+                "seed": accepted["seed"], "request_hash": accepted["request_hash"],
+                "verifier": deepcopy(verifier.identity), "quality": deepcopy(self.config["quality"]),
+                "validation_key": validation_key(reference_text, verifier, self.config["quality"],
+                                                 purpose="reference"),
+            }
+            return self.store.publish_candidate(
+                voice_id, deepcopy(profile), wav, reference_text, binding_identity,
+                accepted["report"], metadata, candidate_id=nonce)
+        finally:
+            if self.config.get("voice_design", {}).get("type") == "gemini":
+                self._release_gemini_voice(designer, directory, request,
+                                           preserve_error=sys.exception() is not None)
 
     def ensure_ready(self, voice_id):
         """Reuse an active voice, adopt the latest saved take, or create one.
@@ -814,6 +996,7 @@ class CastingSession:
         """
         self._profile(voice_id)
         with self._locked():
+            self._retry_gemini_cleanup(voice_id)
             selected = self.store.load(voice_id)
             if selected is not None:
                 return selected
@@ -879,6 +1062,7 @@ class CastingSession:
         with self._using_voice_designer(voice_designer):
             self.prepare_models(generation=True)
             with self._locked():
+                self._retry_gemini_cleanup(voice_id)
                 regeneration = self.store.regeneration_status(voice_id)
                 if regeneration and regeneration["inherited"]:
                     # A retry in a descendant owns its new state, never the parent's.
@@ -1007,6 +1191,8 @@ class CastingSession:
 
     def generate_missing(self):
         """Make each unselected voice ready, reusing saved candidates first."""
+        with self._locked():
+            self._retry_gemini_cleanup()
         selected = []
         seen = set()
         for row in self.rows():

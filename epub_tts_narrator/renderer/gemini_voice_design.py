@@ -1,4 +1,4 @@
-"""Create persistent Gemini voices and exact-script local cloning references.
+"""Create temporary Gemini voices and exact-script local cloning references.
 
 The hosted designer is deliberately separate from the local rendering engine.
 Only the verified reference WAV is needed after casting. The remote voice ID is
@@ -20,6 +20,7 @@ import re
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 import wave
 
 from .engines import EngineError, _seed
@@ -38,9 +39,10 @@ class GeminiVoiceError(EngineError):
 
 
 class _RequestFailure(GeminiVoiceError):
-    def __init__(self, message, *, definite_rejection=False):
+    def __init__(self, message, *, definite_rejection=False, status_code=None):
         super().__init__(message)
         self.definite_rejection = definite_rejection
+        self.status_code = status_code
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -172,9 +174,12 @@ class GeminiVoiceDesigner:
         return safe_error_text(value, secrets=(self._api_key,))
 
     def _post(self, endpoint, payload):
+        return self._request("POST", endpoint, payload)
+
+    def _request(self, method, endpoint, payload=None):
         request = urllib.request.Request(
-            _API_ROOT + endpoint, method="POST",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            _API_ROOT + endpoint, method=method,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None,
             headers={"Content-Type": "application/json", "Accept": "application/json",
                      "x-goog-api-key": self._api_key},
         )
@@ -195,26 +200,145 @@ class GeminiVoiceDesigner:
                 exc.close()
             raise _RequestFailure(
                 f"Gemini API request failed (HTTP {code}): {reason}\n"
-                f"POST {endpoint}; model {self.model}\n{detail}",
+                f"{method} {endpoint}; model {self.model}\n{detail}",
                 definite_rejection=400 <= code < 500 and code != 408,
+                status_code=code,
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise _RequestFailure(
-                f"Gemini API request failed or timed out (POST {endpoint}; model {self.model}):\n"
+                f"Gemini API request failed or timed out ({method} {endpoint}; model {self.model}):\n"
                 f"{type(exc).__name__}: {self._error_detail(str(exc))}",
             ) from None
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise _RequestFailure("Gemini API response exceeded the size limit")
+        if method == "DELETE" and not raw.strip():
+            return {}
         try:
             result = json.loads(raw)
         except (ValueError, UnicodeError) as exc:
             raise _RequestFailure(
-                f"Gemini API returned invalid JSON (POST {endpoint}; model {self.model}):\n"
+                f"Gemini API returned invalid JSON ({method} {endpoint}; model {self.model}):\n"
                 f"{self._error_detail(str(exc))}\n{self._error_detail(raw)}",
             ) from None
         if not isinstance(result, dict):
             raise _RequestFailure("Gemini API returned an invalid response:\n" + self._error_detail(result))
         return result
+
+    def list_voices(self, *, search=None):
+        """List prompted voices in this API project, following every page."""
+        if search is not None and (not isinstance(search, str) or not search or len(search) > 300):
+            raise GeminiVoiceError("Gemini voice search must be a nonempty string of at most 300 characters")
+        voices, seen_ids, seen_tokens = [], set(), set()
+        token = None
+        for _ in range(1000):
+            query = {"type": "prompted", "page_size": 100}
+            if search is not None:
+                query["search"] = search
+            if token:
+                query["page_token"] = token
+            response = self._request("GET", "/voices?" + urlencode(query))
+            page = response.get("voices", [])
+            if not isinstance(page, list):
+                raise GeminiVoiceError("Gemini returned an invalid voices list")
+            for voice in page:
+                if (not isinstance(voice, dict) or not isinstance(voice.get("id"), str)
+                        or not _VOICE_ID.fullmatch(voice["id"])):
+                    raise GeminiVoiceError("Gemini returned an invalid stored voice ID")
+                if voice["id"] not in seen_ids:
+                    seen_ids.add(voice["id"])
+                    voices.append(voice)
+            token = response.get("next_page_token")
+            if token is None or token == "":
+                return voices
+            if not isinstance(token, str) or len(token) > 8192 or token in seen_tokens:
+                raise GeminiVoiceError("Gemini returned an invalid or repeated voice pagination token")
+            seen_tokens.add(token)
+        raise GeminiVoiceError("Gemini voice listing exceeded the pagination limit")
+
+    def delete_voice(self, voice_id):
+        """Delete a stored voice; an already absent voice is a successful cleanup."""
+        if not isinstance(voice_id, str) or not _VOICE_ID.fullmatch(voice_id):
+            raise GeminiVoiceError("Invalid Gemini voice ID for deletion")
+        try:
+            self._request("DELETE", "/voices/" + voice_id)
+        except _RequestFailure as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        return True
+
+    def release_voice(self, directory):
+        """Remove only this creation request's hosted voices, retaining local audio.
+
+        Unknown POST outcomes are reconciled by the exact saved display name.
+        Failed deletions leave state intact so the caller can retry cleanup.
+        """
+        directory = Path(directory)
+        if directory.is_symlink():
+            raise GeminiVoiceError(f"Gemini cleanup directory must not be a symlink: {directory}")
+        state_path = directory / "gemini-voice.json"
+        pending_path = directory / "gemini-voice-pending.json"
+        cleanup_path = directory / "gemini-voice-cleanup.json"
+        cleanup_request_path = directory / "gemini-voice-cleanup-request.json"
+        path = state_path if state_path.exists() or state_path.is_symlink() else pending_path
+        if not path.exists() and not path.is_symlink():
+            return []
+        try:
+            if path.is_symlink() or path.stat().st_size > 8192:
+                raise ValueError
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            fingerprint = saved.get("request_fingerprint")
+            if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                raise ValueError
+        except (OSError, ValueError, UnicodeError, AttributeError):
+            raise GeminiVoiceError(f"Invalid Gemini voice state for cleanup: {path}") from None
+        state = _read_state(path, fingerprint)
+        if cleanup_path.exists() or cleanup_path.is_symlink():
+            cleanup = _read_state(cleanup_path, fingerprint)
+            ids = cleanup.get("voice_ids")
+            if (cleanup.get("remote_deleted") is not True or not isinstance(ids, list)
+                    or not ids and cleanup.get("confirmed_absent") is not True
+                    or any(not isinstance(item, str) or not _VOICE_ID.fullmatch(item) for item in ids)
+                    or state.get("voice_id") is not None and state["voice_id"] not in ids):
+                raise GeminiVoiceError(f"Invalid Gemini voice cleanup record: {cleanup_path}")
+            return ids
+        voice_id = state.get("voice_id")
+        if cleanup_request_path.exists() or cleanup_request_path.is_symlink():
+            cleanup_request = _read_state(cleanup_request_path, fingerprint)
+            ids = cleanup_request.get("voice_ids")
+            if (not isinstance(ids, list) or not ids
+                    or any(not isinstance(item, str) or not _VOICE_ID.fullmatch(item) for item in ids)
+                    or voice_id is not None and voice_id not in ids):
+                raise GeminiVoiceError(f"Invalid Gemini cleanup request: {cleanup_request_path}")
+        elif voice_id is not None:
+            if not isinstance(voice_id, str) or not _VOICE_ID.fullmatch(voice_id):
+                raise GeminiVoiceError(f"Invalid stored Gemini voice ID: {path}")
+            ids = [voice_id]
+        else:
+            display_name = state.get("display_name")
+            if not isinstance(display_name, str) or not re.fullmatch(r"Audiobook voice [0-9a-f]{16}", display_name):
+                raise GeminiVoiceError(f"Cannot reconcile the Gemini creation without its saved display name: {path}")
+            original_model = state.get("model", self.model)
+            if not isinstance(original_model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", original_model):
+                raise GeminiVoiceError(f"Invalid Gemini model in cleanup state: {path}")
+            ids = [voice["id"] for voice in self.list_voices(search=display_name)
+                   if voice.get("display_name") == display_name and voice.get("model") in (original_model, "models/" + original_model)
+                   and voice.get("type") == "prompted"]
+            if not ids:
+                raise GeminiVoiceError(f"No Gemini voice is visible yet for {display_name!r}; the creation outcome "
+                                       f"is still unknown. Retained {pending_path} for cleanup retry.")
+        # Persist discovered IDs BEFORE deletion. If the response or final marker
+        # is lost, a retry can confirm absence with DELETE/404 without depending
+        # on a list response that can no longer find the removed resource.
+        if not cleanup_request_path.exists():
+            _write_state(cleanup_request_path, {"version": _STATE_VERSION,
+                         "request_fingerprint": fingerprint, "voice_ids": ids})
+        for identifier in ids:
+            self.delete_voice(identifier)
+        _write_state(cleanup_path, {"version": _STATE_VERSION, "request_fingerprint": fingerprint,
+                                   "voice_ids": ids, "remote_deleted": True,
+                                   "display_name": state.get("display_name")})
+        return ids
 
     @staticmethod
     def _pending_message(path, display_name):
@@ -229,7 +353,17 @@ class GeminiVoiceDesigner:
         fingerprint = _fingerprint({"designer": self.identity, "description": description})
         state_path = directory / "gemini-voice.json"
         pending_path = directory / "gemini-voice-pending.json"
+        cleanup_path = directory / "gemini-voice-cleanup.json"
+        cleanup_request_path = directory / "gemini-voice-cleanup-request.json"
         display_name = "Audiobook voice " + _fingerprint(str(directory.resolve()))[:16]
+        if cleanup_path.exists() or cleanup_path.is_symlink():
+            _read_state(cleanup_path, fingerprint)
+            raise GeminiVoiceError("This request's hosted Gemini voice has already been cleaned up. "
+                                   "Use a new voice-creation request to generate another take; saved local samples remain usable.")
+        if cleanup_request_path.exists() or cleanup_request_path.is_symlink():
+            _read_state(cleanup_request_path, fingerprint)
+            raise GeminiVoiceError("Cleanup has begun for this request's hosted Gemini voice. "
+                                   "Finish cleanup and use a new voice-creation request; saved local samples remain usable.")
         if state_path.exists() or state_path.is_symlink():
             state = _read_state(state_path, fingerprint)
             if not isinstance(state.get("voice_id"), str) or not _VOICE_ID.fullmatch(state["voice_id"]):
@@ -248,7 +382,7 @@ class GeminiVoiceDesigner:
                 return recovered_id
             raise GeminiVoiceError(self._pending_message(pending_path, display_name))
         pending = {"version": _STATE_VERSION, "request_fingerprint": fingerprint,
-                   "display_name": display_name}
+                   "display_name": display_name, "model": self.model}
         try:
             _write_state(pending_path, pending)
         except FileExistsError:

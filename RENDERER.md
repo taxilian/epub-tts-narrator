@@ -389,7 +389,7 @@ While a sample is playing, any key stops playback and returns to the menu.
 
 Sample scripts contain 25–60 words and at most 650 characters, normally aiming for 35–50 words. Casting prefers clearly attributed ordinary speech and can join several actual statements by the same canonical voice to provide a useful audition. Balanced outer dialogue quotation marks are removed before joining excerpts; embedded quotations and apostrophes are retained. Every excerpt keeps its own chapter, segment, exact source ranges, and position in the joined script; a montage is not represented as one contiguous quotation. Narrators can use narration, and identified participants in simultaneous dialogue can each audition those words alone. Shared roles use one script and one saved reference voice.
 
-Every new voice-design request starts with `Adult audiobook narrator portraying a character in a book. Create an adult performer's imitation of the following vocal qualities:` followed by the voice description. Youthful characters are cast as an adult performer portraying youthful qualities. Analysis and prompt refresh use the same distinction; character ages in the book's metadata and evidence stay intact. This context applies to all designers, including edited and older saved drafts, and is added only once, replacing the previous application prefix when present. It is not part of the spoken sample script. Custom description wording, selected recordings, and inherited voices are preserved; new request records contain the actual prefixed prompt. This applies to both the casting menu and automatic voice creation during rendering. Recovery of a recorded Gemini sample awaiting verification keeps that sample's original request instead of creating another remote voice just to update its prefix. Reconnecting a known existing Gemini voice retains its original description and remote ID. Other unfinished designs require matching context to resume, so a new creation uses the current adult framing.
+Every new voice-design request starts with `Adult audiobook narrator portraying a character in a book. Create an adult performer's imitation of the following vocal qualities:` followed by the voice description. Youthful characters are cast as an adult performer portraying youthful qualities. Analysis and prompt refresh use the same distinction; character ages in the book's metadata and evidence stay intact. This context applies to all designers, including edited and older saved drafts, and is added only once, replacing the previous application prefix when present. It is not part of the spoken sample script. Custom description wording, selected recordings, and inherited voices are preserved; new request records contain the actual prefixed prompt. This applies to both the casting menu and automatic voice creation during rendering. Recovery of a recorded Gemini sample awaiting verification keeps that sample's original request instead of creating another remote voice just to update its prefix. Remote voices left by an interrupted operation are cleaned up; any new generation uses a fresh voice and the current adult framing.
 
 For a creation prompt, describe the voice's lasting identity in one or two concise sentences using a few compatible audible traits: typical pitch, resonance, vocal weight, texture, accent, articulation, and natural cadence. Include age, gender presentation, or fictional context when they help establish the sound. Translate personality into vocal choices: precise consonants and measured phrasing for a meticulous character, or a thin, reedy tone and dry rasp for an abrasive creature. Preserve essential harsh or unusual qualities. Put temporary emotions, urgency, whispering, shouting, and changes of pace in individual passages' delivery directions. The voice generator knows nothing about the book: make the prompt self-contained, translating character names, fictional species, and lore into explicit audible characteristics.
 
@@ -527,7 +527,7 @@ masked and terminal control sequences are removed. The final failure includes
 the last generation or verification exception as well as the inspection path.
 
 Gemini casting sends the voice description and selected sample script to Google's
-API. It creates a persistent custom voice, synthesizes the exact script, and runs
+API. It creates a temporary hosted custom voice, synthesizes the exact script, and runs
 the same independent transcription and audio checks as local creation. Existing
 selections are reused unless you regenerate them. Shared character roles still
 use one canonical reference, and later books inherit it through `--continue-from`.
@@ -535,22 +535,28 @@ Drama 3 renders the audiobook locally by cloning the verified recording; Gemini
 is not needed to render that saved voice. Normalized audition copies work for
 both sources.
 
-The remote voice ID is recorded in candidate metadata and reused when the same
-sample needs a synthesis or verification retry. Explicit `GG` regeneration and
-bulk regeneration request a fresh Gemini voice, even when an earlier creation
-failed or is awaiting verification. Prior pending records are preserved and do
-not block explicit regeneration. After success, casting prints the selected
-Gemini `voice_...` ID; the character's `series_voice_...` ID remains stable.
-Startup recovery still protects an uncertain creation outcome: follow its
-pending-file instructions to recover that voice, or use `GG` to deliberately
-create a new one. Credentials are read only
-from the configuration file and are excluded from candidate metadata and cache
+The remote voice ID is recorded in candidate metadata and reused across synthesis
+retries within one voice-creation operation, whether started through casting or
+automatic creation during rendering. When the operation succeeds, exhausts its
+attempts, or is interrupted, the hosted voice is deleted. Startup also cleans up
+voices left by a crash. Local reference WAVs, selected character voices, and
+their metadata remain available. Explicit `GG` regeneration and
+bulk regeneration request a fresh Gemini voice. If an earlier creation timed out
+before returning an ID, its exact saved request name must first be reconciled and
+cleaned up; an unresolved outcome blocks another creation and explains the problem.
+The historical Gemini `voice_...` ID records where the local reference came from;
+the character's `series_voice_...` ID remains stable.
+Saved audio awaiting verification can still be checked after the hosted voice
+is removed. If it fails verification, another take uses a fresh hosted voice.
+Failed deletions are recorded and retried when the same command is rerun,
+without discarding a saved local sample. Credentials are read only from the
+configuration file and are excluded from candidate metadata and cache
 identities. No Google SDK is required.
 
 Google currently allows up to 200 stored custom voices per project, with expiration
-after one year of inactivity. Each regeneration creates another custom voice;
-manage unused remote voices in AI Studio. Local saved recordings remain usable
-after a remote voice expires. See [Google's voice design documentation](https://ai.google.dev/gemini-api/docs/voice-design).
+after one year of inactivity. Automatic cleanup releases this quota after voice
+creation; local saved recordings remain usable after remote deletion or expiration.
+See [Google's voice design documentation](https://ai.google.dev/gemini-api/docs/voice-design).
 
 To use Qwen3 VoiceDesign instead, download its local checkpoint and configure the separate designer:
 

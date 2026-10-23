@@ -2,8 +2,11 @@
 
 import base64
 from copy import deepcopy
+import io
+import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +17,7 @@ from epub_tts_narrator.renderer.common import read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS, select_voice_designer
 from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
 from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
 from epub_tts_narrator.cli import export_bundle
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, ReferencePlaybackEngine, TranscriptVerifier,
@@ -42,9 +46,10 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         export_bundle(read_json(EXAMPLE / "reviewed.json"), directory)
         self.bundle = prepare_bundle(load_bundle(directory))
         self.calls = []
+        self.deleted_voices = []
         self.notices = []
 
-    def designer(self, creation_responses, *, interaction_errors=()):
+    def designer(self, creation_responses, *, interaction_errors=(), listed_voices=()):
         remote = GeminiVoiceDesigner("fixture-credential-never-sent")
         creations, errors = list(creation_responses), list(interaction_errors)
 
@@ -68,6 +73,15 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
             }]}]}
 
         remote._post = post
+
+        def cleanup_request(request, **kwargs):
+            if request.get_method() == "GET":
+                return io.BytesIO(json.dumps({"voices": list(listed_voices)}).encode())
+            self.assertEqual(request.get_method(), "DELETE")
+            self.deleted_voices.append(request.full_url.rsplit("/", 1)[-1])
+            return io.BytesIO(b"")
+
+        remote._opener = SimpleNamespace(open=cleanup_request)
         return remote
 
     def session(self, designer):
@@ -104,6 +118,7 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         self.assertEqual(session.store.load("voice_mara")["creation"]["remote_voice_id"], "voice_second")
         self.assertIn("Selected Gemini voice ID: voice_first", self.notices)
         self.assertIn("Selected Gemini voice ID: voice_second", self.notices)
+        self.assertEqual(self.deleted_voices, ["voice_first", "voice_second"])
 
     def test_explicit_regeneration_leaves_repaired_pending_untouched_and_creates_new_remote_voice(self):
         pending = self.pending_creation()
@@ -122,22 +137,40 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         self.assertFalse((pending.parent / "gemini-voice.json").exists())
         self.assertEqual((pending.parent / "casting-request.json").read_bytes(), original_request)
 
-    def test_explicit_regeneration_creates_fresh_voice_despite_unknown_prior_outcome(self):
+    def test_explicit_regeneration_blocks_unresolved_creation_instead_of_leaking_a_duplicate(self):
         pending = self.pending_creation()
         before = pending.read_bytes()
         original_request = (pending.parent / "casting-request.json").read_bytes()
         session = self.session(self.designer([{"id": "voice_intentional_new"}]))
-        selected = session.regenerate("voice_mara")
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_intentional_new")
-        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
+            session.regenerate("voice_mara")
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices"])
+        self.assertEqual(self.deleted_voices, [])
         self.assertEqual(pending.read_bytes(), before)
         self.assertEqual((pending.parent / "casting-request.json").read_bytes(), original_request)
+
+    def test_explicit_regeneration_resolves_unknown_creation_by_exact_name_then_creates_fresh(self):
+        pending = self.pending_creation()
+        state = read_json(pending)
+        matching = {"id": "voice_previous_discovered", "display_name": state["display_name"],
+                    "model": "models/gemini-3.8-flash-tts", "type": "prompted"}
+        session = self.session(self.designer([{"id": "voice_intentional_new"}], listed_voices=[
+            dict(matching, id="voice_unrelated", display_name=state["display_name"] + " extra"),
+            matching,
+        ]))
+
+        selected = session.regenerate("voice_mara")
+
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_intentional_new")
+        self.assertEqual(self.deleted_voices, ["voice_previous_discovered", "voice_intentional_new"])
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        self.assertTrue(read_json(pending.parent / "gemini-voice-cleanup.json")["remote_deleted"])
 
     def test_startup_still_blocks_when_prior_creation_outcome_is_unknown(self):
         pending = self.pending_creation()
         before = pending.read_bytes()
         session = self.session(self.designer([]))
-        with self.assertRaisesRegex(ValueError, "may already have succeeded"):
+        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
             session.ensure_ready("voice_mara")
         self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices"])
         self.assertEqual(pending.read_bytes(), before)
@@ -164,18 +197,21 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         lookup.assert_not_called()
         self.assertEqual(selected["creation"]["remote_voice_id"], "voice_explicit_new")
 
-    def test_startup_generation_recovers_known_pending_id_without_new_creation(self):
+    def test_startup_cleans_old_pending_id_before_creating_a_new_voice(self):
         pending = self.pending_creation()
         state = read_json(pending)
         state["voice_id"] = "voice_startup_recovered"
         write_json(pending, state)
-        session = self.session(self.designer([]))
+        original = pending.read_bytes()
+        session = self.session(self.designer([{"id": "voice_startup_fresh"}]))
         selected = session.ensure_ready("voice_mara")
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_startup_recovered")
-        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/interactions"])
-        self.assertFalse(pending.exists())
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_startup_fresh")
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        self.assertEqual(self.deleted_voices, ["voice_startup_recovered", "voice_startup_fresh"])
+        self.assertEqual(pending.read_bytes(), original)
+        self.assertTrue(read_json(pending.parent / "gemini-voice-cleanup.json")["remote_deleted"])
 
-    def test_startup_recovers_legacy_pending_voice_with_original_unprefixed_description(self):
+    def test_startup_cleans_legacy_pending_voice_and_uses_current_prompt_guidance(self):
         original_prompt = "A quiet adult narrator with a measured pace."
         old_session = self.session(self.designer([_RequestFailure("Fixture old creation response lost")]))
         old_session.update_prompt("voice_mara", original_prompt)
@@ -187,14 +223,15 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         state = read_json(pending)
         state["voice_id"] = "voice_legacy_unprefixed"
         write_json(pending, state)
-        restarted = self.session(self.designer([]))
+        restarted = self.session(self.designer([{"id": "voice_current_framing"}]))
         selected = restarted.ensure_ready("voice_mara")
-        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/interactions"])
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_legacy_unprefixed")
-        self.assertEqual(selected["creation"]["requested_description"], original_prompt)
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_current_framing")
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(original_prompt))
         self.assertEqual(restarted.rows()[0]["prompt"], original_prompt)
         self.assertEqual((pending.parent / "casting-request.json").read_bytes(), original_request)
-        self.assertFalse(pending.exists())
+        self.assertTrue(pending.exists())
+        self.assertEqual(self.deleted_voices, ["voice_legacy_unprefixed", "voice_current_framing"])
 
 
 if __name__ == "__main__":

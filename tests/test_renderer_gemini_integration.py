@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -297,6 +298,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.designer = GeminiFixtureDesigner(self.transcripts)
         self.verifier = TranscriptVerifier(self.transcripts)
         self.factory_calls = []
+        self.deleted_voices = []
         self.notices = []
         self.bundle = self.make_bundle("book-one")
 
@@ -392,6 +394,15 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
             }]}]}
 
         designer._post = post
+
+        def cleanup_request(request, **kwargs):
+            if request.get_method() == "GET":
+                return io.BytesIO(json.dumps({"voices": []}).encode())
+            self.assertEqual(request.get_method(), "DELETE")
+            self.deleted_voices.append(request.full_url.rsplit("/", 1)[-1])
+            return io.BytesIO(b"")
+
+        designer._opener = SimpleNamespace(open=cleanup_request)
         return designer
 
     def pending_remote_voice(self, *, interrupted=False):
@@ -425,9 +436,9 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         pending, calls = self.pending_remote_voice()
         designer = self.remote_designer([], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        with self.assertRaisesRegex(ValueError, "may already have succeeded") as raised:
+        with self.assertRaisesRegex(ValueError, "cleanup.*pending") as raised:
             restarted.ensure_ready("voice_mara")
-        self.assertIn(str(pending), str(raised.exception))
+        self.assertIn(str(pending.parent), str(raised.exception))
         self.assertEqual([endpoint for endpoint, _ in calls], ["/voices"])
         self.assertEqual(list(self.root.rglob("gemini-voice-pending.json")), [pending])
 
@@ -437,28 +448,29 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(list(pending.parent.glob("attempt-*.json")), [])
         designer = self.remote_designer([], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        with self.assertRaisesRegex(ValueError, "may already have succeeded"):
+        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
             restarted.ensure_ready("voice_mara")
         self.assertEqual(len(calls), 1)
 
-    def test_missing_voice_preparation_recovers_repaired_remote_id_without_new_creation(self):
+    def test_missing_voice_preparation_cleans_repaired_id_before_new_creation(self):
         pending, calls = self.pending_remote_voice()
         value = read_json(pending)
         value["voice_id"] = "voice_repaired"
         write_json(pending, value)
-        designer = self.remote_designer([], calls)
+        original = pending.read_bytes()
+        designer = self.remote_designer([{"id": "voice_replacement"}], calls)
         restarted = self.session(designer_factory=lambda _: designer)
         selected = restarted.ensure_ready("voice_mara")
-        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
-        self.assertEqual(calls[-1][1]["generation_config"]["speech_config"], [{"voice": "voice_repaired"}])
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_repaired")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/voices", "/interactions"])
+        self.assertEqual(calls[-1][1]["generation_config"]["speech_config"], [{"voice": "voice_replacement"}])
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_replacement")
         self.assertTrue(selected["verification"]["passed"])
-        self.assertFalse(pending.exists())
-        self.assertEqual(read_json(pending.parent / "gemini-voice.json")["voice_id"], "voice_repaired")
+        self.assertEqual(pending.read_bytes(), original)
+        self.assertEqual(self.deleted_voices, ["voice_repaired", "voice_replacement"])
         for path in self.root.rglob("*.json"):
             self.assertNotIn(SECRET, path.read_text())
 
-    def test_repaired_old_context_creation_retains_original_prompt_and_remote_id(self):
+    def test_repaired_old_context_is_cleaned_before_creation_with_current_guidance(self):
         with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
             pending, calls = self.pending_remote_voice()
         request_path = pending.parent / "casting-request.json"
@@ -467,26 +479,29 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         state = read_json(pending)
         state["voice_id"] = "voice_old_context_repaired"
         write_json(pending, state)
-        designer = self.remote_designer([], calls)
+        designer = self.remote_designer([{"id": "voice_current_context"}], calls)
         selected = self.session(designer_factory=lambda _: designer).ensure_ready("voice_mara")
-        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_old_context_repaired")
-        self.assertEqual(selected["creation"]["requested_description"], request["prompt"])
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/voices", "/interactions"])
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_current_context")
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(request["prompt"]))
         self.assertEqual(request_path.read_bytes(), original_request)
-        self.assertFalse(pending.exists())
+        self.assertTrue(pending.exists())
+        self.assertEqual(self.deleted_voices, ["voice_old_context_repaired", "voice_current_context"])
 
     def test_repaired_remote_id_cannot_be_reused_for_changed_description(self):
         pending, calls = self.pending_remote_voice()
         value = read_json(pending)
         value["voice_id"] = "voice_repaired"
         write_json(pending, value)
-        designer = self.remote_designer([], calls)
+        designer = self.remote_designer([{"id": "voice_changed_prompt"}], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        restarted.update_prompt("voice_mara", "A completely different voice, low and gravelly.")
-        with self.assertRaisesRegex(ValueError, "different voice prompt"):
-            restarted.ensure_ready("voice_mara")
+        prompt = "A completely different voice, low and gravelly."
+        restarted.update_prompt("voice_mara", prompt)
+        selected = restarted.ensure_ready("voice_mara")
         self.assertTrue(pending.exists())
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_changed_prompt")
+        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(prompt))
+        self.assertEqual(self.deleted_voices, ["voice_repaired", "voice_changed_prompt"])
 
     def test_pending_other_character_does_not_prevent_generation(self):
         pending, calls = self.pending_remote_voice()
@@ -510,22 +525,25 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(pending.exists())
 
-    def test_recovery_handoff_failure_keeps_original_pending_marker(self):
+    def test_cleanup_journal_failure_keeps_original_pending_marker_and_blocks_creation(self):
         pending, calls = self.pending_remote_voice()
         value = read_json(pending)
         value["voice_id"] = "voice_repaired"
         write_json(pending, value)
-        designer = self.remote_designer([], calls)
+        designer = self.remote_designer([{"id": "voice_after_cleanup_retry"}], calls)
         restarted = self.session(designer_factory=lambda _: designer)
         with patch("epub_tts_narrator.renderer.gemini_voice_design._write_state", side_effect=OSError("disk fixture")):
-            with self.assertRaisesRegex(OSError, "disk fixture"):
+            with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
                 restarted.ensure_ready("voice_mara")
         self.assertTrue(pending.exists())
         self.assertEqual(read_json(pending)["voice_id"], "voice_repaired")
         self.assertEqual(len(calls), 1)
+        self.assertEqual(self.deleted_voices, [])
+        self.assertTrue(any("disk fixture" in notice for notice in self.notices))
         selected = self.session(designer_factory=lambda _: designer).ensure_ready("voice_mara")
-        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_repaired")
-        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_after_cleanup_retry")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/voices", "/interactions"])
+        self.assertEqual(self.deleted_voices, ["voice_repaired", "voice_after_cleanup_retry"])
 
     def test_explicit_regeneration_after_verification_failure_creates_a_fresh_remote_voice(self):
         calls = []

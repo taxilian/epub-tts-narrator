@@ -646,16 +646,142 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
 
 def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, notify=print,
                  designer=None, bundle=None):
+    import sys
+    import uuid
+
     store.persist_aliases()
     requested_id = voice_id
     voice_id = store.canonical_id(voice_id)
     profile = dict(profile, id=voice_id)
     binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
     existing = store.load(voice_id)
+    candidate_root = Path(work) / "voice-candidates"
+    source_fingerprint = (bundle or {}).get("manifest", {}).get("source_fingerprint")
+
+    def saved_request(directory):
+        path = directory / "voice-request.json"
+        from_attempt = not path.exists() and not path.is_symlink()
+        if from_attempt:
+            path = directory / "accepted.json"
+            if not path.exists() and not path.is_symlink():
+                path = next(iter(sorted(directory.glob("attempt-*.json"))), path)
+        if (candidate_root.is_symlink() or directory.is_symlink() or path.is_symlink()
+                or not path.is_file() or path.stat().st_size > 4 * 1024 * 1024):
+            raise ValueError("Automatic voice recovery requires a bounded original request")
+        request = read_json(path)
+        if from_attempt:
+            request = request.get("request") if isinstance(request, dict) else None
+        if (not isinstance(request, dict) or digest(request) != directory.name
+                or request.get("kind") != "create_voice"
+                or not isinstance(request.get("designer"), dict)
+                or request["designer"].get("engine") != "gemini_voice_design"
+                or not isinstance(request["designer"].get("model"), str)):
+            raise ValueError("Automatic Gemini voice request integrity check failed")
+        return request
+
+    def release_remote(source, directory, request, *, preserve_error=False):
+        release = getattr(source, "release_voice", None)
+        if not callable(release):
+            return True
+        marker_path = directory / "gemini-cleanup-pending.json"
+        was_cleaned = (directory / "gemini-voice-cleanup.json").exists()
+        try:
+            from .gemini_voice_design import _read_state
+            fingerprint = digest({"designer": request["designer"], "description": request["prompt"]})
+            for name in ("gemini-voice.json", "gemini-voice-pending.json"):
+                path = directory / name
+                if path.exists() or path.is_symlink():
+                    _read_state(path, fingerprint)
+            released = release(directory)
+            if marker_path.is_symlink():
+                raise ValueError("Gemini cleanup retry marker must not be a symlink")
+            marker_path.unlink(missing_ok=True)
+        except (Exception, KeyboardInterrupt) as exc:
+            detail = safe_error_text(exc, secrets=configured_secrets(config))
+            try:
+                if (directory.is_symlink() or not directory.is_dir()
+                        or marker_path.is_symlink() or digest(request) != directory.name):
+                    raise ValueError("Cannot safely save the Gemini cleanup retry marker")
+                marker = {"format": "audiobook-gemini-cleanup-pending", "version": 1,
+                          "request_hash": directory.name, "series_id": request["series_id"],
+                          "voice_id": request["voice_id"]}
+                write_json(marker_path, dict(marker, sha256=digest(marker)))
+            except (OSError, ValueError, KeyError) as marker_error:
+                detail += "\nCleanup retry could not be saved: " + safe_error_text(
+                    marker_error, secrets=configured_secrets(config))
+            notify("Warning: Gemini remote voice cleanup failed. Saved local recordings remain available. "
+                   f"Rerun the same command to retry cleanup; inspect {directory}.\n{detail}")
+            if isinstance(exc, KeyboardInterrupt) and not preserve_error:
+                raise
+            return False
+        if released and not was_cleaned:
+            notify("Removed temporary Gemini voice(s): " + ", ".join(released)
+                   + ". Saved recordings remain available locally.")
+        return True
+
+    cleanup_pending = False
+    cleanup_directories = set(path.parent for path in candidate_root.glob("*/gemini-cleanup-pending.json"))
+    for state_name in ("gemini-voice.json", "gemini-voice-pending.json"):
+        cleanup_directories.update(path.parent for path in candidate_root.glob("*/" + state_name)
+                                   if not (path.parent / "gemini-voice-cleanup.json").exists())
+    for directory in sorted(cleanup_directories):
+        marker_path = directory / "gemini-cleanup-pending.json"
+        cleanup_designer = None
+        close_cleanup_designer = False
+        try:
+            request = saved_request(directory)
+            if (source_fingerprint and request.get("source_fingerprint")
+                    and request["source_fingerprint"] != source_fingerprint):
+                continue
+            if (request.get("series_id") != store.series_id
+                    or not isinstance(request.get("voice_id"), str)
+                    or store.canonical_id(request["voice_id"]) != voice_id):
+                continue
+            if marker_path.exists() or marker_path.is_symlink():
+                if (marker_path.is_symlink() or not marker_path.is_file()
+                        or marker_path.stat().st_size > 8192):
+                    raise ValueError("Invalid automatic Gemini cleanup retry marker")
+                marker = read_json(marker_path)
+                if not isinstance(marker, dict) or set(marker) != {
+                        "format", "version", "request_hash", "series_id", "voice_id", "sha256"}:
+                    raise ValueError("Invalid automatic Gemini cleanup retry marker")
+                payload = {key: value for key, value in marker.items() if key != "sha256"}
+                if (marker["format"] != "audiobook-gemini-cleanup-pending" or type(marker["version"]) is not int
+                        or marker["version"] != 1 or marker["sha256"] != digest(payload)
+                        or marker["request_hash"] != directory.name
+                        or request.get("series_id") != marker["series_id"]
+                        or request.get("voice_id") != marker["voice_id"]):
+                    raise ValueError("Automatic Gemini cleanup retry identity changed")
+            if (designer is not None and designer_identity(designer).get("engine") == "gemini_voice_design"
+                    and designer_identity(designer).get("model") == request["designer"].get("model")):
+                cleanup_designer = designer
+            else:
+                from .config import select_voice_designer
+                from .voice_design import create_designer
+                settings = (resolve_voice_design(config)
+                            if config.get("voice_design", {}).get("type") == "gemini"
+                            else select_voice_designer(config, "gemini")["voice_design"])
+                settings["model"] = request["designer"]["model"]
+                cleanup_designer = create_designer(settings)
+                close_cleanup_designer = True
+            if not callable(getattr(cleanup_designer, "release_voice", None)):
+                raise ValueError("Configured Gemini designer does not support remote voice cleanup")
+            cleanup_pending = not release_remote(cleanup_designer, directory, request) or cleanup_pending
+        except (ValueError, RuntimeError, OSError) as exc:
+            cleanup_pending = True
+            notify(f"Warning: Could not retry automatic Gemini cleanup at {directory}: "
+                   + safe_error_text(exc, secrets=configured_secrets(config)))
+        finally:
+            if close_cleanup_designer:
+                close = getattr(cleanup_designer, "close", None)
+                if callable(close):
+                    close()
     if existing is not None:
         if any(existing["created_with"].get(key) != binding_identity.get(key) for key in ("engine", "model")):
             raise RenderBlocked("Existing voice was created for a different model; use an explicit compatible binding")
         return existing
+    if cleanup_pending:
+        raise RenderBlocked("Gemini voice cleanup is still pending; rerun to finish cleanup before creating another reference")
     regeneration = store.regeneration_status(voice_id)
     if regeneration is not None:
         raise RenderBlocked(
@@ -693,15 +819,67 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
         if sample_source is not None:
             request["sample_source"] = sample_source
         notify(f"Creating persistent reference voice {voice_id}")
-        wav, accepted = verified_take(
-            text, lambda path, seed: design_voice(source, prompt, text, path, seed=seed),
-            Path(work) / "voice-candidates" / digest(request), request, verifier, config,
-            notify=notify, purpose="reference")
-        if accepted.get("engine_metadata", {}).get("description_applied") is not True:
-            raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
-        reference_text = accepted["report"].get("reference_text", text)
-        return store.publish(voice_id, profile, wav, reference_text, binding_identity,
-                             accepted["report"], {
+        gemini = request["designer"].get("engine") == "gemini_voice_design"
+        if gemini and source_fingerprint:
+            request["source_fingerprint"] = source_fingerprint
+        directory = candidate_root / digest(request)
+        original_request = deepcopy(request)
+        if gemini:
+            matches = []
+            for path in sorted(candidate_root.glob("*/voice-request.json")):
+                previous = saved_request(path.parent)
+                if {key: value for key, value in previous.items() if key != "nonce"} == original_request:
+                    matches.append((path.stat().st_mtime_ns, path.parent.name, path.parent, previous))
+            if matches:
+                _, _, directory, request = max(matches, key=lambda item: item[:2])
+            elif source_fingerprint:
+                # Older automatic requests predate per-book fingerprints. Preserve
+                # their accepted recording in the explicitly chosen work directory.
+                legacy = {key: value for key, value in request.items() if key != "source_fingerprint"}
+                legacy_directory = candidate_root / digest(legacy)
+                if legacy_directory.exists() and saved_request(legacy_directory) == legacy:
+                    request, directory = legacy, legacy_directory
+
+        class FreshGeminiVoiceRequired(RenderBlocked):
+            pass
+
+        for generation_round in range(2):
+            if gemini:
+                if candidate_root.is_symlink() or directory.is_symlink():
+                    raise RenderBlocked("Automatic Gemini voice candidates must not use symlinks")
+                directory.mkdir(parents=True, exist_ok=True)
+                request_path = directory / "voice-request.json"
+                if request_path.exists() or request_path.is_symlink():
+                    if saved_request(directory) != request:
+                        raise RenderBlocked("Automatic Gemini voice request changed")
+                else:
+                    write_json(request_path, request)
+            cleanup_path = directory / "gemini-voice-cleanup.json"
+            cleaned = gemini and (cleanup_path.exists() or cleanup_path.is_symlink())
+            if cleaned:
+                from .gemini_voice_design import _read_state
+                cleanup = _read_state(cleanup_path, digest({
+                    "designer": request["designer"], "description": request["prompt"]}))
+                if cleanup.get("remote_deleted") is not True:
+                    raise RenderBlocked("Invalid Gemini voice cleanup record")
+
+            def generate(path, seed):
+                if cleaned:
+                    raise FreshGeminiVoiceRequired("The previous temporary Gemini voice was removed")
+                return design_voice(source, prompt, text, path, seed=seed)
+
+            try:
+                wav, accepted = verified_take(
+                    text, generate, directory, request, verifier, config,
+                    notify=notify, purpose="reference")
+                if accepted.get("engine_metadata", {}).get("description_applied") is not True:
+                    if cleaned:
+                        raise FreshGeminiVoiceRequired(
+                            "Interrupted reference audio has no saved voice-description binding")
+                    raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
+                reference_text = accepted["report"].get("reference_text", text)
+                return store.publish(voice_id, profile, wav, reference_text, binding_identity,
+                                     accepted["report"], {
                                  **accepted.get("engine_metadata", {}),
                                  "description_applied": True, "designer": designer_identity(source),
                                  "engine": engine.identity,
@@ -712,6 +890,16 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                                  "validation_key": make_validation_key(
                                      reference_text, verifier, config["quality"], purpose="reference"),
                              })
+            except (FreshGeminiVoiceRequired, SpeechVerificationFailed):
+                if not cleaned or generation_round:
+                    raise
+                notify("The saved reference needs a new take and its temporary Gemini voice was removed; "
+                       "creating a fresh voice sample.")
+            finally:
+                if gemini:
+                    release_remote(source, directory, request, preserve_error=sys.exc_info()[0] is not None)
+            request = dict(original_request, nonce=uuid.uuid4().hex)
+            directory = candidate_root / digest(request)
     finally:
         close = getattr(owned_designer, "close", None)
         if callable(close):
