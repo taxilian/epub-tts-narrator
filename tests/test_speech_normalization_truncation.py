@@ -6,7 +6,8 @@ import unittest
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from epub_tts_narrator.provider import OutputTruncatedError, ProviderError
-from epub_tts_narrator.speech_normalization import SCAN, normalize_document_speech
+from epub_tts_narrator.speech_normalization import normalize_document_speech
+from epub_tts_narrator.speech_prompts_v1 import SCAN
 from epub_tts_narrator.speech_prompts import SCAN as compact_scan
 from test_speech_normalization import document, edit
 

@@ -3,9 +3,8 @@
 from copy import deepcopy
 import unittest
 
-from epub_tts_narrator.renderer.phonetic_review import (
-    PROMPT, PronunciationReviewer, substitution_pairs, validate_review,
-)
+from epub_tts_narrator.renderer.phonetic_review import PronunciationReviewer, substitution_pairs, validate_review
+from epub_tts_narrator.renderer.verification_prompts import PHONETIC_PROMPT
 
 
 class Client:
@@ -163,7 +162,7 @@ class PronunciationReviewerTests(unittest.TestCase):
         self.assertEqual(client.calls[1], client.calls[2])
         self.assertEqual(set(client.calls[0][1]), {"pairs"})
         self.assertNotIn("courtyard", str(client.calls))
-        self.assertEqual(record["prompt"], PROMPT)
+        self.assertEqual(record["prompt"], PHONETIC_PROMPT)
         self.assertEqual([v["reviewer"] for v in record["votes"]], [1, 2, 3])
         self.assertNotIn("probability", record)
 
@@ -195,7 +194,7 @@ class PronunciationReviewerTests(unittest.TestCase):
         self.assertEqual(record["pairs"][0]["coverage_rule"], "complete_group_sound")
         from epub_tts_narrator.renderer.speech_coverage import SPEECH_COVERAGE_VERSION
         self.assertEqual(reviewer.identity["coverage_version"], SPEECH_COVERAGE_VERSION)
-        self.assertNotIn("JEV", PROMPT)
+        self.assertNotIn("JEV", PHONETIC_PROMPT)
         for bad in (actual.replace("does", "is"), actual.replace("What ", ""),
                     actual + " Thanks."):
             with self.subTest(bad=bad):

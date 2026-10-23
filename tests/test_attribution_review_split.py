@@ -7,9 +7,8 @@ import json
 import tempfile
 import unittest
 
-from epub_tts_narrator.attribution_review import (
-    SCAN, MAX_SCAN_SPLIT_DEPTH, _batches, audit_attribution, record_scan_truncation,
-)
+from epub_tts_narrator.attribution_review import MAX_SCAN_SPLIT_DEPTH, _batches, audit_attribution, record_scan_truncation
+from epub_tts_narrator.attribution_review_prompts import SCAN
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.prompts import PROMPT_VERSION

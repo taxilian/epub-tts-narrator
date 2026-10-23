@@ -191,7 +191,8 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertEqual(report["text_judge"]["error_code"], "invalid_judge_record")
 
     def test_later_judge_outage_retains_successful_partial_audit_and_safe_cause(self):
-        from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
+        from epub_tts_narrator.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev_prompts import QUESTIONS
         from test_jev import Opener, response
         secret = "PRIVATE_API_KEY_MUST_NOT_APPEAR"
         judge = JevTranscriptJudge({"enabled": True, "api_key": secret})
@@ -215,7 +216,8 @@ class JevReferenceVerificationTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(report, allow_nan=False))
 
     def test_later_judge_model_change_retains_both_audits_without_approving(self):
-        from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
+        from epub_tts_narrator.jev import JevTranscriptJudge
+        from epub_tts_narrator.jev_prompts import QUESTIONS
         from test_jev import Opener, response
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-private-key"})
         first = response(QUESTIONS)

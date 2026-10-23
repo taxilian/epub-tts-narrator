@@ -141,7 +141,8 @@ class ResolvedSpeechIdentityTests(unittest.TestCase):
         self.assertEqual((self.request, self.voices, self.metadata), before)
 
     def audited_fixture(self, *, can_split=True):
-        from epub_tts_narrator.renderer.speech_resolver import PROMPT, SpeechResolver
+        from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+        from epub_tts_narrator.renderer.verification_prompts import PROMPT
 
         class Client:
             identity = {"provider": "local-test-fixture"}

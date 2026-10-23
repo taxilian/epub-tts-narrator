@@ -7,9 +7,8 @@ import unittest
 
 from epub_tts_narrator.renderer.common import digest
 from epub_tts_narrator.renderer.speech_coverage import speech_coverage
-from epub_tts_narrator.renderer.speech_resolver import (
-    PROMPT, SOUND_PROMPT, SpeechResolver, validate_resolution,
-)
+from epub_tts_narrator.renderer.speech_resolver import SpeechResolver, validate_resolution
+from epub_tts_narrator.renderer.verification_prompts import PROMPT, SOUND_PROMPT
 
 
 def failure(transcript, *, attempt=1, reasons=None, **extra):

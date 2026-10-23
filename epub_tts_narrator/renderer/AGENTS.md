@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 74 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 75 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -19,7 +19,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 ## STRUCTURE
 
 1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, recovery identity.
-2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
+2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `verification_prompts.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
 3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
@@ -75,3 +75,4 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.
 - Local `workflow.render()` overlaps one chapter assembly with the next chapter's synthesis; drain assembly before releasing locks. Chunk/recovery algorithms remain shared with chapter jobs.
 - `diagnostics.py` owns fatal frame formatting and payload-free SDK/HTTP error details; managed Runpod failures skip optional stop delays.
+- `speech_resolver.py` reconsiders newly valid, previously blocked rewrites through fresh sound reviews with an origin-bound `reconsidered` audit. `recurring_resolution.py` resumes that candidate without new failed takes or pending-history growth; consonant-fragment shortening is rewrite-only, never direct audio acceptance.

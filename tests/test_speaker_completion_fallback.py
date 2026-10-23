@@ -10,9 +10,9 @@ from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import CachedRequests
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.speaker_completion import (
-    OUTPUT_TRUNCATED_MESSAGE, REVIEWERS, automatic_completion_targets,
-    complete_speakers, unassigned_segments,
+    OUTPUT_TRUNCATED_MESSAGE, automatic_completion_targets, complete_speakers, unassigned_segments,
 )
+from epub_tts_narrator.speaker_completion_prompts import REVIEWERS
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
 from shared_fixtures import Terminal
 from test_speaker_completion import Requests, PairedRequests, missing_document, paired_document

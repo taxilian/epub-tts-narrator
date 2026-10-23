@@ -5,7 +5,7 @@ Tests protect failure, resume, recovery, validation, and boundary behavior.
 Keep this file current: when suite conventions, helpers, or the run environment change, update it in the same commit.
 
 # LAYOUT
-Flat directory: 207 `test_*.py` files plus two shared helper modules.
+Flat directory: 221 `test_*.py` files plus two shared helper modules.
 `audition_fixtures.py` holds bundle/script helpers; `shared_fixtures.py` holds cross-cutting helpers (Terminal, snapshot, pcm_hash, make_epub, timed_transcript, FakeEntryPoints, PARENTHESIS_TRIM_CASES, renderer_config). Neither starts with `test_`, so discovery ignores them; add new shared helpers there, not inline copies.
 `fixtures/` contains five JSON contracts: attribution semantics and speech rewrite policies v1 through v4.
 `test_<module>.py` usually maps to `epub_tts_narrator/<module>.py`.

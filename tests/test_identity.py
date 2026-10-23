@@ -9,7 +9,8 @@ from threading import Event, Lock
 import time
 import unittest
 
-from epub_tts_narrator.identity import VOTE, SERIES_VOTE, audit_identities, _accept_scan, _accept_split, _split_ids, _votes
+from epub_tts_narrator.identity import _accept_scan, _accept_split, _split_ids, _votes, audit_identities
+from epub_tts_narrator.identity_prompts import SERIES_VOTE, VOTE
 from epub_tts_narrator.pipeline import CachedRequests, check_cast, fingerprint, make_units
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from test_contracts import valid_document

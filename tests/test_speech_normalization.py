@@ -8,9 +8,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.speech_normalization import (
-    REVIEW, SCAN, _validate_scan, normalization_pending, normalize_document_speech,
-)
+from epub_tts_narrator.speech_normalization import _validate_scan, normalization_pending, normalize_document_speech
+from epub_tts_narrator.speech_prompts_v1 import REVIEW, SCAN
 from epub_tts_narrator.spoken_text import build_spoken, spoken_source_ranges
 
 

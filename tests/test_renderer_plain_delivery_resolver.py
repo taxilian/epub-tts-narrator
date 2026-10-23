@@ -6,9 +6,8 @@ from pathlib import Path
 import unittest
 
 from epub_tts_narrator.renderer.common import digest
-from epub_tts_narrator.renderer.speech_resolver import (
-    PROMPT, SpeechResolver, validate_resolution,
-)
+from epub_tts_narrator.renderer.speech_resolver import SpeechResolver, validate_resolution
+from epub_tts_narrator.renderer.verification_prompts import PROMPT
 from test_renderer_speech_resolver import Client, failure
 
 

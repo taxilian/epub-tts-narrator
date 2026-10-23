@@ -8,9 +8,8 @@ import unittest
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.provider import ProviderError
-from epub_tts_narrator.speaker_completion import (
-    REVIEWERS, SYSTEM, automatic_completion_targets, complete_speakers, unassigned_segments,
-)
+from epub_tts_narrator.speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
+from epub_tts_narrator.speaker_completion_prompts import REVIEWERS, SYSTEM
 from test_speaker_completion import Requests, missing_document, paired_document, response
 from test_speaker_completion_fallback import uncertain
 

@@ -12,9 +12,10 @@ from unittest.mock import patch
 import unittest
 
 from epub_tts_narrator.jev import (
-    DEFAULTS, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, POLICY_VERSION, QUESTIONS,
+    DEFAULTS, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, POLICY_VERSION,
     JevClient, JevError, JevTranscriptJudge, _NoRedirect, validate_settings,
 )
+from epub_tts_narrator.jev_prompts import QUESTIONS
 
 
 SECRET = "fixture-jev-secret-must-not-appear"

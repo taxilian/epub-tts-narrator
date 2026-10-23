@@ -6,8 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_tts_narrator.identity import (audit_identities, SERIES_SCAN, SERIES_VOTE, VOTE,
-                                     SERIES_IDENTITY_GUIDANCE, SERIES_RETRY_SCOPE_GUIDANCE)
+from epub_tts_narrator.identity import audit_identities
+from epub_tts_narrator.identity_prompts import (SERIES_SCAN, SERIES_VOTE, VOTE,
+                                                SERIES_IDENTITY_GUIDANCE, SERIES_RETRY_SCOPE_GUIDANCE)
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint, make_units
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from epub_tts_narrator.series import reconcile_series_cast

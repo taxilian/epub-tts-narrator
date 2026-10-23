@@ -13,7 +13,7 @@ from epub_tts_narrator.cli import main
 from epub_tts_narrator.config import load_config
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import analyze, fingerprint, write_json
-from epub_tts_narrator.identity import LENSES
+from epub_tts_narrator.identity_prompts import LENSES
 from epub_tts_narrator.series import (link_analysis, load_registry, reconcile_series_cast,
                                    save_registry, series_context, validate_registry, validate_series_proposals)
 from test_contracts import valid_document

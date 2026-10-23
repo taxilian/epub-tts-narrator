@@ -4,7 +4,8 @@ from unittest.mock import patch
 import unittest
 
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
-from epub_tts_narrator.jev import JevTranscriptJudge, QUESTIONS
+from epub_tts_narrator.jev import JevTranscriptJudge
+from epub_tts_narrator.jev_prompts import QUESTIONS
 import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import PrimaryVerifier
 

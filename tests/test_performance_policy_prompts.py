@@ -3,7 +3,8 @@
 from copy import deepcopy
 import unittest
 
-from epub_tts_narrator.attribution_review import SCAN, VOTE, audit_attribution
+from epub_tts_narrator.attribution_review import audit_attribution
+from epub_tts_narrator.attribution_review_prompts import SCAN, VOTE
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import DEFAULT_POLICY, segment
 from epub_tts_narrator.prompts import ATTRIBUTE, COMMON, DISCOVER, PERFORMANCE_POLICY_GUIDANCE

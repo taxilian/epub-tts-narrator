@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.speech_prompts import pack_payload
-from epub_tts_narrator.speech_normalization import SCAN as legacy_scan, REVIEW as legacy_review, normalize_document_speech
+from epub_tts_narrator.speech_normalization import normalize_document_speech
+from epub_tts_narrator.speech_prompts_v1 import REVIEW as legacy_review, SCAN as legacy_scan
 from test_speech_normalization import document, Requests
 
 

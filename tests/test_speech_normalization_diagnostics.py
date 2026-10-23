@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
 from epub_tts_narrator.prompts import PROMPT_VERSION
-from epub_tts_narrator.speech_normalization import SCAN, _validate_scan, normalize_document_speech
+from epub_tts_narrator.speech_normalization import _validate_scan, normalize_document_speech
+from epub_tts_narrator.speech_prompts_v1 import SCAN
 from test_speech_normalization import document, edit
 
 

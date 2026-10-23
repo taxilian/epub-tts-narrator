@@ -9,9 +9,9 @@ import time
 from unittest.mock import patch
 import unittest
 
+from epub_tts_narrator.audition_prompts import PROMPT_VERSION, SYSTEM
 from epub_tts_narrator.audition_scripts import (
-    FILENAME, PROMPT_VERSION, SYSTEM, VERSION, ensure_bundle_scripts, prepare_document_samples,
-    prepare_samples, validate_script,
+    FILENAME, VERSION, ensure_bundle_scripts, prepare_document_samples, prepare_samples, validate_script,
 )
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint

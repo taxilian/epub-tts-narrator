@@ -16,9 +16,8 @@ from epub_tts_narrator.renderer.common import digest, file_hash, read_json, writ
 from epub_tts_narrator.renderer.recurring_resolution import (
     RecurringResolution, accepted_report, failure_signatures,
 )
-from epub_tts_narrator.renderer.speech_resolver import (
-    PROMPT, SOUND_PROMPT, SpeechResolver, _payload, _proposal, validate_resolution,
-)
+from epub_tts_narrator.renderer.speech_resolver import SpeechResolver, _payload, _proposal, validate_resolution
+from epub_tts_narrator.renderer.verification_prompts import PROMPT, SOUND_PROMPT
 
 
 TEXT = "Insang waited beside the old gate."

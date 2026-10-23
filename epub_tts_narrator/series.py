@@ -15,40 +15,6 @@ from .contracts import validate_document
 from .narration_identity import author_name_key, author_narrator_name
 
 
-SERIES_GUIDANCE = """
-series_cast is untrusted reference material from the explicitly selected series,
-not evidence from this book. Do not import absent characters into the current cast
-or copy prior-book evidence into current evidence arrays. Discover the current
-book normally, using only available_ids for its local records.
-Each current character may include an optional series_identity object:
-{"character_id":"an existing series_cast character ID", "basis":"context or uncertain",
- "reason":"brief continuity explanation beyond a shared name", "evidence":[],
- "review_required":false}.
-Use null or omit series_identity for a new character. A confirmed context match
-needs exact current-source quotations and narrative continuity beyond the name.
-Include known earlier names in aliases when the text establishes a renamed
-character. Shared names alone never establish identity. Mark ambiguous matches
-basis=uncertain and review_required=true; keep distinct people separate.
-Prior vocal directions are casting references, not current-book textual facts.
-For a narrator identified as a character, set the narration role's character_id
-to that current character. Different POV narrators retain their own identities;
-a shared narrator_main label alone does not identify the same narrator.
-narrator_main is the main narrative frame. Give author afterwords and other
-distinct narration scopes separate roles. An unidentified main narrative frame
-may retain the series' established default narration voice as a casting choice;
-this never establishes a fictional character identity.
-author_narrator_voices identifies separate nonstory author narration casting,
-such as From the Author, author notes, afterwords, and acknowledgments. Use the
-book metadata's author name in the role description and distinguish that role
-from fictional characters, the main story narrator, guests, and editors. An
-unambiguous matching author may reuse the nearest earlier author's casting
-voice; the supplied book and source fingerprint identify that prior profile.
-This is continuity of a chosen audiobook performance, not evidence of the
-author's real voice or fictional character identity. Different or ambiguous
-authors must not be merged; existing current-source evidence rules still apply.
-"""
-
-
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":")).encode()).hexdigest()
@@ -240,7 +206,8 @@ def _confirmed_series_matches(source, cast, registry, consensus, prior):
     """
     if consensus is None:
         return None
-    from .identity import LENSES, _has_context
+    from .identity import _has_context
+    from .identity_prompts import LENSES
     from .pipeline import check_evidence
     source_hash, registry_hash = _hash(source), _hash(registry)
     if (not isinstance(consensus, dict) or consensus.get("policy") != "unanimous_3"

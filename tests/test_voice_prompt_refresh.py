@@ -11,9 +11,8 @@ from unittest.mock import patch
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.prompts import COMMON, VOICE_PROFILE_GUIDANCE
 from epub_tts_narrator.provider import ProviderError
-from epub_tts_narrator.voice_prompt_refresh import (
-    SYSTEM, refresh_bundle_prompts, refresh_voice_descriptions, validate_description,
-)
+from epub_tts_narrator.voice_prompt_refresh import refresh_bundle_prompts, refresh_voice_descriptions, validate_description
+from epub_tts_narrator.voice_refresh_prompts import SYSTEM
 from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS
 from test_audition_scripts import bundle
 

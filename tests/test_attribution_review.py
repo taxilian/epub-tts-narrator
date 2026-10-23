@@ -8,9 +8,8 @@ import tempfile
 import time
 import unittest
 
-from epub_tts_narrator.attribution_review import (
-    LENSES, _accept_scan, _batches, audit_attribution, count_review_batches,
-)
+from epub_tts_narrator.attribution_review import _accept_scan, _batches, audit_attribution, count_review_batches
+from epub_tts_narrator.attribution_review_prompts import LENSES
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.performance import apply_bracket_delivery
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint, segment
