@@ -12,7 +12,7 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 28 flat modules, stdlib-only
+├── epub_tts_narrator/        # analyzer package: 29 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 73 flat modules, own CLI + AGENTS.md
 ├── tests/                    # 208 flat unittest files + fixtures/; own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
@@ -122,3 +122,4 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - **`deploy/runpod/install.sh` asserts Linux/x86_64 root** — never run it on macOS.
 - Renderer subsystems: see `epub_tts_narrator/renderer/AGENTS.md`, `tests/AGENTS.md`, `vendor/drama3-mlx/AGENTS.md`.
 - `speech_scan_recovery.py` subdivides output-truncated spelling scans at whole-segment boundaries (two levels); separate cache hints select children, never accepted edits. Jury requests do not split.
+- `speech_prompts.py` owns compact v2 spelling requests; v1 prompts remain frozen for validated cache lookup and completed-stage fingerprints. Exact context reconstruction and all three blind reviews remain required.

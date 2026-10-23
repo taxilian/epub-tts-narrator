@@ -7,6 +7,7 @@ from pathlib import Path
 from .pipeline import fingerprint, write_json
 from .prompts import PROMPT_VERSION
 from .provider import OutputTruncatedError
+from .speech_prompts import SCAN as compact_scan, pack_payload
 
 
 MAX_SPLIT_DEPTH = 2
@@ -17,18 +18,24 @@ def _split_hint(requests, system, payload):
     client = getattr(requests, "client", None)
     if cache is None or client is None:
         return None, None, False
-    key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                       "system": system, "payload": payload})
-    marker = {"version": 1, "reason": "model_output_truncated", "request_cache_fingerprint": key}
-    path = Path(cache) / "speech-spelling-subdivisions" / f"{key}.json"
-    if not (Path(cache) / f"{key}.json").exists() and path.is_file() and not path.is_symlink():
-        try:
-            with path.open(encoding="utf-8") as stream:
-                raw = stream.read(2049)
-            if len(raw) <= 2048 and json.loads(raw) == marker:
-                return path, marker, True
-        except (OSError, ValueError, RecursionError):
-            return path, marker, False
+    entries = []
+    for prompt, data in ((compact_scan, pack_payload(payload)), (system, payload)):
+        key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
+                           "system": prompt, "payload": data})
+        marker = {"version": 1, "reason": "model_output_truncated", "request_cache_fingerprint": key}
+        entries.append((Path(cache) / "speech-spelling-subdivisions" / f"{key}.json", marker, key))
+    path, marker, _ = entries[0]
+    if any((Path(cache) / f"{key}.json").exists() for _, _, key in entries):
+        return path, marker, False
+    for candidate, expected, _ in entries:
+        if candidate.is_file() and not candidate.is_symlink():
+            try:
+                with candidate.open(encoding="utf-8") as stream:
+                    raw = stream.read(2049)
+                if len(raw) <= 2048 and json.loads(raw) == expected:
+                    return path, marker, True
+            except (OSError, ValueError, RecursionError):
+                continue
     return path, marker, False
 
 
@@ -42,7 +49,7 @@ def scan_with_recovery(requests, system, payload, rows, run, progress):
 
     def scan(part_rows, part_payload, depth):
         ids = [row["id"] for row in part_rows]
-        record = {"target_segment_ids": ids, "request_fingerprint": fingerprint(part_payload),
+        record = {"target_segment_ids": ids, "request_fingerprint": fingerprint(pack_payload(part_payload)),
                   "depth": depth}
         can_split = len(part_rows) > 1 and depth < MAX_SPLIT_DEPTH
         path, marker, replay = _split_hint(requests, system, part_payload) if can_split else (None, None, False)

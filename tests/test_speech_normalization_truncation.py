@@ -7,6 +7,7 @@ from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from epub_tts_narrator.provider import OutputTruncatedError, ProviderError
 from epub_tts_narrator.speech_normalization import SCAN, normalize_document_speech
+from epub_tts_narrator.speech_prompts import SCAN as compact_scan
 from test_speech_normalization import document, edit
 
 
@@ -148,7 +149,7 @@ class SpeechNormalizationTruncationTests(unittest.TestCase):
         normalize_document_speech(source, CachedRequests(client, self.cache), workers=1)
         parent = client.calls[0]
         key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                           "system": SCAN, "payload": parent})
+                           "system": compact_scan, "payload": parent})
         write_json(self.cache / f"{key}.json", response(parent))
         cached = Client(lambda payload: self.fail("Validated cache should avoid all model calls"))
         result = normalize_document_speech(source, CachedRequests(cached, self.cache), workers=1)

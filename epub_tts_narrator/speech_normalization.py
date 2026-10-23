@@ -63,6 +63,7 @@ must be plain self-contained audible instructions, no markup, voice IDs, book
 lore or presumed knowledge of the book. The prompt is for audiobook narration
 portraying a character; it is not an instruction to change a character's identity.
 """
+# Frozen v1 prompts also bind completed-stage fingerprints and validated legacy caches.
 SCAN = COMMON + RUBRIC + """
 Inspect EVERY target segment, using its surrounding source and assigned role.
 Return exactly {"segments":[{"segment_id":"existing ID","edits":[
@@ -438,6 +439,7 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                             for index in sorted(context_ids)]}
     tasks = [(number, rows, payload_for(rows, number)) for number, rows in enumerate(batches, 1)]
     def run_stage(system, payload, validate, rows, number, stage, cancelled):
+        from .speech_prompts import SCAN as compact_scan, REVIEW as compact_review, pack_payload
         label = f"Speech spelling {stage} batch {number}/{len(tasks)}"
         def checked(response):
             try:
@@ -445,7 +447,13 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
             except ValueError as exc:
                 raise ValueError(f"{label}: {exc}") from exc
         try:
-            return requests.run(system, payload, checked, cancelled=cancelled)
+            lookup = getattr(requests, "cached", None)
+            if callable(lookup):
+                found, accepted = lookup(system, payload, checked, cancelled=cancelled)
+                if found:
+                    return accepted
+            compact_system = compact_scan if payload["mode"] == "speech_spelling_scan" else compact_review
+            return requests.run(compact_system, pack_payload(payload), checked, cancelled=cancelled)
         except ProviderError as exc:
             error_type = OutputTruncatedError if isinstance(exc, OutputTruncatedError) else ProviderError
             raise error_type(f"{label}: {exc}\nNo unvalidated spelling edits were applied; "

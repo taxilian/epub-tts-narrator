@@ -748,6 +748,9 @@ class CachedRequests:
                 "Omit edits whose original and replacement are identical or differ only in capitalization. "
                 "Do not invent a spelling change just to retain an edit; return edits=[] when no changes are needed.",
             ])
+            if payload.get("version") == 2:
+                correction["instruction"] = "Return all target segments in order under the original schema, correcting every validation error."
+                guidance = []
         if not speech_spelling and (attribution or any(word in str(error).casefold() for word in ("evidence", "quote", "substring"))):
             guidance.append(
                 "Copy evidence verbatim from the referenced visible block. Prefer a short, sufficient exact "
@@ -829,12 +832,7 @@ class CachedRequests:
             # Failed output is a performance hint, never an accepted cache hit.
             return None
 
-    def run(self, system, payload, validate, *, cancelled=None):
-        if cancelled is not None and cancelled.is_set():
-            raise CancelledError("Analysis was cancelled")
-        key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
-                           "system": system, "payload": payload})
-        path = self.cache_dir / f"{key}.json"
+    def _cached_response(self, path, validate):
         if path.exists():
             try:
                 accepted = validate(json.loads(path.read_text(encoding="utf-8")))
@@ -851,7 +849,26 @@ class CachedRequests:
                     if self.cache_hits == 1 or self.cache_hits % 25 == 0:
                         self.progress(f"Cache reuse: {self.cache_hits} validated response(s) restored; "
                                       "no API calls for these responses.")
-                return accepted
+                return True, accepted
+        return False, None
+
+    def cached(self, system, payload, validate, *, cancelled=None):
+        """Read and validate an exact prior request without initiating a model call."""
+        if cancelled is not None and cancelled.is_set():
+            raise CancelledError("Analysis was cancelled")
+        key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
+                           "system": system, "payload": payload})
+        return self._cached_response(self.cache_dir / f"{key}.json", validate)
+
+    def run(self, system, payload, validate, *, cancelled=None):
+        if cancelled is not None and cancelled.is_set():
+            raise CancelledError("Analysis was cancelled")
+        key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
+                           "system": system, "payload": payload})
+        path = self.cache_dir / f"{key}.json"
+        found, accepted = self._cached_response(path, validate)
+        if found:
+            return accepted
         current = payload
         failed = self._latest_failed_response(key)
         if failed is not None:
