@@ -19,10 +19,12 @@ import tempfile
 import threading
 import time
 
+from .chapter_protocol import require_hash
 from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .fish_http import MAX_AUDIO_BYTES, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
 from .local_runtime import LocalRuntime, requires_mlx
+from .reference_cache import UNKNOWN_REFERENCE_MESSAGE, ReferenceCache
 
 
 class RequestError(ValueError):
@@ -33,7 +35,7 @@ def _print_activity(message):
     print(message, flush=True)
 
 
-def _parse_request(data, content_type):
+def _parse_request(data, content_type, references_cache=None):
     try:
         if content_type == "application/msgpack":
             try:
@@ -62,9 +64,25 @@ def _parse_request(data, content_type):
         raise RequestError("Provide 1–16 inline audio references; reference_id and remote audio paths are unsupported")
     normalized = []
     for index, reference in enumerate(references):
-        if not isinstance(reference, dict) or set(reference) - {"audio", "text", "speaker"}:
-            raise RequestError(f"references[{index}] must contain inline audio and text, with optional speaker")
+        if (not isinstance(reference, dict)
+                or set(reference) - {"audio", "text", "speaker", "reference_id"}):
+            raise RequestError(f"references[{index}] must contain inline audio or a registered "
+                               f"reference_id, with text and optional speaker")
+        reference_id = reference.get("reference_id")
+        if reference_id is not None:
+            try:
+                require_hash(reference_id, "reference_id")
+            except ValueError as exc:
+                raise RequestError(f"references[{index}].{exc}") from exc
         audio = reference.get("audio")
+        cache_hit = False
+        if audio is None:
+            if reference_id is None:
+                raise RequestError(f"references[{index}].audio must contain inline audio bytes")
+            audio = references_cache.load(reference_id) if references_cache else None
+            if audio is None:
+                raise RequestError(f"references[{index}] {UNKNOWN_REFERENCE_MESSAGE}")
+            cache_hit = True
         if content_type == "application/json" and isinstance(audio, str):
             try:
                 audio = base64.b64decode(audio, validate=True)
@@ -72,6 +90,8 @@ def _parse_request(data, content_type):
                 raise RequestError(f"references[{index}].audio must be base64 audio") from exc
         if not isinstance(audio, bytes) or not audio or len(audio) > MAX_AUDIO_BYTES:
             raise RequestError(f"references[{index}].audio must contain inline audio bytes")
+        if not cache_hit and reference_id is not None and hashlib.sha256(audio).hexdigest() != reference_id:
+            raise RequestError(f"references[{index}].reference_id does not match its inline audio")
         text = reference.get("text")
         if not isinstance(text, str):
             raise RequestError(f"references[{index}].text must be an exact transcript")
@@ -92,7 +112,14 @@ def _parse_request(data, content_type):
             if text.startswith(" "):
                 text = text[1:]
         _text(text, f"references[{index}].text")
-        normalized.append({"audio": audio, "text": text, "speaker": speaker})
+        entry = {"audio": audio, "text": text, "speaker": speaker}
+        if cache_hit:
+            # Bytes from the reference cache already passed inspection when
+            # they were registered; inline bytes are validated by the caller.
+            entry["cache_hit"] = True
+        if reference_id is not None:
+            entry["reference_id"] = reference_id
+        normalized.append(entry)
     speakers = [reference["speaker"] for reference in normalized]
     if len(speakers) > 1 and (None in speakers or len(set(speakers)) != len(speakers)):
         raise RequestError("Multiple references must each have a distinct explicit speaker tag or speaker ID")
@@ -142,6 +169,7 @@ class _RenderServer(ThreadingHTTPServer):
         self.settings = config["server"]
         self.engine = engine
         self.notify = notify
+        self.references = ReferenceCache()
         self._activity_lock = threading.Lock()
         self._request_sequence = 0
         self.model_id = get_drama3_model(
@@ -283,7 +311,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": {"message": "Use GET /health or POST /v1/tts"}})
             return
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
-        self._json(200, {"status": "ready", "model": model, "protocol": "fish-inline-reference-wav-v1"})
+        self._json(200, {"status": "ready", "model": model,
+                         "protocol": "fish-inline-reference-wav-v1", "reference_reuse": True})
 
     def do_POST(self):
         self.request_id = self.server.next_request_id()
@@ -315,7 +344,8 @@ class _Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise RequestError("Incomplete request body")
-            body, references = _parse_request(data, self.headers.get_content_type())
+            body, references = _parse_request(data, self.headers.get_content_type(),
+                                              self.server.references)
             seed, sampling = _sampling(body, self.headers)
         except (RequestError, EngineError) as exc:
             self._json(400, {"error": {"message": str(exc)}})
@@ -327,17 +357,23 @@ class _Handler(BaseHTTPRequestHandler):
                 for index, reference in enumerate(references):
                     path = root / f"reference-{index}.wav"
                     path.write_bytes(reference["audio"])
-                    try:
-                        inspect_wav(path)
-                    except EngineError as exc:
-                        self._json(400, {"error": {"message": f"Invalid reference {index}: {exc}"}})
-                        return
+                    if not reference.get("cache_hit"):
+                        try:
+                            inspect_wav(path)
+                        except EngineError as exc:
+                            self._json(400, {"error": {"message": f"Invalid reference {index}: {exc}"}})
+                            return
+                        self.server.references.store(reference["audio"],
+                                                     reference.get("reference_id"))
                     voices.append({"kind": "reference", "reference_audio": str(path),
                                    "reference_text": reference["text"], "speaker": reference["speaker"],
                                    "reference_sha256": hashlib.sha256(reference["audio"]).hexdigest()})
                 output = root / "take.wav"
+                reused = sum(1 for reference in references if reference.get("cache_hit"))
+                suffix = f", {reused} reused" if reused else ""
                 queued_at = time.monotonic()
-                self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, {len(voices)} reference(s)")
+                self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, "
+                                                     f"{len(voices)} reference(s){suffix}")
                 self.server.synthesize(body["text"], voices, output, seed, sampling,
                                        request_id=self.request_id, queued_at=queued_at)
                 audio = inspect_wav(output)
@@ -348,6 +384,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("Content-Length", str(size))
                 self.send_header("X-Audiobook-Seed-Applied", str(seed))
+                self.send_header("X-Audiobook-Reference-Reuse", "sha256-v1")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.close_connection = True

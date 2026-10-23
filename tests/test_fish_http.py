@@ -588,7 +588,7 @@ class FishHTTPTests(unittest.TestCase):
         for request_id in ("request-000001", "request-000002"):
             events = [event for event in self.activity if request_id in event]
             self.assertEqual(len(events), 3, events)
-            self.assertRegex(events[0], r"^\[\d{4}-\d{2}-\d{2}T.+\] request-\d{6}: queued: \d+ characters, 1 reference\(s\)$")
+            self.assertRegex(events[0], r"^\[\d{4}-\d{2}-\d{2}T.+\] request-\d{6}: queued: \d+ characters, 1 reference\(s\)(?:, 1 reused)?$")
             self.assertIn("inference started (queued ", events[1])
             self.assertIn("completed in ", events[2])
             self.assertIn("0.25s audio, 16000 Hz, 8044 bytes", events[2])

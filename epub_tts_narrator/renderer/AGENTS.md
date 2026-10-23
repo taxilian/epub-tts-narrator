@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 71 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 73 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 ## ENTRY
@@ -70,3 +70,4 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - See `ENGINE_NOTES.md` for engine-specific details.
 - See root `RENDERER.md` for renderer configuration and operation.
 - See root `REMOTE_RENDERING.md` for distributed rendering contracts.
+- `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.

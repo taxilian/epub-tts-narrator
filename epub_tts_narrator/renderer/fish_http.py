@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import socket
 import tempfile
+import threading
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -21,6 +22,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
 from .engines import EngineError, _directed_text, _plain_direction, _seed, _text, format_dialogue
 from .diagnostics import safe_error_text
+from .reference_cache import UNKNOWN_REFERENCE_MARKER, ReferenceCache
 from .speech_text import trim_speech_text
 
 
@@ -38,9 +40,10 @@ class FishHTTPError(EngineError):
 
     transport_error = True
 
-    def __init__(self, message: str, *, retryable: bool = True):
+    def __init__(self, message: str, *, retryable: bool = True, status: int | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.status = status
 
 
 def redact(message: str, key: str) -> str:
@@ -175,6 +178,9 @@ class FishHTTPEngine:
         self.sampling = {key: values.get(key, default) for key, default in (
             ("temperature", 1.0), ("top_p", 0.9), ("top_k", 30), ("max_new_tokens", 2048),
         )}
+        self._reuse_lock = threading.Lock()
+        self._reuse_supported = False
+        self._registered_references: set[str] = set()
         if self.protocol == "fish_native_drama3":
             # Fish Speech 5415669 accepts these fields in the body, has a fixed
             # top-k of 30, and seeds its one shared inference queue globally.
@@ -273,11 +279,54 @@ class FishHTTPEngine:
         return {**self._request(text, references, output_path, seed),
                 "synthesis_text": text, **metadata}
 
+    def _references_for_wire(self, references):
+        """Swap repeated reference audio for its registered content id."""
+        if self.protocol != "fish_inline":
+            return references, (), ()
+        wire, seeded, reused = [], [], []
+        with self._reuse_lock:
+            registered = set(self._registered_references)
+            supported = self._reuse_supported
+        for reference in references:
+            content_id = ReferenceCache.content_id(reference["audio"])
+            if supported and content_id in registered:
+                wire.append({"reference_id": content_id, "text": reference["text"]})
+                reused.append(content_id)
+            else:
+                wire.append(reference)
+                seeded.append(content_id)
+        return wire, seeded, reused
+
+    def _mark_registered(self, content_ids, supported) -> None:
+        with self._reuse_lock:
+            self._reuse_supported = supported
+            if supported:
+                self._registered_references.update(content_ids)
+            else:
+                self._registered_references.clear()
+
+    def _forget_registered(self, content_ids) -> None:
+        with self._reuse_lock:
+            self._registered_references.difference_update(content_ids)
+
     def _request(self, text, references, output_path, seed):
         _seed(seed)
         output = Path(output_path)
         if output.exists():
             raise EngineError(f"Audio output already exists: {output}")
+        wire, seeded, reused = self._references_for_wire(references)
+        try:
+            return self._transmit(text, wire, output, seed, seeded + reused)
+        except FishHTTPError as exc:
+            if not reused or exc.status != 400 or UNKNOWN_REFERENCE_MARKER not in str(exc):
+                raise
+            # The server restarted or evicted an entry, so registration state
+            # is stale. The rejected attempt never reached synthesis because
+            # unknown ids fail at parse time; resend the audio inline once.
+            self._forget_registered(seeded + reused)
+        return self._transmit(text, references, output, seed, seeded + reused)
+
+    def _transmit(self, text, references, output, seed, seeded_ids):
         body = {"text": text, "references": references, "format": "wav", "normalize": False,
                 **{key: value for key, value in self.sampling.items() if key != "top_k"}}
         effective_seed = seed
@@ -350,6 +399,8 @@ class FishHTTPEngine:
                     )
                 metadata = inspect_wav(staged)
                 os.link(staged, output)
+                self._mark_registered(seeded_ids, self.protocol == "fish_inline"
+                                      and response.headers.get("X-Audiobook-Reference-Reuse") == "sha256-v1")
                 if self.protocol == "fish_native_drama3":
                     metadata["seed_effective"] = effective_seed
                 elif self.protocol == "fish_sglang_drama3":
@@ -376,6 +427,7 @@ class FishHTTPEngine:
             raise FishHTTPError(
                 redact(f"Fish HTTP {exc.code} ({self.name}): {detail or exc.reason}", self.api_key),
                 retryable=exc.code in {408, 425, 429} or exc.code >= 500,
+                status=exc.code,
             ) from exc
         except (URLError, TimeoutError, socket.timeout, http.client.HTTPException) as exc:
             raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}): {exc}", self.api_key)) from exc
