@@ -1,6 +1,7 @@
 """Ordered word coverage and explicit contextual evidence for unfamiliar spellings."""
 
 from functools import lru_cache
+import json
 
 from .speech_normalization import _WORDS, _fold, _word_forms_accounted_for
 
@@ -56,18 +57,29 @@ def validate_word_verdicts(vote, proposal):
     if "word_preservation" in proposal:
         expected = [pair["word_id"] for pair in proposal["word_preservation"]["pairs"]]
     else:
-        alignment = word_alignment(proposal["original"], proposal["replacement"])
-        if alignment is None:
-            raise ValueError("Optional word evidence requires complete ordered word coverage")
-        expected = [f"w{index}" for index, _ in enumerate(alignment)]
+        if not _word_forms_accounted_for(proposal["original"], proposal["replacement"]):
+            raise ValueError("Unfamiliar edits require supplied word_preservation pairs")
+        expected = None
     words = vote.get("word_verdicts")
-    if (not isinstance(words, list) or len(words) != len(expected)
-            or any(not isinstance(word, dict) or set(word) != {"word_id", "verdict"}
-                   or word.get("word_id") != identifier
-                   or not isinstance(word.get("verdict"), str)
-                   or word.get("verdict") not in {"approve", "reject", "uncertain"}
-                   for word, identifier in zip(words, expected))):
-        raise ValueError("Contextual word review must return word_verdicts for every word_id exactly once in pair order")
+    if not isinstance(words, list):
+        raise ValueError("word_verdicts must be an array")
+    if expected is not None and len(words) != len(expected):
+        raise ValueError(f"Expected {len(expected)} ordered word verdict(s) for complete coverage; received {len(words)}")
+    if expected is None and len(words) > 16:
+        raise ValueError("Optional word annotations exceed the bounded eight-word-per-side edit scope")
+    for index, word in enumerate(words):
+        if (not isinstance(word, dict) or set(word) != {"word_id", "verdict"}
+                or not isinstance(word.get("word_id"), str) or not word["word_id"].strip()
+                or len(word["word_id"]) > 128 or not word["word_id"].isprintable()
+                or not isinstance(word.get("verdict"), str)
+                or word["verdict"] not in {"approve", "reject", "uncertain"}):
+            raise ValueError(f"word_verdicts[{index}] requires a nonempty bounded word_id and approve/reject/uncertain verdict")
+    identifiers = [word["word_id"] for word in words]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("word_verdicts contains duplicate word_id values; each ordered word verdict needs a unique ID")
+    if expected is not None and identifiers != expected:
+        raise ValueError(f"Expected provided word_ids {json.dumps(expected)}; received {json.dumps(identifiers)}. "
+                         "Copy the IDs from this edit's word_preservation pairs; do not number across proposals.")
 
 
 def approves(vote, proposal):
