@@ -40,6 +40,13 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(json.loads(output)["voices"], 2)
 
+    def test_chapter_server_maintenance_flag_is_explicit_and_defaults_off(self):
+        for flags, expected in (([], False), (["--maintenance"], True)):
+            with self.subTest(maintenance=expected), patch("epub_tts_narrator.renderer.chapter_server.serve") as serve:
+                status, _, error = self.run_cli("serve-chapters", "--config", self.config, *flags)
+            self.assertEqual(status, 0, error)
+            self.assertIs(serve.call_args.kwargs["maintenance"], expected)
+
     def test_cache_report_is_read_only_and_never_initializes_models(self):
         checkpoint = self.root / "tts-model"
         checkpoint.mkdir()

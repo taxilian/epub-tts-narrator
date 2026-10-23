@@ -61,6 +61,14 @@ selects a different deployment override. Bootstrap and Update default to
 uncommitted files, private configuration and book data are not included. This
 allows testing a committed change before publishing it on GitHub.
 
+Bootstrap and Update use maintenance startup: the chapter API is available for
+checks, but pending books are not resumed, and chapter submissions/retries are
+rejected. Stored jobs, event history, voices and accepted clips remain intact.
+Encode starts normal queue processing. For manual operation, the worker's
+`serve-maintenance` command (or `serve-chapters --maintenance` on the renderer)
+provides the same protection. This mode is a startup choice, not a global
+configuration setting, and does not change cache identities.
+
 Each operation stops the Pod on success, failure or interruption. Optionally
 pass `--stop-delay 300` to keep the client attached for a five-minute grace
 period before stopping; Ctrl-C ends the grace period and stops immediately.

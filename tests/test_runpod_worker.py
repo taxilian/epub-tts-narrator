@@ -541,12 +541,34 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(native_command[native_command.index("--workers") + 1], "1")
         self.assertEqual(native_command[native_command.index("--device") + 1], "cuda:0")
         self.assertIn("serve-chapters", chapter_command)
+        self.assertNotIn("--maintenance", chapter_command)
         self.assertEqual(popen.call_args_list[0].kwargs["env"]["PATH"].split(os.pathsep)[0],
                          str(image["fish_source"] / ".venv/bin"))
         self.assertEqual(popen.call_args_list[1].kwargs["env"], dict(os.environ))
         self.assertTrue(all(call.kwargs["start_new_session"] for call in popen.call_args_list))
         ready.assert_called_once()
         cleanup.assert_called_once_with([native, chapter])
+
+    def test_maintenance_worker_serves_api_without_starting_job_consumers(self):
+        self.prepare()
+        image = self.native_image()
+        native, chapter = Mock(pid=100001), Mock(pid=100002)
+        native.poll.return_value, chapter.poll.return_value = None, 0
+        with (patch.object(worker.subprocess, "Popen", side_effect=[native, chapter]) as popen,
+              patch.object(worker, "wait_ready"), patch.object(worker, "stop_children") as cleanup,
+              patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(worker.serve(self.config, self.root / "config.toml", maintenance=True, **image), 0)
+        self.assertEqual(popen.call_count, 2)
+        self.assertIn("--maintenance", popen.call_args_list[1].args[0])
+        cleanup.assert_called_once_with([native, chapter])
+
+    def test_cli_maintenance_command_preserves_normal_and_isolated_startup_modes(self):
+        for command in ("serve", "serve-maintenance", "serve-tts"):
+            with self.subTest(command=command), patch.object(worker, "load_config", return_value=self.config), \
+                    patch.object(worker, "serve", return_value=0) as serve:
+                self.assertEqual(worker.main(["--config", "fixture.toml", command]), 0)
+                self.assertEqual(serve.call_args.kwargs["maintenance"], command == "serve-maintenance")
+                self.assertEqual(serve.call_args.kwargs["chapters"], command != "serve-tts")
 
     def test_failed_model_startup_still_terminates_native_process(self):
         self.prepare()

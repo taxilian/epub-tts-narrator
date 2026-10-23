@@ -26,7 +26,10 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 
 
 class ChapterJobs:
-    def __init__(self, data_dir, executor, settings=None, *, publisher=None):
+    def __init__(self, data_dir, executor, settings=None, *, publisher=None, maintenance=False):
+        if type(maintenance) is not bool:
+            raise ValueError("Maintenance mode must be a boolean")
+        self._maintenance = maintenance
         self.root = Path(data_dir).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.executor, self.publisher = executor, publisher
@@ -82,6 +85,7 @@ class ChapterJobs:
                 "multi_speaker": getattr(self.executor, "multi_speaker", True),
                 "single_speaker_paragraph": getattr(self.executor, "single_speaker_paragraph", False),
                 "parallel_chapters": self._parallel_chapters,
+                "maintenance": self._maintenance,
                 "voice_format": "flac", "chapter_format": "m4a",
                 "timing_precision": "paragraph_or_chunk"}
 
@@ -118,6 +122,11 @@ class ChapterJobs:
     def _admit(self):
         if self._draining or self._stopping or self._closed:
             raise RuntimeError("Chapter server is draining; retry after restarting it")
+
+    def _admit_job(self):
+        self._admit()
+        if self._maintenance:
+            raise RuntimeError("Chapter server is in maintenance mode; start Encode to process books")
 
     def register_voice(self, asset_id, manifest, audio):
         manifest = validate_voice_manifest(manifest)
@@ -187,6 +196,9 @@ class ChapterJobs:
             self._event(db, job_id, message)
 
     def submit(self, spec, idempotency_key):
+        with self._condition:
+            if self._maintenance:
+                self._admit_job()
         spec = validate_spec(spec)
         require_hash(idempotency_key, "Idempotency key")
         identifier = digest({"key": idempotency_key, "renderer": spec["renderer_fingerprint"]})
@@ -207,7 +219,7 @@ class ChapterJobs:
                 if existing["spec"] != payload:
                     raise ValueError("Idempotency key was already used for a different chapter")
             else:
-                self._admit()
+                self._admit_job()
                 pending = db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','generating','assembling')").fetchone()[0]
                 if pending >= self.settings.get("max_pending_jobs", 256):
                     raise RuntimeError("Chapter job queue is full; retry later")
@@ -246,7 +258,7 @@ class ChapterJobs:
 
     def retry(self, job_id):
         with self._condition, self._connect() as db:
-            self._admit()
+            self._admit_job()
             row = self._row(db, job_id)
             if row["renderer"] != self.fingerprint:
                 raise ValueError("This job used another renderer; submit a new job specification")
@@ -288,6 +300,11 @@ class ChapterJobs:
                 lock.close()
                 raise RuntimeError("Another chapter service is using this data directory") from None
             self._file_lock = lock
+            if self._maintenance:
+                # Keep the same exclusive store lease, but do not recover
+                # interrupted states or start any queue/assembly consumers.
+                self._started = True
+                return
             with self._connect() as db:
                 for row in db.execute("SELECT id FROM jobs WHERE state IN ('generating','assembling')").fetchall():
                     db.execute("UPDATE jobs SET state='queued',updated=? WHERE id=?", (time.time(), row["id"]))
@@ -409,7 +426,7 @@ class ChapterJobs:
     def idle_seconds(self):
         with self._condition, self._connect() as db:
             pending = db.execute("SELECT 1 FROM jobs WHERE state IN ('queued','generating','assembling') LIMIT 1").fetchone()
-            return 0.0 if pending or self._active else max(0.0, time.monotonic() - self._last_activity)
+            return 0.0 if (pending and not self._maintenance) or self._active else max(0.0, time.monotonic() - self._last_activity)
 
     def begin_shutdown_if_idle(self, timeout):
         with self._condition:

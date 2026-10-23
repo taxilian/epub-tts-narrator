@@ -823,6 +823,33 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertIn("tail -n 60", deployment.ssh.call_args.args[0])
         self.sleep.assert_not_called()
 
+    def test_prepared_launch_uses_maintenance_and_encode_launch_consumes_jobs(self):
+        for prepare in (True, False):
+            with self.subTest(prepare=prepare):
+                deployment = self.deployment()
+                deployment.state["pod_id"] = "pod_fixture"
+                deployment.ssh = Mock(return_value=b"")
+                with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
+                    client.return_value.request.return_value = {"maintenance": prepare}
+                    deployment.launch(prepare=prepare)
+                launched = next(call.args[0] for call in deployment.ssh.call_args_list if call.args[0].startswith("nohup "))
+                action = "serve-maintenance" if prepare else "serve"
+                self.assertIn(deployment.worker_command(action) + " > ", launched)
+                commands = [call.args[0] for call in deployment.ssh.call_args_list]
+                self.assertEqual(deployment.worker_command("prepare") in commands, prepare)
+
+    def test_launch_rejects_wrong_mode_instead_of_smoking_or_encoding(self):
+        for prepare, reported in ((True, {}), (True, {"maintenance": False}),
+                                  (False, {"maintenance": True})):
+            with self.subTest(prepare=prepare, reported=reported):
+                deployment = self.deployment()
+                deployment.state["pod_id"] = "pod_fixture"
+                deployment.ssh = Mock(return_value=b"")
+                with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
+                    client.return_value.request.return_value = reported
+                    with self.assertRaisesRegex(RuntimeError, "wrong maintenance mode"):
+                        deployment.launch(prepare=prepare)
+
     def test_healthy_supervisor_ignores_ssh_warning_output(self):
         from epub_tts_narrator.renderer.chapter_client import ChapterClientError
         deployment = self.deployment()

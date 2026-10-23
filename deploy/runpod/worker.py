@@ -525,7 +525,7 @@ def inference_environment(config, backend_directory, *, application_python=APPLI
 
 
 def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_SOURCE,
-          application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True):
+          application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True, maintenance=False):
     check(config, application_python=application_python)
     native_command, native_directory = inference_command(
         config, fish_source=fish_source, sglang_source=sglang_source)
@@ -533,6 +533,8 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
         raise ValueError(f"Worker image is missing {application_python}")
     chapter_command = [str(application_python), "-u", "-m", "epub_tts_narrator.renderer.cli",
                        "serve-chapters", "--config", str(Path(config_path).resolve())]
+    if maintenance:
+        chapter_command.append("--maintenance")
     stop = threading.Event()
     received_signal = []
 
@@ -557,7 +559,8 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
                 raise WorkerStopped()
             chapter = None
             if chapters:
-                print("Fish CUDA is ready. Starting the chapter service.", flush=True)
+                mode = " in maintenance mode; queued books remain paused" if maintenance else ""
+                print(f"Fish CUDA is ready. Starting the chapter service{mode}.", flush=True)
                 chapter = subprocess.Popen(
                     chapter_command, start_new_session=True,
                     env=application_environment(config, application_python=application_python))
@@ -594,7 +597,7 @@ def main(argv=None):
                         help="Persistent, pinned Fish Speech checkout (default: beside the application)")
     parser.add_argument("--sglang-source", type=Path, default=SGLANG_SOURCE,
                         help="Persistent, pinned SGLang-Omni checkout")
-    parser.add_argument("command", choices=("prepare", "check", "serve", "serve-tts", "smoke", "run-application"))
+    parser.add_argument("command", choices=("prepare", "check", "serve", "serve-maintenance", "serve-tts", "smoke", "run-application"))
     args = parser.parse_args(arguments[:separator])
     config = None
     try:
@@ -629,7 +632,7 @@ def main(argv=None):
         else:
             return serve(config, args.config, startup_timeout=args.startup_timeout,
                          fish_source=args.fish_source, sglang_source=args.sglang_source,
-                         chapters=args.command != "serve-tts")
+                         chapters=args.command != "serve-tts", maintenance=args.command == "serve-maintenance")
         return 0
     except KeyboardInterrupt:
         return 130

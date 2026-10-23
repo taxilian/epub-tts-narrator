@@ -372,7 +372,7 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
     return app
 
 
-def serve(config):
+def serve(config, *, maintenance=False):
     """Start one transport process; GPU and CPU scheduling belong to ChapterJobs."""
     settings = config["chapter_server"]
     _validate_settings(settings)
@@ -406,7 +406,8 @@ def serve(config):
         shutdown_callback = lambda: stop_runpod(settings)
     executor = ChapterExecutor(config)
     job_settings = {**settings, "ffprobe": config["render"]["ffprobe"]}
-    jobs = ChapterJobs(settings["data_dir"], executor, job_settings, publisher=publisher)
+    jobs = ChapterJobs(settings["data_dir"], executor, job_settings, publisher=publisher,
+                       maintenance=maintenance)
     app = create_app(jobs, settings, shutdown_callback=shutdown_callback)
     uvicorn.run(
         app, host=settings.get("host", "127.0.0.1"), port=settings.get("port", 8081),

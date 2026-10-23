@@ -128,6 +128,19 @@ class ChapterServerSettingsTests(unittest.TestCase):
         self.assertNotIn("ffprobe", config["chapter_server"])
         self.assertEqual(run.call_args.kwargs["workers"], 1)
 
+    @unittest.skipUnless(HAS_SERVER_DEPS and importlib.util.find_spec("uvicorn"), "requires server dependencies")
+    def test_maintenance_is_passed_to_job_service_without_changing_config(self):
+        config = deepcopy(DEFAULTS)
+        config["render_pool"]["workers"] = [{"type": "fish_http"}]
+        config["verification"]["model"] = "/fixture/local-asr"
+        before = deepcopy(config)
+        with (patch("epub_tts_narrator.renderer.chapter_executor.ChapterExecutor"),
+              patch("epub_tts_narrator.renderer.chapter_jobs.ChapterJobs") as jobs,
+              patch("uvicorn.run")):
+            serve(config, maintenance=True)
+        self.assertIs(jobs.call_args.kwargs["maintenance"], True)
+        self.assertEqual(config, before)
+
 
 @unittest.skipUnless(HAS_SERVER_DEPS, "requires FastAPI and httpx")
 class ChapterServerTests(unittest.TestCase):
@@ -465,6 +478,31 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
             self.assertEqual(self.submit(client), identifier)
             self.assertEqual(self.wait_for(client, identifier, "complete")["id"], identifier)
             self.assertEqual(replacement.synthesis_calls, 0)
+
+    def test_real_maintenance_service_keeps_read_apis_and_rejects_job_writes(self):
+        from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
+
+        job = self.jobs.submit(self.spec, self.payload["idempotency_key"])
+        self.jobs._set_state(job["id"], "generating")
+        before = self.jobs.status(job["id"]), self.jobs.events(job["id"])
+        self.jobs.close()
+        engine = FixtureExecutor()
+        maintenance = ChapterJobs(self.root, engine, maintenance=True)
+        with self.client_type(create_app(maintenance, {"api_key": KEY})) as client:
+            caps = client.get("/v1/capabilities", headers=AUTH)
+            self.assertEqual(caps.status_code, 200)
+            self.assertTrue(caps.json()["maintenance"])
+            self.assertEqual(client.get(f"/v1/jobs/{job['id']}", headers=AUTH).json(), before[0])
+            self.assertEqual(client.post("/v1/voices/ensure", headers=AUTH,
+                                         json={"voices": []}).status_code, 200)
+            for endpoint, payload in (("/v1/jobs", self.payload), (f"/v1/jobs/{job['id']}/retry", None)):
+                response = client.post(endpoint, json=payload, headers=AUTH)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn("maintenance mode", response.text)
+            self.assertEqual(engine.synthesis_calls, 0)
+            self.assertEqual(engine.assembly_calls, 0)
+            self.assertEqual(before, (maintenance.status(job["id"]), maintenance.events(job["id"])))
+        self.assertTrue(engine.closed)
 
     def test_real_core_failure_retry_reuses_job_and_retains_event_history(self):
         self.executor.fail_next = True

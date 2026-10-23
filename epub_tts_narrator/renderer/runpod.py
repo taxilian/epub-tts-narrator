@@ -613,20 +613,25 @@ if pidfile.exists():
                 f"--sglang-source {q(self.cfg['sglang_source'])} {action}")
 
     def launch(self, *, prepare=False):
+        # Bootstrap/Update test the installed engine without resuming durable
+        # chapter jobs. Encode is the only managed operation that runs them.
+        action = "serve-maintenance" if prepare else "serve"
         if prepare:
             self.notify("Preparing model downloads on persistent storage (completed downloads are reused)…")
             self.ssh(self.worker_command("prepare"), timeout=3600)
         self.ssh(self.worker_command("check"))
         log = shlex.quote(self.cfg["app_dir"] + "/worker.log")
         pid = shlex.quote(self.cfg["app_dir"] + "/worker.pid")
-        self.ssh(f"nohup {self.worker_command('serve')} > {log} 2>&1 < /dev/null & echo $! > {pid}", timeout=30)
+        self.ssh(f"nohup {self.worker_command(action)} > {log} 2>&1 < /dev/null & echo $! > {pid}", timeout=30)
         self.notify("Loading Drama 3 and waiting for the authenticated chapter service…")
         from .chapter_client import ChapterClient, ChapterClientError
         client = ChapterClient({"url": self.url, "api_key": self.state["api_key"], "timeout_seconds": 15})
         deadline = time.monotonic() + self.cfg["startup_timeout_seconds"]
         while time.monotonic() < deadline:
             try:
-                client.request("GET", "v1/capabilities")
+                capabilities = client.request("GET", "v1/capabilities")
+                if capabilities.get("maintenance", False) is not prepare:
+                    raise RuntimeError("Chapter service started in the wrong maintenance mode")
                 return
             except ChapterClientError:
                 # A dead supervisor cannot recover merely by waiting for the
@@ -653,7 +658,7 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         raise RuntimeError("Chapter service failed to start before startup_timeout_seconds")
 
     def smoke(self):
-        self.notify("Testing GPU synthesis, CPU transcription, and compressed Ceph publication…")
+        self.notify("Testing GPU synthesis, Whisper transcription, and compressed Ceph publication…")
         self.ssh(self.worker_command("smoke"), timeout=1200)
         self.state["bootstrapped"] = True
         self.save()

@@ -56,6 +56,13 @@ committing a code change. Chapter numbers refer to the analysis manifest and
 can include a cover, title page, or other front matter before the first story
 chapter. Keep the same work directory when resuming.
 
+Bootstrap and Update start the chapter service in maintenance mode. Health,
+voice registry, and job status APIs remain available, but existing queued or
+interrupted jobs remain untouched and new chapter submissions/retries are
+rejected. Their smoke test exercises the engine directly. Encode starts normal
+queue processing, including recovery of previously interrupted chapters.
+Maintenance mode does not change renderer or accepted-clip cache identities.
+
 Each managed operation stops compute on completion, error, or interruption.
 `--stop-delay 300` adds a fixed five-minute grace period with the client still
 attached; Ctrl-C ends it immediately. The deployment lock remains held during

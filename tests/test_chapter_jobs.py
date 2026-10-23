@@ -206,6 +206,71 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(self.terminal(job["id"])["state"], "complete")
         self.assertTrue(any("Recovered" in event["message"] for event in self.service.events(job["id"])))
 
+    def test_maintenance_preserves_queued_and_interrupted_jobs_until_normal_restart(self):
+        jobs = [self.submit(number) for number in range(1, 4)]
+        self.service._set_state(jobs[1]["id"], "generating")
+        self.service._set_state(jobs[2]["id"], "assembling")
+        before = [(self.service.status(job["id"]), self.service.events(job["id"])) for job in jobs]
+        accepted = self.service.root / "render-work" / "accepted.flac"
+        accepted.write_bytes(b"accepted take must remain unchanged")
+        self.service.close()
+        engine = Executor()
+        maintenance = ChapterJobs(self.root / "server", engine, maintenance=True)
+        self.addCleanup(maintenance.close)
+        self.assertEqual(maintenance.fingerprint, self.service.fingerprint)
+        self.assertTrue(maintenance.capabilities()["maintenance"])
+        maintenance.start()
+        maintenance.start()
+        self.assertEqual(engine.generated, [])
+        self.assertEqual(maintenance._threads, [])
+        self.assertIsNone(maintenance._assembly)
+        self.assertEqual(before, [(maintenance.status(job["id"]), maintenance.events(job["id"])) for job in jobs])
+        contender = ChapterJobs(self.root / "server", Executor())
+        self.addCleanup(contender.close)
+        with self.assertRaisesRegex(RuntimeError, "Another chapter service"):
+            contender.start()
+        maintenance.close()
+        self.assertEqual(accepted.read_bytes(), b"accepted take must remain unchanged")
+        contender.start()
+        self.service = contender
+        for job in jobs:
+            self.assertEqual(self.terminal(job["id"])["state"], "complete")
+        self.assertEqual(contender.executor.generated, [1, 2, 3])
+        self.assertFalse(contender.capabilities()["maintenance"])
+
+    def test_maintenance_rejects_submissions_and_retries_without_changing_history(self):
+        job = self.submit()
+        self.service._set_state(job["id"], "failed", error="retained failure")
+        before = self.service.status(job["id"]), self.service.events(job["id"])
+        self.service.close()
+        maintenance = ChapterJobs(self.root / "server", Executor(), maintenance=True)
+        self.addCleanup(maintenance.close)
+        maintenance.start()
+        for number in (1, 2):
+            spec = specification(maintenance, number)
+            with self.assertRaisesRegex(RuntimeError, "maintenance mode"):
+                maintenance.submit(spec, digest(spec))
+        with self.assertRaisesRegex(RuntimeError, "maintenance mode"):
+            maintenance.retry(job["id"])
+        self.assertEqual(before, (maintenance.status(job["id"]), maintenance.events(job["id"])))
+
+    def test_maintenance_paused_jobs_do_not_block_idle_shutdown_but_uploads_do(self):
+        self.submit()
+        self.service.close()
+        maintenance = ChapterJobs(self.root / "server", Executor(), maintenance=True,
+                                 settings={"idle_action": "runpod_stop", "persistent_data": True},
+                                 publisher=Publisher())
+        self.addCleanup(maintenance.close)
+        maintenance.start()
+        maintenance._last_activity -= 1000
+        self.assertGreater(maintenance.idle_seconds(), 900)
+        maintenance._active = 1
+        try:
+            self.assertFalse(maintenance.begin_shutdown_if_idle(600))
+        finally:
+            maintenance._active = 0
+        self.assertTrue(maintenance.begin_shutdown_if_idle(600))
+
     def test_server_settings_are_not_client_controlled(self):
         spec = specification(self.service)
         spec["render"]["ffmpeg"] = "/arbitrary/program"

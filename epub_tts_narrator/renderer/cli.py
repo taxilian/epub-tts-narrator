@@ -79,6 +79,8 @@ def parser():
     serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
+    chapters.add_argument("--maintenance", action="store_true",
+                          help="Serve health, voice, and status APIs without accepting or running chapter jobs")
     from .runpod import add_parser as add_runpod_parser
     add_runpod_parser(commands)
     return root
@@ -251,7 +253,7 @@ def main(argv=None):
             return 0
         if args.command == "serve-chapters":
             from .chapter_server import serve
-            serve(config)
+            serve(config, maintenance=args.maintenance)
             return 0
         if args.command == "doctor":
             report = doctor(config)
