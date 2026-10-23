@@ -234,7 +234,7 @@ class OpenAICompatibleClient:
                     {"role": "system", "content": f"{system}\n\n{_JSON_INSTRUCTION}"},
                     {
                         "role": "user",
-                        "content": json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                        "content": json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
                     },
                 ],
             }
@@ -244,7 +244,7 @@ class OpenAICompatibleClient:
                 body[self.token_limit_field] = self.max_output_tokens
             if self.reasoning_effort is not None:
                 body["reasoning_effort"] = self.reasoning_effort
-            encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            encoded = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (ValueError, TypeError, OverflowError, RecursionError):
             raise ProviderError("The completion payload cannot be encoded as JSON.") from None
 

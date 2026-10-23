@@ -90,6 +90,16 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(body["max_tokens"], 1024)
         self.assertIn("JSON object", body["messages"][0]["content"])
 
+    def test_request_json_omits_formatting_whitespace_without_changing_source_text(self):
+        self.respond(completion())
+        payload = {"text": "Café waits here.", "items": [1, 2]}
+        OpenAICompatibleClient("model").complete("Analyze", payload)
+        request = self.opener.open.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(body["messages"][1]["content"], '{"text":"Café waits here.","items":[1,2]}')
+        self.assertEqual(json.loads(body["messages"][1]["content"]), payload)
+        self.assertLess(len(request.data), len(json.dumps(body, ensure_ascii=False).encode()))
+
     def test_unset_token_limit_is_omitted(self):
         self.respond(completion())
         OpenAICompatibleClient("model").complete("Analyze", {})
