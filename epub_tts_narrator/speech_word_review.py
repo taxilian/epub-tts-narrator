@@ -53,7 +53,13 @@ def review_requirement(edit):
 
 
 def validate_word_verdicts(vote, proposal):
-    expected = [pair["word_id"] for pair in proposal["word_preservation"]["pairs"]]
+    if "word_preservation" in proposal:
+        expected = [pair["word_id"] for pair in proposal["word_preservation"]["pairs"]]
+    else:
+        alignment = word_alignment(proposal["original"], proposal["replacement"])
+        if alignment is None:
+            raise ValueError("Optional word evidence requires complete ordered word coverage")
+        expected = [f"w{index}" for index, _ in enumerate(alignment)]
     words = vote.get("word_verdicts")
     if (not isinstance(words, list) or len(words) != len(expected)
             or any(not isinstance(word, dict) or set(word) != {"word_id", "verdict"}
@@ -67,5 +73,5 @@ def validate_word_verdicts(vote, proposal):
 def approves(vote, proposal):
     if vote["verdict"] != "approve":
         return False
-    return ("word_preservation" not in proposal
-            or all(word["verdict"] == "approve" for word in vote["word_verdicts"]))
+    return (all(word["verdict"] == "approve" for word in vote["word_verdicts"])
+            if "word_verdicts" in vote else "word_preservation" not in proposal)

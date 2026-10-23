@@ -384,19 +384,24 @@ def _validate_votes(response, proposals):
     if len(response["votes"]) != len(proposals):
         raise ValueError("Speech spelling review must judge every proposed edit")
     votes = []
-    for vote, proposal in zip(response["votes"], proposals):
+    for index, (vote, proposal) in enumerate(zip(response["votes"], proposals)):
+        location = f"votes[{index}] (edit_id {_shown(proposal['edit_id'], 100)})"
         fields = {"edit_id", "verdict", "reason"}
-        if "word_preservation" in proposal:
+        if "word_preservation" in proposal or isinstance(vote, dict) and "word_verdicts" in vote:
             fields.add("word_verdicts")
-        if (not isinstance(vote, dict) or set(vote) != fields
-                or vote["edit_id"] != proposal["edit_id"]
-                or vote["verdict"] not in {"approve", "reject", "uncertain"}
-                or not isinstance(vote["reason"], str) or not vote["reason"].strip()
-                or len(vote["reason"]) > 1000):
-            raise ValueError("Speech spelling review needs ordered ID-bound verdicts and brief reasons")
-        if "word_preservation" in proposal:
+        _fields(vote, fields, location)
+        if vote["edit_id"] != proposal["edit_id"]:
+            raise ValueError(f"{location}.edit_id must match the proposal in order; received {_shown(vote['edit_id'], 100)}")
+        if not isinstance(vote["verdict"], str) or vote["verdict"] not in {"approve", "reject", "uncertain"}:
+            raise ValueError(f"{location}.verdict must be approve, reject, or uncertain; received {_shown(vote['verdict'])}")
+        if not isinstance(vote["reason"], str) or not vote["reason"].strip() or len(vote["reason"]) > 1000:
+            raise ValueError(f"{location}.reason must be a nonempty string of at most 1000 characters")
+        if "word_verdicts" in vote:
             from .speech_word_review import validate_word_verdicts
-            validate_word_verdicts(vote, proposal)
+            try:
+                validate_word_verdicts(vote, proposal)
+            except ValueError as exc:
+                raise ValueError(f"{location}.word_verdicts: {exc}") from exc
         votes.append(deepcopy(vote))
     return votes
 
