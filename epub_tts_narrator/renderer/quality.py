@@ -17,6 +17,7 @@ import unicodedata
 import wave
 
 from .common import digest
+from .ordinal_words import ordinal_words
 from .phonetic_match import phonetic_equivalence
 
 
@@ -30,7 +31,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 16
+QUALITY_VERSION = 17
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -161,8 +162,11 @@ def normalize_words(text: str) -> list[str]:
     """Conservative lexical normalization, with bounded cardinal equivalents.
 
     Apostrophes and meaningful arithmetic/currency symbols are retained.
-    Leading-zero numbers, decimals, ordinals and integers >= one million stay
-    literal: guessing their pronunciation could mask incorrect speech.
+    Leading-zero numbers, decimals, signed ordinals and integers >= one
+    million stay literal: guessing their pronunciation could mask incorrect
+    speech. Well-formed ordinal digit spellings ("7th", "21st", "1,000th")
+    expand to their spoken words, so a transcript may use either spelling of
+    the same spoken ordinal; changed values and malformed suffixes do not.
     """
     text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
     words = []
@@ -180,7 +184,9 @@ def normalize_words(text: str) -> list[str]:
                 words.append("minus" if sign == "-" else "plus")
             words.extend(_integer_words(int(digits)))
         else:
-            words.append(token)
+            # A signed form such as "-7th" keeps its literal spelling.
+            expanded = None if sign else ordinal_words(token, _integer_words)
+            words.extend(expanded if expanded is not None else [token])
     return words
 
 
