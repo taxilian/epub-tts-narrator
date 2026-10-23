@@ -717,7 +717,7 @@ def _publish(stage, destination, **kwargs):
         raise RenderBlocked(str(exc)) from exc
 
 
-def make_render_plan(bundle, config, *, multi_speaker=True):
+def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False):
     """Group new paragraphs while preserving legacy accepted chunk boundaries."""
     plan = make_plan(bundle, config)
     work = config["render"].get("work_dir")
@@ -731,7 +731,8 @@ def make_render_plan(bundle, config, *, multi_speaker=True):
                 plan, requests, completed=completed_chunks(work, plan["chapters"]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
-    if not multi_speaker or not config["render"].get("paragraph_synthesis", True):
+    if (not (multi_speaker or single_speaker_paragraph)
+            or not config["render"].get("paragraph_synthesis", True)):
         return plan
     from .paragraphs import group_paragraphs
     preserved, preserved_groups = set(), []
@@ -764,14 +765,16 @@ def make_render_plan(bundle, config, *, multi_speaker=True):
                            preserved_chunk_ids=preserved, preserved_groups=preserved_groups)
 
 
-def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True):
+def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
+               single_speaker_paragraph=False):
     from .book_context import resolve_book_config, voice_store
     _check_analysis_update(bundle)
     try:
         config = resolve_book_config(bundle, config)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
-    plan = make_render_plan(bundle, config, multi_speaker=multi_speaker)
+    plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
+                            single_speaker_paragraph=single_speaker_paragraph)
     if plan["errors"]:
         raise RenderBlocked("\n".join(plan["errors"]))
     output = Path(config["render"]["output_dir"])
@@ -1553,7 +1556,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         verifier = wrap_verifier(verifier)
     config, plan, store = _preflight(
         bundle, config, chapters_only=chapters_only,
-        multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False))
+        multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False),
+        single_speaker_paragraph=getattr(engine, "capabilities", {}).get("single_speaker_paragraph", False))
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
     book_lock = None

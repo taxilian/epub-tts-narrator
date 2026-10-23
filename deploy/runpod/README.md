@@ -2,8 +2,11 @@
 
 The lifecycle CLI installs **this project's code** for voice registration, chapter
 jobs, verification, assembly, and Ceph publication. One pinned, unmodified Fish
-Speech process supplies CUDA inference on loopback. GPU requests are serialized;
-CPU verification and assembly can overlap subsequent synthesis.
+Speech or SGLang-Omni process supplies CUDA inference on loopback. Native Fish
+serializes requests; SGLang batches concurrent requests through one loaded TTS
+model. CPU verification and assembly can overlap synthesis. Built-in JEV and
+pronunciation reviews use a separate bounded queue so network waits do not
+occupy the recognition/model thread.
 
 ## Bootstrap, update, and encode
 
@@ -81,6 +84,7 @@ weights, voices and job checkpoints on `/workspace`:
 | --- | --- |
 | `/workspace/epub-tts-narrator` | Application checkout and Python environment |
 | `/workspace/fish-speech` | Pinned, unmodified native inference checkout/environment |
+| `/workspace/sglang-omni` | Optional pinned, unmodified batching checkout/environment |
 | `/workspace/.epub-tts-runtime` | Installer, managed Python and dependency cache |
 | `/workspace/models` | Drama 3 and CPU Whisper weights |
 | `/workspace/chapter-server-data` | Registered voices, durable jobs and resumable audio |
@@ -117,6 +121,40 @@ progress, and downloads M4A/JSON. Only compressed audio crosses the network.
 FLAC masters support final M4B assembly without generating speech again.
 Timing metadata currently links text at paragraph/chunk precision, not words.
 See [remote rendering](../../REMOTE_RENDERING.md) for artifacts and recovery.
+
+## Optional batched inference
+
+Select the backend in the deployment override, then run a full Update:
+
+```toml
+[runpod]
+tts_backend = "sglang"
+tts_concurrency = 4
+```
+
+`tts_backend` defaults to `native`. For `sglang`, `tts_concurrency` accepts 1–8
+simultaneous requests; these share one model, not multiple replicas. The worker
+uses stock SGLang-Omni commit `35e973de917988da23eeba5706c1d6045f260104`
+in its own environment and reuses the existing Drama 3 checkpoint and codec.
+The pinned dependency stack requires Linux glibc 2.34+ and a CUDA-13-compatible
+driver. Installation leaves the native environment and upstream source intact.
+
+The stock speech API supports one speaker per request. Single-voice paragraph
+groups keep their original text and delivery controls; mixed-speaker paragraphs
+require the native backend. This stock API has no per-request seed control:
+metadata explicitly records `seed_applied = false`, and repeated requests draw
+new stochastic takes. Model/voice/sampling compatibility still controls reuse
+of previously accepted pool clips. Switching scheduling or concurrency alone
+does not discard accepted audio.
+
+Benchmark before choosing a concurrency level. See
+[benchmark_rendering.py](../../scripts/benchmark_rendering.py) for a fixed-book
+corpus and separate generation/verification timings. `worker.py serve-tts`
+starts only private inference, so a benchmark does not resume queued chapter
+jobs. Run it under an operation that stops the Pod in a `finally` block; the
+chapter service's idle shutdown is not running in this mode. Do not interpret
+raw synthesis throughput as verified audiobook throughput or compare runs on
+different texts as a hardware speedup.
 
 ## Manual worker commands and diagnostics
 

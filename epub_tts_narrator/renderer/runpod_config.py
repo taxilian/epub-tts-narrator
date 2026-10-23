@@ -36,6 +36,9 @@ DEPLOYMENT_DEFAULTS = {
     "ssh_user": "root",
     "app_dir": "/workspace/epub-tts-narrator",
     "fish_source": "/workspace/fish-speech",
+    "sglang_source": "/workspace/sglang-omni",
+    "tts_backend": "native",
+    "tts_concurrency": 4,
     "remote_config": "/workspace/epub-tts-narrator.remote.toml",
     "model_dir": "/workspace/models/drama-3",
     "whisper_dir": "/workspace/models/whisper-ct2",
@@ -155,6 +158,8 @@ def _deployment_settings(values, directory):
     if not isinstance(values, dict) or set(values) - DEPLOYMENT_DEFAULTS.keys():
         raise ValueError("Unknown key or invalid table in runpod configuration")
     settings = _merge(DEPLOYMENT_DEFAULTS, values)
+    if settings["tts_backend"] not in ("native", "sglang"):
+        raise ValueError("runpod.tts_backend must be native or sglang")
     for key in ("name", "image", "gpu_type_id", "data_center_id", "volume_id", "pod_id", "state_dir"):
         value = settings[key]
         if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
@@ -175,6 +180,7 @@ def _deployment_settings(values, directory):
         ("volume_size_gb", 100, 4000), ("container_disk_gb", 10, 1000),
         ("startup_timeout_seconds", 60, 7200), ("idle_timeout_seconds", 60, 86400),
         ("service_port", 1, 65535),
+        ("tts_concurrency", 1, 8),
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:
             raise ValueError(f"runpod.{key} must be an integer from {low} through {high}")
@@ -183,7 +189,7 @@ def _deployment_settings(values, directory):
     price = settings["max_hourly_price"]
     if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price <= 100:
         raise ValueError("runpod.max_hourly_price must be a positive hourly limit at most 100")
-    for key in ("app_dir", "fish_source", "remote_config", "model_dir", "whisper_dir", "data_dir"):
+    for key in ("app_dir", "fish_source", "sglang_source", "remote_config", "model_dir", "whisper_dir", "data_dir"):
         value = settings[key]
         if (not isinstance(value, str) or not value.startswith("/workspace/")
                 or ".." in PurePosixPath(value).parts or any(ord(c) < 32 or ord(c) == 127 for c in value)):
@@ -261,11 +267,15 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
     native = get_drama3_model(DEFAULT_DRAMA3_MODEL)
     config.setdefault("engine", {}).update(
         type="drama3_mlx", model=DEFAULT_DRAMA3_MODEL, checkpoint=settings["model_dir"])
+    batched = settings["tts_backend"] == "sglang"
     config["render_pool"] = {
         "model_revision": native.revision,
-        "workers": [{"name": "drama3-cuda", "type": "fish_http", "protocol": "fish_native_drama3",
-                     "model": "drama-3", "url": "http://127.0.0.1:8080/v1/tts",
-                     "api_key": "", "concurrency": 1, "multi_speaker": True, "timeout_seconds": 600.0}],
+        "workers": [{"name": "drama3-cuda", "type": "fish_http",
+                     "protocol": "fish_sglang_drama3" if batched else "fish_native_drama3",
+                     "model": "drama-3", "url": "http://127.0.0.1:8080/" + (
+                         "v1/audio/speech" if batched else "v1/tts"),
+                     "api_key": "", "concurrency": settings["tts_concurrency"] if batched else 1,
+                     "multi_speaker": not batched, "timeout_seconds": 600.0}],
     }
     config.setdefault("verification", {}).update(
         type="faster_whisper", model=settings["whisper_dir"], device="cpu", reference_model=None)

@@ -17,6 +17,10 @@ service_port = 8082
 idle_timeout_seconds = 600
 github_url = "https://github.com/taxilian/epub-tts-narrator.git"
 git_ref = "main"
+# Opt in after benchmarking your GPU. Both backends load one Drama 3 model.
+# tts_backend = "sglang"   # default: native (serial inference)
+# tts_concurrency = 4      # SGLang requests in flight; 1–8, not model copies
+# sglang_source = "/workspace/sglang-omni"
 
 # Optional remote-specific changes are merged into normal rendering settings.
 # [verification]

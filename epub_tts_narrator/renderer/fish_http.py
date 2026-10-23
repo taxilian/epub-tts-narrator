@@ -1,10 +1,12 @@
-"""Fish /v1/tts inline-reference WAV transport, without local model imports."""
+"""Native Fish and stock SGLang-Omni reference transports without model imports."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+import base64
 import hashlib
 import http.client
+import json
 import math
 import os
 from pathlib import Path
@@ -23,6 +25,9 @@ from .speech_text import trim_speech_text
 
 
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
+MAX_SGLANG_REFERENCE_BYTES = 10 * 1024 * 1024
+SGLANG_MAIN_TOP_K = (1 << 31) - 1
+PROTOCOLS = {"fish_inline", "fish_native_drama3", "fish_sglang_drama3"}
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 STYLE_CONTROL = rf"\[[^\[\]<>\r\n]{{1,{MAX_DELIVERY_CHARACTERS}}}\]"
 SUPPORTED_CONTROLS = re.compile(r"</?whisper>|" + STYLE_CONTROL)
@@ -155,10 +160,10 @@ class FishHTTPEngine:
         self.model = settings.get("model", "drama-3")
         self.api_key = settings.get("api_key", "")
         self.timeout = settings.get("timeout_seconds", 600)
-        self.multi_speaker = settings.get("multi_speaker", True)
         self.protocol = settings.get("protocol", "fish_inline")
-        if not isinstance(self.protocol, str) or self.protocol not in {"fish_inline", "fish_native_drama3"}:
-            raise EngineError("Fish HTTP protocol must be fish_inline or fish_native_drama3")
+        if not isinstance(self.protocol, str) or self.protocol not in PROTOCOLS:
+            raise EngineError("Fish HTTP protocol must be fish_inline, fish_native_drama3 or fish_sglang_drama3")
+        self.multi_speaker = settings.get("multi_speaker", self.protocol != "fish_sglang_drama3")
         for name, value in (("name", self.name), ("model", self.model), ("api_key", self.api_key)):
             if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 raise EngineError(f"Fish HTTP {name} must be plain text")
@@ -184,6 +189,34 @@ class FishHTTPEngine:
             if (type(self.sampling["max_new_tokens"]) is not int
                     or not 1 <= self.sampling["max_new_tokens"] <= 2048):
                 raise EngineError("fish_native_drama3 max_new_tokens must be from 1 through 2048")
+        elif self.protocol == "fish_sglang_drama3":
+            # Stock SGLang-Omni 35e973d's speech_request.py rejects speaker IDs
+            # other than zero and per-request seeds. Its engine batches requests
+            # using one model; do not reset global RNG state around requests.
+            if self.multi_speaker:
+                raise EngineError("fish_sglang_drama3 supports one reference voice per request; multi_speaker must be false")
+            concurrency = settings.get("concurrency", 1)
+            if type(concurrency) is not int or not 1 <= concurrency <= 16:
+                raise EngineError("fish_sglang_drama3 concurrency must be from 1 through 16")
+            for key, maximum in (("temperature", 2), ("top_p", 1)):
+                value = self.sampling[key]
+                if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= maximum:
+                    raise EngineError(f"fish_sglang_drama3 {key} must be positive and at most {maximum}")
+            if type(self.sampling["top_k"]) is not int or self.sampling["top_k"] != 30:
+                raise EngineError("fish_sglang_drama3 requires top_k = 30 for its residual codebooks; main tokens use the stock uncapped profile")
+            for key, maximum in (("max_new_tokens", 2048),):
+                if type(self.sampling[key]) is not int or not 1 <= self.sampling[key] <= maximum:
+                    raise EngineError(f"fish_sglang_drama3 {key} must be from 1 through {maximum}")
+
+    @property
+    def sglang_sampling(self) -> dict[str, Any]:
+        # Stock 35e973d speech_request.py deliberately leaves main-token top-k
+        # uncapped: its source warns that 30 can fall silent after a phrase.
+        # audio_decoder.py independently caps residual codebooks at 30. The
+        # native backend applies 30 to both, so retain both requested and actual
+        # profiles in provenance instead of claiming identical sampling.
+        return {**{key: value for key, value in self.sampling.items() if key != "top_k"},
+                "main_token_top_k": SGLANG_MAIN_TOP_K, "residual_codebook_top_k": 30}
 
     @property
     def identity(self) -> dict[str, Any]:
@@ -194,6 +227,12 @@ class FishHTTPEngine:
             identity.update(protocol="fish-native-drama3-wav-v1",
                             request_options={"single_chunk": True, "use_memory_cache": "on",
                                              "seed_transport": "body", "fixed_top_k": 30})
+        elif self.protocol == "fish_sglang_drama3":
+            identity.update(protocol="fish-sglang-drama3-wav-v1",
+                            sampling_effective=self.sglang_sampling,
+                            request_options={"request_format": "openai-speech-json",
+                                             "reference_encoding_cache": "content",
+                                             "seed_transport": "unsupported"})
         return identity
 
     @property
@@ -204,6 +243,7 @@ class FishHTTPEngine:
     def capabilities(self) -> dict[str, bool]:
         return {"reference_voice": True, "voice_design": False, "preset_voice": False,
                 "delivery_control": True, "multi_speaker": self.multi_speaker,
+                "single_speaker_paragraph": self.multi_speaker or self.protocol == "fish_sglang_drama3",
                 "unconditioned_voice_creation": False}
 
     def close(self) -> None:
@@ -221,9 +261,11 @@ class FishHTTPEngine:
                 **metadata}
 
     def synthesize_dialogue(self, turns, output_path, *, seed):
-        if not self.multi_speaker:
+        if not self.multi_speaker and self.protocol != "fish_sglang_drama3":
             raise EngineError("This Fish HTTP endpoint is configured without multi-speaker support")
         text, voices, metadata = format_dialogue(turns)
+        if self.protocol == "fish_sglang_drama3" and len(voices) != 1:
+            raise EngineError("fish_sglang_drama3 supports one reference voice per request")
         references = []
         for index, voice in enumerate(voices):
             blob, transcript = read_reference(voice)
@@ -236,10 +278,6 @@ class FishHTTPEngine:
         output = Path(output_path)
         if output.exists():
             raise EngineError(f"Audio output already exists: {output}")
-        try:
-            import msgpack
-        except ImportError as exc:
-            raise FishHTTPError("Fish HTTP requires msgpack; install renderer.requirements.txt", retryable=False) from exc
         body = {"text": text, "references": references, "format": "wav", "normalize": False,
                 **{key: value for key, value in self.sampling.items() if key != "top_k"}}
         effective_seed = seed
@@ -253,10 +291,35 @@ class FishHTTPEngine:
             # references. The chapter API already registers the FLAC bytes once;
             # this cache prevents re-encoding them on each loopback request.
             body.update(seed=effective_seed, single_chunk=True, use_memory_cache="on")
-        payload = msgpack.packb(body, use_bin_type=True)
+        if self.protocol == "fish_sglang_drama3":
+            # Stock /v1/audio/speech accepts inline base64 references and caches
+            # their encoded content. No native-Fish-only fields or unsupported
+            # seed are sent; each request keeps its own immutable input.
+            encoded_references = []
+            for reference in references:
+                blob = reference["audio"]
+                if len(blob) > MAX_SGLANG_REFERENCE_BYTES:
+                    raise EngineError("SGLang reference audio must contain at most 10 MiB")
+                encoded_references.append({
+                    "data": base64.b64encode(blob).decode("ascii"),
+                    "media_type": "audio/flac" if blob.startswith(b"fLaC") else "audio/wav",
+                    "text": reference["text"],
+                })
+            body = {"input": text, "references": encoded_references,
+                    "response_format": "wav", "stream": False, **self.sampling,
+                    "top_k": SGLANG_MAIN_TOP_K}
+            payload = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            content_type = "application/json"
+        else:
+            try:
+                import msgpack
+            except ImportError as exc:
+                raise FishHTTPError("Fish HTTP requires msgpack; install renderer.requirements.txt", retryable=False) from exc
+            payload = msgpack.packb(body, use_bin_type=True)
+            content_type = "application/msgpack"
         if len(payload) > MAX_AUDIO_BYTES:
             raise EngineError("Fish HTTP request is larger than 100 MiB")
-        headers = {"Content-Type": "application/msgpack", "Accept": "audio/wav", "model": self.model}
+        headers = {"Content-Type": content_type, "Accept": "audio/wav", "model": self.model}
         if self.protocol == "fish_inline":
             headers.update({"X-Audiobook-Seed": str(seed), "X-Audiobook-Top-K": str(self.sampling["top_k"])})
         if self.api_key:
@@ -289,9 +352,14 @@ class FishHTTPEngine:
                 os.link(staged, output)
                 if self.protocol == "fish_native_drama3":
                     metadata["seed_effective"] = effective_seed
+                elif self.protocol == "fish_sglang_drama3":
+                    metadata.update(seed_effective=None, seed_mode="unsupported",
+                                    sampling_requested=dict(self.sampling),
+                                    sampling_effective=self.sglang_sampling)
                 return {**metadata, "backend": "fish_http", "worker": self.name,
                         "model": self.model, "seed_requested": seed,
-                        "seed_applied": response.headers.get("X-Audiobook-Seed-Applied") == str(effective_seed)}
+                        "seed_applied": (self.protocol != "fish_sglang_drama3"
+                                         and response.headers.get("X-Audiobook-Seed-Applied") == str(effective_seed))}
         except HTTPError as exc:
             try:
                 try:

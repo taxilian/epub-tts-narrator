@@ -239,6 +239,34 @@ class ChapterOrchestrationTests(unittest.TestCase):
             self.assertNotIn("api_key", path.read_text())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_single_speaker_worker_accepts_unchanged_uniform_paragraphs(self):
+        from test_renderer_workflow import EXAMPLE
+        bundle = load_bundle(EXAMPLE / "bundle")
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+        config = deepcopy(self.config)
+        config["render"]["paragraph_synthesis"] = True
+        plan = make_render_plan(bundle, config)
+        self.assertTrue(any(chunk.get("paragraph_turns") for chapter in plan["chapters"]
+                            for chunk in chapter["chunks"]))
+        client = self.fake_client()(config["remote_chapters"])
+        request = client.request
+
+        def single_voice_capabilities(method, path, payload=None):
+            result = request(method, path, payload)
+            if path == "v1/capabilities":
+                result.update(multi_speaker=False, single_speaker_paragraph=True)
+            return result
+
+        with patch.object(client, "request", side_effect=single_voice_capabilities), \
+             patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(bundle, config, plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(result["chapters"]), len(plan["chapters"]))
+        submitted = [payload["spec"]["chapter"] for _, path, payload in client.calls if path == "v1/jobs"]
+        self.assertEqual(submitted, plan["chapters"])
+
     def test_missing_voice_fails_before_contacting_service(self):
         self.store.load.return_value = None
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:

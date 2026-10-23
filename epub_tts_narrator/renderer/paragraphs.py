@@ -11,6 +11,17 @@ _GROUP_VERSION = 1
 _MAX_SPEAKERS = 16
 
 
+def paragraph_supported(capabilities, chunk):
+    """Check whether a worker can retain this paragraph's saved voice boundaries."""
+    turns = chunk.get("paragraph_turns")
+    if turns is None or capabilities.get("multi_speaker") is True:
+        return True
+    if capabilities.get("single_speaker_paragraph") is not True:
+        return False
+    voices = {turn["segment"].get("voice_id") for turn in turns}
+    return len(voices) == 1 and None not in voices
+
+
 def _source_piece(chunk):
     """Return an exact contiguous source slice, or decline unsafe grouping."""
     row = chunk["segment"]

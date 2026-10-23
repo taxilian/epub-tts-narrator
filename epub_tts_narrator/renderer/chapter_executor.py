@@ -136,6 +136,12 @@ class ChapterExecutor:
         return bool(getattr(engine, "capabilities", {}).get("multi_speaker", False))
 
     @property
+    def single_speaker_paragraph(self):
+        engine, _ = self._components()
+        capabilities = getattr(engine, "capabilities", {})
+        return bool(capabilities.get("multi_speaker") or capabilities.get("single_speaker_paragraph"))
+
+    @property
     def identity(self):
         from .chapter_protocol import SAFE_RENDER_KEYS
         engine, verifier = self._components()
@@ -175,8 +181,9 @@ class ChapterExecutor:
                 raise ValueError(f"Registered voice audio changed: {voice_id}")
             registered[voice_id] = dict(voice, voice_id=voice_id, kind="reference",
                                         reference_audio=str(path), reference_sha256=reference_hash)
-        if any("paragraph_turns" in chunk for chunk in chapter["chunks"]) and not getattr(
-                engine, "capabilities", {}).get("multi_speaker", False):
+        from .paragraphs import paragraph_supported
+        if any(not paragraph_supported(getattr(engine, "capabilities", {}), chunk)
+               for chunk in chapter["chunks"]):
             raise ValueError("The configured server engine cannot render multi-speaker paragraphs")
         engine_identity, verifier_identity = deepcopy(engine.identity), deepcopy(verifier.identity)
         clips, acceptance = _render_chapter_chunks(

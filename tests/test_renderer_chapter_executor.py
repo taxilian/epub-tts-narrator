@@ -176,6 +176,17 @@ class ChapterExecutorTests(unittest.TestCase):
             self.synthesize()
         self.assertFalse(self.engine.speech_calls or self.engine.dialogue_calls)
 
+    def test_single_voice_paragraph_backend_can_render_original_remote_spec(self):
+        self.engine.capabilities = {"multi_speaker": False, "single_speaker_paragraph": True}
+        self.assertFalse(self.executor.multi_speaker)
+        self.assertTrue(self.executor.single_speaker_paragraph)
+        original = deepcopy(self.spec)
+        prepared = self.synthesize()
+        artifacts = self.assemble(prepared)
+        self.assertEqual(self.spec, original)
+        self.assertTrue(self.engine.dialogue_calls)
+        self.assertEqual(read_json(artifacts["chapter.json"])["spec_hash"], digest(original))
+
     def test_export_failure_removes_only_its_temporary_chapter_pcm(self):
         prepared = self.synthesize()
         before = {path: file_hash(path) for path in (self.work / "clips").rglob("*.wav")}

@@ -80,6 +80,7 @@ class ChapterJobs:
         return {"protocol": PROTOCOL, "engine": deepcopy(self.identity),
                 "renderer_fingerprint": self.fingerprint,
                 "multi_speaker": getattr(self.executor, "multi_speaker", True),
+                "single_speaker_paragraph": getattr(self.executor, "single_speaker_paragraph", False),
                 "parallel_chapters": self._parallel_chapters,
                 "voice_format": "flac", "chapter_format": "m4a",
                 "timing_precision": "paragraph_or_chunk"}

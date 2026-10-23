@@ -200,12 +200,15 @@ def validate_distributed_settings(config):
         else:
             default_model = "drama-3" if selected_model == DEFAULT_DRAMA3_MODEL else selected_model
             worker = {"api_key": "", "model": default_model, "timeout_seconds": 300.0,
-                      "multi_speaker": True, "protocol": "fish_inline", **worker}
+                      "multi_speaker": worker.get("protocol") != "fish_sglang_drama3",
+                      "protocol": "fish_inline", **worker}
             if (not isinstance(worker["protocol"], str)
-                    or worker["protocol"] not in {"fish_inline", "fish_native_drama3"}):
-                raise ValueError(f"{label}.protocol must be fish_inline or fish_native_drama3")
+                    or worker["protocol"] not in {"fish_inline", "fish_native_drama3", "fish_sglang_drama3"}):
+                raise ValueError(f"{label}.protocol must be fish_inline, fish_native_drama3 or fish_sglang_drama3")
             if worker["protocol"] == "fish_native_drama3" and concurrency != 1:
                 raise ValueError(f"{label}: fish_native_drama3 requires concurrency = 1")
+            if worker["protocol"] == "fish_sglang_drama3" and worker["multi_speaker"]:
+                raise ValueError(f"{label}: fish_sglang_drama3 requires multi_speaker = false")
             _credential(worker["api_key"], f"{label}.api_key")
             url = worker.get("url")
             try:
@@ -255,6 +258,9 @@ def validate_distributed_settings(config):
             for key in ("temperature", "top_p"):
                 if not 0.1 <= engine[key] <= 1:
                     raise ValueError(f"engine.{key} must be from 0.1 through 1 for fish_native_drama3")
+        if any(worker.get("protocol") == "fish_sglang_drama3" for worker in normalized):
+            if engine["top_k"] != 30:
+                raise ValueError("engine.top_k must be 30 for fish_sglang_drama3 residual codebooks; main tokens use the stock uncapped profile")
     pool["workers"] = normalized
     server = config["server"]
     if (not isinstance(server["host"], str) or not server["host"].strip()

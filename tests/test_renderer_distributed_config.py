@@ -81,6 +81,34 @@ class DistributedConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"engine.{key}"):
                     load_config(self.path)
 
+    def test_sglang_profile_allows_batching_and_defaults_to_single_voice(self):
+        self.write(worker_table(protocol="fish_sglang_drama3", concurrency=4,
+                                url="http://localhost:8080/v1/audio/speech"))
+        config = load_config(self.path)
+        worker = config["render_pool"]["workers"][0]
+        self.assertEqual(worker["concurrency"], 4)
+        self.assertFalse(worker["multi_speaker"])
+        from epub_tts_narrator.renderer.pool import RenderPool
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        self.assertFalse(pool.capabilities["multi_speaker"])
+        self.assertTrue(pool.capabilities["single_speaker_paragraph"])
+        self.assertEqual(pool.max_parallel, 4)
+        load_analyzer_config(self.path)
+
+    def test_sglang_profile_rejects_claiming_unsupported_multispeaker(self):
+        self.write(worker_table(protocol="fish_sglang_drama3", multi_speaker=True))
+        with self.assertRaisesRegex(ValueError, "multi_speaker = false"):
+            load_config(self.path)
+
+    def test_sglang_sampling_constraints_fail_before_loading_workers(self):
+        for key, value in (("top_k", 20), ("top_k", True), ("max_new_tokens", 4096)):
+            with self.subTest(key=key, value=value):
+                self.write('[engine]\n' + f'{key}={json.dumps(value)}\n'
+                           + worker_table(protocol="fish_sglang_drama3"), checkpoint=False)
+                with self.assertRaisesRegex(ValueError, f"engine.{key}"):
+                    load_config(self.path)
+
     def test_remote_only_does_not_require_local_checkpoint(self):
         self.write(worker_table(), checkpoint=False)
         self.assertIsNone(load_config(self.path)["engine"]["checkpoint"])

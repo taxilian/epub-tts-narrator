@@ -780,8 +780,9 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only)
         capabilities = client.request("GET", "v1/capabilities")
         if capabilities.get("protocol") != PROTOCOL:
             raise ChapterClientError("Chapter service uses an incompatible protocol")
-        if capabilities.get("multi_speaker") is not True and any(
-                "paragraph_turns" in chunk for chapter, *_ in unfinished for chunk in chapter["chunks"]):
+        from .paragraphs import paragraph_supported
+        if any(not paragraph_supported(capabilities, chunk)
+               for chapter, *_ in unfinished for chunk in chapter["chunks"]):
             raise ChapterClientError("Chapter service does not support this plan's multi-speaker paragraphs")
         needed = {asset_id for _, selection, _, _ in unfinished for asset_id in selection["voice_bindings"].values()}
         _register_voices(client, {key: assets[key] for key in needed}, notify)

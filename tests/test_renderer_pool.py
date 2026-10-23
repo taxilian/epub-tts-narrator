@@ -14,6 +14,7 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.engines import DRAMA3_MODEL_REVISION, EngineError
+from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
 from epub_tts_narrator.renderer.pool import RenderPool, create_render_engine
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
@@ -133,6 +134,24 @@ class PoolUnitTests(unittest.TestCase):
         self.assertFalse(pool.capabilities["multi_speaker"])
         with self.assertRaisesRegex(EngineError, "Every render worker"):
             pool.synthesize_dialogue([], self.root / "unused.wav", seed=0)
+
+    def test_sglang_pool_keeps_uniform_paragraphs_but_rejects_different_references(self):
+        settings = {**worker("sglang", concurrency=4, multi_speaker=False),
+                    "protocol": "fish_sglang_drama3"}
+        pool = RenderPool(pool_config(settings))
+        self.addCleanup(pool.close)
+        self.assertFalse(pool.capabilities["multi_speaker"])
+        self.assertTrue(pool.capabilities["single_speaker_paragraph"])
+        voice = {"kind": "reference", "reference_audio": "/voice.wav", "reference_text": "Saved speech."}
+        uniform = [{"text": "Hello.", "voice": voice}, {"text": "Goodbye.", "voice": voice}]
+        with patch.object(pool, "_execute", return_value={}) as execute:
+            pool.synthesize_dialogue(uniform, self.root / "uniform.wav", seed=3)
+            execute.assert_called_once_with("synthesize_dialogue", uniform, self.root / "uniform.wav", seed=3)
+            with self.assertRaisesRegex(EngineError, "Every render worker"):
+                pool.synthesize_dialogue([uniform[0], {"text": "Another voice.",
+                    "voice": {**voice, "reference_text": "Different saved speech."}}],
+                    self.root / "mixed.wav", seed=4)
+            self.assertEqual(execute.call_count, 1)
 
     def test_free_fast_worker_takes_more_work_without_waiting_for_slow_worker(self):
         pool = RenderPool(pool_config(worker("slow"), worker("fast")))
@@ -455,6 +474,53 @@ class PoolWorkflowTests(unittest.TestCase):
 
                     self.assertEqual(resumed, first)
                     self.assertEqual(len(self.verifier.calls), count)
+
+    def test_native_to_sglang_preserves_uniform_paragraph_plan_and_accepted_audio(self):
+        for row in self.bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+        native_config = deepcopy(self.config)
+        native_settings = {**worker("native"), "protocol": "fish_native_drama3"}
+        native_config["render_pool"]["workers"] = [native_settings]
+        sglang_config = deepcopy(native_config)
+        sglang_config["render_pool"]["workers"] = [
+            {**worker("sglang", concurrency=4, multi_speaker=False), "protocol": "fish_sglang_drama3"}]
+        native, sglang = RenderPool(native_config), RenderPool(sglang_config)
+        self.addCleanup(native.close)
+        self.addCleanup(sglang.close)
+        self.assertEqual(native.identity, sglang.identity)
+        native_plan = make_render_plan(self.bundle, native_config)
+        sglang_plan = make_render_plan(self.bundle, sglang_config, multi_speaker=False,
+                                       single_speaker_paragraph=True)
+        self.assertEqual(native_plan, sglang_plan)
+        paragraph = next(chunk for chapter in native_plan["chapters"]
+                         for chunk in chapter["chunks"] if chunk.get("paragraph_turns"))
+        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
+        voices = {key: store.load(key) for key in native_plan["voice_ids"]}
+        fixture = ParagraphFixtureEngine()
+        fixture.fixture_transcripts = self.fixtures
+        fixture.identity = FishHTTPEngine(native_settings, native_config["engine"]).identity
+        native._workers[0]._engine = fixture
+
+        for indexed in (False, True):
+            with self.subTest(indexed=indexed):
+                work = self.root / f"native-sglang-{indexed}"
+                first = _render_chapter_chunks({"chunks": [paragraph]}, voices, native,
+                    native.identity, self.verifier, native_config, work, notify=lambda _: None)
+                acceptance = read_json(next((work / "clips").glob("*/accepted.json")))
+                self.assertEqual(acceptance["engine_metadata"]["worker_engine"]["protocol"],
+                                 "fish-native-drama3-wav-v1")
+                count = len(self.verifier.calls)
+                if not indexed:
+                    for path in (work / "speech-cache").glob("*.json"):
+                        path.unlink()
+                with patch.object(sglang, "synthesize", side_effect=AssertionError("regenerated speech")), \
+                     patch.object(sglang, "synthesize_dialogue", side_effect=AssertionError("regenerated paragraph")):
+                    resumed = _render_chapter_chunks({"chunks": [paragraph]}, voices, sglang,
+                        sglang.identity, self.verifier, sglang_config, work, notify=lambda _: None)
+                self.assertEqual(first, resumed)
+                self.assertEqual(len(self.verifier.calls), count)
+                self.assertEqual(read_json(next((work / "clips").glob("*/accepted.json"))), acceptance)
 
     def test_pool_model_revision_and_sampling_changes_do_not_reuse_local_speech(self):
         self.config["render"]["paragraph_synthesis"] = False

@@ -159,6 +159,16 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertIn("faster_whisper", imports[0])
         self.assertIn("torch", imports[1])
         self.assertFalse((self.root / "runtime").exists())
+        # SGLang uses its own existing environment; native is not imported or
+        # loaded as a second copy when the batching backend is selected.
+        result = subprocess.run(
+            ["/bin/sh", str(_path.parent / "install.sh"), str(app), "runtime",
+             str(self.root / "runtime"), str(self.root / "missing-native"), "sglang", str(fish)],
+            capture_output=True, text=True,
+            env={**os.environ, "PATH": str(commands) + ":" + os.environ.get("PATH", "")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sglang_omni", log.read_text().splitlines()[-1])
+        self.assertFalse((self.root / "runtime").exists())
 
     def test_example_config_loads_but_requires_replacing_predictable_application_key(self):
         template = _path.parent / "epub-tts-narrator.example.toml"
@@ -265,6 +275,64 @@ class RunpodWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "during startup"):
             worker.wait_ready(process, threading.Event(), fetch=fetch)
         fetch.assert_not_called()
+
+    def batched_image(self):
+        self.config["render_pool"]["workers"][0].update(
+            protocol="fish_sglang_drama3", url=worker.SGLANG_URL,
+            concurrency=4, multi_speaker=False)
+        root = self.root / "sglang"
+        executable = root / ".venv/bin/sgl-omni"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        return root
+
+    def test_batched_server_is_one_process_with_loopback_and_local_codec(self):
+        root = self.batched_image()
+        worker.validate_worker(self.config)
+        command, cwd = worker.inference_command(self.config, sglang_source=root)
+        self.assertEqual(cwd, root)
+        self.assertEqual(command[0], str(root / ".venv/bin/sgl-omni"))
+        self.assertEqual(command[command.index("--host") + 1], "127.0.0.1")
+        self.assertEqual(command[command.index("--tts_engine.factory.max_running_requests") + 1], "4")
+        self.assertEqual(command[command.index("--vocoder.factory.codec_path") + 1],
+                         str(self.root / "drama/codec.pth"))
+        self.assertNotIn("--workers", command)
+        for update in ({"concurrency": 9}, {"multi_speaker": True}, {"url": worker.FISH_URL}):
+            with self.subTest(update=update):
+                invalid = deepcopy(self.config)
+                invalid["render_pool"]["workers"][0].update(update)
+                with self.assertRaises(ValueError):
+                    worker.validate_worker(invalid)
+
+    def test_batched_readiness_checks_health_and_loaded_model(self):
+        process = Mock()
+        process.poll.return_value = None
+        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
+                                  {"data": [{"id": "drama-3"}]}])
+        worker.wait_ready(process, threading.Event(), protocol="fish_sglang_drama3", fetch=fetch)
+        self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                         ["http://127.0.0.1:8080/health", "http://127.0.0.1:8080/v1/models"])
+        stop = Mock()
+        stop.is_set.side_effect = [False, True]
+        wrong = Mock(side_effect=[{"status": "healthy", "running": True},
+                                  {"data": [{"id": "other"}]}])
+        with self.assertRaises(worker.WorkerStopped):
+            worker.wait_ready(process, stop, protocol="fish_sglang_drama3", fetch=wrong)
+
+    def test_isolated_tts_mode_never_starts_or_resumes_chapter_jobs(self):
+        root = self.batched_image()
+        self.prepare()
+        inference = Mock(pid=100001)
+        inference.poll.return_value = 2
+        with (patch.object(worker.subprocess, "Popen", return_value=inference) as popen,
+              patch.object(worker, "wait_ready") as ready,
+              patch.object(worker, "stop_children") as cleanup,
+              patch("sys.stdout", new=io.StringIO())):
+            with self.assertRaisesRegex(RuntimeError, "exited"):
+                worker.serve(self.config, self.root / "config.toml", sglang_source=root, chapters=False)
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(ready.call_args.kwargs["protocol"], "fish_sglang_drama3")
+        cleanup.assert_called_once_with([inference])
 
     def test_process_supervision_uses_one_model_and_cleans_up_both_groups(self):
         self.prepare()

@@ -84,6 +84,22 @@ class ParagraphWorkflowTests(unittest.TestCase):
         return {path: record for path, record in self.accepted_clips().items()
                 if record["request"]["kind"] == "paragraph_speech"}
 
+    def test_single_voice_paragraph_backend_retains_groups_and_resume(self):
+        original_plan = make_render_plan(self.bundle, self.config)
+        self.engine.capabilities = {**self.engine.capabilities, "multi_speaker": False,
+                                    "single_speaker_paragraph": True}
+        restricted_plan = make_render_plan(self.bundle, self.config, multi_speaker=False,
+                                          single_speaker_paragraph=True)
+        self.assertEqual(original_plan, restricted_plan)
+        first = self.chapters()
+        self.assertTrue(self.grouped_clips())
+        calls = len(self.engine.dialogue_calls), len(self.engine.speech_calls)
+        with patch.object(self.engine, "synthesize_dialogue", side_effect=AssertionError("regenerated paragraph")), \
+             patch.object(self.engine, "synthesize", side_effect=AssertionError("regenerated speech")):
+            resumed = self.chapters()
+        self.assertEqual(first["chapters"], resumed["chapters"])
+        self.assertEqual(calls, (len(self.engine.dialogue_calls), len(self.engine.speech_calls)))
+
     def test_fresh_same_voice_paragraph_groups_but_mixed_voices_remain_separate(self):
         first = self.chapters()
         self.assertEqual(first["status"], "chapters_complete")

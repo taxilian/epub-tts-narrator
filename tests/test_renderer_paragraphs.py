@@ -3,7 +3,7 @@
 from copy import deepcopy
 import unittest
 
-from epub_tts_narrator.renderer.paragraphs import group_paragraphs
+from epub_tts_narrator.renderer.paragraphs import group_paragraphs, paragraph_supported
 
 
 def passages(texts, *, block="b1", offset=0, voices=None):
@@ -35,6 +35,17 @@ def chunks_of(result, chapter=0):
 
 
 class ParagraphGroupingTests(unittest.TestCase):
+    def test_single_voice_capability_accepts_only_uniform_paragraphs(self):
+        uniform = chunks_of(group_paragraphs(plan(passages(["Hello. ", "Goodbye."]))))[0]
+        mixed = chunks_of(group_paragraphs(plan(passages(["Hello. ", "Goodbye."],
+                                   voices=["v1", "v2"])), multi_speaker=True))[0]
+        capabilities = {"multi_speaker": False, "single_speaker_paragraph": True}
+        self.assertTrue(paragraph_supported(capabilities, uniform))
+        self.assertFalse(paragraph_supported(capabilities, mixed))
+        self.assertFalse(paragraph_supported({"multi_speaker": False}, uniform))
+        self.assertTrue(paragraph_supported({"multi_speaker": True}, mixed))
+        self.assertFalse(paragraph_supported({"single_speaker_paragraph": "true"}, uniform))
+
     def test_explicit_legacy_groups_preserve_original_speakers_and_directions(self):
         members = passages(['“Hello,” ', 'she said. ', '“Come inside.”'], offset=12,
                            voices=["v1", "v2", "v1"])

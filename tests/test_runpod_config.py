@@ -76,6 +76,30 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(remote["verification"]["recurrence_threshold"], 4)
         self.assertEqual(remote["chapter_server"]["port"], 8082)
 
+    def test_batched_backend_uses_one_server_with_bounded_request_slots(self):
+        write_private_toml(self.directory / "runpod.local.toml", {
+            "runpod": {"tts_backend": "sglang", "tts_concurrency": 8}})
+        remote = self.remote()
+        worker, = remote["render_pool"]["workers"]
+        self.assertEqual(worker["protocol"], "fish_sglang_drama3")
+        self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/audio/speech")
+        self.assertEqual(worker["concurrency"], 8)
+        self.assertFalse(worker["multi_speaker"])
+        self.assertFalse(worker["api_key"])
+        self.assertEqual(remote["engine"]["checkpoint"], "/workspace/models/drama-3")
+        loaded = load_config(write_private_toml(self.directory / "worker.toml", remote))
+        self.assertEqual(loaded["render_pool"]["workers"][0]["concurrency"], 8)
+
+    def test_invalid_batching_options_are_rejected_before_cloud_calls(self):
+        for key, value in (("tts_backend", "other"), ("tts_backend", []),
+                           ("tts_concurrency", True), ("tts_concurrency", 0),
+                           ("tts_concurrency", 9), ("tts_concurrency", 1.5),
+                           ("sglang_source", "/workspace/../etc/sglang")):
+            with self.subTest(key=key, value=value):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {key: value}})
+                with self.assertRaisesRegex(ValueError, "runpod"):
+                    load_settings(self.path)
+
     def test_deployment_service_port_controls_worker_without_changing_local_server(self):
         base = deepcopy(self.base)
         base["chapter_server"]["port"] = 8090

@@ -165,6 +165,9 @@ class RenderPool:
 
     The configured model revision is the operator's compatibility contract for
     these workers. The actual backend and worker remain recorded on every take.
+    This preserves already verified speech when switching native/SGLang workers;
+    it does not promise identical samples. SGLang uses its stock uncapped main
+    tokens and capped residual codebooks, recorded in worker sampling provenance.
     References are prepared once on the coordinator, never redesigned remotely.
     """
 
@@ -198,8 +201,12 @@ class RenderPool:
             "reference_voice": True,
             "voice_design": selected.runtime == "sogni" and any(w.local for w in self._workers),
             "preset_voice": False, "delivery_control": True,
-            "multi_speaker": all(w.local or w.settings.get("multi_speaker", True)
+            "multi_speaker": all(w.local or w.settings.get(
+                "multi_speaker", w.settings.get("protocol") != "fish_sglang_drama3")
                                  for w in self._workers),
+            "single_speaker_paragraph": all(
+                w.local or w.settings.get("multi_speaker", True)
+                or w.settings.get("protocol") == "fish_sglang_drama3" for w in self._workers),
             "unconditioned_voice_creation": False,
         }
 
@@ -269,7 +276,12 @@ class RenderPool:
 
     def synthesize_dialogue(self, turns, output_path, *, seed):
         if not self.capabilities["multi_speaker"]:
-            raise EngineError("Every render worker must support multi-speaker paragraphs")
+            if not self.capabilities["single_speaker_paragraph"]:
+                raise EngineError("Every render worker must support multi-speaker paragraphs")
+            from .engines import format_dialogue
+            _, voices, _ = format_dialogue(turns)
+            if len(voices) != 1:
+                raise EngineError("Every render worker must support multi-speaker paragraphs")
         return self._execute("synthesize_dialogue", turns, output_path, seed=seed)
 
     def create_voice(self, description, text, output_path, *, seed):

@@ -160,6 +160,23 @@ The native adapter folds generated seeds into the server's supported 31-bit
 range so retries do not collapse to the same clamped seed. Take metadata retains
 the requested and submitted seeds; previously accepted audio remains reusable.
 
+The stock SGLang-Omni profile uses `protocol = "fish_sglang_drama3"`, a
+`/v1/audio/speech` URL, `multi_speaker = false`, and a bounded worker concurrency
+(start with four). Several requests share one loaded model. A request may retain
+an entire paragraph using one saved voice, including changes of delivery, but
+cannot mix different voices. References remain unchanged FLAC bytes; only
+loopback synthesis responses use WAV. Stock SGLang does not support per-request
+seeds, which the adapter reports explicitly in each take's metadata.
+
+This profile requires `engine.top_k = 30` for residual codebooks and uses the
+upstream stock uncapped main-token setting. Upstream warns that capping the main
+token at 30 can make output fall silent. Worker identity and take metadata record
+the requested and effective sampling profiles. Accepted speech remains reusable
+across native and SGLang workers for the same configured model contract, text,
+and voice; this retains already verified audio, not a promise of identical
+sampling or deterministic reproduction. Changed model contracts, text, or
+voices continue to invalidate the relevant cached takes.
+
 For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and
 `tokenizer.json`. It never downloads a model implicitly. CPU recognition is the

@@ -315,6 +315,96 @@ class NativeDrama3TransportTests(unittest.TestCase):
         self.assertTrue(result["seed_applied"])
         self.assertNotIn("seed_effective", result)
 
+    def test_sglang_json_speech_preserves_voice_and_reports_unsupported_seed(self):
+        client = self.client(protocol="fish_sglang_drama3", concurrency=4)
+        self.response_headers["X-Audiobook-Seed-Applied"] = "99"
+        result = client.synthesize("Hello, world.", self.voice,
+                                   self.root / "sglang.wav", seed=99, direction="whisper")
+        request = self.requests[-1]
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        payload = json.loads(request.data)
+        self.assertEqual(payload, {
+            "input": "<whisper>Hello, world.</whisper>",
+            "references": [{"data": base64.b64encode(wav_bytes()).decode("ascii"),
+                            "media_type": "audio/wav", "text": "Reference words."}],
+            "response_format": "wav", "stream": False, "temperature": 1.0,
+            "top_p": .9, "top_k": (1 << 31) - 1, "max_new_tokens": 2048,
+        })
+        self.assertEqual(result["seed_requested"], 99)
+        self.assertIsNone(result["seed_effective"])
+        self.assertFalse(result["seed_applied"])
+        self.assertEqual(result["seed_mode"], "unsupported")
+        self.assertEqual(result["sampling_requested"]["top_k"], 30)
+        self.assertEqual(result["sampling_effective"], {
+            "temperature": 1.0, "top_p": .9, "max_new_tokens": 2048,
+            "main_token_top_k": (1 << 31) - 1, "residual_codebook_top_k": 30})
+        self.assertEqual(client.identity["sampling_effective"], result["sampling_effective"])
+        self.assertFalse(client.capabilities["multi_speaker"])
+        self.assertTrue(client.capabilities["single_speaker_paragraph"])
+        self.assertEqual(client.identity["request_options"]["seed_transport"], "unsupported")
+        self.assertNotEqual(client.identity, self.client(protocol="fish_native_drama3").identity)
+
+    def test_sglang_uniform_paragraph_preserves_styles_and_rejects_multiple_voices(self):
+        client = self.client(protocol="fish_sglang_drama3")
+        client.synthesize_dialogue([
+            {"text": "Hello. ", "voice": self.voice},
+            {"text": "Stay here.", "voice": self.voice, "direction": "whisper"},
+        ], self.root / "sglang-paragraph.wav", seed=8)
+        payload = json.loads(self.requests[-1].data)
+        self.assertEqual(payload["input"], "<|speaker:0|> Hello.\n<|speaker:0|> <whisper>Stay here.</whisper>")
+        self.assertEqual(payload["references"][0]["text"], "<|speaker:0|> Reference words.")
+        previous = len(self.requests)
+        with self.assertRaisesRegex(EngineError, "one reference voice"):
+            client.synthesize_dialogue([
+                {"text": "Hello.", "voice": self.voice},
+                {"text": "Goodbye.", "voice": {**self.voice, "reference_text": "Another voice."}},
+            ], self.root / "unsupported.wav", seed=9)
+        self.assertEqual(len(self.requests), previous)
+
+    def test_sglang_references_remain_lossless_flac_bytes(self):
+        import soundfile as sf
+        reference = self.root / "reference.flac"
+        sf.write(reference, [0.1] * 100, 16000, format="FLAC")
+        voice = {**self.voice, "reference_audio": str(reference)}
+        self.client(protocol="fish_sglang_drama3").synthesize(
+            "Hello.", voice, self.root / "flac-input.wav", seed=1)
+        payload = json.loads(self.requests[-1].data)
+        self.assertEqual(payload["references"][0]["media_type"], "audio/flac")
+        self.assertEqual(base64.b64decode(payload["references"][0]["data"]), reference.read_bytes())
+
+    def test_sglang_transport_allows_concurrent_requests_without_shared_seed_state(self):
+        client = self.client(protocol="fish_sglang_drama3", concurrency=4)
+        barrier = threading.Barrier(4, timeout=5)
+        seen = []
+        opener = Mock()
+        def respond(request, **kwargs):
+            seen.append(json.loads(request.data))
+            barrier.wait()  # All requests must enter before any can finish.
+            response = io.BytesIO(wav_bytes())
+            response.status, response.headers = 200, {}
+            return response
+        opener.open.side_effect = respond
+        with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(client.synthesize, f"Take {number}.", self.voice,
+                           self.root / f"parallel-{number}.wav", seed=number) for number in range(4)]
+                results = [future.result(10) for future in futures]
+        self.assertEqual({item["input"] for item in seen}, {f"Take {n}." for n in range(4)})
+        self.assertEqual([result["seed_requested"] for result in results], list(range(4)))
+        self.assertTrue(all("seed" not in item for item in seen))
+
+    def test_sglang_unsupported_options_and_oversized_reference_fail_before_request(self):
+        for settings in ({"multi_speaker": True}, {"concurrency": 0}, {"concurrency": 17},
+                         {"top_k": True}, {"top_k": 20}, {"top_k": 30.0},
+                         {"temperature": float("nan")}, {"max_new_tokens": 4096}):
+            with self.subTest(settings=settings), self.assertRaises(EngineError):
+                self.client(protocol="fish_sglang_drama3", **settings)
+        with patch("epub_tts_narrator.renderer.fish_http.MAX_SGLANG_REFERENCE_BYTES", 4):
+            with self.assertRaisesRegex(EngineError, "10 MiB"):
+                self.client(protocol="fish_sglang_drama3").synthesize(
+                    "Hello.", self.voice, self.root / "oversized.wav", seed=1)
+        self.assertEqual(self.requests, [])
+
     def test_http_target_quotes_are_trimmed_before_controls_but_reference_is_unchanged(self):
         voice = {**self.voice, "reference_text": ' “Saved reference.” '}
         self.client().synthesize(' \u2003“ Don\'t call it "easy". ” ', voice,

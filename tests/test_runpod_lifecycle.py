@@ -308,6 +308,15 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(spec["env"], {"PUBLIC_KEY": "ssh-ed25519 fixture-public-key"})
         self.assertNotIn("fixture-provider-secret", json.dumps(spec))
         self.assertNotIn("fixture-ceph-secret", json.dumps(spec))
+
+    def test_batched_backend_requests_cuda13_without_extra_gpu_replicas(self):
+        self.settings["deployment"]["tts_backend"] = "sglang"
+        deployment = self.deployment()
+        deployment.provision()
+        self.assertEqual(self.api.catalog_gpus.call_args.kwargs["minCudaVersion"], "13.0")
+        spec = self.api.create_pod.call_args.args[0]
+        self.assertEqual(spec["gpu"]["minCudaVersion"], "13.0")
+        self.assertEqual(spec["gpu"]["count"], 1)
         self.assertEqual(deployment.state["pod_id"], "pod_fixture")
         self.assertEqual(deployment.state_path.stat().st_mode & 0o777, 0o600)
 
