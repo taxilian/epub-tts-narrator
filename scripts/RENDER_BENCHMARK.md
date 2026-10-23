@@ -42,6 +42,41 @@ seeds, so its results remain stochastic even though requested seeds are fixed
 and retained. Identical requested seeds also do not promise identical samples
 across runtimes or model quantizations.
 
+To measure synthesis and verification together, use `pipeline` with the same
+corpus and a new output directory:
+
+```sh
+python scripts/benchmark_rendering.py pipeline /path/to/benchmark/corpus/corpus.json \
+  --config /path/to/worker.toml --worker drama3-cuda --concurrency 8 \
+  --output /path/to/benchmark/sglang-c8-pipeline
+```
+
+The selected config controls the verifier device and compute type. A CUDA
+comparison uses `type = "faster_whisper"`, `device = "cuda"` and a compatible
+`compute_type`, such as `"float16"`, with locally available Whisper weights.
+Keep the verifier model and quality policy fixed when comparing CPU and CUDA.
+The benchmark creates one verifier and uses the production pool's wrapper to
+run recognition on its persistent runtime thread. It does not load a verifier
+for each paragraph. Remote synthesis can continue while recognition or text
+review is in progress.
+
+The pool's `max_inflight` bounds the number of complete passage transactions;
+its worker concurrency separately limits simultaneous synthesis requests. Set
+`render_pool.max_inflight` explicitly when comparing admission windows. Voice
+warmups and one ASR warmup complete before the measured pipeline starts. Each
+measured passage generates once, uses production audio normalization and
+quality validation, and retains the generated audio unchanged. The executor
+drains before the shared verifier and engine are closed.
+
+Pipeline manifests report **verified audio seconds / pipeline wall second**,
+alongside pass rate and generated audio duration. Per-request and per-method
+times overlap. Verifier method timings include time waiting for the shared
+runtime or text-review queue; their sum can exceed wall time. They are not the
+isolated method costs reported by sequential verification. This measures the
+first-pass passage pipeline: retries, chapter encoding, publication and book
+assembly still require a separate production run. Do not add sequential
+generation and verification timings to estimate the measured pipeline result.
+
 Verify all runs with the same verifier model, configuration, and quality policy:
 
 ```sh
@@ -49,8 +84,8 @@ python scripts/benchmark_rendering.py verify /path/to/benchmark/m5-first/manifes
   --config /path/to/comparison-verifier.toml
 ```
 
-Verification is a separate phase so engine throughput and verification cost
-remain distinguishable. The ordinary acoustic and transcript checks, including
+In `generate`/`verify` mode, verification is a separate phase so engine throughput
+and verification cost remain distinguishable. The ordinary acoustic and transcript checks, including
 configured secondary recognition and JEV, still apply. There is one generation
 per case; rejected audio stays rejected, and there is no automatic regeneration
 or pronunciation repair in this first-pass comparison. To compare end-to-end

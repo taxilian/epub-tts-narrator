@@ -178,6 +178,15 @@ def summarize(rows, generation_wall_seconds, verification_wall_seconds=None):
             "latency_p95_seconds": latencies[min(len(latencies) - 1, int(len(latencies) * .95))] if latencies else None}
 
 
+def summarize_pipeline(rows, elapsed):
+    result = summarize(rows, None)
+    result["pipeline_wall_seconds"] = elapsed
+    verified = result["verified_audio_seconds"]
+    result["verified_audio_per_pipeline_second"] = verified / elapsed if verified is not None and elapsed else None
+    result["generated_audio_per_pipeline_second"] = result["generated_audio_seconds"] / elapsed if elapsed else None
+    return result
+
+
 class TimedVerifier:
     """Forward optional verifier APIs unchanged, measuring even failed calls."""
 
@@ -228,25 +237,53 @@ class GpuSampler:
             self.thread.join(timeout=5)
 
 
-def generate(args):
-    from epub_tts_narrator.renderer.config import load_config
-    from epub_tts_narrator.renderer.fish_http import inspect_wav
-    from epub_tts_narrator.renderer.pool import create_render_engine
-
-    corpus, voices = load_corpus(args.corpus)
-    config = load_config(args.config)
+def selected_workers(config, worker_name, concurrency):
     workers = config.get("render_pool", {}).get("workers", [])
-    if args.worker == "local" or not workers:
-        if args.concurrency != 1:
+    if worker_name == "local" or not workers:
+        if concurrency != 1:
             raise ValueError("Local MLX comparison requires concurrency 1")
         # Keep all lazy model operations on the existing persistent MLX thread.
         workers = [{"name": "benchmark-local", "type": "local", "concurrency": 1}]
     else:
-        workers = [w for w in workers if args.worker is None or w["name"] == args.worker]
+        workers = [w for w in workers if worker_name is None or w["name"] == worker_name]
         if len(workers) != 1 or workers[0]["type"] == "local":
             raise ValueError("Select one remote worker, or use --worker local")
-        workers = [dict(workers[0], concurrency=args.concurrency)]
+        workers = [dict(workers[0], concurrency=concurrency)]
     config.setdefault("render_pool", {})["workers"] = workers
+    return workers
+
+
+def synthesize_case(engine, case, voices, output, secrets, *, warmup=False):
+    from epub_tts_narrator.renderer.fish_http import inspect_wav
+
+    target = output / (case["id"] + ("-warmup" if warmup else "") + ".wav")
+    row = {"case_id": case["id"], "warmup": warmup, "length_class": case["length_class"],
+           "expected_text": case["expected_text"], "seed_requested": 0 if warmup else case["seed_requested"]}
+    started = time.perf_counter()
+    try:
+        voice = voices[case["voice_asset"]]
+        turns = [dict(t, voice=voice) for t in case["turns"]]
+        if case["paragraph"]:
+            metadata = engine.synthesize_dialogue(turns, target, seed=row["seed_requested"])
+        else:
+            metadata = engine.synthesize(turns[0]["text"], voice, target,
+                                         seed=row["seed_requested"], direction=turns[0]["direction"])
+        row["engine_metadata"] = metadata
+        row["audio_seconds"] = inspect_wav(target)["duration_seconds"]
+        row.update(audio=target.name, audio_sha256=file_hash(target))
+    except Exception as exc:
+        row.update(error=safe_error_text(f"{type(exc).__name__}: {exc}", secrets), passed=False)
+    row["latency_seconds"] = time.perf_counter() - started
+    return row
+
+
+def generate(args):
+    from epub_tts_narrator.renderer.config import load_config
+    from epub_tts_narrator.renderer.pool import create_render_engine
+
+    corpus, voices = load_corpus(args.corpus)
+    config = load_config(args.config)
+    workers = selected_workers(config, args.worker, args.concurrency)
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"format": "epub-tts-render-benchmark-results", "version": 1,
               "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
@@ -264,25 +301,7 @@ def generate(args):
     write_json(path, report)
 
     def run(case, warmup=False):
-        target = args.output / (case["id"] + ("-warmup" if warmup else "") + ".wav")
-        row = {"case_id": case["id"], "warmup": warmup, "length_class": case["length_class"],
-               "expected_text": case["expected_text"], "seed_requested": 0 if warmup else case["seed_requested"]}
-        started = time.perf_counter()
-        try:
-            voice = voices[case["voice_asset"]]
-            turns = [dict(t, voice=voice) for t in case["turns"]]
-            if case["paragraph"]:
-                metadata = engine.synthesize_dialogue(turns, target, seed=row["seed_requested"])
-            else:
-                metadata = engine.synthesize(turns[0]["text"], voice, target,
-                                             seed=row["seed_requested"], direction=turns[0]["direction"])
-            row["engine_metadata"] = metadata
-            row["audio_seconds"] = inspect_wav(target)["duration_seconds"]
-            row.update(audio=target.name, audio_sha256=file_hash(target))
-        except Exception as exc:
-            row.update(error=safe_error_text(f"{type(exc).__name__}: {exc}", secrets), passed=False)
-        row["latency_seconds"] = time.perf_counter() - started
-        return row
+        return synthesize_case(engine, case, voices, args.output, secrets, warmup=warmup)
 
     try:
         warm = {}
@@ -310,6 +329,129 @@ def generate(args):
         print(json.dumps(report["summary"], indent=2))
     finally:
         engine.close()
+
+
+def pipeline(args):
+    """First-pass production-shaped overlap; one pool and one shared ASR model."""
+    from epub_tts_narrator.renderer.assembly import normalize_clip
+    from epub_tts_narrator.renderer.chapter_verification import create_chapter_verifier
+    from epub_tts_narrator.renderer.config import load_config
+    from epub_tts_narrator.renderer.pool import create_render_engine
+    from epub_tts_narrator.renderer.quality import validate_audio
+
+    corpus, voices = load_corpus(args.corpus)
+    config = load_config(args.config)
+    workers = selected_workers(config, args.worker, args.concurrency)
+    args.output.mkdir(parents=True, exist_ok=False)
+    path = args.output / "manifest.json"
+    secrets = configured_secrets(config)
+    report = {"format": "epub-tts-render-benchmark-results", "version": 1, "mode": "pipeline",
+              "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
+              "started_utc": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
+              "concurrency": args.concurrency, "results": [], "status": "warming",
+              "quality": deepcopy(config["quality"]), "transport_protocol": workers[0].get("protocol", "local"),
+              "seed_control": "unsupported_stochastic" if "sglang" in workers[0].get("protocol", "") else "requested; see backend metadata",
+              "timing_note": "First-pass generation, normalization and verification overlap under production admission and worker limits. Warmups are excluded. No retries, assembly or publication. Pipeline makespan is the throughput denominator; per-row times overlap.",
+              "verification_timing_note": "Per-method elapsed times include pooled runtime/review queue waits. Their sums can exceed pipeline wall time and are not isolated ASR/JEV service times."}
+    engine = create_render_engine(config)
+    verifier = None
+    try:
+        if not callable(getattr(engine, "admit_chunk", None)):
+            raise ValueError("Pipeline benchmark requires the production pool admission gate")
+        report.update(engine=engine.identity, max_inflight=engine.max_inflight)
+        verifier = create_chapter_verifier(config["verification"], config.get("jev"), config.get("provider"))
+        verifier = engine.wrap_verifier(verifier)
+        report["verification_identity"] = verifier.identity
+        write_json(path, report)
+
+        def check(row):
+            raw = args.output / row["audio"]
+            normalized = raw.with_name(raw.stem + "-verified.wav")
+            seconds = row["verification_stage_seconds"] = {}
+            began = time.perf_counter()
+            try:
+                raw = regular_file(raw)
+                if file_hash(raw) != row["audio_sha256"]:
+                    raise ValueError("Generated audio changed before verification")
+                normalization_start = time.monotonic()
+                try:
+                    normalize_clip(raw, normalized, sample_rate=config["render"]["sample_rate"],
+                                   ffmpeg=config["render"]["ffmpeg"])
+                finally:
+                    seconds["normalization"] = time.monotonic() - normalization_start
+                result = validate_audio(normalized, row["expected_text"], TimedVerifier(verifier, seconds),
+                                        config["quality"], purpose="speech")
+                if file_hash(raw) != row["audio_sha256"]:
+                    raise ValueError("Generated audio changed during verification")
+                row.update(verification=result, passed=result["passed"])
+            except Exception as exc:
+                row.update(verification_error=safe_error_text(f"{type(exc).__name__}: {exc}", secrets), passed=False)
+            finally:
+                normalized.unlink(missing_ok=True)
+                row["verification_seconds"] = time.perf_counter() - began
+
+        warm = {}
+        for case in sorted(corpus["cases"], key=lambda c: len(c["expected_text"])):
+            warm.setdefault(case["voice_asset"], case)
+        began = time.perf_counter()
+        for case in warm.values():
+            with engine.admit_chunk():
+                report["results"].append(synthesize_case(engine, case, voices, args.output, secrets, warmup=True))
+            write_json(path, report)
+        report["warmup_wall_seconds"] = time.perf_counter() - began
+        if not report["results"] or any("error" in row for row in report["results"]):
+            raise RuntimeError("Reference warmup failed; inspect manifest before measuring")
+        began = time.perf_counter()
+        with engine.admit_chunk():
+            check(report["results"][0])
+            warmup = report["results"][0]
+            if "verification_error" not in warmup and "transcribe" not in warmup["verification_stage_seconds"]:
+                # An acoustic rejection can short-circuit validate_audio. Load
+                # the one shared ASR model before measuring any passage anyway.
+                raw = regular_file(args.output / warmup["audio"])
+                if file_hash(raw) != warmup["audio_sha256"]:
+                    raise ValueError("Warmup audio changed before ASR initialization")
+                TimedVerifier(verifier, warmup["verification_stage_seconds"]).transcribe(raw)
+        report["verification_warmup_seconds"] = time.perf_counter() - began
+        if "verification_error" in report["results"][0]:
+            raise RuntimeError("ASR warmup failed; inspect manifest before measuring")
+        report["status"] = "pipelining"
+        write_json(path, report)
+
+        def run(case):
+            began = time.perf_counter()
+            with engine.admit_chunk():
+                row = synthesize_case(engine, case, voices, args.output, secrets)
+                row["generation_seconds"] = row["latency_seconds"]
+                if "error" not in row:
+                    check(row)
+            row["latency_seconds"] = time.perf_counter() - began
+            return row
+
+        with GpuSampler() as sampler:
+            began = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=engine.max_inflight) as executor:
+                futures = [executor.submit(run, case) for case in corpus["cases"]]
+                for future in as_completed(futures):
+                    report["results"].append(future.result())
+                    write_json(path, report)
+            elapsed = time.perf_counter() - began
+        report.update(status="verified", gpu_samples=sampler.samples, pipeline_wall_seconds=elapsed)
+        report["summary"] = summarize_pipeline(report["results"], elapsed)
+        write_json(path, report)
+        print(json.dumps(report["summary"], indent=2))
+    except BaseException as exc:
+        report.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                      error=safe_error_text(f"{type(exc).__name__}: {exc}", secrets))
+        write_json(path, report)
+        raise
+    finally:
+        try:
+            close = getattr(verifier, "close", None)
+            if close:
+                close()
+        finally:
+            engine.close()
 
 
 def verify(args):
@@ -350,6 +492,10 @@ def verify(args):
             report["verification_warmup_stage_seconds"] = {}
             try:
                 check(raw, normalized, row["expected_text"], report["verification_warmup_stage_seconds"])
+                if "transcribe" not in report["verification_warmup_stage_seconds"]:
+                    # Acoustic gates may reject a warmup before recognition.
+                    # Keep lazy model initialization outside measured time.
+                    TimedVerifier(verifier, report["verification_warmup_stage_seconds"]).transcribe(raw)
             finally:
                 normalized.unlink(missing_ok=True)
         report["verification_warmup_seconds"] = time.perf_counter() - started
@@ -391,16 +537,18 @@ def main():
     prepare_parser.add_argument("--seed", type=int, default=1729)
     prepare_parser.add_argument("--output", type=Path, required=True)
     generate_parser = sub.add_parser("generate")
-    generate_parser.add_argument("corpus", type=Path)
-    generate_parser.add_argument("--worker")
-    generate_parser.add_argument("--concurrency", type=int, choices=(1, 4, 8), default=1)
-    generate_parser.add_argument("--output", type=Path, required=True)
+    pipeline_parser = sub.add_parser("pipeline")
+    for p in (generate_parser, pipeline_parser):
+        p.add_argument("corpus", type=Path)
+        p.add_argument("--worker")
+        p.add_argument("--concurrency", type=int, choices=(1, 4, 8), default=1)
+        p.add_argument("--output", type=Path, required=True)
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("manifest", type=Path)
-    for p in (prepare_parser, generate_parser, verify_parser):
+    for p in (prepare_parser, generate_parser, pipeline_parser, verify_parser):
         p.add_argument("--config", type=Path)
     args = parser.parse_args()
-    {"prepare": prepare, "generate": generate, "verify": verify}[args.command](args)
+    {"prepare": prepare, "generate": generate, "pipeline": pipeline, "verify": verify}[args.command](args)
 
 
 if __name__ == "__main__":

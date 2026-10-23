@@ -1,17 +1,17 @@
 """Offline checks for fixed workloads, honest parallel timing, and voice safety."""
 
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from copy import deepcopy
 import io
 from pathlib import Path
 import tempfile
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock, get_ident
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.benchmark_rendering import TimedVerifier, generate, load_corpus, select_cases, summarize, verify
+from scripts.benchmark_rendering import TimedVerifier, generate, load_corpus, pipeline, select_cases, summarize, summarize_pipeline, verify
 from epub_tts_narrator.renderer.common import digest, file_hash, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
@@ -22,6 +22,15 @@ def row(duration=10, elapsed=2, **changes):
 
 
 class SummaryTests(unittest.TestCase):
+    def test_pipeline_uses_one_overlapped_makespan_and_excludes_warmup(self):
+        rows = [row(duration=10, elapsed=8, passed=True), row(duration=20, elapsed=7, passed=False),
+                row(duration=100, elapsed=100, passed=True, warmup=True)]
+        result = summarize_pipeline(rows, 9)
+        self.assertEqual(result["verified_audio_per_pipeline_second"], 10 / 9)
+        self.assertEqual(result["generated_audio_per_pipeline_second"], 30 / 9)
+        self.assertIsNone(result["verified_audio_per_generation_second"])
+        self.assertIsNone(result["verified_audio_per_total_second"])
+
     def test_parallel_makespan_not_sum_of_request_latencies_is_denominator(self):
         rows = [row(elapsed=4, passed=True), row(elapsed=4, passed=True)]
         result = summarize(rows, 5, 3)
@@ -190,10 +199,17 @@ class GenerationTests(unittest.TestCase):
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required for real normalization")
 class VerificationTests(unittest.TestCase):
     def test_real_audio_checks_preserve_raw_bytes_and_count_bad_text_as_rejected(self):
+        from epub_tts_narrator.renderer.quality import validate_audio
+        asr_paths = []
         class Verifier:
             identity = {"backend": "independent-fixture"}
             def transcribe(self, path):
+                asr_paths.append(path.name)
                 return timed_transcript("Hello world.")
+        def acoustic_warmup(path, *args, **kwargs):
+            if path.name == "verification-warmup.wav":
+                return {"passed": False, "reasons": ["silent_audio"]}
+            return validate_audio(path, *args, **kwargs)
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             audio = folder / "generated.wav"
@@ -210,6 +226,7 @@ class VerificationTests(unittest.TestCase):
             config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE)
             with patch("epub_tts_narrator.renderer.config.load_config", return_value=config), \
                     patch("epub_tts_narrator.renderer.chapter_verification.create_chapter_verifier", return_value=Verifier()), \
+                    patch("epub_tts_narrator.renderer.quality.validate_audio", side_effect=acoustic_warmup), \
                     redirect_stdout(io.StringIO()):
                 verify(SimpleNamespace(manifest=manifest, config=None))
             from epub_tts_narrator.renderer.common import read_json
@@ -222,6 +239,7 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse(list(folder.glob("*-verified.wav")))
             self.assertFalse((folder / "verification-warmup.wav").exists())
             self.assertEqual(report["verification_identity"], Verifier.identity)
+            self.assertEqual(asr_paths.count("generated.wav"), 1)
             for item in report["results"][1:]:
                 self.assertEqual(set(item["verification_stage_seconds"]), {"normalization", "transcribe"})
                 self.assertTrue(all(value >= 0 for value in item["verification_stage_seconds"].values()))
@@ -229,6 +247,140 @@ class VerificationTests(unittest.TestCase):
             for stage, elapsed in report["summary"]["verification_stage_seconds"].items():
                 self.assertEqual(elapsed, sum(item["verification_stage_seconds"][stage]
                                               for item in report["results"][1:]))
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required for production normalization")
+class PipelineTests(unittest.TestCase):
+    def test_real_pool_overlaps_tts_and_one_affine_verifier_and_preserves_failures(self):
+        from epub_tts_narrator.renderer.pool import RenderPool
+        from epub_tts_narrator.renderer.quality import validate_audio
+        asr_entered, generation_overlapped = Event(), Event()
+        lock, main_thread = Lock(), get_ident()
+        asr_threads, close_order, synth_calls, pools, asr_paths = set(), [], [], [], []
+        counts = {"active": 0, "peak": 0, "admitted": 0, "admission_peak": 0}
+
+        class Backend:
+            identity = {"engine": "fixture-http"}
+            def synthesize(self, text, voice, output, *, seed, direction):
+                with lock:
+                    synth_calls.append((seed, text, direction))
+                    counts["active"] += 1
+                    counts["peak"] = max(counts["peak"], counts["active"])
+                try:
+                    if seed == 4:
+                        raise TimeoutError("fixture generation failure")
+                    if seed == 2:
+                        if not asr_entered.wait(5):
+                            raise RuntimeError("TTS failed to overlap verification")
+                        generation_overlapped.set()
+                    write_tone(output)
+                    return {"seed_requested": seed, "seed_applied": False}
+                finally:
+                    with lock:
+                        counts["active"] -= 1
+            def synthesize_dialogue(self, turns, output, *, seed):
+                self.asserted_turns = turns
+                return self.synthesize("".join(t["text"] for t in turns), turns[0]["voice"],
+                                       output, seed=seed, direction=turns[0]["direction"])
+            def close(self):
+                close_order.append("engine")
+
+        class Verifier:
+            identity = {"backend": "fixture-asr", "device": "cuda"}
+            def transcribe(self, path):
+                asr_threads.add(get_ident())
+                asr_paths.append(path.name)
+                if path.name == "case-1-verified.wav":
+                    asr_entered.set()
+                    if not generation_overlapped.wait(5):
+                        raise RuntimeError("No synthesis progressed while ASR was waiting")
+                return timed_transcript("Hello world.")
+            def close(self):
+                self.assert_drained = counts["active"] == counts["admitted"] == 0
+                asr_threads.add(get_ident())
+                close_order.append("verifier")
+
+        backend, verifier = Backend(), Verifier()
+        def make_pool(config):
+            pool = RenderPool(config)
+            admission = pool.admit_chunk
+            @contextmanager
+            def tracked():
+                with admission():
+                    with lock:
+                        counts["admitted"] += 1
+                        counts["admission_peak"] = max(counts["admission_peak"], counts["admitted"])
+                    try:
+                        yield
+                    finally:
+                        with lock:
+                            counts["admitted"] -= 1
+            pool.admit_chunk = tracked
+            pools.append(pool)
+            return pool
+        def main_thread_write(*args, **kwargs):
+            self.assertEqual(get_ident(), main_thread)
+            return write_json(*args, **kwargs)
+        def acoustic_warmup(path, *args, **kwargs):
+            if "-warmup-" in path.name:
+                return {"passed": False, "reasons": ["silent_audio"]}
+            return validate_audio(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            cases = [{"id": f"case-{i}", "length_class": "short", "paragraph": i == 2,
+                      "voice_asset": "voice", "seed_requested": i,
+                      "expected_text": "Clearly different words altogether." if i == 3 else "Hello world.",
+                      "turns": [{"text": "Clearly different words altogether." if i == 3 else "Hello world.",
+                                 "direction": "measured"}]} for i in range(1, 5)]
+            corpus = {"corpus_sha256": digest("pipeline fixture"), "cases": cases}
+            voices = {"voice": {"kind": "reference", "reference_text": "Reference text.",
+                                "reference_audio": str(folder / "voice.flac"), "asset_hash": digest("voice")}}
+            config = deepcopy(DEFAULTS)
+            config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE)
+            config["render_pool"].update(max_inflight=5, workers=[
+                {"name": "fixture", "type": "fish_http", "protocol": "fish_sglang_drama3", "concurrency": 4}])
+            args = SimpleNamespace(corpus=folder / "corpus.json", config=None, worker="fixture",
+                                   concurrency=4, output=folder / "results")
+            with patch("scripts.benchmark_rendering.load_corpus", return_value=(corpus, voices)), \
+                    patch("epub_tts_narrator.renderer.config.load_config", return_value=config), \
+                    patch("epub_tts_narrator.renderer.pool.create_render_engine", side_effect=make_pool), \
+                    patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend), \
+                    patch("epub_tts_narrator.renderer.chapter_verification.create_chapter_verifier", return_value=verifier) as factory, \
+                    patch("epub_tts_narrator.renderer.quality.validate_audio", side_effect=acoustic_warmup), \
+                    patch("scripts.benchmark_rendering.write_json", side_effect=main_thread_write), \
+                    patch("scripts.benchmark_rendering.shutil.which", return_value=None), redirect_stdout(io.StringIO()):
+                pipeline(args)
+            from epub_tts_narrator.renderer.common import read_json
+            report = read_json(args.output / "manifest.json")
+            measured = [r for r in report["results"] if not r["warmup"]]
+            self.assertTrue(generation_overlapped.is_set())
+            self.assertEqual(factory.call_count, 1)
+            self.assertEqual(len(asr_threads), 1)
+            self.assertEqual(asr_paths.count("case-1-warmup.wav"), 1)
+            self.assertNotIn(main_thread, asr_threads)
+            self.assertEqual(close_order, ["verifier", "engine"])
+            self.assertTrue(verifier.assert_drained)
+            self.assertTrue(pools[0]._closed)
+            self.assertLessEqual(counts["peak"], 4)
+            self.assertLessEqual(counts["admission_peak"], 5)
+            self.assertCountEqual([call[0] for call in synth_calls], [0, 1, 2, 3, 4])
+            self.assertEqual(backend.asserted_turns[0]["direction"], "measured")
+            self.assertEqual(report["summary"]["generated"], 3)
+            self.assertEqual(report["summary"]["generation_failures"], 1)
+            self.assertEqual(report["summary"]["accepted"], 2)
+            self.assertEqual(report["summary"]["rejected_or_failed"], 2)
+            self.assertEqual(report["summary"]["verified_audio_per_pipeline_second"],
+                             report["summary"]["verified_audio_seconds"] / report["pipeline_wall_seconds"])
+            self.assertIn("queue waits", report["verification_timing_note"])
+            self.assertEqual(report["max_inflight"], 5)
+            self.assertFalse(list(args.output.glob("*-verified.wav")))
+            self.assertFalse(list(args.output.rglob("accepted.json")))
+            for result in measured:
+                if "error" not in result:
+                    self.assertEqual(file_hash(args.output / result["audio"]), result["audio_sha256"])
+                    self.assertEqual(set(result["verification_stage_seconds"]), {"normalization", "transcribe"})
+                    self.assertIsNot(result["verification_stage_seconds"], report["results"][0].get("verification_stage_seconds"))
 
 
 if __name__ == "__main__":
