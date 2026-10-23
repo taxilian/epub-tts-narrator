@@ -9,16 +9,14 @@ from queue import Queue
 from threading import BoundedSemaphore, Condition, RLock, get_ident
 from time import monotonic
 
+from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 from .progress import generation_notifier, report_worker_activity
 
 
-_SAMPLING_DEFAULTS = {
-    "experts": "q8", "temperature": 1.0, "top_p": 0.9, "top_k": 30,
-    "max_new_tokens": 2048, "min_audio_seconds": 0.1,
-}
+_SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
 
 
 def pool_sampling(config):
@@ -172,7 +170,7 @@ class RenderPool:
     References are prepared once on the coordinator, never redesigned remotely.
     """
 
-    voice_binding_identity = {"engine": "drama3_mlx", "model": "fishaudio/drama-3"}
+    voice_binding_identity = {"engine": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL}
 
     def __init__(self, config):
         settings = config["render_pool"]
@@ -210,7 +208,7 @@ class RenderPool:
             "voice_design": selected.runtime == "sogni" and any(w.local for w in self._workers),
             "preset_voice": False, "delivery_control": True,
             "multi_speaker": all(w.local or w.settings.get(
-                "multi_speaker", w.settings.get("protocol") != "fish_sglang_drama3")
+                "multi_speaker", default_multi_speaker(w.settings.get("protocol")))
                                  for w in self._workers),
             "single_speaker_paragraph": all(
                 w.local or w.settings.get("multi_speaker", True)
@@ -361,8 +359,34 @@ class RenderPool:
                 self._local_runtime.close()
 
 
-def create_render_engine(config):
-    """Keep the original single-engine path unless workers are configured."""
-    if not config.get("render_pool", {}).get("workers"):
+def create_render_engine(config, *, shared_inference=False):
+    """Keep the original single-engine path unless workers are configured.
+
+    With shared_inference, a drama3_mlx coordinator without configured workers
+    renders through a one-slot local pool so concurrent chapter jobs share one
+    persistent MLX inference thread, including lazy model initialization.
+    """
+    workers = config.get("render_pool", {}).get("workers")
+    if (not workers and shared_inference
+            and config.get("engine", {}).get("type") == "drama3_mlx"):
+        config = {**config, "render_pool": {**config.get("render_pool", {}),
+                                            "workers": [{"name": "local", "type": "local", "concurrency": 1}]}}
+        workers = config["render_pool"]["workers"]
+    if not workers:
         return create_engine(config["engine"])
     return RenderPool(config)
+
+
+def bind_engine_verifier(engine, verifier):
+    """Apply the engine's verifier wrapping when the engine provides one."""
+    wrap = getattr(engine, "wrap_verifier", None)
+    if callable(wrap):
+        return wrap(verifier)
+    return verifier
+
+
+def create_render_components(config, *, verifier_factory):
+    """Create the configured render engine and verifier, then bind them."""
+    engine = create_render_engine(config)
+    verifier = verifier_factory(config["verification"], config.get("jev"), config.get("provider"))
+    return engine, bind_engine_verifier(engine, verifier)

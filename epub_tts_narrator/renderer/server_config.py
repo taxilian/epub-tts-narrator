@@ -7,9 +7,9 @@ import os
 from pathlib import Path
 import re
 import secrets
-import tempfile
 import tomllib
 
+from .common import write_private
 from .config import _credential
 
 
@@ -69,18 +69,6 @@ def _with_key(text, supplied, key):
                      "use a [server] table with api_key = \"\"")
 
 
-def _write_private(path, content):
-    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content.encode("utf-8"))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
 def ensure_server_api_key(path: Path) -> tuple[str, bool]:
     """Return the saved key and whether it was generated, or fail before serving.
 
@@ -106,7 +94,7 @@ def ensure_server_api_key(path: Path) -> tuple[str, bool]:
             # since the snapshot used to construct the credential insertion.
             if path.read_bytes() != text.encode("utf-8"):
                 raise ValueError("Configuration changed while creating server.api_key; rerun serve")
-            _write_private(path, updated)
+            write_private(path, updated)
             return key, True
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)

@@ -21,13 +21,20 @@ import time
 import wave
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 from .bundle import chunk_speakers
-from .common import digest, file_hash, read_json, regular_file, write_json
-from .chapter_protocol import PROTOCOL, ARTIFACT_NAMES, SAFE_RENDER_KEYS, validate_spec
+from .common import USER_AGENT, RejectRedirects, digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
+from .chapter_protocol import (
+    PROTOCOL, ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, SAFE_RENDER_KEYS, validate_spec,
+)
+from .chapter_records import (
+    CHAPTER_FORMAT, MANIFEST_FORMAT, VERIFICATION_FORMAT, audio_pointers,
+    expected_artifact_names, signed_record, sync_record,
+)
 
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+_CHUNK = re.compile(r"[0-9a-f]{32,64}\Z")
 _JOB = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -35,9 +42,36 @@ class ChapterClientError(RuntimeError):
     pass
 
 
-class _NoRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ChapterClientError("Chapter service redirects are disabled; configure its direct URL")
+class RemoteChapterFailed(ChapterClientError):
+    """A remote job reached a terminal failed state on this client's watch."""
+
+    def __init__(self, message, *, job_id, record, paragraph=None):
+        super().__init__(message)
+        self.job_id = job_id
+        self.record = record
+        self.paragraph = paragraph
+
+
+def _failed_paragraph(error):
+    """Parse the service's hash-only failed-paragraph identity from an error."""
+    if not isinstance(error, str):
+        return None
+    marker = FAILED_PARAGRAPH_FIELD
+    if marker not in error:
+        return None
+    try:
+        detail = json.loads(error.rsplit(marker, 1)[1].splitlines()[0].strip())
+    except (ValueError, IndexError):
+        return None
+    if (not isinstance(detail, dict) or set(detail) != {"request_hash", "chunk_id"}
+            or not isinstance(detail["request_hash"], str) or not _HASH.fullmatch(detail["request_hash"])
+            or not isinstance(detail["chunk_id"], str) or not _CHUNK.fullmatch(detail["chunk_id"])):
+        return None
+    return detail
+
+
+def _redirect_refused(request, fp, code, headers):
+    return ChapterClientError("Chapter service redirects are disabled; configure its direct URL")
 
 
 def _safe_id(value):
@@ -63,23 +97,12 @@ def _run_audio(arguments):
 
 
 def _reference_pcm_hash(path):
-    checksum = hashlib.sha256()
-    with wave.open(str(path), "rb") as stream:
-        if stream.getnchannels() != 1 or stream.getsampwidth() != 2:
-            raise ChapterClientError("Reference WAV must use the saved mono 16-bit cloning format")
-        while data := stream.readframes(65536):
-            checksum.update(data)
-    return checksum.hexdigest()
+    return pcm_sha256(path, format_error=ChapterClientError("Reference WAV must use the saved mono 16-bit cloning format"))
 
 
 def _verify_flac_pcm(path, expected, ffmpeg):
-    result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-                             "-protocol_whitelist", "file,pipe", "-i", str(path),
-                             "-map", "0:a:0", "-c:a", "pcm_s16le", "-f", "hash", "-hash", "sha256", "-"],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=3600)
-    if result.returncode or result.stdout.decode("ascii", errors="replace").strip().lower() != "sha256=" + expected:
-        raise ChapterClientError("Compressed voice transfer copy does not preserve the original PCM samples")
+    error = ChapterClientError("Compressed voice transfer copy does not preserve the original PCM samples")
+    verify_flac_pcm(path, expected, ffmpeg, decode_error=error, mismatch_error=error)
 
 
 class ChapterClient:
@@ -89,14 +112,14 @@ class ChapterClient:
         self.settings = settings
         self.base_url = settings["url"].rstrip("/") + "/"
         self.headers = {"Authorization": f"Bearer {settings['api_key']}"} if settings["api_key"] else {}
-        self.opener = build_opener(ProxyHandler({}), _NoRedirects())
+        self.opener = build_opener(ProxyHandler({}), RejectRedirects(_redirect_refused))
 
     def _url(self, path):
         return self.base_url + path.lstrip("/")
 
     def request(self, method, path, payload=None):
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
-        headers = {**self.headers, "Accept": "application/json", "User-Agent": "epub-tts-narrator/1"}
+        headers = {**self.headers, "Accept": "application/json", "User-Agent": USER_AGENT}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(self._url(path), data=data, headers=headers, method=method)
@@ -299,7 +322,7 @@ def _read_job(folder, selection):
     if not isinstance(record, dict):
         raise ChapterClientError("Invalid saved remote chapter job")
     checksum = record.pop("record_sha256", None)
-    if (checksum != digest(record) or record.get("selection") != selection
+    if (checksum != signed_record(record) or record.get("selection") != selection
             or record.get("format") != PROTOCOL or record.get("version") != 1):
         raise ChapterClientError("Saved remote chapter job failed integrity checks")
     _safe_id(record.get("id"))
@@ -330,7 +353,8 @@ def _archive_job(folder, record):
     return history.relative_to(folder).as_posix()
 
 
-def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, include_masters):
+def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, include_masters,
+                    submission=None):
     """Resume the same job, or reconcile a terminal job from an older renderer."""
     spec = current_spec if saved is None else saved["spec"]
     replacement = saved.get("replacement_spec") if saved is not None else None
@@ -370,7 +394,10 @@ def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, i
             raise ChapterClientError("Saved replacement specification differs from the chapter selection")
         spec = replacement
     validate_spec(spec)
-    status = client.request("POST", "v1/jobs", {"spec": spec, "idempotency_key": digest(spec)})
+    payload = {"spec": spec, "idempotency_key": digest(spec)}
+    if submission is not None:
+        payload["submission"] = submission
+    status = client.request("POST", "v1/jobs", payload)
     job_id = _safe_id(status.get("id"))
     if saved is not None and replacement is None and saved["id"] != job_id:
         raise ChapterClientError("Service did not preserve the saved job's idempotency key")
@@ -391,7 +418,8 @@ def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, i
             return _submit_chapter(client, folder, selection, record, current_spec, notify,
                                    include_masters=include_masters)
     if status.get("state") in {"failed", "cancelled"}:
-        status = client.request("POST", f"v1/jobs/{job_id}/retry", {})
+        status = client.request("POST", f"v1/jobs/{job_id}/retry",
+                                {"submission": submission} if submission is not None else {})
     record["state"] = status.get("state")
     _save_job(folder, record)
     return record, status
@@ -490,8 +518,8 @@ def _validate_artifact_manifest(folder, spec, metadata, verification, artifacts)
         raise ChapterClientError("Downloaded chapter artifact manifest must be an object")
     identity = manifest.get("identity")
     context = identity.get("context") if isinstance(identity, dict) else None
-    if (manifest.get("format") != "epub-tts-narrator-chapter-artifacts" or manifest.get("version") != 1
-            or manifest.get("record_sha256") != digest({key: value for key, value in manifest.items() if key != "record_sha256"})
+    if (manifest.get("format") != MANIFEST_FORMAT or manifest.get("version") != 1
+            or manifest.get("record_sha256") != signed_record(manifest)
             or manifest.get("spec_hash") != digest(spec)
             or manifest.get("source_fingerprint") != spec["source_fingerprint"]
             or manifest.get("status") != metadata["status"]
@@ -502,9 +530,7 @@ def _validate_artifact_manifest(folder, spec, metadata, verification, artifacts)
             or context.get("voice_assets") != spec["voice_bindings"]
             or any(context.get(key) != verification.get(key) for key in ("engine", "verifier", "quality_version", "quality"))):
         raise ChapterClientError("Downloaded chapter artifact manifest does not match its verified job")
-    expected = {"chapter.json", "sync.json", "verification.json"}
-    if metadata["frames"]:
-        expected.update({"chapter.m4a", "chapter.flac"})
+    expected = expected_artifact_names(metadata["frames"])
     inventory = manifest.get("artifacts")
     if not isinstance(inventory, dict) or set(inventory) != expected:
         raise ChapterClientError("Downloaded chapter artifact inventory is incomplete or unexpected")
@@ -538,7 +564,7 @@ def _validate_metadata(folder, record, *, artifacts=None):
     spec, chapter = record["spec"], record["selection"]["chapter"]
     expected = [chunk["chunk_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]]
     if (not isinstance(metadata, dict)
-            or metadata.get("format") != "epub-tts-narrator-chapter" or metadata.get("version") != 1
+            or metadata.get("format") != CHAPTER_FORMAT or metadata.get("version") != 1
             or metadata.get("source_fingerprint") != spec["source_fingerprint"]
             or metadata.get("spec_hash") != digest(spec)
             or metadata.get("voice_bindings") != spec["voice_bindings"]
@@ -552,9 +578,10 @@ def _validate_metadata(folder, record, *, artifacts=None):
                != [chunk["chunk_id"] for chunk in chapter["chunks"]]):
         raise ChapterClientError("Downloaded chapter metadata does not match its submitted source and timeline")
     audio = bool(metadata["frames"])
-    if (metadata.get("status") != ("complete" if audio else "empty")
-            or metadata.get("audio_file") != ("chapter.m4a" if audio else None)
-            or metadata.get("lossless_file") != ("chapter.flac" if audio else None)
+    pointers = audio_pointers(metadata["frames"])
+    if (metadata.get("status") != pointers["status"]
+            or metadata.get("audio_file") != pointers["audio_file"]
+            or metadata.get("lossless_file") != pointers["lossless_file"]
             or any(not isinstance(metadata.get(key), str) or not _HASH.fullmatch(metadata[key])
                    for key in ("encoded_sha256", "pcm_data_sha256") if audio)
             or (not audio and (metadata.get("encoded_sha256") is not None or metadata.get("pcm_data_sha256") is not None))):
@@ -563,7 +590,7 @@ def _validate_metadata(folder, record, *, artifacts=None):
     verification = read_json(regular_file(folder / "verification.json"))
     acceptance = verification.get("acceptance") if isinstance(verification, dict) else None
     if (not isinstance(verification, dict)
-            or verification.get("format") != "audiobook-renderer-chapter-verification" or verification.get("version") != 1
+            or verification.get("format") != VERIFICATION_FORMAT or verification.get("version") != 1
             or verification.get("spec_hash") != digest(spec) or verification.get("passed") is not True
             or not isinstance(acceptance, list)
             or any(not isinstance(entry, dict) or not isinstance(entry.get("report"), dict) for entry in acceptance)
@@ -571,14 +598,13 @@ def _validate_metadata(folder, record, *, artifacts=None):
             or any(entry.get("report", {}).get("passed") is not True for entry in acceptance)):
         raise ChapterClientError("Downloaded chapter lacks complete accepted speech verification")
     sync = read_json(regular_file(folder / "sync.json"))
-    expected_sync = {"format": "audiobook-renderer-chapter-sync", "version": 1,
-                     "book_id": spec["book"].get("id"), "source_fingerprint": spec["source_fingerprint"],
-                     "spec_hash": digest(spec), "chapter_id": chapter["id"], "chapter_number": chapter["number"],
-                     "sample_rate": metadata["sample_rate"], "timebase": f"1/{metadata['sample_rate']}",
-                     "range_end": "exclusive", "frames": metadata["frames"],
-                     "precision": "paragraph" if any("paragraph_turns" in chunk for chunk in chapter["chunks"]) else "chunk",
-                     "audio_file": metadata["audio_file"], "audio_sha256": metadata["encoded_sha256"],
-                     "segments": metadata["segments"]}
+    expected_sync = sync_record(
+        book_id=spec["book"].get("id"), source_fingerprint=spec["source_fingerprint"],
+        spec_hash=digest(spec), chapter_id=chapter["id"], chapter_number=chapter["number"],
+        sample_rate=metadata["sample_rate"], frames=metadata["frames"],
+        precision="paragraph" if any("paragraph_turns" in chunk for chunk in chapter["chunks"]) else "chunk",
+        audio_file=metadata["audio_file"], audio_sha256=metadata["encoded_sha256"],
+        segments=metadata["segments"])
     if not isinstance(sync, dict) or any(sync.get(key) != value for key, value in expected_sync.items()):
         raise ChapterClientError("Downloaded synchronization metadata differs from its chapter")
     _validate_artifact_manifest(folder, spec, metadata, verification,
@@ -627,8 +653,10 @@ def _wait_jobs(client, jobs, notify, *, include_masters=True):
                 elif state in {"failed", "cancelled"}:
                     error = status.get("error")
                     detail = str(error)[:600] if error else "no diagnostic provided"
-                    raise ChapterClientError(f"Remote chapter {record['selection']['chapter']['number']} {state}: {detail}. "
-                                             "Accepted paragraphs remain saved; rerun to retry this job")
+                    raise RemoteChapterFailed(
+                        f"Remote chapter {record['selection']['chapter']['number']} {state}: {detail}. "
+                        "Accepted paragraphs remain saved; rerun to retry this job",
+                        job_id=job_id, record=record, paragraph=_failed_paragraph(error))
             if not pending:
                 break
             first = next(iter(pending))
@@ -718,24 +746,79 @@ def _has_partial_local_speech(chapter, identifiers):
     return False
 
 
+def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failure, notify):
+    """Record one failed remote paragraph and rebuild the chapter with its turns.
+
+    The chapter protocol already validates pre-split paragraph turns, so the
+    resubmitted spec expresses the failed paragraph as its source turns and the
+    server needs no splitting behavior. Only hash identities crossed the wire;
+    the client matches them against its own plan and confirms the exact
+    synthesis request before recording the immutable fallback marker.
+    """
+    detail = failure.paragraph
+    if detail is None:
+        return None
+    chapter_id = failure.record["selection"]["chapter"]["id"]
+    chapter = next((item for item in plan["chapters"] if item["id"] == chapter_id), None)
+    if chapter is None:
+        return None
+    chunk = next((item for item in chapter["chunks"] if item["chunk_id"] == detail["chunk_id"]), None)
+    if chunk is None or "paragraph_turns" not in chunk:
+        return None
+    identity = capabilities.get("engine")
+    if not isinstance(identity, dict) or not isinstance(identity.get("engine"), dict):
+        return None
+    from .workflow import _paragraph_request, make_render_plan
+    request = _paragraph_request(chunk, voices, identity["engine"], config)
+    if digest(request) != detail["request_hash"]:
+        raise ChapterClientError(
+            f"Chapter {chapter['number']} paragraph {chunk['chunk_id']} does not match the service's "
+            "synthesis request; the paragraph fallback was not recorded. Reconcile renderer "
+            "configuration between this client and the chapter service, then rerun")
+    from .paragraph_recovery import record_paragraph_fallback
+    try:
+        record_paragraph_fallback(config["render"]["work_dir"], request)
+    except (ValueError, OSError) as exc:
+        raise ChapterClientError(f"Could not save remote paragraph recovery: {exc}") from exc
+    new_plan = make_render_plan(bundle, config, multi_speaker=True)
+    if new_plan["errors"]:
+        raise ChapterClientError("Paragraph recovery produced an invalid plan: "
+                                 + "; ".join(new_plan["errors"]))
+    replacement = next(item for item in new_plan["chapters"] if item["id"] == chapter_id)
+    if (any(item["chunk_id"] == chunk["chunk_id"] for item in replacement["chunks"])
+            or "".join(item["spoken_text"] for item in chapter["chunks"])
+            != "".join(item["spoken_text"] for item in replacement["chunks"])):
+        raise ChapterClientError("Paragraph recovery did not preserve the complete remote speech plan")
+    notify(f"  Chapter {chapter['number']} paragraph failed verification; resubmitting its "
+           f"{len(chunk['paragraph_turns'])} passages separately with their assigned voices. "
+           "Verified clips are retained.")
+    return new_plan, replacement
+
+
 def render_remote(bundle, config, *, notify=print, chapters_only=False):
     from .workflow import _preflight, _lock_book_audio
-    config, plan, store = _preflight(bundle, config, chapters_only=chapters_only, multi_speaker=True)
+    validated = config.pop("_validated_remote_plan", None)
+    if validated is None:
+        config, plan, store = _preflight(bundle, config, chapters_only=chapters_only, multi_speaker=True)
+    else:
+        plan, store = validated
     lock = _lock_book_audio(bundle)
     try:
-        return _render_remote_locked(bundle, config, plan, store, notify=notify, chapters_only=chapters_only)
+        return _render_remote_locked(bundle, config, plan, store, notify=notify, chapters_only=chapters_only,
+                                     validated=validated is not None)
     finally:
         lock.rmdir()
 
 
-def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only):
+def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only, validated=False):
     if config["render"]["chapter_format"] != "m4a":
         raise ChapterClientError("Remote chapter jobs currently produce M4A; use --chapter-format m4a")
     voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}
     missing = [key for key, value in voices.items() if value is None]
     if missing:
         raise ChapterClientError("Remote chapter rendering requires saved voices. Run cast first for: " + ", ".join(missing))
-    validate_remote_plan(bundle, config, plan)
+    if not validated:
+        validate_remote_plan(bundle, config, plan)
     work = _regular_directory(config["render"]["work_dir"])
     root = _regular_directory(work / "remote-chapters")
     bindings, assets = _voice_assets(voices, work, config["render"]["ffmpeg"])
@@ -786,23 +869,48 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only)
             raise ChapterClientError("Chapter service does not support this plan's multi-speaker paragraphs")
         needed = {asset_id for _, selection, _, _ in unfinished for asset_id in selection["voice_bindings"].values()}
         _register_voices(client, {key: assets[key] for key in needed}, notify)
+        # One retry allowance spans every job of this submission and their
+        # retries; the next render_remote invocation starts a fresh budget.
+        submission = os.urandom(32).hex() if capabilities.get("submission_budget") is True else None
         pending = {}
-        # Submit every chapter before watching any, so synthesis can immediately
-        # enter the next queued chapter while previous chapters are encoded.
-        for chapter, selection, folder, saved in unfinished:
+
+        def submit(chapter, selection, folder, saved):
             spec = deepcopy(selection)
             fingerprint = capabilities.get("renderer_fingerprint")
             if fingerprint is not None:
                 spec["renderer_fingerprint"] = fingerprint
-            validate_spec(spec)
+            try:
+                validate_spec(spec)
+            except ValueError as exc:
+                raise ChapterClientError(
+                    f"Chapter {chapter['number']} / {len(bundle['chapters'])} "
+                    f"cannot be rendered remotely: {exc}") from exc
             record, status = _submit_chapter(client, folder, selection, saved, spec, notify,
-                                             include_masters=not chapters_only)
+                                             include_masters=not chapters_only, submission=submission)
             cached[chapter["id"]] = (folder, record)
             if _cached_artifacts_present(folder, record, require_masters=not chapters_only):
-                continue
+                return
             pending[record["id"]] = (folder, record)
             notify(f"Scheduled chapter {chapter['number']} / {len(bundle['chapters'])}: {record['id']}")
-        _wait_jobs(client, pending, notify, include_masters=not chapters_only)
+
+        # Submit every chapter before watching any, so synthesis can immediately
+        # enter the next queued chapter while previous chapters are encoded.
+        for chapter, selection, folder, saved in unfinished:
+            submit(chapter, selection, folder, saved)
+        while pending:
+            try:
+                _wait_jobs(client, pending, notify, include_masters=not chapters_only)
+                break
+            except RemoteChapterFailed as failure:
+                recovered = _recover_failed_paragraph(bundle, config, plan, voices, capabilities,
+                                                      failure, notify)
+                if recovered is None:
+                    raise
+                pending.pop(failure.job_id, None)
+                plan, replacement = recovered
+                selection = _selection(bundle, replacement, config, bindings)
+                folder = _regular_directory(root / digest(selection))
+                submit(replacement, selection, folder, _read_job(folder, selection))
     if chapters_only:
         completed = []
         for chapter in plan["chapters"]:
@@ -899,11 +1007,7 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                 if composed["frames"]:
                     _run_audio([config["render"]["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
                                 "-i", str(folder / "chapter.flac"), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
-                    with wave.open(str(wav), "rb") as stream:
-                        checksum = hashlib.sha256()
-                        while data := stream.readframes(65536):
-                            checksum.update(data)
-                    if checksum.hexdigest() != metadata.get("pcm_data_sha256"):
+                    if pcm_sha256(wav) != metadata.get("pcm_data_sha256"):
                         raise ChapterClientError("Decoded chapter master differs from the server's lossless PCM")
                 else:
                     with wave.open(str(wav), "wb") as stream:

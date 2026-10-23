@@ -277,20 +277,31 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
     @app.post("/v1/jobs", status_code=202)
     async def submit_job(request: Request):
         data = await body(request)
-        fields(data, {"spec", "idempotency_key"}, {"spec", "idempotency_key"})
+        fields(data, {"spec", "idempotency_key", "submission"}, {"spec", "idempotency_key"})
         if not isinstance(data["spec"], dict):
             raise HTTPException(400, "spec must be a chapter specification object")
         key = _require_id(data["idempotency_key"])
-        return with_artifact_urls(await call(jobs.submit, data["spec"], key))
+        submission = data.get("submission")
+        if submission is not None:
+            _require_id(submission)
+        return with_artifact_urls(await call(jobs.submit, data["spec"], key, submission))
 
     @app.get("/v1/jobs/{job_id}")
     async def job_status(job_id: str):
         return await get_status(job_id)
 
     @app.post("/v1/jobs/{job_id}/retry", status_code=202)
-    async def retry_job(job_id: str):
+    async def retry_job(job_id: str, request: Request):
         _require_id(job_id)
-        return with_artifact_urls(await call(jobs.retry, job_id))
+        submission = None
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type == "application/json":
+            data = await body(request)
+            fields(data, {"submission"})
+            submission = data.get("submission")
+            if submission is not None:
+                _require_id(submission)
+        return with_artifact_urls(await call(jobs.retry, job_id, submission))
 
     def parse_after(value):
         try:
@@ -376,14 +387,9 @@ def serve(config, *, maintenance=False):
     """Start one transport process; GPU and CPU scheduling belong to ChapterJobs."""
     settings = config["chapter_server"]
     _validate_settings(settings)
+    # verification.model and engine.checkpoint requirements are enforced by
+    # config.load_config, which every serve-chapters start reads first.
     verification = config["verification"]
-    if not isinstance(verification.get("model"), str) or not verification["model"].strip():
-        raise ValueError("serve-chapters requires verification.model to identify a local ASR model; remote_chapters.url only configures the client")
-    workers = config.get("render_pool", {}).get("workers", [])
-    needs_local_engine = not workers or any(worker["type"] == "local" for worker in workers)
-    if (needs_local_engine and config["engine"]["type"] == "drama3_mlx"
-            and not config["engine"].get("checkpoint")):
-        raise ValueError("serve-chapters requires engine.checkpoint for local Drama 3, or configured remote render_pool workers")
     if verification.get("type") == "faster_whisper":
         from .model_setup import ModelSetup
         # This backend only validates already installed CT2 files; it never
@@ -395,7 +401,8 @@ def serve(config, *, maintenance=False):
         raise RuntimeError("Chapter serving requires the chapter-server optional dependencies") from exc
     from .chapter_executor import ChapterExecutor
     from .chapter_jobs import ChapterJobs
-    from .chapter_storage import S3ArtifactPublisher, stop_runpod
+    from .chapter_storage import S3ArtifactPublisher
+    from .runpod_api import RunpodAPI
 
     storage = config.get("chapter_storage", {})
     publisher = S3ArtifactPublisher(storage) if storage.get("bucket") else None
@@ -403,7 +410,10 @@ def serve(config, *, maintenance=False):
     if settings.get("idle_action", "none") == "runpod_stop":
         if not settings.get("persistent_data") or publisher is None:
             raise ValueError("Runpod idle shutdown requires persistent data and independent artifact storage")
-        shutdown_callback = lambda: stop_runpod(settings)
+        # Idle shutdown releases paid compute through the same classified v2
+        # client the deployment CLI uses; the idle monitor tolerates its errors.
+        api = RunpodAPI(settings["runpod_api_key"])
+        shutdown_callback = lambda: api.stop_pod(settings["runpod_pod_id"])
     executor = ChapterExecutor(config)
     job_settings = {**settings, "ffprobe": config["render"]["ffprobe"]}
     jobs = ChapterJobs(settings["data_dir"], executor, job_settings, publisher=publisher,

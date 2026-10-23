@@ -10,8 +10,11 @@ pipeline. When a paragraph uses one saved voice and delivery style, recovery can
 render exact sentence slices, verify each slice, then join and verify the whole
 paragraph. It retains the original chapter plan and text links, and accepted
 audio (including completed recovery slices) remains reusable after interruption.
-Mixed-voice or mixed-delivery paragraphs cannot use this sentence fallback;
-source-boundary replanning currently requires the local book-rendering wrapper.
+Mixed-voice or mixed-delivery paragraphs cannot use this sentence fallback.
+When such a paragraph still fails verification on a remote job, the service
+reports the failed paragraph's hash identity, and the client records the split
+locally, rebuilds its plan, and resubmits that chapter with the paragraph
+expressed as its separately verified source turns.
 
 **Only compressed audio crosses the chapter-service API.** Voice references are
 registered as FLAC once, finished chapters are M4A/AAC, and lossless chapter
@@ -26,60 +29,33 @@ compute; the managed Runpod bootstrap command creates paid resources.
 
 ## Managed Runpod client
 
-Use the [Runpod deployment setup](deploy/runpod/README.md) with your normal
-global configuration and a private `runpod.local.toml` override. The managed
-commands supply the service URL and application bearer key automatically;
-you do not need the manual `[remote_chapters]` configuration below.
+The [Runpod deployment guide](deploy/runpod/README.md) is authoritative for the
+managed worker: bootstrap, update, encode, stop semantics, replacement, and
+recovery. The managed commands supply the service URL and application bearer
+key automatically; you do not need the manual `[remote_chapters]` configuration
+below. Bootstrap and update default to `--source github`; use `--source local`
+to deploy committed-but-unpublished changes — uncommitted files and private
+configuration are never transferred. Every managed operation stops compute on
+completion, error, or interruption.
 
-```sh
-# Initial deployment: install committed code, dependencies and models, test, stop.
-.venv-renderer/bin/audiobook-render runpod bootstrap --source local
+Operational notes specific to chapter rendering:
 
-# Deploy subsequent committed changes, update dependencies/configuration, test, stop.
-.venv-renderer/bin/audiobook-render runpod update --source local
-
-# Render a selected manifest chapter into a separate remote cache, then stop.
-.venv-renderer/bin/audiobook-render runpod encode books/book-01 --chapters 3 \
-  --chapters-only --work-dir books/book-01/render-work-remote
-
-# Render missing chapters and package the complete book with its EPUB cover.
-.venv-renderer/bin/audiobook-render runpod encode books/book-01 \
-  --work-dir books/book-01/render-work-remote -o audio/book-01 \
-  --epub books/book-01.epub
-```
-
-Bootstrap and Update default to `--source github`, using the configured
-repository and ref. Use `--source local` for committed changes that have not
-been published there: it transfers committed HEAD, excluding uncommitted files
-and private configuration. Encode uses the installed revision; run Update after
-committing a code change. Chapter numbers refer to the analysis manifest and
-can include a cover, title page, or other front matter before the first story
-chapter. Keep the same work directory when resuming.
-
-Bootstrap and Update start the chapter service in maintenance mode. Health,
-voice registry, and job status APIs remain available, but existing queued or
-interrupted jobs remain untouched and new chapter submissions/retries are
-rejected. Their smoke test exercises the engine directly. Encode starts normal
-queue processing, including recovery of previously interrupted chapters.
-Maintenance mode does not change renderer or accepted-clip cache identities.
-
-Each managed operation stops compute on completion, error, or interruption.
-`--stop-delay 300` adds a fixed five-minute grace period with the client still
-attached; Ctrl-C ends it immediately. The deployment lock remains held during
-that delay, so it is not an idle window for starting a second CLI operation.
-The server's separate `[runpod].idle_timeout_seconds` setting defaults to 600
-seconds and is an additional fallback when no work is pending.
-
-Stopping releases the GPU. Restarting depends on capacity on the Pod's machine,
-and every new inference process must load the model into GPU memory again.
-If Runpod confirms that a managed Pod's host has no free GPU, the client can
-create one replacement with the same GPU, datacenter, and existing network
-volume, within the configured price cap. Explicit `runpod.pod_id` deployments
-remain fixed. An uncertain creation is reconciled before another operation;
-it is never blindly repeated. See the deployment guide for recovery details.
-The persistent network volume retains model files, environments, registered
-voices, and accepted checkpoints, so unchanged models are not downloaded again.
-Storage remains billed while compute is stopped.
+- Chapter numbers refer to the analysis manifest and can include a cover, title
+  page, or other front matter before the first story chapter. Keep the same
+  work directory when resuming.
+- Bootstrap and update leave the service in maintenance mode: health, voice
+  registry, and job status APIs answer, but existing jobs are left untouched and
+  new chapter submissions are rejected. Maintenance mode does not change
+  renderer or accepted-clip cache identities. Encode starts normal queue
+  processing, including recovery of previously interrupted chapters.
+- Two separate idle timeouts exist: the deployment's
+  `[runpod].idle_timeout_seconds` (default 600) is the managed stop fallback,
+  while the chapter service's `[chapter_server].idle_timeout_seconds` governs
+  idle shutdown while serving — see "Idle shutdown and independent downloads"
+  below.
+- The persistent network volume retains model files, environments, registered
+  voices, and accepted checkpoints, so unchanged models are not downloaded
+  again. Storage remains billed while compute is stopped.
 
 ## Manual client setup
 
@@ -188,7 +164,10 @@ For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and
 `tokenizer.json`. It never downloads a model implicitly. CPU recognition is the
 default, leaving the GPU for synthesis; CUDA recognition is configurable and
-must be included in the memory/throughput budget. Existing JEV decisions and
+must be included in the memory/throughput budget. Configuring
+`verification.reference_model` prepares a second copy of the same pinned
+Whisper repository for reference corroboration; managed deployments bind it to
+the `[runpod].reference_whisper_dir` directory. Existing JEV decisions and
 secondary recognition remain part of the verification pipeline.
 
 Keep `chapter_server.data_dir` on persistent storage. It contains:
@@ -231,6 +210,12 @@ replays numbered events, with HTTP polling available if WebSockets fail. Retryin
 a failed job reuses its accepted paragraphs. An interrupted service recovers
 pending jobs when restarted against the same data directory and compatible
 renderer configuration.
+
+Speech retries share one bounded allowance across all chapter jobs of a client
+submission and their retries, matching one local render invocation; a new
+submission starts a fresh allowance. Paragraphs no longer regenerate whole
+takes after their allowance is spent — like local rendering, a persistently
+failing paragraph is split into its source turns and resubmitted.
 
 Accepted speech has a separate cache from chapter assembly. Changing only
 spacing or bitrate reuses accepted speech on the server. Already downloaded,

@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.chapter_server import create_app, serve
-from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.config import DEFAULTS, load_config
 
 
 HAS_SERVER_DEPS = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
@@ -58,8 +58,8 @@ class FakeJobs:
         self.voices[asset_id] = {"manifest": manifest, "audio": audio}
         return {"id": asset_id}
 
-    def submit(self, spec, idempotency_key):
-        self.submit_calls.append((spec, idempotency_key))
+    def submit(self, spec, idempotency_key, submission=None):
+        self.submit_calls.append((spec, idempotency_key, submission))
         return deepcopy(self.job)
 
     def status(self, job_id):
@@ -72,8 +72,8 @@ class FakeJobs:
         self.events_requested.append(after)
         return [event for event in self.log if event["sequence"] > after]
 
-    def retry(self, job_id):
-        self.retry_calls.append(job_id)
+    def retry(self, job_id, submission=None):
+        self.retry_calls.append((job_id, submission))
         return self.status(job_id)
 
     def artifact(self, job_id, name):
@@ -97,21 +97,15 @@ class ChapterServerSettingsTests(unittest.TestCase):
             with self.subTest(host=host), self.assertRaisesRegex(ValueError, "requires.*api_key"):
                 create_app(None, {"host": host})
 
-    def test_client_only_configuration_cannot_start_an_unconfigured_server(self):
-        config = deepcopy(DEFAULTS)
-        config["remote_chapters"]["url"] = "https://fixture.invalid"
-        with patch("epub_tts_narrator.renderer.chapter_executor.ChapterExecutor") as executor:
-            with self.assertRaisesRegex(ValueError, "serve-chapters requires verification.model"):
-                serve(config)
-        executor.assert_not_called()
-
-    def test_server_without_remote_workers_needs_a_local_speech_checkpoint(self):
-        config = deepcopy(DEFAULTS)
-        config["verification"]["model"] = "/fixture/local-asr"
-        with patch("epub_tts_narrator.renderer.chapter_executor.ChapterExecutor") as executor:
-            with self.assertRaisesRegex(ValueError, "serve-chapters requires engine.checkpoint"):
-                serve(config)
-        executor.assert_not_called()
+    def test_chapter_server_model_and_checkpoint_requirements_are_enforced_at_load_time(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "global.toml"
+            path.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "verification.model must be a nonempty string"):
+                load_config(path)
+            path.write_text('[verification]\nmodel = "/fixture/local-asr"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "engine.checkpoint is required for Drama 3"):
+                load_config(path)
 
     @unittest.skipUnless(HAS_SERVER_DEPS and importlib.util.find_spec("uvicorn"), "requires server dependencies")
     def test_configured_ffprobe_is_passed_to_voice_registry_without_mutating_config(self):
@@ -140,6 +134,27 @@ class ChapterServerSettingsTests(unittest.TestCase):
             serve(config, maintenance=True)
         self.assertIs(jobs.call_args.kwargs["maintenance"], True)
         self.assertEqual(config, before)
+
+    @unittest.skipUnless(HAS_SERVER_DEPS and importlib.util.find_spec("uvicorn"), "requires server dependencies")
+    def test_runpod_idle_shutdown_stops_compute_through_the_managed_api_client(self):
+        config = deepcopy(DEFAULTS)
+        config["render_pool"]["workers"] = [{"type": "fish_http"}]
+        config["verification"]["model"] = "/fixture/local-asr"
+        config["chapter_server"].update(idle_action="runpod_stop", persistent_data=True,
+                                        runpod_pod_id="pod_fixture", runpod_api_key="fixture-key")
+        config["chapter_storage"]["bucket"] = "fixture-bucket"
+        api = Mock()
+        with (patch("epub_tts_narrator.renderer.chapter_storage.S3ArtifactPublisher", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.chapter_executor.ChapterExecutor"),
+              patch("epub_tts_narrator.renderer.chapter_jobs.ChapterJobs"),
+              patch("epub_tts_narrator.renderer.runpod_api.RunpodAPI", return_value=api) as client,
+              patch("epub_tts_narrator.renderer.chapter_server.create_app", return_value=Mock()) as create_app,
+              patch("uvicorn.run")):
+            serve(config)
+        client.assert_called_once_with("fixture-key")
+        api.stop_pod.assert_not_called()
+        create_app.call_args.kwargs["shutdown_callback"]()
+        api.stop_pod.assert_called_once_with("pod_fixture")
 
 
 @unittest.skipUnless(HAS_SERVER_DEPS, "requires FastAPI and httpx")
@@ -222,10 +237,26 @@ class ChapterServerTests(unittest.TestCase):
             result = client.post("/v1/jobs", headers=AUTH, json=body)
             self.assertEqual(result.status_code, 202)
             self.assertEqual(result.json()["id"], JOB)
-            self.assertEqual(self.jobs.submit_calls, [(body["spec"], body["idempotency_key"])])
+            self.assertEqual(self.jobs.submit_calls, [(body["spec"], body["idempotency_key"], None)])
             retry = client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH)
             self.assertEqual(retry.status_code, 202)
-            self.assertEqual(self.jobs.retry_calls, [JOB])
+            self.assertEqual(self.jobs.retry_calls, [(JOB, None)])
+
+    def test_submission_identity_passes_through_and_malformed_values_are_rejected(self):
+        with self.client() as client:
+            body = {"spec": {"chapter": {"number": 2}}, "idempotency_key": "c" * 64,
+                    "submission": "d" * 64}
+            self.assertEqual(client.post("/v1/jobs", headers=AUTH, json=body).status_code, 202)
+            self.assertEqual(client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH,
+                                         json={"submission": "e" * 64}).status_code, 202)
+            self.assertEqual(self.jobs.submit_calls[-1], (body["spec"], body["idempotency_key"], "d" * 64))
+            self.assertEqual(self.jobs.retry_calls[-1], (JOB, "e" * 64))
+            for payload in ({"submission": "not-a-hash"}, {"unknown": True}):
+                with self.subTest(payload=payload):
+                    self.assertEqual(client.post("/v1/jobs", headers=AUTH,
+                                                 json={**body, **payload}).status_code, 400)
+                    self.assertEqual(client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH,
+                                                 json=payload).status_code, 400)
 
     def test_poll_replays_only_later_events(self):
         self.complete()
@@ -392,7 +423,7 @@ class FixtureExecutor:
         self.release = threading.Event()
         self.release.set()
 
-    def synthesize(self, spec, voices, work, notify):
+    def synthesize(self, spec, voices, work, notify, retry_budget=None):
         self.synthesis_calls += 1
         notify("Generating paragraph 1 / 1")
         if not self.release.wait(5):

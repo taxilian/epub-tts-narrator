@@ -110,6 +110,22 @@ def create_phonetic_reviewer(settings, provider_settings):
     return PronunciationReviewer(RecoveryModelClient(options))
 
 
+def assemble_verifier(primary, settings, jev_settings, provider_settings, reference_builder):
+    """Wrap a primary recognizer with the configured reference corroboration,
+    JEV text judging, phonetic review, and recurring speech recovery."""
+    verifier = primary
+    if settings.get("reference_model"):
+        verifier = ReferenceCorroboratingVerifier(primary, reference_builder())
+    if jev_settings and jev_settings.get("enabled"):
+        from epub_tts_narrator.jev import JevTranscriptJudge
+        verifier = ReferenceTextJudgingVerifier(
+            verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
+    resolver = create_speech_resolver(settings, provider_settings)
+    if resolver is not None:
+        verifier = RecurringSpeechVerifier(verifier, resolver)
+    return verifier
+
+
 def create_verifier(settings, jev_settings=None, provider_settings=None):
     from .phonetic_match import require_phonetic_matcher
     require_phonetic_matcher()
@@ -121,17 +137,11 @@ def create_verifier(settings, jev_settings=None, provider_settings=None):
         return create_chapter_verifier(settings, jev_settings, provider_settings)
     if kind != "mlx_whisper":
         raise ValueError("Unsupported verifier type")
-    primary = MlxWhisperVerifier(settings["model"], language=settings["language"])
-    verifier = primary
-    if settings.get("reference_model"):
+
+    def reference_builder():
         from .reference_asr import MlxParakeetVerifier
-        verifier = ReferenceCorroboratingVerifier(
-            primary, MlxParakeetVerifier(settings["reference_model"]))
-    if jev_settings and jev_settings.get("enabled"):
-        from epub_tts_narrator.jev import JevTranscriptJudge
-        verifier = ReferenceTextJudgingVerifier(
-            verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
-    resolver = create_speech_resolver(settings, provider_settings)
-    if resolver is not None:
-        verifier = RecurringSpeechVerifier(verifier, resolver)
-    return verifier
+        return MlxParakeetVerifier(settings["reference_model"])
+
+    return assemble_verifier(
+        MlxWhisperVerifier(settings["model"], language=settings["language"]),
+        settings, jev_settings, provider_settings, reference_builder)

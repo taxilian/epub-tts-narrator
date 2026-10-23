@@ -709,6 +709,8 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         if missing:
             raise ValueError("Remote rendering requires saved voices; run cast first for: " + ", ".join(missing))
         validate_remote_plan(bundle, config, plan)
+        # encode() hands this to render_remote, which then skips its own preflight.
+        config["_validated_remote_plan"] = (plan, store)
         return bundle, config
 
 

@@ -29,12 +29,13 @@ from .drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION,
     generate_scene_voice, validate_scene_fields,
 )
+from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS, get_drama3_model
 from .speech_text import speech_text_parts, trim_speech_text
 
 
 DRAMA3_RUNTIME_VERSION = "0.1.1+epub.1"
 DRAMA3_RUNTIME_REVISION = "3b76bf84714d3766d7872f3409639a438e296cc8"
-DRAMA3_MODEL_REVISION = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+DRAMA3_MODEL_REVISION = DRAMA3_MODELS[DEFAULT_DRAMA3_MODEL].revision
 DRAMA3_MAX_SPEAKERS = 16
 DRAMA3_INSTALL = "uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt"
 
@@ -717,7 +718,6 @@ def create_engine(config: Mapping[str, Any]) -> TTSEngine:
         raise EngineError("Drama 3 settings belong directly in the engine table")
     if not isinstance(config.get("checkpoint"), (str, Path)):
         raise EngineError("engine.checkpoint must specify a local Drama 3 directory")
-    from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
     try:
         selected = get_drama3_model(config.get("model", DEFAULT_DRAMA3_MODEL))
     except ValueError as exc:

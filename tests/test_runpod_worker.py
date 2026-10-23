@@ -28,13 +28,15 @@ def fake_download(**kwargs):
     directory.mkdir(parents=True, exist_ok=True)
     if kwargs["repo_id"] == "fishaudio/drama-3":
         files = ["codec.pth", "config.json", "tokenizer.json", "tokenizer_config.json",
-                 "special_tokens_map.json", "chat_template.jinja", "model-00001-of-00001.safetensors"]
-        (directory / "model.safetensors.index.json").write_text(json.dumps(
-            {"weight_map": {"fixture.weight": "model-00001-of-00001.safetensors"}}))
+                 "special_tokens_map.json", "chat_template.jinja", "model.safetensors.index.json",
+                 *(f"model-{number:05d}-of-00008.safetensors" for number in range(1, 9))]
     else:
         files = ["model.bin", "config.json", "tokenizer.json", "preprocessor_config.json", "vocabulary.json"]
     for name in files:
         (directory / name).write_bytes(b"fixture model")
+    if kwargs["repo_id"] == "fishaudio/drama-3":
+        (directory / "model.safetensors.index.json").write_text(json.dumps(
+            {"weight_map": {"fixture.weight": "model-00001-of-00008.safetensors"}}))
     return str(directory)
 
 
@@ -254,14 +256,35 @@ class RunpodWorkerTests(unittest.TestCase):
             item = deepcopy(self.config)
             item["render_pool"]["workers"][0][key] = value
             variants.append(item)
-        for key, value in (("type", "mlx_whisper"), ("device", "mps"), ("reference_model", "/model")):
-            item = deepcopy(self.config)
-            item["verification"][key] = value
-            variants.append(item)
         for item in variants:
             with self.subTest(item=item):
                 with self.assertRaises(ValueError):
                     worker.validate_worker(item)
+        mlx = deepcopy(self.config)
+        mlx["verification"]["type"] = "mlx_whisper"
+        with self.assertRaises(ValueError):
+            worker.validate_worker(mlx)
+
+    def test_configured_reference_model_prepares_the_same_pinned_whisper_revision(self):
+        self.config["verification"]["reference_model"] = str(self.root / "whisper-reference")
+        with patch("sys.stdout", new=io.StringIO()):
+            worker.prepare(self.config, downloader=self.downloader)
+        self.assertEqual(self.downloader.call_count, 3)
+        references = [call.kwargs for call in self.downloader.call_args_list
+                      if call.kwargs["local_dir"] == self.config["verification"]["reference_model"]]
+        self.assertEqual(len(references), 1)
+        self.assertEqual(references[0]["repo_id"], worker.WHISPER_REPOSITORY)
+        self.assertEqual(references[0]["revision"], worker.WHISPER_REVISION)
+        worker.check(self.config)
+        self.assertTrue((self.root / "whisper-reference" / worker.RECEIPT).exists())
+
+    def test_verification_device_bounds_belong_to_load_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "worker.toml"
+            path.write_text('[verification]\nmodel = "/fixture/asr"\ndevice = "mps"\n'
+                            '[engine]\ncheckpoint = "/fixture/drama"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "verification.device must be cpu or cuda"):
+                load_config(path)
 
     def test_worker_lease_prevents_two_model_processes_for_same_store(self):
         with worker.worker_lease(self.config):
@@ -280,6 +303,29 @@ class RunpodWorkerTests(unittest.TestCase):
         stop.is_set.side_effect = [False, True]
         with self.assertRaises(worker.WorkerStopped):
             worker.wait_ready(process, stop, fetch=fetch)
+
+    def test_ready_urls_and_model_come_from_the_worker_configuration(self):
+        process = Mock()
+        process.poll.return_value = None
+        native = {"url": "http://127.0.0.1:9091/v1/tts", "model": "drama-3"}
+        fetch = Mock(side_effect=[{"status": "ok"}, {"model_family": "drama3"}])
+        worker.wait_ready(process, threading.Event(), fetch=fetch, worker=native)
+        self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                         ["http://127.0.0.1:9091/v1/health", "http://127.0.0.1:9091/v1/tts/defaults"])
+        batched = {"url": "http://127.0.0.1:9091/v1/audio/speech", "model": "drama-3"}
+        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
+                                  {"data": [{"id": "drama-3"}]}])
+        worker.wait_ready(process, threading.Event(), protocol="fish_sglang_drama3",
+                          fetch=fetch, worker=batched)
+        self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                         ["http://127.0.0.1:9091/health", "http://127.0.0.1:9091/v1/models"])
+        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
+                                  {"data": [{"id": "other"}]}])
+        stop = Mock()
+        stop.is_set.side_effect = [False, True]
+        with self.assertRaises(worker.WorkerStopped):
+            worker.wait_ready(process, stop, protocol="fish_sglang_drama3", fetch=fetch,
+                              worker=batched)
 
     def test_early_model_exit_is_detected_before_starting_chapter_service(self):
         process = Mock()

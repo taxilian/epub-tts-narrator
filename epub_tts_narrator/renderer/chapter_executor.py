@@ -9,34 +9,30 @@ resumption; only explicitly returned compressed artifacts are published.
 from __future__ import annotations
 
 from copy import deepcopy
-import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 from threading import Lock, RLock
-import wave
 
 from .bundle import chunk_speakers
 from .chapter_cache import chapter_settings, prepare_chapter
-from .common import digest, file_hash, read_json, regular_file, write_json
+from .chapter_protocol import ARTIFACT_NAMES
+from .chapter_records import (
+    chapter_record, manifest_record, signed_record, sync_record, verification_record,
+)
+from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .quality import QUALITY_VERSION
+from .retry_budget import SpeechRetryBudget
 from .workflow import _render_chapter_chunks
 
 
-ARTIFACT_NAMES = frozenset({"chapter.m4a", "chapter.flac", "chapter.json", "sync.json",
-                            "verification.json", "manifest.json"})
+MAX_PARALLEL_CHAPTERS = 2
 
 
 def _pcm_data_hash(path):
-    result = hashlib.sha256()
-    with wave.open(str(path), "rb") as source:
-        if source.getnchannels() != 1 or source.getsampwidth() != 2:
-            raise ValueError("Chapter master must contain mono 16-bit PCM")
-        while data := source.readframes(65536):
-            result.update(data)
-    return result.hexdigest()
+    return pcm_sha256(path, format_error=ValueError("Chapter master must contain mono 16-bit PCM"))
 
 
 def _flac_master(wav, target, ffmpeg):
@@ -44,22 +40,22 @@ def _flac_master(wav, target, ffmpeg):
     expected = _pcm_data_hash(wav)
     base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
             "-protocol_whitelist", "file,pipe"]
-    commands = [
-        base + ["-i", str(wav), "-map", "0:a:0", "-vn", "-sn", "-dn",
-                "-map_metadata", "-1", "-c:a", "flac", "-compression_level", "8", str(target)],
-        base + ["-i", str(target), "-map", "0:a:0", "-c:a", "pcm_s16le",
-                "-f", "hash", "-hash", "sha256", "-"],
-    ]
-    for command in commands:
-        try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, timeout=3600, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError("Could not encode or verify the lossless chapter master") from exc
-        if result.returncode:
-            raise ValueError("FFmpeg could not encode or verify the lossless chapter master")
-    if result.stdout.decode("ascii", errors="replace").strip().lower() != "sha256=" + expected:
-        raise ValueError("FLAC chapter master does not preserve the PCM samples")
+    try:
+        result = subprocess.run(base + ["-i", str(wav), "-map", "0:a:0", "-vn", "-sn", "-dn",
+                                        "-map_metadata", "-1", "-c:a", "flac",
+                                        "-compression_level", "8", str(target)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=3600, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Could not encode or verify the lossless chapter master") from exc
+    if result.returncode:
+        raise ValueError("FFmpeg could not encode or verify the lossless chapter master")
+    try:
+        verify_flac_pcm(target, expected, ffmpeg,
+                        decode_error=ValueError("FFmpeg could not encode or verify the lossless chapter master"),
+                        mismatch_error=ValueError("FLAC chapter master does not preserve the PCM samples"))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Could not encode or verify the lossless chapter master") from exc
     return expected
 
 
@@ -69,8 +65,7 @@ def _exported_paths(folder, expected_identity):
         raise ValueError("Chapter export must be a regular directory")
     manifest = read_json(regular_file(folder / "manifest.json"))
     if (not isinstance(manifest, dict) or manifest.get("identity") != expected_identity
-            or manifest.get("record_sha256") != digest({key: value for key, value in manifest.items()
-                                                         if key != "record_sha256"})):
+            or manifest.get("record_sha256") != signed_record(manifest)):
         raise ValueError("Chapter artifact manifest failed integrity checks")
     records = manifest.get("artifacts")
     if not isinstance(records, dict) or not {"chapter.json", "sync.json", "verification.json"} <= records.keys():
@@ -103,22 +98,16 @@ class ChapterExecutor:
                 raise RuntimeError("The chapter executor is closed")
             if self._engine is None:
                 from .pool import create_render_engine
-                runtime_config = deepcopy(self.config)
-                if (runtime_config["engine"]["type"] == "drama3_mlx"
-                        and not runtime_config.get("render_pool", {}).get("workers")):
-                    # Concurrent chapter coordinators must share one persistent
-                    # MLX inference thread, including lazy model initialization.
-                    runtime_config.setdefault("render_pool", {})["workers"] = [
-                        {"name": "local", "type": "local", "concurrency": 1}]
-                self._engine = create_render_engine(runtime_config)
+                # Concurrent chapter coordinators share one persistent MLX
+                # inference thread, including lazy model initialization.
+                self._engine = create_render_engine(self.config, shared_inference=True)
             if self._verifier is None:
                 from .chapter_verification import create_chapter_verifier
                 self._verifier = create_chapter_verifier(
                     self.config["verification"], self.config.get("jev"), self.config.get("provider"))
             if not self._wrapped:
-                wrap = getattr(self._engine, "wrap_verifier", None)
-                if callable(wrap):
-                    self._verifier = wrap(self._verifier)
+                from .pool import bind_engine_verifier
+                self._verifier = bind_engine_verifier(self._engine, self._verifier)
                 self._wrapped = True
             return self._engine, self._verifier
 
@@ -128,7 +117,7 @@ class ChapterExecutor:
         engine, _ = self._components()
         # The pool owns global inference slots and model/thread affinity. Other
         # plugins have no concurrency contract and retain serial chapter jobs.
-        return 2 if isinstance(engine, RenderPool) else 1
+        return MAX_PARALLEL_CHAPTERS if isinstance(engine, RenderPool) else 1
 
     @property
     def multi_speaker(self):
@@ -161,9 +150,13 @@ class ChapterExecutor:
         chapter_settings(config["render"])
         return config
 
-    def synthesize(self, spec, voices, work, notify=print):
+    def synthesize(self, spec, voices, work, notify=print, retry_budget=None):
         config = self._settings(spec)
         engine, verifier = self._components()
+        if retry_budget is None:
+            # A restarted service lost its in-memory submission registry; each
+            # recovered execution is bounded like a fresh local CLI run.
+            retry_budget = SpeechRetryBudget()
         work = Path(work).resolve()
         work.mkdir(parents=True, exist_ok=True)
         chapter = spec["chapter"]
@@ -190,7 +183,7 @@ class ChapterExecutor:
             chapter, registered, engine, engine_identity, verifier, config, work,
             notify=notify, total_chapters=spec["total_chapters"],
             take_locks=self._take_locks, take_locks_guard=self._take_locks_guard,
-            paragraph_split_available=False)
+            retry_budget=retry_budget, paragraph_split_available=False)
         context = {"version": 1, "spec_hash": digest(spec),
                    "source_fingerprint": spec["source_fingerprint"],
                    "total_chapters": spec["total_chapters"],
@@ -206,8 +199,7 @@ class ChapterExecutor:
         """CPU-only stage. This method never calls the engine or verifier."""
         config = self._settings(spec)
         if (not isinstance(prepared, dict) or prepared.get("spec_hash") != digest(spec)
-                or prepared.get("record_sha256") != digest({key: value for key, value in prepared.items()
-                                                             if key != "record_sha256"})):
+                or prepared.get("record_sha256") != signed_record(prepared)):
             raise ValueError("Prepared chapter does not match the requested job")
         clips, acceptance = prepared["clips"], prepared["acceptance"]
         if (len(clips) != len(spec["chapter"]["chunks"])
@@ -253,40 +245,22 @@ class ChapterExecutor:
                 shutil.copyfile(regular_file(composed["encoded_path"]), stage / "chapter.m4a")
                 if file_hash(stage / "chapter.m4a") != composed["encoded_sha256"]:
                     raise ValueError("Encoded chapter changed during export")
-            chapter = {key: deepcopy(composed[key]) for key in
-                       ("id", "number", "title", "frames", "channels", "sample_rate", "segments",
-                        "pcm_sha256", "encoded_sha256", "normalization", "track_number", "total_chapters")}
-            chapter.update(format="epub-tts-narrator-chapter", version=1,
-                           spec_hash=digest(spec), source_fingerprint=spec["source_fingerprint"],
-                           voice_bindings=deepcopy(spec["voice_bindings"]), pcm_data_sha256=pcm_hash,
-                           audio_file="chapter.m4a" if composed["frames"] else None,
-                           lossless_file="chapter.flac" if composed["frames"] else None,
-                           status="complete" if composed["frames"] else "empty")
+            chapter = chapter_record(composed, spec=spec, pcm_data_sha256=pcm_hash)
             write_json(stage / "chapter.json", chapter)
-            sync = {"format": "audiobook-renderer-chapter-sync", "version": 1,
-                    "book_id": spec["book"].get("id"), "source_fingerprint": spec["source_fingerprint"],
-                    "spec_hash": digest(spec), "chapter_id": chapter["id"], "chapter_number": chapter["number"],
-                    "sample_rate": chapter["sample_rate"], "timebase": f"1/{chapter['sample_rate']}",
-                    "range_end": "exclusive", "frames": chapter["frames"],
-                    "timing_basis": "PCM sample frames after trimming and inserted pauses",
-                    "precision": "paragraph" if any("source_segments" in item for item in chapter["segments"]) else "chunk",
-                    "audio_file": chapter["audio_file"], "audio_sha256": chapter["encoded_sha256"],
-                    "playback_note": "Use codec delay/padding-aware playback; word alignment is not provided.",
-                    "segments": deepcopy(chapter["segments"])}
+            sync = sync_record(book_id=spec["book"].get("id"), source_fingerprint=spec["source_fingerprint"],
+                               spec_hash=digest(spec), chapter_id=chapter["id"], chapter_number=chapter["number"],
+                               sample_rate=chapter["sample_rate"], frames=chapter["frames"],
+                               precision="paragraph" if any("source_segments" in item for item in chapter["segments"]) else "chunk",
+                               audio_file=chapter["audio_file"], audio_sha256=chapter["encoded_sha256"],
+                               segments=chapter["segments"])
             write_json(stage / "sync.json", sync)
-            write_json(stage / "verification.json", {
-                "format": "audiobook-renderer-chapter-verification", "version": 1,
-                "spec_hash": digest(spec), "passed": True,
-                "engine": prepared["context"]["engine"], "verifier": prepared["context"]["verifier"],
-                "quality_version": prepared["context"]["quality_version"],
-                "quality": prepared["context"]["quality"], "acceptance": acceptance})
+            write_json(stage / "verification.json", verification_record(
+                spec_hash=digest(spec), context=prepared["context"], acceptance=acceptance))
             artifacts = {path.name: {"sha256": file_hash(path), "bytes": path.stat().st_size}
                          for path in stage.iterdir()}
-            manifest = {"format": "epub-tts-narrator-chapter-artifacts", "version": 1,
-                        "identity": export_identity, "spec_hash": digest(spec),
-                        "source_fingerprint": spec["source_fingerprint"],
-                        "status": chapter["status"], "artifacts": artifacts}
-            write_json(stage / "manifest.json", dict(manifest, record_sha256=digest(manifest)))
+            manifest = manifest_record(identity=export_identity, spec=spec, status=chapter["status"],
+                                       artifacts=artifacts)
+            write_json(stage / "manifest.json", dict(manifest, record_sha256=signed_record(manifest)))
             try:
                 os.rename(stage, folder)
             except OSError:

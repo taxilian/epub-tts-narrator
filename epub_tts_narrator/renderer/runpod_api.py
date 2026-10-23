@@ -17,7 +17,9 @@ import re
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
+
+from .common import USER_AGENT, RejectRedirects
 
 
 _V1 = "https://rest.runpod.io/v1"
@@ -46,11 +48,10 @@ class RunpodAmbiguousOutcome(RunpodAPIError):
         super().__init__(message, status=status, ambiguous=True, retryable=False)
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, request, fp, code, message, headers, newurl):
-        # HTTPError preserves the status for classification. Neither Location
-        # nor the provider body becomes part of the user-facing exception.
-        raise HTTPError(request.full_url, code, "Redirect refused", headers, fp)
+def _redirect_refused(request, fp, code, headers):
+    # HTTPError preserves the status for classification. Neither Location
+    # nor the provider body becomes part of the user-facing exception.
+    return HTTPError(request.full_url, code, "Redirect refused", headers, fp)
 
 
 def _resource_id(value):
@@ -93,7 +94,7 @@ class RunpodAPI:
             raise ValueError("Runpod request timeout must be between 0 and 300 seconds")
         self._api_key = api_key
         self.timeout = timeout
-        self._opener = build_opener(ProxyHandler({}), _NoRedirect())
+        self._opener = build_opener(ProxyHandler({}), RejectRedirects(_redirect_refused))
 
     def list_pods(self, **filters):
         return self._request("GET", "/pods", query=filters, expected=list)
@@ -160,7 +161,7 @@ class RunpodAPI:
         mutation = method != "GET"
         body = None
         headers = {"Authorization": f"Bearer {self._api_key}", "Accept": "application/json",
-                   "User-Agent": "epub-tts-narrator/1"}
+                   "User-Agent": USER_AGENT}
         if require_id and not isinstance(spec, dict):
             raise ValueError("Runpod creation settings must be a JSON object")
         if spec is not None:

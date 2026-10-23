@@ -74,9 +74,21 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(remote["verification"]["compute_type"], "int8")
         self.assertNotIn("max_inflight", remote["render_pool"])
         self.assertEqual(remote["verification"]["model"], "/workspace/models/whisper-ct2")
-        self.assertIsNone(remote["verification"]["reference_model"])
+        self.assertEqual(remote["verification"]["reference_model"], "/workspace/models/whisper-ct2-reference")
         self.assertEqual(remote["verification"]["recurrence_threshold"], 4)
         self.assertEqual(remote["chapter_server"]["port"], 8082)
+
+    def test_configured_reference_model_is_prepared_on_the_worker_and_absent_stays_unset(self):
+        remote = self.remote()
+        path = write_private_toml(self.directory / "worker.toml", remote)
+        self.assertEqual(load_config(path)["verification"]["reference_model"],
+                         "/workspace/models/whisper-ct2-reference")
+        base = deepcopy(self.base)
+        base["verification"].pop("reference_model")
+        write_private_toml(self.path, base)
+        remote = self.remote()
+        self.assertIsNone(remote["verification"]["reference_model"])
+        load_config(write_private_toml(self.directory / "worker.toml", remote))
 
     def test_batched_backend_uses_one_server_with_bounded_request_slots(self):
         write_private_toml(self.directory / "runpod.local.toml", {

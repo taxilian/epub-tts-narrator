@@ -26,11 +26,13 @@ import time
 import uuid
 import wave
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
+from epub_tts_narrator.renderer.drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
 
 
 APPLICATION_ROOT = Path(__file__).resolve().parents[2]
@@ -67,11 +69,10 @@ def validate_worker(config):
         raise ValueError("engine.checkpoint must name the native Drama 3 model directory")
     if not re.fullmatch(r"[0-9a-f]{40}", config["render_pool"]["model_revision"]):
         raise ValueError("render_pool.model_revision must be a pinned 40-character commit SHA")
-    verification = config["verification"]
-    if verification["type"] != "faster_whisper" or verification["device"] not in {"cpu", "cuda"}:
+    # load_config already confines verification.device to cpu/cuda; this
+    # profile only narrows the verifier type beyond the loader's shared set.
+    if config["verification"]["type"] != "faster_whisper":
         raise ValueError("This worker requires verification.type = faster_whisper and device = cpu or cuda")
-    if verification.get("reference_model"):
-        raise ValueError("This worker prepares one Whisper model; omit verification.reference_model")
     api_key = config["chapter_server"]["api_key"]
     if not api_key or api_key.upper().startswith("REPLACE-WITH"):
         raise ValueError("Set chapter_server.api_key to a new random application key before starting the worker")
@@ -80,17 +81,26 @@ def validate_worker(config):
 
 
 def model_specs(config):
-    return (
+    specs = [
         ("fishaudio/drama-3", config["render_pool"]["model_revision"],
          Path(config["engine"]["checkpoint"])),
         (WHISPER_REPOSITORY, WHISPER_REVISION, Path(config["verification"]["model"])),
-    )
+    ]
+    # Reference corroboration reuses the same pinned Whisper repository in its
+    # own directory, so both verifiers share one revision contract.
+    reference = config["verification"].get("reference_model")
+    if reference:
+        specs.append((WHISPER_REPOSITORY, WHISPER_REVISION, Path(reference)))
+    return tuple(specs)
 
 
 def required_model_files(repo, directory):
-    if repo == "fishaudio/drama-3":
+    if repo == DEFAULT_DRAMA3_MODEL:
+        # drama3_models owns the canonical shard layout; the downloaded index
+        # is untrusted and must still validate and resolve to present files.
         names = {"codec.pth", "config.json", "tokenizer.json", "tokenizer_config.json",
-                 "special_tokens_map.json", "chat_template.jinja", "model.safetensors.index.json"}
+                 "special_tokens_map.json", "chat_template.jinja", "model.safetensors.index.json",
+                 *DRAMA3_MODELS[repo].weight_files}
         index = read_json(directory / "model.safetensors.index.json")
         weights = index.get("weight_map") if isinstance(index, dict) else None
         if not isinstance(weights, dict) or not weights:
@@ -282,6 +292,8 @@ def check(config, *, application_python=APPLICATION_PYTHON):
 
 
 class _NoRedirect(HTTPRedirectHandler):
+    # Deliberately pass-through, unlike common.RejectRedirects: 3xx responses
+    # reach the callers' own status checks instead of raising mid-transfer.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -318,8 +330,8 @@ def _download_hash(url, expected_size):
 
 def storage_smoke(config, path, *, publisher_factory=None, download=_download_hash):
     """Round-trip only our unique temporary object; never touch book exports."""
+    from epub_tts_narrator.renderer.chapter_storage import S3ArtifactPublisher, key_for
     if publisher_factory is None:
-        from epub_tts_narrator.renderer.chapter_storage import S3ArtifactPublisher
         publisher_factory = S3ArtifactPublisher
     settings = dict(config["chapter_storage"])
     settings["prefix"] = "/".join(part for part in (
@@ -330,7 +342,7 @@ def storage_smoke(config, path, *, publisher_factory=None, download=_download_ha
     # Compute the unique key before upload so a partially successful upload is
     # cleaned up even when its HEAD verification fails.
     name = "chapter" + path.suffix
-    key = "/".join((settings["prefix"], job_id, checksum, name))
+    key = key_for(settings, job_id, checksum, name)
     try:
         record = publisher.publish(job_id, name, path, checksum)
         if download(publisher.url(record), record["size"]) != checksum:
@@ -357,6 +369,7 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
     from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
     from epub_tts_narrator.renderer.quality import validate_audio
     from epub_tts_narrator.renderer.verification import create_verifier
+    from epub_tts_narrator.renderer.assembly import aac_codec_arguments
     import soundfile as sf
 
     check(config)
@@ -392,8 +405,8 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
             chapter = directory / "chapter.m4a"
             result = subprocess.run(
                 [config["render"]["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error",
-                 "-i", str(compressed), "-c:a", "aac", "-b:a", config["render"]["aac_bitrate"],
-                 "-movflags", "+faststart", str(chapter)],
+                 "-i", str(compressed), *aac_codec_arguments(config["render"]["aac_bitrate"]),
+                 str(chapter)],
                 capture_output=True, timeout=60, check=False)
             if result.returncode or not chapter.is_file() or chapter.stat().st_size == 0:
                 raise RuntimeError("Smoke M4A encoding failed")
@@ -410,7 +423,20 @@ class WorkerStopped(Exception):
     pass
 
 
-def wait_ready(process, stop, *, timeout=600, fetch=_get_json, protocol="fish_native_drama3"):
+def wait_ready(process, stop, *, timeout=600, fetch=_get_json, protocol="fish_native_drama3",
+               worker=None):
+    """Wait for the backend's loopback health and model identity.
+
+    URLs and the expected model name come from the render_pool worker table
+    that the loaded configuration (runpod_config) minted; the pinned constants
+    are only fallbacks for direct manual invocations.
+    """
+    settings = worker or {}
+    url = settings.get("url") or (SGLANG_URL if protocol == "fish_sglang_drama3" else FISH_URL)
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    versioned = origin + "/v1"
+    model = settings.get("model", "drama-3")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if stop.is_set():
@@ -419,16 +445,18 @@ def wait_ready(process, stop, *, timeout=600, fetch=_get_json, protocol="fish_na
             raise RuntimeError("Fish CUDA process exited during startup; inspect its log above")
         try:
             if protocol == "fish_sglang_drama3":
-                health = fetch("http://127.0.0.1:8080/health")
-                models = fetch("http://127.0.0.1:8080/v1/models")
+                health = fetch(origin + "/health")
+                models = fetch(versioned + "/models")
                 if (isinstance(health, dict) and health.get("status") == "healthy"
                         and health.get("running") is True and isinstance(models, dict)
-                        and any(isinstance(item, dict) and item.get("id") == "drama-3"
+                        and any(isinstance(item, dict) and item.get("id") == model
                                 for item in models.get("data", []))):
                     return
             else:
-                health = fetch("http://127.0.0.1:8080/v1/health")
-                defaults = fetch("http://127.0.0.1:8080/v1/tts/defaults")
+                health = fetch(versioned + "/health")
+                defaults = fetch(url + "/defaults")
+                # model_family is the stock Fish server's Drama 3 label, not a
+                # deployment pin; the model identity is the configuration's.
                 if (health == {"status": "ok"} and isinstance(defaults, dict)
                         and defaults.get("model_family") == "drama3"):
                     return
@@ -553,8 +581,9 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
                                       env=inference_environment(config, native_directory,
                                                                 application_python=application_python))
             children.append(native)
-            wait_ready(native, stop, timeout=startup_timeout,
-                       protocol=config["render_pool"]["workers"][0]["protocol"])
+            backend = config["render_pool"]["workers"][0]
+            wait_ready(native, stop, timeout=startup_timeout, worker=backend,
+                       protocol=backend["protocol"])
             if stop.is_set():
                 raise WorkerStopped()
             chapter = None

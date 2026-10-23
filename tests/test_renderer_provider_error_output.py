@@ -123,6 +123,7 @@ class ProviderErrorOutputTests(unittest.TestCase):
                             capabilities={"voice_design": True})
             designer.voice_design_identity = designer.identity
             designer.create_voice.side_effect = GeminiVoiceError(diagnostic)
+            designer.release_voice = Mock(return_value=[])
             messages = []
             session = CastingSession(bundle, config, engine_factory=lambda settings: engine,
                                      designer_factory=lambda settings: designer,

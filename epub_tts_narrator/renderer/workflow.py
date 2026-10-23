@@ -17,6 +17,7 @@ from ..spoken_text import effective_delivery
 from .assembly import extract_cover, normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
+from .chapter_records import signed_record
 from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import resolve_voice_design
@@ -1218,7 +1219,7 @@ def _read_checkpoint(work, chapter):
         if not isinstance(record, dict):
             raise ValueError("Checkpoint must be a JSON object")
         checksum = record.pop("record_sha256")
-        if (checksum != digest(record) or record.get("format") != "audiobook-chapter-checkpoint"
+        if (checksum != signed_record(record) or record.get("format") != "audiobook-chapter-checkpoint"
                 or record.get("version") != 1
                 or not isinstance(record.get("context"), dict)
                 or not isinstance(record.get("cache_key"), str)
@@ -1717,8 +1718,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
     if retry_budget is None:
-        # Standalone chapter workers have no paragraph-splitting recovery loop.
-        # Their explicit reruns need a fresh allowance for paragraphs too.
+        # The chapter service passes a submission-bound budget; this permissive
+        # default remains for direct callers such as tools and benchmarks.
         retry_budget = SpeechRetryBudget(retry_paragraphs=True)
     if (take_locks is None) != (take_locks_guard is None):
         raise ValueError("Shared take locks require both the mapping and its guard")
@@ -1827,9 +1828,8 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
     run_started = monotonic()
     retry_budget = SpeechRetryBudget()
-    wrap_verifier = getattr(engine, "wrap_verifier", None)
-    if callable(wrap_verifier):
-        verifier = wrap_verifier(verifier)
+    from .pool import bind_engine_verifier
+    verifier = bind_engine_verifier(engine, verifier)
     config, plan, store = _preflight(
         bundle, config, chapters_only=chapters_only,
         multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False),

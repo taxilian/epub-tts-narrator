@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import re
 
 from .common import digest
+from .config import RENDER_CONTRACT
 
 
 PROTOCOL = "epub-tts-narrator.chapter-jobs.v1"
 HASH = re.compile(r"[0-9a-f]{64}\Z")
-SAFE_RENDER_KEYS = frozenset({
-    "chapter_format", "max_chunk_chars", "max_attempts", "paragraph_synthesis",
-    "max_paragraph_chars", "seed", "sample_rate", "paragraph_pause_ms",
-    "blank_pause_ms", "bracket_pause_ms", "normalize_pauses", "sentence_pause_ms",
-    "clause_pause_ms", "normalize_loudness", "target_lufs", "true_peak_db",
-    "aac_bitrate", "mp3_bitrate",
-})
+SAFE_RENDER_KEYS = frozenset(
+    key for key, spec in RENDER_CONTRACT.items() if spec.get("remote_safe"))
 ARTIFACT_NAMES = frozenset({
     "chapter.m4a", "chapter.flac", "chapter.json", "sync.json", "verification.json", "manifest.json",
 })
+FAILED_PARAGRAPH_FIELD = "failed_paragraph="
+_CHUNK_ID = re.compile(r"[0-9a-f]{32,64}\Z")
 
 
 def require_hash(value, label="SHA256"):
@@ -39,6 +38,32 @@ def validate_voice_manifest(manifest):
     return deepcopy(manifest)
 
 
+def failed_paragraph_detail(exc):
+    """Hash-only identity of a failed paragraph synthesis, safe for wire errors.
+
+    Book text never enters job records or logs; the client matches these
+    identifiers against its own plan to recover the paragraph remotely.
+    """
+    request = getattr(exc, "request", None)
+    if not isinstance(request, dict) or request.get("kind") != "paragraph_speech":
+        return None
+    chunk = request.get("chunk")
+    if not isinstance(chunk, dict) or "paragraph_turns" not in chunk:
+        return None
+    identifier = chunk.get("chunk_id")
+    if not isinstance(identifier, str) or not _CHUNK_ID.fullmatch(identifier):
+        return None
+    return {"request_hash": digest(request), "chunk_id": identifier}
+
+
+def failed_paragraph_suffix(exc):
+    """Return the durable wire suffix for a paragraph speech failure, if any."""
+    detail = failed_paragraph_detail(exc)
+    if detail is None:
+        return ""
+    return "\n" + FAILED_PARAGRAPH_FIELD + json.dumps(detail, sort_keys=True)
+
+
 def validate_render_settings(settings):
     """Do not allow clients to choose server executables or filesystem paths."""
     from .chapter_cache import chapter_settings
@@ -47,18 +72,19 @@ def validate_render_settings(settings):
     chapter_settings(settings)
     if settings.get("chapter_format", "m4a") != "m4a":
         raise ValueError("Remote chapters use M4A; the final audiobook uses M4B")
-    limits = {"max_chunk_chars": (40, 1000), "max_attempts": (1, 10),
-              "max_paragraph_chars": (320, 1500), "seed": (0, 2**32 - 1),
-              "sample_rate": (44100, 44100)}
-    for key, (low, high) in limits.items():
-        if key in settings and (type(settings[key]) is not int or not low <= settings[key] <= high):
-            raise ValueError(f"Invalid remote render.{key}")
-    for key in ("paragraph_synthesis",):
-        if key in settings and type(settings[key]) is not bool:
-            raise ValueError(f"Invalid remote render.{key}")
-    for key in ("aac_bitrate", "mp3_bitrate"):
-        if key in settings and (not isinstance(settings[key], str)
-                                or not re.fullmatch(r"[1-9][0-9]{0,2}k", settings[key])):
+    for key, spec in RENDER_CONTRACT.items():
+        if key not in settings or spec.get("checked"):
+            continue
+        kind = spec["kind"]
+        if kind == "int":
+            low, high = spec["range"]
+            if type(settings[key]) is not int or not low <= settings[key] <= high:
+                raise ValueError(f"Invalid remote render.{key}")
+        elif kind == "bool":
+            if type(settings[key]) is not bool:
+                raise ValueError(f"Invalid remote render.{key}")
+        elif kind == "bitrate" and (not isinstance(settings[key], str)
+                                    or not re.fullmatch(r"[1-9][0-9]{0,2}k", settings[key])):
             raise ValueError(f"Invalid remote render.{key}")
     return deepcopy(settings)
 

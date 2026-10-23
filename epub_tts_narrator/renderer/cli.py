@@ -378,6 +378,7 @@ def main(argv=None):
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 0
         from .engines import create_engine
+        from .pool import create_render_components
         from .verification import create_verifier
         from .workflow import ensure_voice, import_voice, render
         from .model_setup import ModelSetup
@@ -399,15 +400,12 @@ def main(argv=None):
                 from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
                 bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
         if workers:
-            from .pool import create_render_engine
-            engine = create_render_engine(config)
             print("Rendering with " + ", ".join(
                 f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
+            engine, verifier = create_render_components(config, verifier_factory=create_verifier)
         else:
             engine = create_engine(config["engine"])
-        verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
-        if workers:
-            verifier = engine.wrap_verifier(verifier)
+            verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
         if args.command == "import-voice":
             result = import_voice(bundle, args.voice_id, args.audio,
                                   args.transcript.read_text(encoding="utf-8"), config, engine, verifier)

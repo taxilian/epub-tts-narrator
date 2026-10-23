@@ -14,11 +14,65 @@ from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 
 
+# Shared Drama 3 sampling defaults. config.py owns the user-facing values;
+# pool.py and fish_http.py derive their request profiles from this constant.
+SAMPLING_DEFAULTS = {
+    "experts": "q8", "temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048,
+}
+
+
+# Canonical render contract: defaults, value kinds and bounds, plus scope
+# flags. load_config enforces the kinds and ranges below;
+# chapter_cache.chapter_settings and chapter_protocol.validate_render_settings
+# derive their defaults, limits and the SAFE_RENDER_KEYS wire whitelist from
+# this table. Key order preserves each validator's error precedence.
+RENDER_CONTRACT = {
+    "max_chunk_chars": {"default": 320, "kind": "int", "range": (40, 1000), "remote_safe": True},
+    "max_attempts": {"default": 3, "kind": "int", "range": (1, 10), "remote_safe": True},
+    "max_paragraph_chars": {"default": 1000, "kind": "int", "range": (320, 1500), "remote_safe": True},
+    "seed": {"default": 1729, "kind": "int", "range": (0, 2**32 - 1), "remote_safe": True},
+    "sample_rate": {"default": 44100, "kind": "int", "range": (44100, 44100),
+                    "chapter": True, "remote_safe": True},
+    "allow_review": {"default": False, "kind": "bool"},
+    "paragraph_synthesis": {"default": True, "kind": "bool", "remote_safe": True},
+    "paragraph_pause_ms": {"default": 250, "kind": "int", "range": (0, 5000),
+                           "chapter": True, "checked": True, "remote_safe": True},
+    "blank_pause_ms": {"default": 500, "kind": "int", "range": (0, 5000),
+                       "chapter": True, "checked": True, "remote_safe": True},
+    "bracket_pause_ms": {"default": 120, "kind": "int", "range": (0, 5000),
+                         "chapter": True, "checked": True, "remote_safe": True},
+    "sentence_pause_ms": {"default": 220, "kind": "int", "range": (0, 5000),
+                          "chapter": True, "checked": True, "remote_safe": True},
+    "clause_pause_ms": {"default": 100, "kind": "int", "range": (0, 5000),
+                        "chapter": True, "checked": True, "remote_safe": True},
+    "normalize_loudness": {"default": True, "kind": "bool",
+                           "chapter": True, "checked": True, "remote_safe": True},
+    "normalize_pauses": {"default": True, "kind": "bool",
+                         "chapter": True, "checked": True, "remote_safe": True},
+    "keep_intermediate_audio": {"default": False, "kind": "bool"},
+    "target_lufs": {"default": -20.0, "kind": "float", "range": (-40, -10),
+                    "chapter": True, "checked": True, "remote_safe": True},
+    "true_peak_db": {"default": -1.5, "kind": "float", "range": (-9, 0),
+                     "chapter": True, "checked": True, "remote_safe": True},
+    "aac_bitrate": {"default": "128k", "kind": "bitrate", "chapter": True, "remote_safe": True},
+    "mp3_bitrate": {"default": "128k", "kind": "bitrate", "chapter": True, "remote_safe": True},
+    "chapter_format": {"default": "m4a", "kind": "enum", "choices": ("m4a", "mp3"),
+                       "chapter": True, "checked": True, "remote_safe": True},
+    "ffmpeg": {"default": "ffmpeg", "kind": "text", "chapter": True},
+    "ffprobe": {"default": "ffprobe", "kind": "text", "chapter": True},
+}
+
+
+def default_multi_speaker(protocol):
+    """Wire default for worker multi_speaker: SGLang serves one reference voice."""
+    return protocol != "fish_sglang_drama3"
+
+
 DEFAULTS = {
     "engine": {
-        "type": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL, "checkpoint": None, "experts": "q8",
-        "cache_model_alias": None,
-        "temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048, "options": {},
+        "type": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL, "checkpoint": None,
+        "cache_model_alias": None, "options": {},
+        **SAMPLING_DEFAULTS,
     },
     "verification": {
         "type": "mlx_whisper", "model": None, "language": "en",
@@ -45,7 +99,7 @@ DEFAULTS = {
     "render_pool": {
         "workers": [],
         "max_inflight": 0,
-        "model_revision": "b2b5ee998034b2975720906c815e7fb0e9f007bd",
+        "model_revision": get_drama3_model(DEFAULT_DRAMA3_MODEL).revision,
     },
     "server": {
         "host": "127.0.0.1", "port": 8080, "api_key": "",
@@ -81,16 +135,8 @@ DEFAULTS = {
         "sample_loudness_lufs": -20.0, "sample_true_peak_db": -1.5,
     },
     "render": {
-        "work_dir": None, "output_dir": None,
-        "chapter_format": "m4a", "max_chunk_chars": 320, "max_attempts": 3,
-        "paragraph_synthesis": True, "max_paragraph_chars": 1000,
-        "seed": 1729, "sample_rate": 44100, "paragraph_pause_ms": 250,
-        "blank_pause_ms": 500, "bracket_pause_ms": 120, "allow_review": False, "chapter_numbers": [],
-        "normalize_pauses": True, "sentence_pause_ms": 220, "clause_pause_ms": 100,
-        "keep_intermediate_audio": False,
-        "normalize_loudness": True, "target_lufs": -20.0, "true_peak_db": -1.5,
-        "aac_bitrate": "128k", "mp3_bitrate": "128k",
-        "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "epub": None,
+        "work_dir": None, "output_dir": None, "chapter_numbers": [], "epub": None,
+        **{key: spec["default"] for key, spec in RENDER_CONTRACT.items()},
     },
     "quality": {},
 }
@@ -204,7 +250,7 @@ def validate_distributed_settings(config):
         else:
             default_model = "drama-3" if selected_model == DEFAULT_DRAMA3_MODEL else selected_model
             worker = {"api_key": "", "model": default_model, "timeout_seconds": 300.0,
-                      "multi_speaker": worker.get("protocol") != "fish_sglang_drama3",
+                      "multi_speaker": default_multi_speaker(worker.get("protocol")),
                       "protocol": "fish_inline", **worker}
             if (not isinstance(worker["protocol"], str)
                     or worker["protocol"] not in {"fish_inline", "fish_native_drama3", "fish_sglang_drama3"}):
@@ -376,39 +422,35 @@ def load_config(path=None, *, require_verifier=True):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{section}.{key} must be a nonempty string when configured")
     render = result["render"]
-    for key, low, high in (
-        ("max_chunk_chars", 40, 1000), ("max_attempts", 1, 10),
-        ("max_paragraph_chars", 320, 1500),
-        ("seed", 0, 2**32 - 1), ("sample_rate", 44100, 44100),
-        ("paragraph_pause_ms", 0, 5000), ("blank_pause_ms", 0, 5000),
-        ("bracket_pause_ms", 0, 5000),
-        ("sentence_pause_ms", 0, 5000), ("clause_pause_ms", 0, 5000),
-    ):
+    for key, spec in RENDER_CONTRACT.items():
+        if spec["kind"] != "int":
+            continue
+        low, high = spec["range"]
         value = render[key]
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"Invalid render.{key}")
-    if type(render["allow_review"]) is not bool:
-        raise ValueError("render.allow_review must be boolean")
-    if type(render["paragraph_synthesis"]) is not bool:
-        raise ValueError("render.paragraph_synthesis must be boolean")
-    if type(render["normalize_loudness"]) is not bool:
-        raise ValueError("render.normalize_loudness must be boolean")
-    if type(render["normalize_pauses"]) is not bool:
-        raise ValueError("render.normalize_pauses must be boolean")
-    if type(render["keep_intermediate_audio"]) is not bool:
-        raise ValueError("render.keep_intermediate_audio must be boolean")
-    for key, low, high in (("target_lufs", -40, -10), ("true_peak_db", -9, 0)):
+    for key, spec in RENDER_CONTRACT.items():
+        if spec["kind"] != "bool":
+            continue
+        if type(render[key]) is not bool:
+            raise ValueError(f"render.{key} must be boolean")
+    for key, spec in RENDER_CONTRACT.items():
+        if spec["kind"] != "float":
+            continue
+        low, high = spec["range"]
         value = render[key]
         if (type(value) not in (int, float) or not math.isfinite(value)
                 or not low <= value <= high):
             raise ValueError(f"render.{key} must be a finite number from {low} to {high}")
-    for key in ("aac_bitrate", "mp3_bitrate"):
+    for key, spec in RENDER_CONTRACT.items():
+        if spec["kind"] != "bitrate":
+            continue
         if not isinstance(render[key], str) or not re.fullmatch(r"[1-9][0-9]{0,2}k", render[key]):
             raise ValueError(f"render.{key} must be a positive bitrate such as 128k")
     numbers = render["chapter_numbers"]
     if not isinstance(numbers, list) or any(type(n) is not int or n < 1 for n in numbers) or len(set(numbers)) != len(numbers):
         raise ValueError("render.chapter_numbers must contain distinct positive integers")
-    if render["chapter_format"] not in {"m4a", "mp3"}:
+    if render["chapter_format"] not in RENDER_CONTRACT["chapter_format"]["choices"]:
         raise ValueError("render.chapter_format must be m4a or mp3")
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")

@@ -23,12 +23,14 @@ class Executor:
 
     def __init__(self):
         self.generated = []
+        self.budgets = []
         self.fail = False
         self.assembly_entered = threading.Event()
         self.assembly_release = None
 
-    def synthesize(self, spec, voices, work, notify):
+    def synthesize(self, spec, voices, work, notify, retry_budget=None):
         self.generated.append(spec["chapter"]["number"])
+        self.budgets.append(retry_budget)
         notify("Paragraph complete")
         if self.fail:
             raise ValueError("fixture failure")
@@ -76,9 +78,9 @@ class ChapterJobsTests(unittest.TestCase):
         self.service = ChapterJobs(self.root / "server", self.engine, {"assembly_workers": 2})
         self.addCleanup(self.service.close)
 
-    def submit(self, number=1):
+    def submit(self, number=1, submission=None):
         spec = specification(self.service, number)
-        return self.service.submit(spec, digest(spec))
+        return self.service.submit(spec, digest(spec), submission)
 
     def terminal(self, job_id):
         until = time.monotonic() + 5
@@ -194,6 +196,61 @@ class ChapterJobsTests(unittest.TestCase):
             self.service.artifact(job["id"], "chapter.json")
         with self.assertRaises(KeyError):
             self.service.artifact(job["id"], "chapter.wav")
+
+    def test_submission_budget_is_shared_across_jobs_and_refreshed_per_submission(self):
+        self.assertTrue(self.service.capabilities()["submission_budget"])
+        first, second = self.submit(1, "d" * 64), self.submit(2, "d" * 64)
+        self.service.start()
+        self.assertEqual(self.terminal(first["id"])["state"], "complete")
+        self.assertEqual(self.terminal(second["id"])["state"], "complete")
+        shared = self.engine.budgets[0]
+        self.assertIsNotNone(shared)
+        self.assertIs(self.engine.budgets[1], shared)
+        self.assertFalse(shared.retry_paragraphs)
+        third = self.submit(3, "e" * 64)
+        self.assertEqual(self.terminal(third["id"])["state"], "complete")
+        self.assertIsNot(self.engine.budgets[2], shared)
+
+    def test_retry_spends_the_retried_submission_budget_and_keeps_it_without_one(self):
+        self.engine.fail = True
+        job = self.submit(1, "d" * 64)
+        self.service.start()
+        self.assertEqual(self.terminal(job["id"])["state"], "failed")
+        original = self.engine.budgets[0]
+        self.service.retry(job["id"])
+        self.assertEqual(self.terminal(job["id"])["state"], "failed")
+        self.assertIs(self.engine.budgets[1], original)
+        self.service.retry(job["id"], "e" * 64)
+        self.assertEqual(self.terminal(job["id"])["state"], "failed")
+        self.assertIsNot(self.engine.budgets[2], original)
+        self.engine.fail = False
+        self.service.retry(job["id"])
+        self.assertEqual(self.terminal(job["id"])["state"], "complete")
+        self.assertIs(self.engine.budgets[3], self.engine.budgets[2])
+
+    def test_failed_paragraph_verification_records_a_hash_only_wire_suffix(self):
+        from epub_tts_narrator.renderer.chapter_protocol import FAILED_PARAGRAPH_FIELD
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+        request = {"kind": "paragraph_speech", "chunk": {
+            "chunk_id": "c" * 32,
+            "paragraph_turns": [{"chunk_id": "a" * 32}, {"chunk_id": "b" * 32}]}}
+        job = self.submit()
+        for failure, label in ((SpeechVerificationFailed(
+                "Speech verification failed after 2 attempts. Inspect /work/clips/x",
+                request=request, report={}), "identified"),
+                               (SpeechVerificationFailed("word" * 1000, request=request, report={}),
+                                "truncated")):
+            with self.subTest(label=label):
+                self.service._failure(job["id"], failure)
+                error = self.service.status(job["id"])["error"]
+                self.assertIn(FAILED_PARAGRAPH_FIELD, error)
+                detail = json.loads(error.rsplit(FAILED_PARAGRAPH_FIELD, 1)[1])
+                self.assertEqual(detail, {"request_hash": digest(request), "chunk_id": "c" * 32})
+                self.assertNotIn("paragraph_turns", error)
+                if label == "truncated":
+                    self.assertEqual(len(error), 2000)
+        self.service._failure(job["id"], ValueError("plain fixture failure"))
+        self.assertNotIn(FAILED_PARAGRAPH_FIELD, self.service.status(job["id"])["error"])
 
     def test_recover_inflight_state_and_single_process_lease(self):
         job = self.submit()

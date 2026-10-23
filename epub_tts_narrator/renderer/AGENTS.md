@@ -2,8 +2,10 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 73 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 74 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
+
+Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
 
 ## ENTRY
 
@@ -17,8 +19,8 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 ## STRUCTURE
 
 1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, recovery identity.
-2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `speech_identity.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
-3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_protocol.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
+2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
+3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
 6. Assembly/publication: `assembly.py`, `publication.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.

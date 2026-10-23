@@ -21,8 +21,13 @@ import tempfile
 import threading
 import time
 
-from .chapter_protocol import ARTIFACT_NAMES, PROTOCOL, require_hash, validate_spec, validate_voice_manifest
+from .chapter_executor import MAX_PARALLEL_CHAPTERS
+from .chapter_protocol import (
+    ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix,
+    require_hash, validate_spec, validate_voice_manifest,
+)
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .retry_budget import SpeechRetryBudget
 
 
 class ChapterJobs:
@@ -39,7 +44,7 @@ class ChapterJobs:
         parallel = getattr(executor, "parallel_chapters", 1)
         if type(parallel) is not int or parallel < 1:
             raise ValueError("Executor chapter concurrency must be a positive integer")
-        self._parallel_chapters = min(2, parallel)
+        self._parallel_chapters = min(MAX_PARALLEL_CHAPTERS, parallel)
         self._condition = threading.Condition(threading.RLock())
         self._stopping = self._draining = False
         self._started = self._closed = self._closing = False
@@ -47,6 +52,11 @@ class ChapterJobs:
         self._last_activity = time.monotonic()
         self._thread = self._assembly = self._file_lock = None
         self._threads = []
+        # One shared speech-retry allowance per client submission, matching a
+        # fresh local render invocation; retries of the same submission keep
+        # spending it, while a new submission starts a fresh budget.
+        self._submission_budgets = {}
+        self._job_budgets = {}
         self._db = self.root / "jobs.sqlite3"
         for name in ("voices", "render-work"):
             if (self.root / name).is_symlink():
@@ -85,9 +95,24 @@ class ChapterJobs:
                 "multi_speaker": getattr(self.executor, "multi_speaker", True),
                 "single_speaker_paragraph": getattr(self.executor, "single_speaker_paragraph", False),
                 "parallel_chapters": self._parallel_chapters,
+                "submission_budget": True,
                 "maintenance": self._maintenance,
                 "voice_format": "flac", "chapter_format": "m4a",
                 "timing_precision": "paragraph_or_chunk"}
+
+    def _submission_budget(self, submission):
+        require_hash(submission, "Submission")
+        with self._condition:
+            budget = self._submission_budgets.get(submission)
+            if budget is None:
+                budget = SpeechRetryBudget()
+                self._submission_budgets[submission] = budget
+                if len(self._submission_budgets) > 64:
+                    bound = set(self._job_budgets.values())
+                    for key in [key for key in self._submission_budgets
+                                if key not in bound and key != submission]:
+                        del self._submission_budgets[key]
+            return budget
 
     def _voice(self, asset_id):
         require_hash(asset_id, "Voice asset")
@@ -195,12 +220,14 @@ class ChapterJobs:
         with self._condition, self._connect() as db:
             self._event(db, job_id, message)
 
-    def submit(self, spec, idempotency_key):
+    def submit(self, spec, idempotency_key, submission=None):
         with self._condition:
             if self._maintenance:
                 self._admit_job()
         spec = validate_spec(spec)
         require_hash(idempotency_key, "Idempotency key")
+        if submission is not None:
+            require_hash(submission, "Submission")
         identifier = digest({"key": idempotency_key, "renderer": spec["renderer_fingerprint"]})
         payload = json.dumps(spec, sort_keys=True, ensure_ascii=False, allow_nan=False)
         with self._condition, self._connect() as db:
@@ -227,6 +254,8 @@ class ChapterJobs:
                 db.execute("INSERT INTO jobs(id,idem,spec,renderer,state,created,updated) VALUES (?,?,?,?,?,?,?)",
                            (identifier, idempotency_key, payload, self.fingerprint, "queued", now, now))
                 self._event(db, identifier, "Chapter queued", state="queued")
+                if submission is not None:
+                    self._job_budgets[identifier] = self._submission_budget(submission)
                 self._last_activity = time.monotonic()
             db.commit()
             self._condition.notify_all()
@@ -256,7 +285,7 @@ class ChapterJobs:
                               (job_id, after)).fetchall()
             return [dict(json.loads(row["payload"]), sequence=row["sequence"]) for row in rows]
 
-    def retry(self, job_id):
+    def retry(self, job_id, submission=None):
         with self._condition, self._connect() as db:
             self._admit_job()
             row = self._row(db, job_id)
@@ -268,6 +297,10 @@ class ChapterJobs:
                     raise RuntimeError("Chapter job queue is full; retry later")
                 db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
                 self._event(db, job_id, "Retry queued; accepted paragraphs will be reused", state="queued")
+                if submission is not None:
+                    # An explicit retry from a later submission spends that
+                    # submission's fresh allowance, like a rerun of the CLI.
+                    self._job_budgets[job_id] = self._submission_budget(submission)
                 self._last_activity = time.monotonic()
             db.commit()
             self._condition.notify_all()
@@ -325,6 +358,8 @@ class ChapterJobs:
             if artifacts is not None:
                 db.execute("UPDATE jobs SET artifacts=? WHERE id=?", (json.dumps(artifacts), job_id))
             self._event(db, job_id, error or f"Chapter {state}", state=state)
+            if state == "complete":
+                self._job_budgets.pop(job_id, None)
             self._last_activity = time.monotonic()
             self._condition.notify_all()
 
@@ -345,7 +380,13 @@ class ChapterJobs:
         redact(self.settings)
         redact(getattr(self.executor, "config", {}))
         # Redact first so truncation cannot expose a prefix of a credential.
-        self._set_state(job_id, "failed", error=message[:2000])
+        # The hash-only paragraph suffix must survive truncation: the client
+        # needs it to record the fallback and resubmit a split chapter.
+        suffix = failed_paragraph_suffix(exc)
+        if suffix:
+            self._set_state(job_id, "failed", error=message[:2000 - len(suffix)] + suffix)
+        else:
+            self._set_state(job_id, "failed", error=message[:2000])
 
     def _done(self):
         with self._condition:
@@ -388,8 +429,11 @@ class ChapterJobs:
                     raise ValueError("Server renderer changed since submission; resubmit with current capabilities")
                 spec = validate_spec(json.loads(row["spec"]))
                 voices = {voice: self._voice(asset) for voice, asset in spec["voice_bindings"].items()}
+                with self._condition:
+                    budget = self._job_budgets.get(job_id)
                 prepared = self.executor.synthesize(spec, voices, self.root / "render-work",
-                                                    lambda message: self._log(job_id, message))
+                                                    lambda message: self._log(job_id, message),
+                                                    retry_budget=budget)
                 self._set_state(job_id, "assembling")
                 self._assembly.submit(self._finish, job_id, spec, prepared)
             except BaseException as exc:

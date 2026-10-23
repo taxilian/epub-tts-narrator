@@ -79,8 +79,11 @@ def fixture_artifacts(spec, mutate=None, mutate_manifest=None):
             "source_fingerprint": spec["source_fingerprint"], "spec_hash": digest(spec),
             "chapter_id": chapter["id"], "chapter_number": chapter["number"], "sample_rate": 44100,
             "timebase": "1/44100", "range_end": "exclusive", "frames": cursor,
+            "timing_basis": "PCM sample frames after trimming and inserted pauses",
             "precision": "paragraph" if any("source_segments" in row for row in segments) else "chunk",
-            "audio_file": metadata["audio_file"], "audio_sha256": audio_hash, "segments": deepcopy(segments)}
+            "audio_file": metadata["audio_file"], "audio_sha256": audio_hash,
+            "playback_note": "Use codec delay/padding-aware playback; word alignment is not provided.",
+            "segments": deepcopy(segments)}
     files = {"chapter.json": metadata, "sync.json": sync, "verification.json": verification}
     if cursor:
         files.update({"chapter.m4a": encoded, "chapter.flac": b"fLaCfixture"})
@@ -586,6 +589,109 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                       notify=lambda _: None, chapters_only=True)
         factory.assert_not_called()
+
+    def paragraph_plan(self):
+        from test_renderer_workflow import EXAMPLE
+        bundle = load_bundle(EXAMPLE / "bundle")
+        for row in bundle["chapters"][0]["rows"]:
+            if row["block_id"] == "b000003":
+                row["role_id"] = "mara_dialogue"
+        config = deepcopy(self.config)
+        config["render"]["paragraph_synthesis"] = True
+        plan = make_render_plan(bundle, config)
+        paragraph = next(chunk for chunk in plan["chapters"][0]["chunks"] if "paragraph_turns" in chunk)
+        return bundle, config, plan, paragraph
+
+    def splitting_client(self, paragraph, voices, config, *, include_detail=True, request_hash=None):
+        from epub_tts_narrator.renderer.chapter_protocol import FAILED_PARAGRAPH_FIELD
+        from epub_tts_narrator.renderer.workflow import _paragraph_request
+        request = _paragraph_request(paragraph, voices, {"engine": "fixture"}, config)
+        detail = {"request_hash": request_hash or digest(request), "chunk_id": paragraph["chunk_id"]}
+        base = self.fake_client()
+
+        class SplittingClient(base):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.specs = []
+
+            def request(self, method, path, payload=None):
+                if path == "v1/capabilities":
+                    return {"protocol": PROTOCOL, "multi_speaker": True,
+                            "renderer_fingerprint": "f" * 64, "submission_budget": True,
+                            "engine": {"engine": {"engine": "fixture"}}}
+                if path == "v1/jobs":
+                    self.specs.append(deepcopy(payload["spec"]))
+                    if len(self.specs) == 1:
+                        job_id = digest(payload["spec"])
+                        error = "SpeechVerificationFailed: failed after 2 attempts"
+                        if include_detail:
+                            error += "\n" + FAILED_PARAGRAPH_FIELD + json.dumps(detail, sort_keys=True)
+                        self.jobs[job_id] = {"id": job_id, "state": "failed", "artifacts": [],
+                                             "last_event": 1, "error": error}
+                        return {"id": job_id, "state": "queued"}
+                    return super().request(method, path, payload)
+                if "/events?" in path:
+                    job = self.jobs[path.split("/")[2]]
+                    if job["state"] == "failed":
+                        return {"events": [{"sequence": 1, "message": "Chapter failed"}], "job": job}
+                    return super().request(method, path, payload)
+                return super().request(method, path, payload)
+
+        return SplittingClient(self.config["remote_chapters"])
+
+    def test_failed_paragraph_is_recorded_and_the_split_chapter_is_resubmitted(self):
+        from epub_tts_narrator.renderer.paragraph_recovery import load_paragraph_fallbacks
+        bundle, config, plan, paragraph = self.paragraph_plan()
+        voices = {voice_id: self.voice for voice_id in plan["voice_ids"]}
+        client = self.splitting_client(paragraph, voices, config)
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(bundle, config, plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(client.specs), 2)
+        grouped, split = client.specs
+        self.assertTrue(any("paragraph_turns" in chunk for chunk in grouped["chapter"]["chunks"]))
+        self.assertTrue(all("paragraph_turns" not in chunk for chunk in split["chapter"]["chunks"]))
+        self.assertEqual(grouped["chapter"]["id"], split["chapter"]["id"])
+        self.assertEqual("".join(chunk["spoken_text"] for chunk in grouped["chapter"]["chunks"]),
+                         "".join(chunk["spoken_text"] for chunk in split["chapter"]["chunks"]))
+        submissions = [payload["submission"] for _, path, payload in client.calls if path == "v1/jobs"]
+        self.assertEqual(submissions, [submissions[0]])
+        self.assertRegex(submissions[0], r"[0-9a-f]{64}")
+        self.assertEqual(load_paragraph_fallbacks(config["render"]["work_dir"]),
+                         {turn["chunk_id"] for turn in paragraph["paragraph_turns"]})
+        self.assertEqual(len(result["chapters"]), len(plan["chapters"]))
+        self.assertTrue(all(Path(item["audio_file"]).is_file() for item in result["chapters"]))
+
+    def test_unidentified_paragraph_failure_stops_without_replanning(self):
+        bundle, config, plan, paragraph = self.paragraph_plan()
+        voices = {voice_id: self.voice for voice_id in plan["voice_ids"]}
+        client = self.splitting_client(paragraph, voices, config, include_detail=False)
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            with self.assertRaisesRegex(ChapterClientError, "Remote chapter 1 failed"):
+                _render_remote_locked(bundle, config, plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(client.specs), 1)
+        self.assertEqual(list((Path(config["render"]["work_dir"]) / "paragraph-fallbacks").glob("*.json")), [])
+
+    def test_paragraph_failure_with_a_mismatched_request_stops_without_recording(self):
+        bundle, config, plan, paragraph = self.paragraph_plan()
+        voices = {voice_id: self.voice for voice_id in plan["voice_ids"]}
+        client = self.splitting_client(paragraph, voices, config, request_hash="0" * 64)
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            with self.assertRaisesRegex(ChapterClientError, "does not match the service's"):
+                _render_remote_locked(bundle, config, plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(client.specs), 1)
+        self.assertEqual(list((Path(config["render"]["work_dir"]) / "paragraph-fallbacks").glob("*.json")), [])
+
+    def test_submission_is_sent_only_when_the_service_advertises_budget_support(self):
+        client = self.fake_client()(self.config["remote_chapters"])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                  notify=lambda _: None, chapters_only=True)
+        payloads = [payload for _, path, payload in client.calls if path == "v1/jobs"]
+        self.assertTrue(payloads)
+        self.assertTrue(all("submission" not in payload for payload in payloads))
 
     def test_assembly_does_not_automatically_render_stale_local_chapter(self):
         from epub_tts_narrator.renderer.chapter_client import _local_chapter

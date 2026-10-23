@@ -9,7 +9,6 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import math
-import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
@@ -17,6 +16,7 @@ import tomllib
 from urllib.parse import urlsplit
 
 from epub_tts_narrator.config import resolve_config_path
+from .common import write_private
 from .config import DEFAULTS, load_config
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 
@@ -42,6 +42,7 @@ DEPLOYMENT_DEFAULTS = {
     "remote_config": "/workspace/epub-tts-narrator.remote.toml",
     "model_dir": "/workspace/models/drama-3",
     "whisper_dir": "/workspace/models/whisper-ct2",
+    "reference_whisper_dir": "/workspace/models/whisper-ct2-reference",
     "data_dir": "/workspace/chapter-server-data",
     "github_url": "https://github.com/taxilian/epub-tts-narrator.git",
     "git_ref": "main",
@@ -117,21 +118,8 @@ def toml_text(config):
 def write_private_toml(path, config):
     """Replace one file atomically, with private permissions even on first write."""
     path = Path(path)
-    content = toml_text(config).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-    return path
+    return write_private(path, toml_text(config))
 
 
 def _absolute_paths(config, directory):
@@ -284,8 +272,14 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
     device = remote_verification.get("device", "cpu")
     if not isinstance(device, str) or device not in {"cpu", "cuda"}:
         raise ValueError("Remote verification.device must be cpu or cuda")
-    config.setdefault("verification", {}).update(
-        type="faster_whisper", model=settings["whisper_dir"], device=device, reference_model=None)
+    verification = config.setdefault("verification", {})
+    # The faster-whisper reference corroborator runs on the same Linux CPU/CUDA
+    # backend as the primary verifier. A configured local path signals intent;
+    # the worker binds it to its own prepared reference directory.
+    reference = verification.get("reference_model")
+    verification.update(
+        type="faster_whisper", model=settings["whisper_dir"], device=device,
+        reference_model=settings["reference_whisper_dir"] if reference else None)
     # Remote hardware choices must be explicit; never inherit the Mac's type.
     # Supported types on the actual GPU are checked before starting inference.
     if "compute_type" not in remote_verification:

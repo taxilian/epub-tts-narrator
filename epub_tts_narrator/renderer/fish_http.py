@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
+from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, _directed_text, _plain_direction, _seed, _text, format_dialogue
 from .diagnostics import safe_error_text
 from .reference_cache import UNKNOWN_REFERENCE_MARKER, ReferenceCache
@@ -166,7 +167,7 @@ class FishHTTPEngine:
         self.protocol = settings.get("protocol", "fish_inline")
         if not isinstance(self.protocol, str) or self.protocol not in PROTOCOLS:
             raise EngineError("Fish HTTP protocol must be fish_inline, fish_native_drama3 or fish_sglang_drama3")
-        self.multi_speaker = settings.get("multi_speaker", self.protocol != "fish_sglang_drama3")
+        self.multi_speaker = settings.get("multi_speaker", default_multi_speaker(self.protocol))
         for name, value in (("name", self.name), ("model", self.model), ("api_key", self.api_key)):
             if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 raise EngineError(f"Fish HTTP {name} must be plain text")
@@ -175,9 +176,8 @@ class FishHTTPEngine:
         if type(self.timeout) not in (int, float) or not math.isfinite(self.timeout) or self.timeout <= 0:
             raise EngineError("Fish HTTP timeout_seconds must be positive")
         values = {**settings, **(sampling or {})}
-        self.sampling = {key: values.get(key, default) for key, default in (
-            ("temperature", 1.0), ("top_p", 0.9), ("top_k", 30), ("max_new_tokens", 2048),
-        )}
+        self.sampling = {key: values.get(key, SAMPLING_DEFAULTS[key])
+                         for key in ("temperature", "top_p", "top_k", "max_new_tokens")}
         self._reuse_lock = threading.Lock()
         self._reuse_supported = False
         self._registered_references: set[str] = set()

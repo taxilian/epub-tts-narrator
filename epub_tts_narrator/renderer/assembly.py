@@ -445,6 +445,11 @@ def _check_encoded(path: Path, frames: int, sample_rate: int, *, ffprobe: str,
     return inspection
 
 
+def aac_codec_arguments(bitrate: str) -> list[str]:
+    """AAC faststart codec flags shared by chapter encoding and deployment smoke."""
+    return ["-c:a", "aac", "-b:a", bitrate, "-movflags", "+faststart"]
+
+
 def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
                    ordinal: int, total_chapters: int, chapter_format: str = "m4a",
                    aac_bitrate: str = "128k", mp3_bitrate: str = "128k",
@@ -466,8 +471,7 @@ def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
     if info["frames"] != chapter["frames"] or not info["frames"]:
         raise ValueError("Chapter PCM is empty or differs from its synchronization data")
     target.parent.mkdir(parents=True, exist_ok=True)
-    codec = (["-c:a", "aac", "-b:a", aac_bitrate, "-movflags", "+faststart"]
-             if chapter_format == "m4a"
+    codec = (aac_codec_arguments(aac_bitrate) if chapter_format == "m4a"
              else ["-c:a", "libmp3lame", "-b:a", mp3_bitrate])
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=target.parent) as temporary:
         staged = Path(temporary) / f"chapter.{chapter_format}"

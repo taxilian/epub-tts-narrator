@@ -1,14 +1,16 @@
-"""Independent compressed artifact downloads and provider lifecycle actions."""
+"""Independent compressed artifact downloads and the shared storage key layout."""
 
 from __future__ import annotations
-
-import re
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .chapter_protocol import ARTIFACT_NAMES, require_hash
 from .common import file_hash
 from .diagnostics import exception_detail
+
+
+def key_for(settings, job_id, sha256, name):
+    """Storage key layout shared by publish and external cleanup tools."""
+    prefix = settings.get("prefix", "epub-tts-narrator").strip("/")
+    return "/".join(part for part in (prefix, job_id, sha256, name) if part)
 
 
 class S3ArtifactPublisher:
@@ -55,8 +57,7 @@ class S3ArtifactPublisher:
         require_hash(sha256, "Artifact hash")
         if name not in ARTIFACT_NAMES:
             raise ValueError("Only compressed chapter audio and JSON may be published")
-        prefix = self.settings.get("prefix", "epub-tts-narrator").strip("/")
-        key = "/".join(part for part in (prefix, job_id, sha256, name) if part)
+        key = key_for(self.settings, job_id, sha256, name)
         record = {"key": key, "bucket": self.bucket, "endpoint_url": self.settings.get("endpoint_url", ""),
                   "region": self.settings.get("region", ""), "sha256": sha256, "size": path.stat().st_size}
         try:
@@ -86,25 +87,3 @@ class S3ArtifactPublisher:
                 ExpiresIn=self.settings.get("download_expiry_seconds", 3600))
         except Exception as exc:
             raise RuntimeError(f"Unable to create a chapter download URL ({exception_detail(exc)})") from None
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, request, fp, code, message, headers, newurl):
-        raise ValueError("Provider lifecycle redirects are not allowed")
-
-
-def stop_runpod(settings):
-    """Release paid GPU compute via the provider API, never by exiting Python."""
-    pod_id, key = settings.get("runpod_pod_id"), settings.get("runpod_api_key")
-    if not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pod_id) or not key:
-        raise ValueError("Runpod idle shutdown requires an explicit Pod ID and API key")
-    request = Request(f"https://rest.runpod.io/v1/pods/{pod_id}/stop", method="POST", data=b"",
-                      headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
-                               "User-Agent": "epub-tts-narrator/1"})
-    try:
-        with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=30) as response:
-            if not 200 <= response.status < 300:
-                raise ValueError("Provider did not acknowledge stopping the Pod")
-    except (HTTPError, URLError, OSError, ValueError) as exc:
-        raise RuntimeError(f"Runpod did not confirm the stop request ({exception_detail(exc)}); "
-                           "the server may still be billed") from None

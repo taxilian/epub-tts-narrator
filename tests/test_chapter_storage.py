@@ -1,4 +1,4 @@
-"""No-network checks for durable downloads and paid-compute lifecycle calls."""
+"""No-network checks for durable compressed downloads and the shared key layout."""
 
 import os
 from pathlib import Path
@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from epub_tts_narrator.renderer.chapter_storage import S3ArtifactPublisher, stop_runpod
+from epub_tts_narrator.renderer.chapter_storage import S3ArtifactPublisher, key_for
 from epub_tts_narrator.renderer.common import file_hash
 
 
@@ -84,6 +84,15 @@ class ChapterStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "explicit"):
             S3ArtifactPublisher(self.settings)
 
+    def test_shared_key_helper_composes_the_published_layout(self):
+        sha = file_hash(self.path)
+        self.publisher.client.head_object.return_value = {"ContentLength": self.path.stat().st_size,
+                                                          "Metadata": {"sha256": sha}}
+        record = self.publisher.publish("b" * 64, "sync.json", self.path, sha)
+        self.assertEqual(record["key"],
+                         "books/" + "b" * 64 + "/" + sha + "/sync.json")
+        self.assertEqual(record["key"], key_for(self.settings, "b" * 64, sha, "sync.json"))
+
     def test_file_credentials_ignore_missing_ambient_profile(self):
         try:
             import boto3
@@ -93,50 +102,6 @@ class ChapterStorageTests(unittest.TestCase):
             publisher = S3ArtifactPublisher(dict(self.settings, access_key_id="fixture-id", secret_access_key="fixture-secret"))
             self.assertEqual(publisher.client.meta.region_name, "test-1")
             self.assertEqual(publisher.client.meta.endpoint_url, self.settings["endpoint_url"])
-
-    def test_stop_uses_actual_provider_lifecycle_not_process_exit(self):
-        response = Mock(status=204)
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        opener = Mock()
-        opener.open.return_value = response
-        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener", return_value=opener):
-            stop_runpod({"runpod_pod_id": "pod_fixture", "runpod_api_key": "fixture-key"})
-        request = opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod_fixture/stop")
-        self.assertEqual(request.method, "POST")
-        self.assertEqual(request.headers["Authorization"], "Bearer fixture-key")
-
-    def test_invalid_pod_id_never_sends_request(self):
-        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener") as opener:
-            with self.assertRaises(ValueError):
-                stop_runpod({"runpod_pod_id": "../../other", "runpod_api_key": "fixture"})
-            opener.assert_not_called()
-
-    def test_stop_failure_identifies_http_status_and_type(self):
-        from urllib.error import HTTPError
-        opener = Mock()
-        opener.open.side_effect = HTTPError("https://rest.runpod.io/v1/pods/pod_fixture/stop",
-                                            503, "unavailable", {}, None)
-        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener", return_value=opener):
-            with self.assertRaises(RuntimeError) as raised:
-                stop_runpod({"runpod_pod_id": "pod_fixture", "runpod_api_key": "fixture-key"})
-        message = str(raised.exception)
-        self.assertIn("HTTPError", message)
-        self.assertIn("HTTP status 503", message)
-        self.assertIn("may still be billed", message)
-        self.assertNotIn("fixture-key", message)
-
-    def test_stop_failure_identifies_network_error_type_without_raw_reason(self):
-        from urllib.error import URLError
-        opener = Mock()
-        opener.open.side_effect = URLError("raw connection detail fixture-key")
-        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener", return_value=opener):
-            with self.assertRaises(RuntimeError) as raised:
-                stop_runpod({"runpod_pod_id": "pod_fixture", "runpod_api_key": "fixture-key"})
-        message = str(raised.exception)
-        self.assertIn("URLError", message)
-        self.assertNotIn("raw connection detail", message)
 
 
 if __name__ == "__main__":
