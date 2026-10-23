@@ -45,7 +45,10 @@ if [ -n "$missing_packages" ]; then
 fi
 
 if [ "$install_mode" = runtime ]; then
-    "$worker_root/.venv/bin/python" -c 'import fastapi, uvicorn, boto3, faster_whisper, soundfile, msgpack, epub_tts_narrator'
+    if ! "$worker_root/.venv/bin/python" -c 'import fastapi, uvicorn, boto3, faster_whisper, soundfile, msgpack, epub_tts_narrator, nvidia.cublas; from importlib.metadata import version; assert version("ctranslate2") == "4.8.3" and version("nvidia-cublas-cu12") == "12.8.4.1"'; then
+        echo 'Run a full worker update to install the pinned application and CUDA verification dependencies.' >&2
+        exit 1
+    fi
     if [ "$tts_backend" = native ]; then
         "$fish_root/.venv/bin/python" -c 'import torch, fish_speech'
     else

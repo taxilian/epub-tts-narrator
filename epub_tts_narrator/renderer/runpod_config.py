@@ -277,12 +277,19 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
                      "api_key": "", "concurrency": settings["tts_concurrency"] if batched else 1,
                      "multi_speaker": not batched, "timeout_seconds": 600.0}],
     }
+    if batched:
+        # One bound across all chapter coordinators, including verification.
+        config["render_pool"]["max_inflight"] = 4 * settings["tts_concurrency"]
+    remote_verification = override_raw.get("verification", {})
+    device = remote_verification.get("device", "cpu")
+    if not isinstance(device, str) or device not in {"cpu", "cuda"}:
+        raise ValueError("Remote verification.device must be cpu or cuda")
     config.setdefault("verification", {}).update(
-        type="faster_whisper", model=settings["whisper_dir"], device="cpu", reference_model=None)
-    # Mac GPU compute types cannot run on the worker's CPU verifier. Explicit
-    # remote overrides remain validated by the regular renderer loader.
-    if "compute_type" not in override_raw.get("verification", {}):
-        config["verification"]["compute_type"] = "int8"
+        type="faster_whisper", model=settings["whisper_dir"], device=device, reference_model=None)
+    # Remote hardware choices must be explicit; never inherit the Mac's type.
+    # Supported types on the actual GPU are checked before starting inference.
+    if "compute_type" not in remote_verification:
+        config["verification"]["compute_type"] = "int8_float16" if device == "cuda" else "int8"
     server = config.setdefault("chapter_server", {})
     server.update(host="0.0.0.0", port=settings["service_port"], api_key=auth_key, data_dir=settings["data_dir"],
                   persistent_data=True, runpod_pod_id=pod_id, idle_action="runpod_stop",

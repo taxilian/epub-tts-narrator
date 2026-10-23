@@ -68,8 +68,8 @@ def validate_worker(config):
     if not re.fullmatch(r"[0-9a-f]{40}", config["render_pool"]["model_revision"]):
         raise ValueError("render_pool.model_revision must be a pinned 40-character commit SHA")
     verification = config["verification"]
-    if verification["type"] != "faster_whisper" or verification["device"] != "cpu":
-        raise ValueError("This worker requires verification.type = faster_whisper and device = cpu")
+    if verification["type"] != "faster_whisper" or verification["device"] not in {"cpu", "cuda"}:
+        raise ValueError("This worker requires verification.type = faster_whisper and device = cpu or cuda")
     if verification.get("reference_model"):
         raise ValueError("This worker prepares one Whisper model; omit verification.reference_model")
     api_key = config["chapter_server"]["api_key"]
@@ -189,9 +189,87 @@ def check_audio_decoder(*, decoder=None):
                            f"its dependencies: {exc}") from None
 
 
-def check(config):
+def cuda_library_directory(application_python=APPLICATION_PYTHON):
+    """Locate the pinned application cuBLAS, without importing CUDA or a model."""
+    probe = (
+        "import json; from pathlib import Path; import nvidia.cublas; "
+        "from importlib.metadata import version; "
+        "assert version('ctranslate2') == '4.8.3'; "
+        "assert version('nvidia-cublas-cu12') == '12.8.4.1'; "
+        "print(json.dumps(str(Path(nvidia.cublas.__path__[0]) / 'lib')))"
+    )
+    try:
+        result = subprocess.run([str(application_python), "-c", probe],
+                                capture_output=True, text=True, timeout=30, check=False)
+        directory = Path(json.loads(result.stdout)) if result.returncode == 0 else None
+        app_venv = Path(application_python).absolute().parent.parent.resolve()
+        if (directory is None or not directory.is_absolute()
+                or not directory.resolve().is_relative_to(app_venv)
+                or not all((directory / name).is_file()
+                           for name in ("libcublas.so.12", "libcublasLt.so.12"))):
+            raise ValueError("missing pinned cuBLAS libraries")
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        raise RuntimeError("CUDA Whisper requires the pinned CTranslate2 4.8.3 and cuBLAS "
+                           "12.8.4.1 application packages; run a full worker update") from None
+    return directory
+
+
+def application_environment(config, *, application_python=APPLICATION_PYTHON):
+    """Set loader paths before the application interpreter starts, never globally."""
+    environment = os.environ.copy()
+    if config["verification"]["device"] == "cuda":
+        directory = str(cuda_library_directory(application_python))
+        inherited = environment.get("LD_LIBRARY_PATH", "")
+        environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+            [directory, *(entry for entry in inherited.split(os.pathsep)
+                          if entry and entry != directory)])
+    return environment
+
+
+def run_application(config, arguments, *, application_python=APPLICATION_PYTHON):
+    """Replace this launcher with application Python, preserving signals/status."""
+    if not arguments:
+        raise ValueError("run-application requires -- followed by a Python script or -m module")
+    environment = application_environment(config, application_python=application_python)
+    os.execve(str(application_python), [str(application_python), *arguments], environment)
+
+
+def check_cuda_verification(config, *, application_python=APPLICATION_PYTHON):
+    """Check CUDA libraries and hardware support without loading Whisper weights."""
+    if config["verification"]["device"] != "cuda":
+        return
+    environment = application_environment(config, application_python=application_python)
+    probe = (
+        "import ctypes, json, ctranslate2; "
+        "ctypes.CDLL('libcublasLt.so.12', mode=ctypes.RTLD_GLOBAL); "
+        "ctypes.CDLL('libcublas.so.12', mode=ctypes.RTLD_GLOBAL); "
+        "assert ctranslate2.get_cuda_device_count() > 0, 'No visible CUDA device'; "
+        "print(json.dumps(sorted(ctranslate2.get_supported_compute_types('cuda', 0))))"
+    )
+    try:
+        result = subprocess.run([str(application_python), "-c", probe], env=environment,
+                                capture_output=True, text=True, timeout=30, check=False)
+        if result.returncode:
+            detail = " ".join(result.stderr.splitlines()[-3:])[:600]
+            raise ValueError("CUDA libraries or device initialization failed" +
+                             (f": {detail}" if detail else ""))
+        supported = json.loads(result.stdout)
+        if not isinstance(supported, list) or not supported or not all(
+                isinstance(item, str) for item in supported):
+            raise ValueError("CUDA capability probe returned no supported compute types")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"CUDA Whisper preflight failed: {exc}. Check the NVIDIA driver "
+                           "and run a full worker update; CPU fallback is disabled") from None
+    requested = config["verification"]["compute_type"]
+    if requested not in {"default", "auto"} and requested not in supported:
+        raise ValueError(f"CUDA Whisper does not support verification.compute_type={requested!r} "
+                         "on GPU 0; supported types: " + ", ".join(supported))
+
+
+def check(config, *, application_python=APPLICATION_PYTHON):
     validate_worker(config)
     check_audio_decoder()
+    check_cuda_verification(config, application_python=application_python)
     for repo, revision, directory in model_specs(config):
         try:
             names = required_model_files(repo, directory)
@@ -300,7 +378,8 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
             # A self-contained smoke check cannot require any book's cast. The
             # native transport accepts an empty reference list for this probe.
             engine._request(SMOKE_TEXT, [], audio, 4101)
-            print("Smoke test: checking generated words with CPU Whisper.", flush=True)
+            device = config["verification"]["device"].upper()
+            print(f"Smoke test: checking generated words with {device} Whisper.", flush=True)
             verifier = (verifier_factory or create_verifier)(
                 config["verification"], config.get("jev"), config.get("provider"))
             report = validate_audio(audio, SMOKE_TEXT, verifier, config["quality"], purpose="reference")
@@ -391,6 +470,8 @@ def inference_command(config, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_S
             raise ValueError(f"Worker image is missing {executable}; run a full update")
         return [str(executable), "serve", "--model-path", config["engine"]["checkpoint"],
                 "--model-name", "drama-3", "--host", "127.0.0.1", "--port", "8080",
+                "--tts_engine.gpu_memory_fraction",
+                "0.60" if config["verification"]["device"] == "cuda" else "0.70",
                 "--tts_engine.factory.max_running_requests", str(worker["concurrency"]),
                 "--tts_engine.factory.first_frame_cuda_graph_max_requests", str(worker["concurrency"]),
                 "--vocoder.factory.codec_path", str(Path(config["engine"]["checkpoint"]) / "codec.pth")], sglang_source
@@ -403,9 +484,20 @@ def inference_command(config, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_S
             "--device", "cuda:0", "--workers", "1"], fish_source
 
 
-def inference_environment(config, backend_directory):
+def inference_environment(config, backend_directory, *, application_python=APPLICATION_PYTHON):
     """Resolve compiler tools and caches before the backend imports its libraries."""
     environment = os.environ.copy()
+    # The application may have been launched with its CUDA 12 loader path.
+    # Never pass that managed path to the independent SGLang CUDA 13 process.
+    app_venv = Path(application_python).absolute().parent.parent.resolve()
+    if "LD_LIBRARY_PATH" in environment:
+        remaining = [entry for entry in environment["LD_LIBRARY_PATH"].split(os.pathsep)
+                     if entry and not (Path(entry).resolve().is_relative_to(app_venv)
+                                       and Path(entry).parts[-3:] == ("nvidia", "cublas", "lib"))]
+        if remaining:
+            environment["LD_LIBRARY_PATH"] = os.pathsep.join(remaining)
+        else:
+            environment.pop("LD_LIBRARY_PATH", None)
     backend_bin = str(Path(backend_directory) / ".venv/bin")
     inherited_path = environment.get("PATH", os.defpath)
     environment["PATH"] = os.pathsep.join(
@@ -434,7 +526,7 @@ def inference_environment(config, backend_directory):
 
 def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_SOURCE,
           application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True):
-    check(config)
+    check(config, application_python=application_python)
     native_command, native_directory = inference_command(
         config, fish_source=fish_source, sglang_source=sglang_source)
     if chapters and not application_python.is_file():
@@ -456,7 +548,8 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
                 signal.signal(number, on_signal)
             print("Starting the private Fish CUDA process; model loading may take several minutes.", flush=True)
             native = subprocess.Popen(native_command, cwd=native_directory, start_new_session=True,
-                                      env=inference_environment(config, native_directory))
+                                      env=inference_environment(config, native_directory,
+                                                                application_python=application_python))
             children.append(native)
             wait_ready(native, stop, timeout=startup_timeout,
                        protocol=config["render_pool"]["workers"][0]["protocol"])
@@ -465,7 +558,9 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
             chapter = None
             if chapters:
                 print("Fish CUDA is ready. Starting the chapter service.", flush=True)
-                chapter = subprocess.Popen(chapter_command, start_new_session=True)
+                chapter = subprocess.Popen(
+                    chapter_command, start_new_session=True,
+                    env=application_environment(config, application_python=application_python))
                 children.append(chapter)
             else:
                 print("Fish CUDA is ready for isolated benchmarking; chapter jobs are not running.", flush=True)
@@ -488,6 +583,9 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
 
 
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    separator = arguments.index("--") if "--" in arguments else len(arguments)
+    application_args = arguments[separator + 1:]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/workspace/epub-tts-narrator.remote.toml"))
     parser.add_argument("--startup-timeout", type=float, default=600,
@@ -496,19 +594,29 @@ def main(argv=None):
                         help="Persistent, pinned Fish Speech checkout (default: beside the application)")
     parser.add_argument("--sglang-source", type=Path, default=SGLANG_SOURCE,
                         help="Persistent, pinned SGLang-Omni checkout")
-    parser.add_argument("command", choices=("prepare", "check", "serve", "serve-tts", "smoke"))
-    args = parser.parse_args(argv)
+    parser.add_argument("command", choices=("prepare", "check", "serve", "serve-tts", "smoke", "run-application"))
+    args = parser.parse_args(arguments[:separator])
     config = None
     try:
         if not 1 <= args.startup_timeout <= 3600:
             raise ValueError("--startup-timeout must be from 1 through 3600 seconds")
+        if separator < len(arguments) and args.command != "run-application":
+            raise ValueError("Only run-application accepts arguments after --")
         config = load_config(args.config)
+        if args.command == "run-application":
+            return run_application(config, application_args)
         if args.command == "prepare":
             prepare(config)
         elif args.command == "check":
             check(config)
             print("Worker config and prepared model files are ready.", flush=True)
         elif args.command == "smoke":
+            # dlopen reads the process's startup search path. Restart this CLI
+            # once with the same environment used by the chapter service.
+            if config["verification"]["device"] == "cuda":
+                environment = application_environment(config)
+                if environment.get("LD_LIBRARY_PATH") != os.environ.get("LD_LIBRARY_PATH"):
+                    return run_application(config, [str(Path(__file__).resolve()), *arguments])
             def smoke_timeout(number, frame):
                 raise RuntimeError("Worker smoke test exceeded its ten-minute limit")
             previous_handler = signal.signal(signal.SIGALRM, smoke_timeout)

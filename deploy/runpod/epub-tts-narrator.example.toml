@@ -29,6 +29,8 @@ model = "/workspace/models/whisper-ct2"
 language = "en"
 device = "cpu"
 compute_type = "int8"
+# With GPU headroom, use device = "cuda" and compute_type = "int8_float16".
+# The launcher checks hardware support; it never falls back silently to CPU.
 cpu_threads = 4
 
 [chapter_server]

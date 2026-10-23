@@ -40,6 +40,10 @@ def fake_download(**kwargs):
 
 class RunpodWorkerTests(unittest.TestCase):
     def setUp(self):
+        # Subprocess assertions should never capture the developer's ambient
+        # credentials in a unittest failure. Tests opt into needed values.
+        patch.dict(os.environ, {"PATH": os.defpath}, clear=True).start()
+        self.addCleanup(patch.stopall)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -66,7 +70,8 @@ class RunpodWorkerTests(unittest.TestCase):
             path = native / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
-        application = self.root / "app-python"
+        application = self.root / "app/.venv/bin/python"
+        application.parent.mkdir(parents=True, exist_ok=True)
         application.touch()
         return {"fish_source": native, "application_python": application}
 
@@ -169,6 +174,14 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sglang_omni", log.read_text().splitlines()[-1])
         self.assertFalse((self.root / "runtime").exists())
+        # Runtime startup cannot silently use an old CUDA verifier environment.
+        (app / ".venv/bin/python").write_text("#!/bin/sh\nexit 1\n")
+        result = subprocess.run(
+            ["/bin/sh", str(_path.parent / "install.sh"), str(app), "runtime",
+             str(self.root / "runtime"), str(fish)], capture_output=True, text=True,
+            env={**os.environ, "PATH": str(commands) + ":" + os.environ.get("PATH", "")})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("full worker update", result.stderr)
 
     def test_example_config_loads_but_requires_replacing_predictable_application_key(self):
         template = _path.parent / "epub-tts-narrator.example.toml"
@@ -241,7 +254,7 @@ class RunpodWorkerTests(unittest.TestCase):
             item = deepcopy(self.config)
             item["render_pool"]["workers"][0][key] = value
             variants.append(item)
-        for key, value in (("type", "mlx_whisper"), ("device", "cuda"), ("reference_model", "/model")):
+        for key, value in (("type", "mlx_whisper"), ("device", "mps"), ("reference_model", "/model")):
             item = deepcopy(self.config)
             item["verification"][key] = value
             variants.append(item)
@@ -294,9 +307,15 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(command[0], str(root / ".venv/bin/sgl-omni"))
         self.assertEqual(command[command.index("--host") + 1], "127.0.0.1")
         self.assertEqual(command[command.index("--tts_engine.factory.max_running_requests") + 1], "4")
+        self.assertEqual(command[command.index("--tts_engine.gpu_memory_fraction") + 1], "0.70")
         self.assertEqual(command[command.index("--vocoder.factory.codec_path") + 1],
                          str(self.root / "drama/codec.pth"))
         self.assertNotIn("--workers", command)
+        self.config["verification"].update(device="cuda", compute_type="int8_float16")
+        worker.validate_worker(self.config)
+        cuda_command, _ = worker.inference_command(self.config, sglang_source=root)
+        self.assertEqual(cuda_command[cuda_command.index("--tts_engine.gpu_memory_fraction") + 1], "0.60")
+        self.assertNotIn("--tts_engine.engine.mem_fraction_static", cuda_command)
         for update in ({"concurrency": 9}, {"multi_speaker": True}, {"url": worker.FISH_URL}):
             with self.subTest(update=update):
                 invalid = deepcopy(self.config)
@@ -359,6 +378,133 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(set(environment), {"PATH"})
         self.assertFalse((self.root / "data/runtime-cache").exists())
 
+    def cuda_runtime(self):
+        python = self.native_image()["application_python"]
+        directory = python.parent.parent / "lib/python3.12/site-packages/nvidia/cublas/lib"
+        directory.mkdir(parents=True)
+        for name in ("libcublas.so.12", "libcublasLt.so.12"):
+            (directory / name).touch()
+        return python, directory
+
+    def test_cuda_library_probe_requires_both_pinned_libraries_in_application_venv(self):
+        python, directory = self.cuda_runtime()
+        result = Mock(returncode=0, stdout=json.dumps(str(directory)))
+        with patch.object(worker.subprocess, "run", return_value=result) as probe:
+            self.assertEqual(worker.cuda_library_directory(python), directory)
+            self.assertEqual(probe.call_args.args[0][0], str(python))
+            self.assertIn("4.8.3", probe.call_args.args[0][2])
+            self.assertIn("12.8.4.1", probe.call_args.args[0][2])
+            (directory / "libcublasLt.so.12").unlink()
+            with self.assertRaisesRegex(RuntimeError, "full worker update"):
+                worker.cuda_library_directory(python)
+            result.stdout = json.dumps("/usr/local/cuda/lib64")
+            with self.assertRaisesRegex(RuntimeError, "full worker update"):
+                worker.cuda_library_directory(python)
+            result.returncode = 1
+            result.stdout = ""
+            with self.assertRaisesRegex(RuntimeError, "pinned CTranslate2"):
+                worker.cuda_library_directory(python)
+
+    def test_cuda_loader_path_is_application_only_and_does_not_mutate_parent(self):
+        root = self.batched_image()
+        python, directory = self.cuda_runtime()
+        self.config["verification"].update(device="cuda", compute_type="int8_float16")
+        inherited = {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/driver/lib:/other/lib", "KEEP": "value"}
+        with (patch.dict(os.environ, inherited, clear=True),
+              patch.object(worker, "cuda_library_directory", return_value=directory)):
+            application = worker.application_environment(self.config, application_python=python)
+            self.assertEqual(dict(os.environ), inherited)
+        self.assertEqual(application["LD_LIBRARY_PATH"], str(directory) + ":/driver/lib:/other/lib")
+        with patch.dict(os.environ, application, clear=True):
+            backend = worker.inference_environment(self.config, root, application_python=python)
+            self.assertEqual(dict(os.environ), application)
+        self.assertEqual(backend["LD_LIBRARY_PATH"], "/driver/lib:/other/lib")
+        self.assertEqual(backend["KEEP"], "value")
+        # An existing correctly prepared application launch is idempotent.
+        with (patch.dict(os.environ, application, clear=True),
+              patch.object(worker, "cuda_library_directory", return_value=directory)):
+            self.assertEqual(worker.application_environment(self.config, application_python=python), application)
+        with patch.dict(os.environ, {"LD_LIBRARY_PATH": str(directory)}, clear=True):
+            self.assertNotIn("LD_LIBRARY_PATH", worker.inference_environment(
+                self.config, root, application_python=python))
+
+    def test_cuda_preflight_checks_hardware_without_loading_whisper_or_cpu_fallback(self):
+        self.config["verification"].update(device="cuda", compute_type="int8_float16")
+        environment = {"LD_LIBRARY_PATH": "/application/cublas/lib"}
+        result = Mock(returncode=0, stdout=json.dumps(["float16", "int8_float16"]), stderr="")
+        with (patch.object(worker, "application_environment", return_value=environment),
+              patch.object(worker.subprocess, "run", return_value=result) as probe):
+            worker.check_cuda_verification(self.config)
+            command = probe.call_args.args[0]
+            self.assertIn("get_supported_compute_types('cuda', 0)", command[-1])
+            self.assertNotIn("WhisperModel", command[-1])
+            self.assertEqual(probe.call_args.kwargs["env"], environment)
+            self.config["verification"]["compute_type"] = "bfloat16"
+            with self.assertRaisesRegex(ValueError, "does not support.*bfloat16"):
+                worker.check_cuda_verification(self.config)
+            result.returncode, result.stderr = 1, "RuntimeError: No visible CUDA device"
+            with self.assertRaisesRegex(RuntimeError, "No visible CUDA device.*CPU fallback is disabled"):
+                worker.check_cuda_verification(self.config)
+            self.assertEqual(self.config["verification"]["device"], "cuda")
+        self.config["verification"]["device"] = "cpu"
+        with patch.object(worker.subprocess, "run") as probe:
+            worker.check_cuda_verification(self.config)
+        probe.assert_not_called()
+
+    def test_application_wrapper_preserves_argument_boundaries_and_executes_selected_python(self):
+        self.config["verification"]["device"] = "cuda"
+        arguments = ["/workspace/script.py", "--config", "path with spaces", "literal $(value)"]
+        environment = {"LD_LIBRARY_PATH": "/application/cublas/lib"}
+        with (patch.object(worker, "application_environment", return_value=environment),
+              patch.object(worker.os, "execve") as execute):
+            worker.run_application(self.config, arguments, application_python=Path("/app/python"))
+        execute.assert_called_once_with("/app/python", ["/app/python", *arguments], environment)
+        with self.assertRaisesRegex(ValueError, "requires --"):
+            worker.run_application(self.config, [])
+
+    def test_application_cli_forwards_only_arguments_after_separator(self):
+        arguments = ["/workspace/benchmark.py", "verify", "manifest.json", "--config", "cuda.toml"]
+        with (patch.object(worker, "load_config", return_value=self.config),
+              patch.object(worker, "run_application", return_value=17) as launch):
+            self.assertEqual(worker.main(["--config", "cuda.toml", "run-application", "--", *arguments]), 17)
+        launch.assert_called_once_with(self.config, arguments)
+
+    def test_cuda_smoke_reexecutes_once_with_application_loader_environment(self):
+        self.config["verification"]["device"] = "cuda"
+        environment = {"LD_LIBRARY_PATH": "/application/cublas/lib"}
+        with (patch.object(worker, "load_config", return_value=self.config),
+              patch.object(worker, "application_environment", return_value=environment),
+              patch.object(worker, "run_application", return_value=0) as launch,
+              patch.object(worker, "smoke") as smoke,
+              patch.dict(os.environ, {}, clear=True)):
+            self.assertEqual(worker.main(["--config", "cuda.toml", "smoke"]), 0)
+            launch.assert_called_once_with(self.config, [str(_path), "--config", "cuda.toml", "smoke"])
+            smoke.assert_not_called()
+            launch.reset_mock()
+            with patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(worker.main(["--config", "cuda.toml", "smoke"]), 0)
+            launch.assert_not_called()
+            smoke.assert_called_once_with(self.config)
+
+    def test_cuda_service_gets_loader_environment_but_tts_does_not(self):
+        self.prepare()
+        root = self.batched_image()
+        python, directory = self.cuda_runtime()
+        self.config["verification"].update(device="cuda", compute_type="int8_float16")
+        native, chapter = Mock(pid=100001), Mock(pid=100002)
+        native.poll.return_value, chapter.poll.return_value = None, 0
+        with (patch.object(worker, "check_cuda_verification") as preflight,
+              patch.object(worker, "cuda_library_directory", return_value=directory),
+              patch.object(worker.subprocess, "Popen", side_effect=[native, chapter]) as popen,
+              patch.object(worker, "wait_ready"), patch.object(worker, "stop_children"),
+              patch("sys.stdout", new=io.StringIO()),
+              patch.dict(os.environ, {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/driver/lib"}, clear=True)):
+            self.assertEqual(worker.serve(self.config, self.root / "cuda.toml",
+                                         sglang_source=root, application_python=python), 0)
+        preflight.assert_called_once_with(self.config, application_python=python)
+        self.assertEqual(popen.call_args_list[0].kwargs["env"]["LD_LIBRARY_PATH"], "/driver/lib")
+        self.assertEqual(popen.call_args_list[1].kwargs["env"]["LD_LIBRARY_PATH"], str(directory) + ":/driver/lib")
+
     def test_isolated_tts_mode_never_starts_or_resumes_chapter_jobs(self):
         root = self.batched_image()
         self.prepare()
@@ -397,7 +543,7 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertIn("serve-chapters", chapter_command)
         self.assertEqual(popen.call_args_list[0].kwargs["env"]["PATH"].split(os.pathsep)[0],
                          str(image["fish_source"] / ".venv/bin"))
-        self.assertNotIn("env", popen.call_args_list[1].kwargs)
+        self.assertEqual(popen.call_args_list[1].kwargs["env"], dict(os.environ))
         self.assertTrue(all(call.kwargs["start_new_session"] for call in popen.call_args_list))
         ready.assert_called_once()
         cleanup.assert_called_once_with([native, chapter])

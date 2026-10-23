@@ -4,3 +4,7 @@ soundfile>=0.13,<0.14
 huggingface-hub>=0.34,<1
 # faster-whisper's released decoder still passes metadata_errors, removed in PyAV 19.
 av>=11,<19
+# The 4.8.3 Linux wheel builds native CUDA convolution without cuDNN and loads
+# CUDA 12 cuBLAS dynamically. Keep this separate from SGLang's CUDA 13 stack.
+ctranslate2==4.8.3
+nvidia-cublas-cu12==12.8.4.1

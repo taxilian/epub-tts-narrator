@@ -71,6 +71,8 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(remote["engine"]["temperature"], 0.8)
         self.assertEqual(remote["verification"]["type"], "faster_whisper")
         self.assertEqual(remote["verification"]["device"], "cpu")
+        self.assertEqual(remote["verification"]["compute_type"], "int8")
+        self.assertNotIn("max_inflight", remote["render_pool"])
         self.assertEqual(remote["verification"]["model"], "/workspace/models/whisper-ct2")
         self.assertIsNone(remote["verification"]["reference_model"])
         self.assertEqual(remote["verification"]["recurrence_threshold"], 4)
@@ -84,11 +86,39 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(worker["protocol"], "fish_sglang_drama3")
         self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/audio/speech")
         self.assertEqual(worker["concurrency"], 8)
+        self.assertEqual(remote["render_pool"]["max_inflight"], 32)
         self.assertFalse(worker["multi_speaker"])
         self.assertFalse(worker["api_key"])
         self.assertEqual(remote["engine"]["checkpoint"], "/workspace/models/drama-3")
         loaded = load_config(write_private_toml(self.directory / "worker.toml", remote))
         self.assertEqual(loaded["render_pool"]["workers"][0]["concurrency"], 8)
+
+    def test_remote_verification_device_and_compute_type_are_explicit_overrides(self):
+        # The local machine's hardware settings never opt the remote into CUDA.
+        base = deepcopy(self.base)
+        base["verification"].update(device="cuda", compute_type="float32")
+        write_private_toml(self.path, base)
+        for override, expected in (
+                ({}, ("cpu", "int8")),
+                ({"device": "cuda"}, ("cuda", "int8_float16")),
+                ({"device": "cuda", "compute_type": "float16"}, ("cuda", "float16")),
+                ({"device": "cpu", "compute_type": "float32"}, ("cpu", "float32"))):
+            with self.subTest(override=override):
+                write_private_toml(self.directory / "runpod.local.toml", {"verification": override})
+                remote = self.remote()
+                settings = remote["verification"]
+                self.assertEqual((settings["device"], settings["compute_type"]), expected)
+                load_config(write_private_toml(self.directory / "worker.toml", remote))
+        self.assertEqual(load_settings(self.path)["renderer_config"]["verification"]["compute_type"],
+                         "float32")
+
+    def test_invalid_remote_verification_is_rejected_before_upload(self):
+        for override in ({"device": "mps"}, {"device": []}, {"device": True},
+                         {"device": "cuda", "compute_type": "invented"}):
+            with self.subTest(override=override):
+                write_private_toml(self.directory / "runpod.local.toml", {"verification": override})
+                with self.assertRaisesRegex(ValueError, "verification"):
+                    self.remote()
 
     def test_invalid_batching_options_are_rejected_before_cloud_calls(self):
         for key, value in (("tts_backend", "other"), ("tts_backend", []),

@@ -4,7 +4,7 @@ The lifecycle CLI installs **this project's code** for voice registration, chapt
 jobs, verification, assembly, and Ceph publication. One pinned, unmodified Fish
 Speech or SGLang-Omni process supplies CUDA inference on loopback. Native Fish
 serializes requests; SGLang batches concurrent requests through one loaded TTS
-model. CPU verification and assembly can overlap synthesis. Built-in JEV and
+model. Verification and CPU assembly can overlap synthesis. Built-in JEV and
 pronunciation reviews use a separate bounded queue so network waits do not
 occupy the recognition/model thread.
 
@@ -69,7 +69,7 @@ without queued work, synthesis, assembly or uploads. Leaving SSH or exiting a
 server process alone does **not** stop GPU billing.
 
 The first live deployment should use one short chapter. The CLI's smoke check
-runs a separate short passage through CUDA synthesis and CPU Whisper, encodes
+runs a separate short passage through CUDA synthesis and the configured Whisper device, encodes
 FLAC and M4A, and verifies Ceph upload/download checksums and deletion of its
 temporary objects. It does not change any book or saved character voice. A
 successful smoke check does not establish throughput for a full book.
@@ -86,7 +86,7 @@ weights, voices and job checkpoints on `/workspace`:
 | `/workspace/fish-speech` | Pinned, unmodified native inference checkout/environment |
 | `/workspace/sglang-omni` | Optional pinned, unmodified batching checkout/environment |
 | `/workspace/.epub-tts-runtime` | Installer, managed Python and dependency cache |
-| `/workspace/models` | Drama 3 and CPU Whisper weights |
+| `/workspace/models` | Drama 3 and Whisper weights |
 | `/workspace/chapter-server-data` | Registered voices, durable jobs and resumable audio |
 | `/workspace/chapter-server-data/runtime-cache/sglang` | SGLang, Triton, Inductor, FlashInfer and CUDA compilation caches |
 | `/workspace/epub-tts-narrator.remote.toml` | Private merged server configuration |
@@ -154,6 +154,41 @@ new stochastic takes. Model/voice/sampling compatibility still controls reuse
 of previously accepted pool clips. Switching scheduling or concurrency alone
 does not discard accepted audio.
 
+The generated SGLang configuration bounds unfinished paragraphs across all
+chapter coordinators to four times `tts_concurrency`. This includes recognition
+and review, so a full GPU batch can run while earlier audio is being checked.
+It still uses one TTS model and one shared Whisper model.
+
+### Optional CUDA verification
+
+CPU recognition remains the default. To move Whisper onto the same GPU, add
+this to `runpod.local.toml` and run a full Update:
+
+```toml
+[verification]
+device = "cuda"
+compute_type = "int8_float16"
+```
+
+Omitting `compute_type` selects `int8_float16` for CUDA or `int8` for CPU.
+Explicit remote choices override these defaults; local Mac hardware settings
+are not inherited. Before inference starts, the launcher loads the runtime
+libraries and checks GPU 0's supported compute types without loading Whisper
+weights. An unsupported device/type fails clearly without falling back to CPU.
+
+The application environment pins CTranslate2 `4.8.3` and CUDA 12 cuBLAS
+`12.8.4.1`. This CTranslate2 release uses native CUDA convolution and needs no
+cuDNN; its [Linux wheel build](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/python/tools/prepare_build_environment_linux.sh)
+disables cuDNN. The launcher supplies the application library path before Python
+starts and removes it from the separate SGLang CUDA 13 subprocess. These are
+internal runtime settings; users continue configuring everything through TOML.
+
+With CUDA verification, SGLang's engine memory share is 0.60 instead of 0.70,
+using the stock `--tts_engine.gpu_memory_fraction` option. The vocoder's 0.10
+share and preprocessing reserve stay unchanged. This leaves more space for
+Whisper; benchmark the combined load and actual peak memory on the chosen GPU.
+The native backend's memory behavior is unchanged.
+
 Benchmark before choosing a concurrency level. See
 [benchmark_rendering.py](../../scripts/benchmark_rendering.py) for a fixed-book
 corpus and separate generation/verification timings. `worker.py serve-tts`
@@ -162,6 +197,20 @@ jobs. Run it under an operation that stops the Pod in a `finally` block; the
 chapter service's idle shutdown is not running in this mode. Do not interpret
 raw synthesis throughput as verified audiobook throughput or compare runs on
 different texts as a hardware speedup.
+
+For CUDA verification benchmarks, use the application wrapper so the same
+runtime libraries are selected before the interpreter starts:
+
+```sh
+/workspace/epub-tts-narrator/.venv/bin/python /workspace/epub-tts-narrator/deploy/runpod/worker.py \
+  --config /workspace/epub-tts-narrator.remote.toml run-application -- \
+  /workspace/epub-tts-narrator/scripts/benchmark_rendering.py verify /workspace/benchmark/manifest.json \
+  --config /workspace/epub-tts-narrator.remote.toml
+```
+
+The wrapper also accepts Python's `-m MODULE` form. It replaces itself with
+the application interpreter, preserving signals and exit status. It does not
+start inference, load models by itself, or stop paid compute.
 
 ## Manual worker commands and diagnostics
 
@@ -178,7 +227,7 @@ sh /workspace/epub-tts-narrator/deploy/runpod/install.sh /workspace/epub-tts-nar
 After the chapter service starts, run `worker.py smoke` from another SSH session.
 The default config is `/workspace/epub-tts-narrator.remote.toml`; use
 `--config PATH` before the subcommand to override it. `prepare` resumes partial
-model downloads; `check` validates offline receipts; `serve` never downloads
+model downloads; `check` validates offline receipts and configured CUDA support; `serve` never downloads
 models. `smoke` has a ten-minute limit. Each smoke object uses a unique prefix
 and is deleted even if download verification fails.
 
@@ -213,7 +262,7 @@ instead. Do not mount `/workspace` over `/opt`.
 - Drama 3 weights: `b2b5ee998034b2975720906c815e7fb0e9f007bd`.
 - CTranslate2 Whisper large-v3: `edaa852ec7e145841d8ffdb056a99866b5f0a478`.
 - Fish uses managed Python 3.12 and its frozen CUDA 12.9 lock. Chapter processing
-  and CPU recognition use a separate environment.
+  and CPU/CUDA recognition use a separate environment.
 - Native requests use `single_chunk=true`, `use_memory_cache="on"`, a seed in
   the MessagePack body, and speaker-tagged references. Native `top_k` is fixed
   at 30; inference concurrency is **1**. No second model copy is loaded.
