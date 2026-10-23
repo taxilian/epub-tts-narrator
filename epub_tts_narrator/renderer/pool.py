@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from functools import wraps
 from queue import Queue
-from threading import RLock
+from threading import Condition, RLock, get_ident
 from time import monotonic
 
 from .engines import EngineError, create_engine
@@ -26,13 +26,97 @@ def pool_sampling(config):
     return {key: settings.get(key, value) for key, value in _SAMPLING_DEFAULTS.items()}
 
 
-class _SerializedVerifier:
-    """Protect optional ASR/judge methods without inventing unsupported methods."""
+def _text_review_method(name, method):
+    """Recognize our text-only adapters, never infer safety from a plugin name."""
+    if name not in {"judge_reference", "review_phonetics"}:
+        return False
+    from epub_tts_narrator.jev import JevTranscriptJudge
+    from .phonetic_review import PronunciationReviewer
+    from .recovery_client import RecoveryModelClient
+    from .verification import ReferenceTextJudgingVerifier
 
-    def __init__(self, verifier, lock, runtime):
+    owner, function = getattr(method, "__self__", None), getattr(method, "__func__", None)
+    if type(owner) is not ReferenceTextJudgingVerifier:
+        return False
+    if name == "judge_reference":
+        return (function is ReferenceTextJudgingVerifier.judge_reference
+                and type(owner.judge) is JevTranscriptJudge)
+    if name == "review_phonetics":
+        reviewer = owner.phonetic_reviewer
+        return (function is ReferenceTextJudgingVerifier.review_phonetics
+                and type(reviewer) is PronunciationReviewer
+                and type(reviewer._client) is RecoveryModelClient)
+    return False
+
+
+class _SerializedVerifier:
+    """Keep recognition model-affine while known text reviews use their own lane."""
+
+    def __init__(self, verifier, lock, runtime, review_runtime):
         self._verifier = verifier
         self._lock = lock
         self._runtime = runtime
+        self._review_runtime = review_runtime
+        self._state = Condition(RLock())
+        self._active = 0
+        self._closing = self._closed = False
+
+    def _call(self, name, method, args, kwargs):
+        with self._state:
+            if self._closing or self._closed:
+                raise RuntimeError("The pooled verifier is closed")
+            self._active += 1
+        try:
+            if _text_review_method(name, method):
+                # Keep the reusable HTTP clients serialized, but do not occupy
+                # the inference thread or its lock during a network request.
+                return self._review_runtime.run(method, *args, **kwargs)
+
+            def run():
+                with self._lock:
+                    return method(*args, **kwargs)
+            return self._runtime.run(run, initialize_mlx=requires_mlx(self._verifier))
+        finally:
+            with self._state:
+                self._active -= 1
+                self._state.notify_all()
+
+    def _close(self, method, args, kwargs):
+        if get_ident() in {self._runtime._thread_id, self._review_runtime._thread_id}:
+            raise RuntimeError("Close the pooled verifier from its owner")
+        interrupted = None
+        with self._state:
+            if self._closing:
+                while not self._closed:
+                    try:
+                        self._state.wait()
+                    except KeyboardInterrupt as error:
+                        interrupted = error
+                if interrupted is not None:
+                    raise interrupted
+                return
+            if self._closed:
+                return
+            self._closing = True
+            while self._active:
+                try:
+                    self._state.wait()
+                except KeyboardInterrupt as error:
+                    # Finish draining both lanes before releasing the caller's
+                    # render/cache locks, just as LocalRuntime.run does.
+                    interrupted = error
+        try:
+            def run():
+                with self._lock:
+                    return method(*args, **kwargs)
+            result = self._runtime.run(run)
+        finally:
+            with self._state:
+                self._closed = True
+                self._state.notify_all()
+        if interrupted is not None:
+            raise interrupted
+        return result
 
     def __getattr__(self, name):
         value = getattr(self._verifier, name)
@@ -41,10 +125,9 @@ class _SerializedVerifier:
 
         @wraps(value)
         def serialized(*args, **kwargs):
-            def run():
-                with self._lock:
-                    return value(*args, **kwargs)
-            return self._runtime.run(run, initialize_mlx=name != "close" and requires_mlx(self._verifier))
+            if name == "close":
+                return self._close(value, args, kwargs)
+            return self._call(name, value, args, kwargs)
         return serialized
 
 
@@ -93,6 +176,7 @@ class RenderPool:
         self.sampling = pool_sampling(config)
         self.local_lock = RLock()
         self._local_runtime = LocalRuntime()
+        self._review_runtime = LocalRuntime(name="audiobook-text-review")
         self._closed = False
         self._workers = [_Worker(worker, config["engine"], self.sampling)
                          for worker in settings["workers"]]
@@ -137,7 +221,7 @@ class RenderPool:
     def wrap_verifier(self, verifier):
         if isinstance(verifier, _SerializedVerifier) and verifier._lock is self.local_lock:
             return verifier
-        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime)
+        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime, self._review_runtime)
 
     def _execute(self, method, *args, **kwargs):
         from .interrupts import stop_if_requested
@@ -206,18 +290,26 @@ class RenderPool:
         if self._closed:
             return
         self._closed = True
+        # Text reviewers never enter the model lane. Drain them before closing
+        # engine resources or the shared model runtime, including during error
+        # cleanup after a render coordinator has stopped dispatching work.
         def close_local():
             with self.local_lock:
                 for worker in self._workers:
                     if worker.local:
                         worker.close()
         try:
-            self._local_runtime.run(close_local)
-            for worker in self._workers:
-                if not worker.local:
-                    worker.close()
+            # Shutdown runs off the calling thread so an interrupted wait is
+            # drained by LocalRuntime before engine resources are released.
+            self._local_runtime.run(self._review_runtime.close)
         finally:
-            self._local_runtime.close()
+            try:
+                self._local_runtime.run(close_local)
+                for worker in self._workers:
+                    if not worker.local:
+                        worker.close()
+            finally:
+                self._local_runtime.close()
 
 
 def create_render_engine(config):
