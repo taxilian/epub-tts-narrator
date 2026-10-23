@@ -22,7 +22,10 @@ class SpeechCache:
         self.loaded = False
 
     def identity(self, request, *, engine_metadata=None):
-        return generation_identity(request, self.voices, engine_metadata=engine_metadata)
+        from .recovery_provenance import bind_legacy_recovery_metadata
+
+        metadata = bind_legacy_recovery_metadata(self.work / "clips", request, engine_metadata)
+        return generation_identity(request, self.voices, engine_metadata=metadata)
 
     @staticmethod
     def _performance_key(identity):

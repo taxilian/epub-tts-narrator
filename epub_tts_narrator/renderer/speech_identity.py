@@ -348,7 +348,8 @@ def _recovered_generation_identity(request, voices_by_asset, metadata):
                 or not isinstance(report, Mapping) or report.get("passed") is not True
                 or report.get("reasons") or report.get("expected_text") != part["text"]
                 or not isinstance(actual_metadata, Mapping)
-                or not isinstance(actual_metadata.get("synthesis_text"), str)):
+                or (parent["engine"].get("engine") in _DRAMA_ENGINES
+                    and not isinstance(actual_metadata.get("synthesis_text"), str))):
             raise ValueError("Sentence recovery child binding changed")
         generation_identity(actual, voices_by_asset, engine_metadata=actual_metadata)
     return generation_identity(parent, voices_by_asset)

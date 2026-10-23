@@ -255,14 +255,13 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                           "validation_key": record["validation_key"],
                           "accepted_sha256": file_hash(wav.parent / "accepted.json"),
                           "audio_file": str(wav.relative_to(directory))})
-            if parent_request["kind"] == "paragraph_speech" or bind_single_inputs:
-                # Retain actual child inputs, including any audited rewrite.
-                # The joined file is not represented as a one-shot model call.
-                audit[-1]["acceptance"] = deepcopy(record)
+            # Every join needs actual child inputs, even when normalization
+            # makes plain delivery unavailable. It is never a one-shot take.
+            audit[-1]["acceptance"] = deepcopy(record)
         _concatenate(verified, path, config["render"]["sample_rate"])
         recovery_audit = {"version": _VERSION, "strategy": _STRATEGY,
                           "parent_request_hash": digest(parent_request), "parts": audit}
-        if bind_single_inputs:
+        if parent_request["kind"] == "speech":
             recovery_audit["child_acceptance_version"] = 1
         return {"synthesis_text": trim_speech_text(text), "recovery": recovery_audit}
 
