@@ -363,6 +363,16 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 notify(f"  Testing the new {kind} once before shorter-part recovery.")
         if action in {"split", "stop"}:
             report = dict(record["report"], resolution_action=action)
+            if (action == "stop" and resolution_session.can_split and fallback_parts >= 2
+                    and retry_budget.episode_started(episode) <= episode_maximum - fallback_parts):
+                # The planner's stop remains in its hash-bound audit. Runtime routing
+                # must try an executable, untried strategy before giving up.
+                action = "split"
+                report.update(planner_resolution_action="stop", resolution_action=action)
+                record["report"] = report
+                write_json(directory / f"attempt-{record['attempt']:03d}.json", record)
+                notify("  Trying the available shorter-part strategy before stopping; "
+                       "the shared generation allowance and full verification still apply.")
             raise SpeechVerificationFailed(
                 f"Speech recovery selected {action}. Inspect {directory}", request=request, report=report)
         return None

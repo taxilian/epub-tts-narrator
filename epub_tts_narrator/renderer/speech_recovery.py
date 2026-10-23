@@ -27,8 +27,6 @@ def _period_can_end(text, index):
 
 def split_recovery_text(text):
     """Return two to four contiguous exact slices, each containing >=2 words."""
-    from .quality import normalize_words
-
     if not isinstance(text, str) or not text.strip() or len(text) > 100000:
         return None
     candidates = set()
@@ -42,6 +40,21 @@ def split_recovery_text(text):
                 continue
         if match.end() < len(text):
             candidates.add(match.end())
+    parts = _split_at_boundaries(text, candidates)
+    if parts is not None:
+        return parts  # Existing persisted sentence plans keep their exact identities.
+    addresses = [token for token in re.finditer(r"\S+", text)
+                 if any(marker in token[0] for marker in ("://", "www.", "@"))]
+    candidates = {match.end() for match in re.finditer(r"—[\"'”’)]*\s*", text)
+                  if match.end() < len(text)
+                  and not any(address.start() <= match.start() < address.end() for address in addresses)}
+    return _split_at_boundaries(text, candidates)
+
+
+def _split_at_boundaries(text, candidates):
+    """Choose bounded exact slices without leaving single-word fragments."""
+    from .quality import normalize_words
+
     parts, start = [], 0
     for end in sorted(candidates):
         if len(parts) == 3:
