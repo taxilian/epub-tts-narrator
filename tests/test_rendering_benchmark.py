@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.benchmark_rendering import generate, load_corpus, select_cases, summarize, verify
+from scripts.benchmark_rendering import TimedVerifier, generate, load_corpus, select_cases, summarize, verify
 from epub_tts_narrator.renderer.common import digest, file_hash, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
@@ -46,6 +46,45 @@ class SummaryTests(unittest.TestCase):
             self.assertFalse(result["verification_complete"])
             self.assertIsNone(result["verified_audio_per_generation_second"])
             self.assertIsNone(result["verified_audio_per_total_second"])
+
+    def test_stage_totals_include_failed_checks_and_exclude_warmup(self):
+        rows = [row(passed=True, verification_stage_seconds={"normalization": 1, "transcribe": 2}),
+                row(passed=False, verification_stage_seconds={"transcribe": 3, "judge_reference": 4}),
+                row(warmup=True, verification_stage_seconds={"transcribe": 100})]
+        self.assertEqual(summarize(rows, 5, 10)["verification_stage_seconds"],
+                         {"normalization": 1, "transcribe": 5, "judge_reference": 4})
+
+
+class TimingTests(unittest.TestCase):
+    def test_optional_methods_forward_arguments_results_identity_and_exceptions(self):
+        calls, seconds = [], {}
+        result = {"text": "fixture"}
+        failure = RuntimeError("fixture failure")
+
+        def transcribe(*args, **kwargs):
+            calls.append((args, kwargs))
+            return result
+
+        def judge(*args, **kwargs):
+            raise failure
+
+        target = SimpleNamespace(identity={"backend": "fixture"}, transcribe=transcribe,
+                                 judge_reference=judge, speech_resolver=object(), close=lambda: calls.append("close"))
+        proxy = TimedVerifier(target, seconds)
+        self.assertIs(proxy.identity, target.identity)
+        self.assertIs(proxy.speech_resolver, target.speech_resolver)
+        self.assertFalse(hasattr(proxy, "corroborate_reference"))
+        self.assertIsNone(getattr(proxy, "review_phonetics", None))
+        with patch("scripts.benchmark_rendering.time.monotonic", side_effect=[10, 12, 20, 23, 30, 34]):
+            self.assertIs(proxy.transcribe(Path("audio.wav"), option="unchanged"), result)
+            self.assertIs(proxy.transcribe("again"), result)
+            with self.assertRaises(RuntimeError) as raised:
+                proxy.judge_reference("expected", "heard")
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(calls, [((Path("audio.wav"),), {"option": "unchanged"}), (("again",), {})])
+        self.assertEqual(seconds, {"transcribe": 5, "judge_reference": 4})
+        proxy.close()
+        self.assertEqual(calls[-1], "close")
 
 
 class WorkloadTests(unittest.TestCase):
@@ -182,6 +221,14 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual(audio.read_bytes(), original)
             self.assertFalse(list(folder.glob("*-verified.wav")))
             self.assertFalse((folder / "verification-warmup.wav").exists())
+            self.assertEqual(report["verification_identity"], Verifier.identity)
+            for item in report["results"][1:]:
+                self.assertEqual(set(item["verification_stage_seconds"]), {"normalization", "transcribe"})
+                self.assertTrue(all(value >= 0 for value in item["verification_stage_seconds"].values()))
+            self.assertEqual(set(report["verification_warmup_stage_seconds"]), {"normalization", "transcribe"})
+            for stage, elapsed in report["summary"]["verification_stage_seconds"].items():
+                self.assertEqual(elapsed, sum(item["verification_stage_seconds"][stage]
+                                              for item in report["results"][1:]))
 
 
 if __name__ == "__main__":

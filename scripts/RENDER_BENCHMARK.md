@@ -63,6 +63,14 @@ cannot measure a remote GPU; run the generator on the GPU host for those samples
 GPU warmup/model loading and ASR warmup are recorded separately. The M5's unified
 memory is not an NVIDIA VRAM measurement; absent samples are unavailable, not zero.
 
+Each verified case also records `verification_stage_seconds`: normalization and
+each recognizer or text-review method actually called, including failed calls.
+The summary sums these timings across measured cases; ASR warmup has its own
+`verification_warmup_stage_seconds`. Missing stages were not called. Stage totals
+exclude acoustic checks, comparison bookkeeping, and file handling, so they need
+not sum to the complete verification wall time. Instrumentation forwards the
+same inputs and results and does not add retries or change verification policy.
+
 The main comparison is **verified audio seconds / generation wall second**,
 alongside pass rate and generated audio seconds / generation wall second. Failed
 requests cost time and earn no verified audio. **Verified audio seconds / total

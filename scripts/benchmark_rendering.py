@@ -7,6 +7,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import wraps
 import json
 from pathlib import Path
 import platform
@@ -156,6 +157,9 @@ def summarize(rows, generation_wall_seconds, verification_wall_seconds=None):
     audio = sum(row["audio_seconds"] for row in generated)
     verified = sum(row["audio_seconds"] for row in accepted)
     latencies = sorted(row["latency_seconds"] for row in measured)
+    stage_seconds = Counter()
+    for row in measured:
+        stage_seconds.update(row.get("verification_stage_seconds", {}))
     return {"cases": len(measured), "generated": len(generated),
             "generation_failures": len(measured) - len(generated),
             "verification_complete": complete,
@@ -163,6 +167,7 @@ def summarize(rows, generation_wall_seconds, verification_wall_seconds=None):
             "rejected_or_failed": len(measured) - len(accepted) if complete else None,
             "generation_wall_seconds": generation_wall_seconds,
             "verification_wall_seconds": verification_wall_seconds,
+            "verification_stage_seconds": dict(stage_seconds),
             "generated_audio_seconds": audio,
             "verified_audio_seconds": verified if complete else None,
             "generated_audio_per_generation_second": audio / generation_wall_seconds if generation_wall_seconds else None,
@@ -171,6 +176,28 @@ def summarize(rows, generation_wall_seconds, verification_wall_seconds=None):
                 if complete and verification_wall_seconds is not None and generation_wall_seconds + verification_wall_seconds else None,
             "latency_median_seconds": statistics.median(latencies) if latencies else None,
             "latency_p95_seconds": latencies[min(len(latencies) - 1, int(len(latencies) * .95))] if latencies else None}
+
+
+class TimedVerifier:
+    """Forward optional verifier APIs unchanged, measuring even failed calls."""
+
+    def __init__(self, verifier, seconds):
+        self._target, self._seconds = verifier, seconds
+
+    def __getattr__(self, name):
+        value = getattr(self._target, name)
+        if name not in {"transcribe", "transcribe_reference", "corroborate_reference",
+                        "judge_reference", "review_phonetics"} or not callable(value):
+            return value
+
+        @wraps(value)
+        def timed(*args, **kwargs):
+            began = time.monotonic()
+            try:
+                return value(*args, **kwargs)
+            finally:
+                self._seconds[name] = self._seconds.get(name, 0.0) + time.monotonic() - began
+        return timed
 
 
 class GpuSampler:
@@ -300,6 +327,17 @@ def verify(args):
     report["quality"] = deepcopy(config["quality"])
     secrets = configured_secrets(config)
     warmups = [row for row in report["results"] if row["warmup"] and "error" not in row]
+
+    def check(raw, normalized, expected_text, seconds):
+        began = time.monotonic()
+        try:
+            normalize_clip(raw, normalized, sample_rate=config["render"]["sample_rate"],
+                           ffmpeg=config["render"]["ffmpeg"])
+        finally:
+            seconds["normalization"] = time.monotonic() - began
+        return validate_audio(normalized, expected_text, TimedVerifier(verifier, seconds),
+                              config["quality"], purpose="speech")
+
     try:
         # Initialize ASR separately; this never changes the measured TTS audio.
         started = time.perf_counter()
@@ -309,9 +347,11 @@ def verify(args):
             if file_hash(raw) != row["audio_sha256"]:
                 raise ValueError("Warmup audio changed")
             normalized = args.manifest.parent / "verification-warmup.wav"
-            normalize_clip(raw, normalized, sample_rate=config["render"]["sample_rate"], ffmpeg=config["render"]["ffmpeg"])
-            validate_audio(normalized, row["expected_text"], verifier, config["quality"], purpose="speech")
-            normalized.unlink()
+            report["verification_warmup_stage_seconds"] = {}
+            try:
+                check(raw, normalized, row["expected_text"], report["verification_warmup_stage_seconds"])
+            finally:
+                normalized.unlink(missing_ok=True)
         report["verification_warmup_seconds"] = time.perf_counter() - started
         started = time.perf_counter()
         for row in report["results"]:
@@ -322,9 +362,9 @@ def verify(args):
                 raise ValueError("Measured audio changed before verification")
             began = time.perf_counter()
             normalized = args.manifest.parent / (row["case_id"] + "-verified.wav")
+            row["verification_stage_seconds"] = {}
             try:
-                normalize_clip(raw, normalized, sample_rate=config["render"]["sample_rate"], ffmpeg=config["render"]["ffmpeg"])
-                result = validate_audio(normalized, row["expected_text"], verifier, config["quality"], purpose="speech")
+                result = check(raw, normalized, row["expected_text"], row["verification_stage_seconds"])
                 row.update(verification=result, passed=result["passed"])
             except Exception as exc:
                 row.update(verification_error=safe_error_text(f"{type(exc).__name__}: {exc}", secrets), passed=False)
