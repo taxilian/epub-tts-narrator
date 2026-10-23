@@ -35,6 +35,17 @@ class RenderBlocked(ValueError):
     pass
 
 
+class ChapterNeedsRendering(RenderBlocked):
+    """An intact checkpoint contains performances with obsolete synthesis inputs."""
+
+    def __init__(self, chapter_id, block_count):
+        self.block_count = block_count
+        super().__init__(
+            f"Saved {chapter_id} needs rendering: speech inputs changed for "
+            f"{block_count} block(s). Rerun render to rebuild this chapter "
+            "while reusing matching verified clips.")
+
+
 class VerificationUnavailable(RenderBlocked):
     """Stop batch generation while an external verification service is unavailable."""
 
@@ -981,7 +992,9 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         speech_cache = SpeechCache(work, voices)
 
     def matches_request(request, accepted):
-        return accepted["request_hash"] == digest(request) or speech_cache.matches(request, accepted)
+        # Identical source requests can prepare different engine inputs after
+        # a delivery-formatting update. Check the actual recorded performance.
+        return speech_cache.matches(request, accepted)
 
     if not _same_chapter_audio_context(record["context"], context):
         raise RenderBlocked(
@@ -1004,6 +1017,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         cache_record = read_json(Path(composed["cache_directory"]) / "chapter.json")
         cached_clips = {clip["chunk_id"]: clip for clip in cache_record["identity"]["clips"]}
         timings = {item["chunk_id"]: item for item in composed["segments"]}
+        stale_chunks = set()
         for chunk, accepted in zip(expected, acceptance):
             if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
                 raise ValueError("Invalid chapter verification record")
@@ -1015,7 +1029,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
             if "paragraph_turns" in chunk:
                 request = _paragraph_request(chunk, voices, context["engine"], config)
                 if not matches_request(request, accepted):
-                    raise ValueError("Paragraph verification does not match its source or voices")
+                    stale_chunks.add(chunk["chunk_id"])
             elif len(speakers) > 1:
                 lanes, mix = accepted.get("speaker_lanes"), accepted.get("mix")
                 if (not isinstance(lanes, list) or len(lanes) != len(speakers)
@@ -1045,17 +1059,23 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                     request = _speech_request(chunk, voices[speaker["voice_id"]], context["engine"],
                                               config, performer=speaker)
                     if (lane["role_id"] != speaker["role_id"] or lane["voice_id"] != speaker["voice_id"]
-                            or not matches_request(request, lane) or not _has_accepted_verification(lane)):
+                            or not _has_accepted_verification(lane)):
                         raise ValueError("A simultaneous speaker lacks matching verification")
+                    if not matches_request(request, lane):
+                        stale_chunks.add(chunk["chunk_id"])
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
                 if not matches_request(request, accepted):
-                    raise ValueError("Chapter verification does not match the current plan")
+                    stale_chunks.add(chunk["chunk_id"])
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
-        return composed, acceptance
     except (ValueError, KeyError, TypeError, OSError) as exc:
         raise RenderBlocked(f"Invalid saved chapter {chapter['id']}: {exc}") from exc
+    if stale_chunks:
+        # Finish every integrity check first. A valid but obsolete performance
+        # is a cache miss; changed bytes or broken provenance remain fatal.
+        raise ChapterNeedsRendering(chapter["id"], len(stale_chunks))
+    return composed, acceptance
 
 
 def _save_checkpoint(work, chapter, composed, context, acceptance):
@@ -1562,13 +1582,19 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
+            composed = None
             if (saved is not None and _same_chapter_audio_context(saved["context"], context)
                     and _saved_chapter_clips_present(work, saved)
                     and _saved_chapter_engines_match(work, saved, context["engine"])):
-                composed, chapter_acceptance = _restore_chapter(
-                    work, chapter, saved, context, voices, config, speech_cache=speech_cache)
-                notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
-            else:
+                try:
+                    composed, chapter_acceptance = _restore_chapter(
+                        work, chapter, saved, context, voices, config, speech_cache=speech_cache)
+                except ChapterNeedsRendering as exc:
+                    notify(f"Rebuilding {chapter_label}: speech inputs changed for {exc.block_count} block(s); "
+                           "reusing matching verified clips.")
+                else:
+                    notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
+            if composed is None:
                 notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                     bundle, chapter, voices, engine, engine_identity, verifier, config, work,
