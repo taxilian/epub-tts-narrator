@@ -54,7 +54,6 @@ class PlainDeliveryResolverTests(unittest.TestCase):
         audit = self.resolver.resolve(self.expected, evidence, can_plain_delivery=True)
         self.assertEqual(audit["decision"], "resolved")
         self.assertNotIn("accept", audit["payload"]["permitted_actions"])
-        self.assertNotIn("rewrite", audit["payload"]["permitted_actions"])
         self.assertEqual(validate_resolution(audit, self.expected, evidence, self.resolver.identity,
                                              can_plain_delivery=True)["action"], "plain_delivery")
 

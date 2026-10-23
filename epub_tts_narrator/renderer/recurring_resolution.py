@@ -8,6 +8,7 @@ from pathlib import Path
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .quality import compare_words
 from .retry_budget import generation_attempts
+from .speech_resolver import _ACOUSTIC_REASONS
 
 
 def failure_signatures(expected, report):
@@ -15,13 +16,15 @@ def failure_signatures(expected, report):
 
     Different spellings of the same problematic source span share a signature;
     the actual spellings remain in the model evidence, never normalized away.
+    Acoustic reasons each become one take-level signature: they describe the
+    whole recording, so a take counts once toward recovery no matter how many
+    acoustic checks it failed.
     """
     if report.get('passed') or not report.get('reasons'):
         return set()
     if report['reasons'] != ['text_mismatch']:
-        acoustic = {'silent_audio', 'audio_too_quiet', 'excessive_silence',
-                    'internal_silence_stall', 'excessive_clipping', 'audio_too_short'}
-        return {digest({'acoustic': reason}) for reason in report['reasons'] if reason in acoustic}
+        return {digest({'acoustic': reason}) for reason in report['reasons']
+                if reason in _ACOUSTIC_REASONS}
     found = set()
     for transcript in (report.get('transcript'), report.get('secondary_transcript'),
                        report.get('corroboration', {}).get('transcript')):
@@ -88,11 +91,17 @@ class RecurringResolution:
         self.maximum_rounds = settings.get('max_resolution_rounds', 2)
         self.rounds = 0
         self.path = self.directory / 'speech-resolution.json'
-        self.binding = {'version': 2, 'request_hash': digest(request), 'expected_text': text,
+        self.binding = {'version': 3, 'request_hash': digest(request), 'expected_text': text,
                         'resolver': self.identity, 'threshold': self.threshold,
                         'can_rewrite': can_rewrite, 'can_split': can_split}
         if can_plain_delivery:
             self.binding['can_plain_delivery'] = True
+        # The immediately preceding policy differs only in which failures may
+        # motivate a new rewrite. Its already-reviewed repairs remain usable.
+        self.previous_identity = {key: value for key, value in self.identity.items()
+                                  if key != 'policy_sha256'}
+        self.previous_identity['version'] = 1
+        self.previous_identity['policy_sha256'] = digest(self.previous_identity)
         self.state = {'binding': self.binding, 'handled': {}, 'history': []}
         if self.path.exists() or self.path.is_symlink():
             saved = read_json(regular_file(self.path))
@@ -123,10 +132,14 @@ class RecurringResolution:
                 if not archive.exists():
                     write_json(archive, saved)
                 self.state = dict(body, binding=self.binding, handled={})
-            elif body.get('binding') == dict(self.binding, version=1):
-                # Source-span signatures changed, not the reviewed evidence.
-                # Retain approved rewrites and feedback; recalculate recurrence
-                # from the saved distinct takes using the new signature policy.
+            elif body.get('binding') in (dict(self.binding, version=1),
+                                         dict(self.binding, version=2),
+                                         dict(self.binding, version=2,
+                                              resolver=self.previous_identity)):
+                # Source-span signatures or the recurrence trigger policy
+                # changed, not the reviewed evidence. Retain approved rewrites
+                # and feedback; recalculate recurrence from the saved distinct
+                # takes using the new counting policy.
                 self.state = dict(body, binding=self.binding, handled={})
             else:
                 # Retain old decisions for inspection when a model/policy changes.
@@ -211,7 +224,8 @@ class RecurringResolution:
             if (row['audit'].get('decision') != 'resolved'
                     or row['audit'].get('proposal', {}).get('action') != 'rewrite'):
                 continue
-            proposal = validate_resolution(row['audit'], self.text, row['failures'], self.identity,
+            proposal = validate_resolution(row['audit'], self.text, row['failures'],
+                                           self._audit_identity(row['audit']),
                                            can_rewrite=self.can_rewrite,
                                            can_split='split' in row['audit'].get('payload', {}).get('permitted_actions', []),
                                            previous_decisions=self._saved_feedback(index))
@@ -234,7 +248,7 @@ class RecurringResolution:
                     or row['audit'].get('proposal', {}).get('action') != 'plain_delivery'):
                 continue
             proposal = validate_resolution(
-                row['audit'], self.text, row['failures'], self.identity,
+                row['audit'], self.text, row['failures'], self._audit_identity(row['audit']),
                 can_rewrite=self.can_rewrite,
                 can_split='split' in row['audit'].get('payload', {}).get('permitted_actions', []),
                 can_plain_delivery=True,
@@ -243,6 +257,12 @@ class RecurringResolution:
                 raise ValueError('Saved plain delivery decision no longer validates')
             return {**proposal, 'audit': row['audit'], 'failures': row['failures']}
         return None
+
+    def _audit_identity(self, audit):
+        """Replay only the current or exact preceding provider-bound policy."""
+        if audit.get('identity') == self.previous_identity:
+            return self.previous_identity
+        return self.identity
 
     def note_failed_split(self, report):
         """Give the planner the renderer's actual strategy outcome once.
@@ -277,6 +297,30 @@ class RecurringResolution:
                 or file_hash(regular_file(wav)) != record.get('audio_sha256')):
             raise ValueError('Speech resolution candidate audio changed')
 
+    def _failed_takes(self):
+        return sum(1 for saved in self.records.values()
+                   if failure_signatures(self.text, saved['report']))
+
+    def _failed_repair(self, record):
+        """Return the applied repair this newer take disproves, if any.
+
+        A reviewed rewrite or delivery change that just failed its own take is
+        feedback the planner must see at once; it never buys extra rounds past
+        the configured maximum, and an unapplied or terminal decision is not
+        feedback of this kind.
+        """
+        history = self.state['history']
+        if not history:
+            return None
+        row, audit = history[-1], history[-1].get('audit')
+        if (row.get('origin') == 'renderer' or not isinstance(audit, dict)
+                or audit.get('decision') != 'resolved' or not row.get('applied', True)
+                or not isinstance(audit.get('proposal'), dict)
+                or audit['proposal'].get('action') not in {'rewrite', 'plain_delivery'}
+                or type(row.get('attempt')) is not int or row['attempt'] >= record['attempt']):
+            return None
+        return audit['proposal']['action']
+
     def consider(self, record, *, notify):
         from .speech_resolver import validate_resolution
         self.records[record['attempt']] = record
@@ -291,7 +335,8 @@ class RecurringResolution:
                 and previous['failures']
                 and previous['failures'][-1] == self._failure(record)):
             proposal = validate_resolution(
-                previous['audit'], self.text, previous['failures'], self.identity,
+                previous['audit'], self.text, previous['failures'],
+                self._audit_identity(previous['audit']),
                 can_rewrite=self.can_rewrite, can_split=self.can_split,
                 previous_decisions=self._saved_feedback(len(self.state['history']) - 1))
             if proposal is not None and proposal['action'] in {'accept', 'split'}:
@@ -303,16 +348,28 @@ class RecurringResolution:
             return None
         counts = Counter(signature for saved in self.records.values()
                          for signature in failure_signatures(self.text, saved['report']))
-        ready = sorted(signature for signature in signatures
-                       if counts[signature] - self.state['handled'].get(signature, 0) >= self.threshold)
-        if not ready:
+        # Escalation counts distinct failed takes once each: mixed text and
+        # acoustic failures, or several acoustic checks on one take, must not
+        # hide behind per-signature repetition or double-count a single take.
+        # A disproved applied repair escalates without waiting for more takes.
+        # handled records how many of those takes a saved decision already
+        # consumed; invalid or unavailable decisions consume none, so bounded
+        # rounds stay the only limit on reconsidering the same evidence.
+        takes = self._failed_takes()
+        repeat = self._failed_repair(record)
+        if takes - self.state['handled'].get('takes', 0) < self.threshold and repeat is None:
             return None
         # Historical reports can trigger review, but only a current byte-bound
         # waveform can be accepted. The latest failure is always last in payload.
         self._check_candidate_audio(record)
         failures = [self._failure(saved) for number, saved in sorted(self.records.items())
                     if number <= record['attempt'] and failure_signatures(self.text, saved['report'])][-30:]
-        notify(f'  Recurring speech discrepancy ({max(counts[s] for s in ready)} takes); asking the analysis model how to recover.')
+        ready = sorted(signature for signature in signatures if counts[signature] >= self.threshold)
+        if repeat is not None:
+            notify(f'  The applied {repeat} recovery failed its new take; asking the analysis '
+                   f'model how to recover ({takes} takes).')
+        else:
+            notify(f'  Recurring speech discrepancy ({takes} takes); asking the analysis model how to recover.')
         self.rounds += 1
         feedback = self._feedback(self.state['history'])
         # Once selected, plain delivery remains active for subsequent takes.
@@ -321,15 +378,16 @@ class RecurringResolution:
         audit = self.resolver.resolve(self.text, failures, can_rewrite=self.can_rewrite,
                                       can_split=self.can_split, previous_decisions=feedback,
                                       can_plain_delivery=can_plain)
-        row = {'trigger_counts': {key: counts[key] for key in ready},
-               'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
-               'failures': failures, 'audit': audit, 'previous_decisions': feedback}
-        self.state['history'].append(row)
         proposal = validate_resolution(audit, self.text, failures, self.identity,
                                        can_rewrite=self.can_rewrite, can_split=self.can_split,
                                        previous_decisions=feedback, can_plain_delivery=can_plain)
-        if audit.get('decision') != 'unavailable':
-            self.state['handled'].update(row['trigger_counts'])
+        row = {'trigger_counts': {key: counts[key] for key in ready},
+               'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
+               'failures': failures, 'audit': audit, 'previous_decisions': feedback,
+               'applied': proposal is not None}
+        self.state['history'].append(row)
+        if audit.get('decision') == 'resolved':
+            self.state['handled'] = {'takes': takes}
         self._save()  # Commit the decision before changing input or accepting audio.
         if audit.get('decision') == 'unavailable':
             return {'action': 'unavailable', 'audit': audit, 'failures': failures}

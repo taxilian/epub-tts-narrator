@@ -53,6 +53,11 @@ _ADDRESS_LIMITS = {"max_failures": 30, "max_text_chars": 20000, "max_payload_cha
                    "reviewers": 3, "required_votes": 2, "guard_version": 1}
 _LIMITS = {**_ADDRESS_LIMITS, "max_prior_decisions": 5, "max_feedback_chars": 30000}
 _ACTIONS = frozenset({"accept", "rewrite", "plain_delivery", "retry", "split", "stop"})
+# Verification reasons that describe measurable audio rather than recognized
+# wording. They can motivate a pronunciation rewrite but never acceptance.
+_ACOUSTIC_REASONS = frozenset({"silent_audio", "audio_too_quiet", "excessive_silence",
+                               "internal_silence_stall", "excessive_clipping",
+                               "audio_too_short", "audio_too_long"})
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _SPELLING = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:[ \-‐‑][A-Za-z]+(?:['’][A-Za-z]+)*)*\Z")
 
@@ -69,10 +74,15 @@ _FEEDBACK_PROMPT_SHA256 = "904bafc4fe71993fe0c5b83a06ed11ecb2ee64c5175b997ca06d4
 _FEEDBACK_SOUND_SHA256 = "5e15f4c54a5b8b565cfa9d1449cd0155d169583b42d685d24f9bb7743a21d9af"
 _STUTTER_PROMPT_SHA256 = "3aadc33173b9d909208d279c5934933be71996acfdd86034dc21ba5452e9367c"
 _STUTTER_SOUND_SHA256 = "7d01a9a3180686e9a7cf5d0a31f4c2c77ad357ed1a36827e722d6da130583832"
+# The policy immediately before acoustic failures could motivate a rewrite.
+# It shared the stutter sound prompt; its planner prompt was the current one
+# before version 2. These hashes identify that fixed policy for read-only use.
+_TEXT_GATE_PROMPT_SHA256 = "545f7a00195a0f4ec3fa5222f84bdff2308cea517ee53d657a553e25d8a1e34c"
+_TEXT_GATE_SOUND_SHA256 = _STUTTER_SOUND_SHA256
 
 
 def _identity(provider):
-    identity = {"name": "recurring_speech_resolver", "version": 1,
+    identity = {"name": "recurring_speech_resolver", "version": 2,
                 "provider": deepcopy(provider), "planner_prompt_sha256": digest(PROMPT),
                 "sound_prompt_sha256": digest(SOUND_PROMPT),
                 "coverage_version": SPEECH_COVERAGE_VERSION, "limits": deepcopy(_LIMITS)}
@@ -149,6 +159,25 @@ def _stutter_rewrite_identity(identity):
     return identity == expected
 
 
+def _clean_text_rewrite_identity(identity):
+    """Reuse accepted audits from the fixed pre-acoustic-rewrite policy.
+
+    That policy allowed a rewrite only after a clean transcription mismatch;
+    its payloads therefore never offered rewrite for acoustic failures, and
+    they validate under that older rule, never the current one.
+    """
+    if (not isinstance(identity, dict) or not isinstance(identity.get("provider"), dict)
+            or type(identity.get("coverage_version")) is not int):
+        return False
+    expected = {"name": "recurring_speech_resolver", "version": 1,
+                "provider": deepcopy(identity["provider"]),
+                "planner_prompt_sha256": _TEXT_GATE_PROMPT_SHA256,
+                "sound_prompt_sha256": _TEXT_GATE_SOUND_SHA256,
+                "coverage_version": identity["coverage_version"], "limits": deepcopy(_LIMITS)}
+    expected["policy_sha256"] = digest(expected)
+    return identity == expected
+
+
 def _prior_decisions(value):
     if value is None:
         value = []
@@ -171,7 +200,8 @@ def _prior_decisions(value):
 
 
 def _payload(expected_text, failures, can_rewrite, can_split, *, legacy_rewrite=False,
-             address_rewrite=False, previous_decisions=None, can_plain_delivery=False):
+             address_rewrite=False, previous_decisions=None, can_plain_delivery=False,
+             acoustic_rewrite=False):
     if (not isinstance(expected_text, str) or not expected_text.strip()
             or len(expected_text) > _LIMITS["max_text_chars"]
             or type(can_rewrite) is not bool or type(can_split) is not bool
@@ -218,12 +248,18 @@ def _payload(expected_text, failures, can_rewrite, can_split, *, legacy_rewrite=
         permitted.append("split")
     if can_plain_delivery:
         permitted.append("plain_delivery")
-    # Acceptance and pronunciation editing require a clean acoustic gate and a
-    # genuine transcription mismatch, never an unavailable recognizer/provider.
-    if failures[-1]["reasons"] == ["text_mismatch"]:
+    # Acceptance requires a genuine transcription mismatch of the latest take,
+    # never an unavailable recognizer/provider and never failed acoustic
+    # checks. A pronunciation rewrite may also respond to a persistent spelling
+    # problem when the latest take additionally failed an acoustic check, but
+    # that rewrite still needs its sound jury and a fully passing new take.
+    latest = failures[-1]["reasons"]
+    if latest == ["text_mismatch"]:
         permitted.append("accept")
-        if can_rewrite:
-            permitted.append("rewrite")
+    if can_rewrite and (latest == ["text_mismatch"]
+                        or (acoustic_rewrite
+                            and any(reason in _ACOUSTIC_REASONS for reason in latest))):
+        permitted.append("rewrite")
     source_words = [{"start": match.start(), "end": match.end(),
                      "source": expected_text[match.start():match.end()]}
                     for match in _lexeme_matches(expected_text.replace("’", "'").replace("‘", "'"))]
@@ -533,7 +569,8 @@ class SpeechResolver:
         try:
             audit["payload"] = _payload(expected_text, failures, can_rewrite, can_split,
                                         previous_decisions=previous_decisions,
-                                        can_plain_delivery=can_plain_delivery)
+                                        can_plain_delivery=can_plain_delivery,
+                                        acoustic_rewrite=True)
         except (ValueError, TypeError, OverflowError, RecursionError):
             return dict(audit, error_code="invalid_request")
         try:
@@ -584,7 +621,8 @@ def validate_resolution(audit, expected_text, failures, identity, *, can_rewrite
         address = _address_rewrite_identity(identity)
         feedback = _feedback_rewrite_identity(identity)
         stutter = _stutter_rewrite_identity(identity)
-        historical = legacy or address or feedback or stutter
+        clean_text = _clean_text_rewrite_identity(identity)
+        historical = legacy or address or feedback or stutter or clean_text
         # Historical rewrite markers do not know the caller's current engine
         # capabilities. Fresh decisions must pass an explicit boolean; omission
         # only replays the capability bound into an existing audit's payload.
@@ -598,21 +636,22 @@ def validate_resolution(audit, expected_text, failures, identity, *, can_rewrite
             previous_decisions = payload.get("previous_decisions") if isinstance(payload, dict) else None
         planner_hash = (_LEGACY_PROMPT_SHA256 if legacy else _ADDRESS_PROMPT_SHA256 if address
                         else _FEEDBACK_PROMPT_SHA256 if feedback else _STUTTER_PROMPT_SHA256 if stutter
-                        else digest(PROMPT))
+                        else _TEXT_GATE_PROMPT_SHA256 if clean_text else digest(PROMPT))
         sound_hash = (_LEGACY_SOUND_SHA256 if legacy else _ADDRESS_SOUND_SHA256 if address
                       else _FEEDBACK_SOUND_SHA256 if feedback else _STUTTER_SOUND_SHA256 if stutter
-                      else digest(SOUND_PROMPT))
+                      else _TEXT_GATE_SOUND_SHA256 if clean_text else digest(SOUND_PROMPT))
         if (not (_valid_identity(identity) or historical) or not isinstance(audit, dict)
                 or set(audit) != {"identity", "prompt", "payload", "proposal", "reviews", "decision"}
                 or audit["identity"] != identity
                 or digest(audit["prompt"]) != planner_hash
                 or audit["decision"] != "resolved"
-                or (historical and (can_plain_delivery or not isinstance(audit["proposal"], dict)
+                or (historical and not clean_text and (can_plain_delivery or not isinstance(audit["proposal"], dict)
                                 or audit["proposal"].get("action") != "rewrite"))
                 or audit["payload"] != _payload(expected_text, failures, can_rewrite, can_split,
                                                 legacy_rewrite=legacy, address_rewrite=address,
                                                 previous_decisions=previous_decisions,
-                                                can_plain_delivery=can_plain_delivery)):
+                                                can_plain_delivery=can_plain_delivery,
+                                                acoustic_rewrite=not historical)):
             return None
         proposal = _proposal(audit["proposal"], audit["payload"], legacy_rewrite=legacy)
         if proposal is None or not isinstance(audit["reviews"], list):

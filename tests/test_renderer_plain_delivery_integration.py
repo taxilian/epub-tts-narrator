@@ -213,7 +213,7 @@ class PlainDeliveryIntegrationTests(unittest.TestCase):
         with patch.object(RecurringResolution, "_save", interrupt_after_plain):
             with self.assertRaises(KeyboardInterrupt):
                 self.render_chunk()
-        self.assertEqual([call["text"] for call in self.engine.calls], [text] * 3 + [alternate] * 3)
+        self.assertEqual([call["text"] for call in self.engine.calls], [text] * 3 + [alternate])
         self.assertEqual(len(self.client.plans), 2)
         self.assertEqual(len(self.client.reviews), 3)
         result, accepted = self.render_chunk()
@@ -221,7 +221,7 @@ class PlainDeliveryIntegrationTests(unittest.TestCase):
         self.assertEqual(accepted["report"]["expected_text"], text)
         self.assertEqual(accepted["report"]["transcript"], alternate)
         self.assertEqual(len(self.client.plans), 2)
-        self.assertEqual(len(self.engine.calls), 7)
+        self.assertEqual(len(self.engine.calls), 5)
         self.assertEqual(self.engine.calls[-1]["text"], alternate)
         self.assertEqual(self.engine.calls[-1]["direction"], "")
         record = self.accepted_record(result)
@@ -233,7 +233,7 @@ class PlainDeliveryIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["delivery_recovery"]["original_text"], text)
         self.assertEqual(metadata["delivery_recovery"]["original_direction"], DIRECTION)
         self.assertEqual(self.render_chunk(), (result, accepted))
-        self.assertEqual(len(self.engine.calls), 7)
+        self.assertEqual(len(self.engine.calls), 5)
 
 
 if __name__ == "__main__":

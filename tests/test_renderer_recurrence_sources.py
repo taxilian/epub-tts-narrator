@@ -136,7 +136,7 @@ class SourceRecurrenceStateTests(unittest.TestCase):
         self.assertEqual(list(session.state["handled"].values()), [3])
         self.assertEqual(len(session.records), 3)
 
-    def test_version_one_state_preserves_decisions_but_recounts_source_failures(self):
+    def test_previous_policy_state_preserves_decisions_but_recounts_source_failures(self):
         session = self.session()
         latest = None
         for attempt in range(1, 4):
@@ -144,12 +144,12 @@ class SourceRecurrenceStateTests(unittest.TestCase):
             self.consider(session, latest)
         saved = read_json(session.path)
         legacy = {key: value for key, value in saved.items() if key != "record_sha256"}
-        legacy["binding"]["version"] = 1
+        legacy["binding"]["version"] = 2
         legacy["handled"] = {digest({"legacy-operation-sensitive-signature": True}): 3}
         history = deepcopy(legacy["history"])
         write_json(session.path, {**legacy, "record_sha256": digest(legacy)})
         resumed = self.session()
-        self.assertEqual(resumed.binding["version"], 2)
+        self.assertEqual(resumed.binding["version"], 3)
         self.assertEqual(resumed.state["binding"], resumed.binding)
         self.assertEqual(resumed.state["history"], history)
         self.assertEqual(resumed.state["handled"], {})
@@ -158,7 +158,7 @@ class SourceRecurrenceStateTests(unittest.TestCase):
         self.assertEqual(len(self.client.plans), 2)
         self.assertEqual(resumed.state["history"][:1], history)
         persisted = read_json(resumed.path)
-        self.assertEqual(persisted["binding"]["version"], 2)
+        self.assertEqual(persisted["binding"]["version"], 3)
         self.assertEqual(persisted["history"][:1], history)
         self.assertEqual(list(persisted["handled"].values()), [3])
 

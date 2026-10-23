@@ -112,22 +112,24 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         return {"action": "rewrite", "reason": "Try a pronunciation spelling.",
                 "edits": [{"start": 0, "end": 6, "source": "Insang", "replacement": replacement}]}
 
-    def test_nonconsecutive_a_b_a_c_a_resolves_on_fifth_take(self):
+    def test_mixed_failure_kinds_resolve_once_three_distinct_takes_fail(self):
         variants = [HEARD, TEXT.replace("old ", ""), HEARD, TEXT + " Today.", HEARD]
         self.engine.heard = lambda text, number: variants[number - 1]
         wav, accepted = self.take()
-        self.assertEqual(len(self.engine.calls), 5)
-        self.assertEqual(wav.name, "attempt-005.wav")
+        self.assertEqual(len(self.engine.calls), 3)
+        self.assertEqual(wav.name, "attempt-003.wav")
         self.assertEqual(len(self.client.plans), 1)
         self.assertEqual(len(self.client.reviews), 3)
-        self.assertEqual([item["attempt"] for item in self.client.plans[0]["failures"]], [1, 2, 3, 4, 5])
+        self.assertEqual([item["attempt"] for item in self.client.plans[0]["failures"]], [1, 2, 3])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["transcript"], HEARD)
         self.assertEqual(accepted["report"]["expected_text"], TEXT)
         self.assertGreater(accepted["report"]["metrics"]["wer"], 0)
         self.assertEqual(accepted["report"]["previous_reasons"], ["text_mismatch"])
         state = read_json(self.work / "takes" / "speech-resolution.json")
-        self.assertEqual(list(state["history"][0]["trigger_counts"].values()), [3])
+        self.assertEqual(state["history"][0]["trigger_counts"], {},
+                         "No single signature reached the threshold; distinct takes escalated")
+        self.assertTrue(any("(3 takes)" in row for row in self.messages))
 
     def test_distinct_generations_with_identical_audio_count_once_per_take(self):
         self.engine.same_audio = True
@@ -356,7 +358,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
     def test_persisted_split_recheck_never_uses_permissive_wer_to_approve_omission(self):
         self.check_persisted_split_with_omission(permissive_wer=True)
 
-    def test_rewrites_and_split_parts_share_the_twelve_generation_budget(self):
+    def test_failed_repairs_and_split_parts_share_the_twelve_generation_budget(self):
         text = "Insang waited beside the old gate. Everyone watched the river."
         self.chunk["spoken_text"] = text
         self.chunk["source_ranges"][0]["end"] = 7 + len(text)
@@ -369,12 +371,12 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         with self.assertRaises(SpeechVerificationFailed):
             self.render_chunk(budget)
         self.assertEqual(len(self.engine.calls), 11)
-        self.assertEqual([row["text"] for row in self.engine.calls[:7]],
-                         [text] * 3 + [text.replace("Insang", "Insaan")] * 3
-                         + [text.replace("Insang", "Eensang")])
-        self.assertEqual([row["text"] for row in self.engine.calls[7:]],
-                         ["Insang waited beside the old gate."] * 4)
-        self.assertTrue(any("Testing the new pronunciation once" in row for row in self.messages))
+        self.assertEqual([row["text"] for row in self.engine.calls[:5]],
+                         [text] * 3 + [text.replace("Insang", "Insaan"), text.replace("Insang", "Eensang")])
+        self.assertEqual([row["text"] for row in self.engine.calls[5:]],
+                         ["Insang waited beside the old gate."] * 6)
+        self.assertTrue(any("The applied rewrite recovery failed its new take" in row
+                            for row in self.messages))
         self.assertTrue(list((self.work / "clips").glob("*/speech-recovery.json")))
         self.assertFalse(list((self.work / "speech-cache").glob("*.json")))
         with self.assertRaises(SpeechVerificationFailed) as failure:
@@ -382,6 +384,29 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 11, "Reentry cannot spend the remaining sibling's reserved start")
         self.assertIn("11/12 starts", str(failure.exception))
         self.assertNotIn("after 0 attempts", str(failure.exception))
+
+    def test_budget_spent_repairs_still_get_one_tested_take_before_parts(self):
+        text = "Insang waited beside the old gate. Everyone watched the river."
+        self.chunk["spoken_text"] = text
+        self.chunk["source_ranges"][0]["end"] = 7 + len(text)
+        self.config["verification"]["max_resolution_rounds"] = 5
+        self.config["verification"]["max_resolution_attempts"] = 7
+        self.client.actions = [self.rewrite("Insaan"), self.rewrite("Eensang"),
+                               {"action": "split", "edits": [], "reason": "Try complete short sentences."},
+                               {"action": "retry", "edits": [], "reason": "Try a fresh take."}]
+        self.engine.heard = lambda given, number: given.replace("old ", "")
+        budget = SpeechRetryBudget()
+        with self.assertRaises(SpeechVerificationFailed):
+            self.render_chunk(budget)
+        self.assertEqual([row["text"] for row in self.engine.calls],
+                         [text] * 3 + [text.replace("Insang", "Insaan"), text.replace("Insang", "Eensang")]
+                         + ["Insang waited beside the old gate."])
+        self.assertEqual(self.messages.count("  Testing the new pronunciation once before shorter-part recovery."), 2,
+                         "A repair arriving with the whole-take budget spent borrows one real test")
+        with self.assertRaises(SpeechVerificationFailed) as failure:
+            self.render_chunk(budget)
+        self.assertEqual(len(self.engine.calls), 6, "Reentry respects the reserved sibling starts")
+        self.assertIn("6/7 starts", str(failure.exception))
 
     def test_exhausted_whole_strategy_really_renders_and_caches_shorter_parts(self):
         text = "Insang waited beside the old gate. Everyone watched the river."

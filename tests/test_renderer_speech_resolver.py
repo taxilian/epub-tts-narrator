@@ -404,15 +404,23 @@ class SpeechResolverTests(unittest.TestCase):
                 self.assertEqual(audit["error_code"], "invalid_request")
                 self.assertEqual(client.calls, [])
 
-    def test_availability_and_acoustic_failures_cannot_be_accepted_or_rewritten(self):
-        for reasons in (["silent_audio"], ["text_mismatch", "excessive_silence"],
-                        ["generation_or_verification_error"], ["verification_failed: TimeoutError"]):
-            for action in ("accept", "rewrite"):
-                with self.subTest(reasons=reasons, action=action):
-                    evidence = [failure("Zekra waited.", reasons=reasons)]
-                    audit, proposal, _, _, _ = self.resolve("Xzqra waited.", "", Client(action), failures=evidence)
-                    self.assertIsNone(proposal)
-                    self.assertNotIn(action, audit["payload"]["permitted_actions"])
+    def test_acoustic_failures_permits_rewrites_but_never_acceptance(self):
+        for reasons in (["silent_audio"], ["text_mismatch", "excessive_silence"]):
+            with self.subTest(reasons=reasons):
+                evidence = [failure("Zekra waited.", reasons=reasons)]
+                audit, proposal, _, _, _ = self.resolve("Xzqra waited.", "", Client("accept"),
+                                                        failures=evidence)
+                self.assertIsNone(proposal)
+                self.assertNotIn("accept", audit["payload"]["permitted_actions"])
+                self.assertIn("rewrite", audit["payload"]["permitted_actions"])
+        for reasons in (["generation_or_verification_error"], ["verification_failed: TimeoutError"]):
+            with self.subTest(reasons=reasons):
+                evidence = [failure("Zekra waited.", reasons=reasons)]
+                audit, proposal, _, _, _ = self.resolve("Xzqra waited.", "", Client("accept"),
+                                                        failures=evidence)
+                self.assertIsNone(proposal)
+                self.assertNotIn("accept", audit["payload"]["permitted_actions"])
+                self.assertNotIn("rewrite", audit["payload"]["permitted_actions"])
         audit, proposal, client, _, _ = self.resolve("Xzqra waited.", "", Client("split"),
                                                  failures=[failure("", reasons=["silent_audio"])])
         self.assertEqual(proposal["action"], "split")
