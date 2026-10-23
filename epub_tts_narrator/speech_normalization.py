@@ -14,6 +14,7 @@ import unicodedata
 from .attribution_review import _bounded_map
 from .pipeline import fingerprint
 from .prompts import COMMON
+from .provider import OutputTruncatedError, ProviderError
 
 
 VERSION = 1
@@ -445,6 +446,12 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                 raise ValueError(f"{label}: {exc}") from exc
         try:
             return requests.run(system, payload, checked, cancelled=cancelled)
+        except ProviderError as exc:
+            error_type = OutputTruncatedError if isinstance(exc, OutputTruncatedError) else ProviderError
+            raise error_type(f"{label}: {exc}\nNo unvalidated spelling edits were applied; "
+                             "completed, validated responses remain cached.",
+                             status_code=exc.status_code, code=exc.code, retryable=exc.retryable,
+                             retry_after_seconds=exc.retry_after_seconds, rate_limits=exc.rate_limits) from exc
         except ValueError as exc:
             chapter_ids = {blocks[block_positions[row["block_id"]]]["chapter_id"] for row in rows}
             chapters = [chapter.get("title") or chapter["id"]
@@ -455,17 +462,21 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                              "completed, validated responses remain cached.") from exc
     def scan(task, cancelled):
         number, rows, payload = task
-        scanned = run_stage(SCAN, payload, lambda response: _validate_scan(response, rows, names),
-                            rows, number, "scan", cancelled)
+        from .speech_scan_recovery import scan_with_recovery
+        def run(part_payload, part_rows):
+            return run_stage(SCAN, part_payload, lambda response: _validate_scan(response, part_rows, names),
+                             part_rows, number, "scan", cancelled)
+        scanned, subdivision = scan_with_recovery(requests, SCAN, payload, rows, run, progress)
+        scanned = _validate_scan({"segments": scanned}, rows, names)
         progress(f"Preparing spoken spelling {number}/{len(tasks)}: scanned")
         proposals = []
         for row in scanned:
             for index, edit in enumerate(row["edits"]):
                 proposals.append({"edit_id": f"{row['segment_id']}:{index}", "segment_id": row["segment_id"], **edit})
-        return payload, proposals
+        return payload, proposals, subdivision
     scanned = _bounded_map(tasks, scan, workers)
     review_tasks = [(batch_index, payload, proposals, reviewer, lens)
-                    for batch_index, (payload, proposals) in enumerate(scanned) if proposals
+                    for batch_index, (payload, proposals, _) in enumerate(scanned) if proposals
                     for reviewer, lens in _LENSES]
     def review(task, cancelled):
         batch_index, payload, proposals, reviewer, lens = task
@@ -481,7 +492,7 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
         for vote in rows:
             by_edit.setdefault((batch_index, vote["edit_id"]), []).append(dict(vote, reviewer_id=reviewer))
     edits_by_segment, audit = {}, []
-    for batch_index, (_, proposals) in enumerate(scanned):
+    for batch_index, (_, proposals, _) in enumerate(scanned):
         for proposal in proposals:
             edit_votes = by_edit[(batch_index, proposal["edit_id"])]
             approved = sum(vote["verdict"] == "approve" for vote in edit_votes) >= 2
@@ -506,6 +517,10 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
         "applied_edits": sum(row["applied"] for row in audit),
         "rejected_edits": sum(not row["applied"] for row in audit), "decisions": audit,
     }
+    subdivisions = [{"batch": index + 1, **record} for index, (_, _, record) in enumerate(scanned)
+                    if record.get("status") == "subdivided"]
+    if subdivisions:
+        result["provenance"]["speech_normalization"]["scan_subdivisions"] = subdivisions
     progress(f"Spoken spelling complete: {sum(row['applied'] for row in audit)} edit(s) applied; "
              f"{sum(not row['applied'] for row in audit)} proposal(s) left unchanged.")
     return result
