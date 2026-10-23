@@ -392,7 +392,11 @@ These limitations are separate from speaker-attribution uncertainty. Review extr
 ```sh
 python3.11 -m epub_tts_narrator review examples/last-lantern/analysis.json
 python3.11 -m epub_tts_narrator validate examples/last-lantern/reviewed.json --ready
-python3.11 -m unittest discover -s tests -q
+
+# The suite exercises the renderer verification stack, so install the extras first.
+python3.11 -m venv .venv
+.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile
+.venv/bin/python -m unittest discover -s tests -q
 
 # Rebuild the example in a new directory without any API calls.
 python3.11 examples/build_example.py /tmp/new-audiobook-example
