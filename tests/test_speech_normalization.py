@@ -156,14 +156,16 @@ class SpeechNormalizationTests(unittest.TestCase):
     def test_runtime_guards_reject_omissions_names_numbers_negation_and_bad_offsets(self):
         examples = [
             ("wheerrre issss sheeee", "where"), ("never ever", "ever"), ("can't", "can"),
-            ("noooo", "yes"), ("red", "blue"), ("not", "now"), ("where is she", "where she"), ("Vern", "John"), ("123", "124"), ("three", "four"),
+            ("noooo", "yes"), ("not", "now"), ("where is she", "where she"), ("Vern", "John"), ("123", "124"), ("three", "four"),
             ("wull", ""), ("wull", "<whisper>well</whisper>"),
         ]
         for before, after in examples:
             with self.subTest(before=before, after=after):
                 source = document(before)
+                requests = Requests({before: after})
                 with self.assertRaises(ValueError):
-                    normalize_document_speech(source, Requests({before: after}))
+                    normalize_document_speech(source, requests)
+                self.assertEqual(len(requests.calls), 1)
         row = document("wull")["segments"][0]
         change = edit(row["text"], "wull", "well")
         change["start"] = 1

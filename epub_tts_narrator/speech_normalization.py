@@ -300,7 +300,11 @@ def _guard_edit(edit, row, names):
             or bool(before_words) != bool(after_words)):
         raise ValueError("Speech spelling edits must be bounded and must not add or remove all lexical content")
     if not _word_forms_accounted_for(before, after):
-        raise ValueError("Speech spelling edits must account for every word with matching spelling or sound; no omissions or unrelated substitutions")
+        from .speech_word_review import word_alignment
+        if word_alignment(before, after) is None:
+            raise ValueError("Speech spelling edit cannot preserve complete ordered word coverage: "
+                             f"original={_shown(before, 160)}; replacement={_shown(after, 160)}. "
+                             "Do not omit, add, reorder, or absorb unchanged words.")
     if any(char in before + after for char in "[]"):
         raise ValueError("Speech spelling edits cannot change square-bracket delimiters")
     _preserve_protected(before, after, names)
@@ -381,12 +385,18 @@ def _validate_votes(response, proposals):
         raise ValueError("Speech spelling review must judge every proposed edit")
     votes = []
     for vote, proposal in zip(response["votes"], proposals):
-        if (not isinstance(vote, dict) or set(vote) != {"edit_id", "verdict", "reason"}
+        fields = {"edit_id", "verdict", "reason"}
+        if "word_preservation" in proposal:
+            fields.add("word_verdicts")
+        if (not isinstance(vote, dict) or set(vote) != fields
                 or vote["edit_id"] != proposal["edit_id"]
                 or vote["verdict"] not in {"approve", "reject", "uncertain"}
                 or not isinstance(vote["reason"], str) or not vote["reason"].strip()
                 or len(vote["reason"]) > 1000):
             raise ValueError("Speech spelling review needs ordered ID-bound verdicts and brief reasons")
+        if "word_preservation" in proposal:
+            from .speech_word_review import validate_word_verdicts
+            validate_word_verdicts(vote, proposal)
         votes.append(deepcopy(vote))
     return votes
 
@@ -439,7 +449,7 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                             for index in sorted(context_ids)]}
     tasks = [(number, rows, payload_for(rows, number)) for number, rows in enumerate(batches, 1)]
     def run_stage(system, payload, validate, rows, number, stage, cancelled):
-        from .speech_prompts import SCAN as compact_scan, REVIEW as compact_review, pack_payload
+        from .speech_prompts import SCAN as compact_scan, REVIEW as compact_review, CONTEXTUAL_REVIEW, pack_payload
         label = f"Speech spelling {stage} batch {number}/{len(tasks)}"
         def checked(response):
             try:
@@ -453,6 +463,8 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                 if found:
                     return accepted
             compact_system = compact_scan if payload["mode"] == "speech_spelling_scan" else compact_review
+            if payload.get("word_preservation_contract") == 1:
+                compact_system = CONTEXTUAL_REVIEW
             return requests.run(compact_system, pack_payload(payload), checked, cancelled=cancelled)
         except ProviderError as exc:
             error_type = OutputTruncatedError if isinstance(exc, OutputTruncatedError) else ProviderError
@@ -477,10 +489,19 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
         scanned, subdivision = scan_with_recovery(requests, SCAN, payload, rows, run, progress)
         scanned = _validate_scan({"segments": scanned}, rows, names)
         progress(f"Preparing spoken spelling {number}/{len(tasks)}: scanned")
+        from .speech_word_review import review_requirement
         proposals = []
         for row in scanned:
             for index, edit in enumerate(row["edits"]):
-                proposals.append({"edit_id": f"{row['segment_id']}:{index}", "segment_id": row["segment_id"], **edit})
+                proposal = {"edit_id": f"{row['segment_id']}:{index}", "segment_id": row["segment_id"], **edit}
+                requirement = review_requirement(edit)
+                if requirement is not None:
+                    proposal["word_preservation"] = requirement
+                proposals.append(proposal)
+        contextual = sum("word_preservation" in proposal for proposal in proposals)
+        if contextual:
+            progress(f"Speech spelling scan batch {number}/{len(tasks)}: {contextual} unfamiliar spelling "
+                     "proposal(s) require contextual word-preservation review; not scanner repair.")
         return payload, proposals, subdivision
     scanned = _bounded_map(tasks, scan, workers)
     review_tasks = [(batch_index, payload, proposals, reviewer, lens)
@@ -490,6 +511,8 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
         batch_index, payload, proposals, reviewer, lens = task
         review_payload = dict(payload, mode="speech_spelling_review", reviewer_id=reviewer,
                               private_lens=lens, proposals=proposals)
+        if any("word_preservation" in proposal for proposal in proposals):
+            review_payload["word_preservation_contract"] = 1
         votes = run_stage(REVIEW, review_payload, lambda response: _validate_votes(response, proposals),
                           batches[batch_index], batch_index + 1, f"review ({reviewer})", cancelled)
         progress(f"Spoken spelling jury {batch_index + 1}/{len(tasks)}: {reviewer} completed")
@@ -499,11 +522,12 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
     for batch_index, reviewer, rows in votes:
         for vote in rows:
             by_edit.setdefault((batch_index, vote["edit_id"]), []).append(dict(vote, reviewer_id=reviewer))
+    from .speech_word_review import approves
     edits_by_segment, audit = {}, []
     for batch_index, (_, proposals, _) in enumerate(scanned):
         for proposal in proposals:
             edit_votes = by_edit[(batch_index, proposal["edit_id"])]
-            approved = sum(vote["verdict"] == "approve" for vote in edit_votes) >= 2
+            approved = sum(approves(vote, proposal) for vote in edit_votes) >= 2
             audit.append({"proposal": deepcopy(proposal), "votes": edit_votes, "applied": approved})
             if approved:
                 edits_by_segment.setdefault(proposal["segment_id"], []).append(
@@ -529,6 +553,13 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                     if record.get("status") == "subdivided"]
     if subdivisions:
         result["provenance"]["speech_normalization"]["scan_subdivisions"] = subdivisions
+    contextual = [row for row in audit if "word_preservation" in row["proposal"]]
+    if contextual:
+        unresolved = sum(not row["applied"] for row in contextual)
+        result["provenance"]["speech_normalization"]["unresolved_edits"] = unresolved
+        if unresolved:
+            progress(f"Spoken spelling: {unresolved} contextual proposal(s) remain unresolved; "
+                     "source spelling retained unchanged. Inspect speech_normalization.decisions in provenance.")
     progress(f"Spoken spelling complete: {sum(row['applied'] for row in audit)} edit(s) applied; "
              f"{sum(not row['applied'] for row in audit)} proposal(s) left unchanged.")
     return result

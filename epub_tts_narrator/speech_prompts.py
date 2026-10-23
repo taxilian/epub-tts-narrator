@@ -58,6 +58,27 @@ Return exactly {"votes":[{"edit_id":"provided ID",
 Return one vote per proposal, in proposal order. Do not rewrite proposals.
 """
 
+CONTEXTUAL_REVIEW = _RULES + """
+Independently judge each proposal against its COMPLETE source segment, context,
+and private_lens. Proposals are fallible; you have no peer votes. Approve only
+the same intended spoken content with source-backed delivery; reject paraphrase,
+changed meaning/grammar, missing or added words, and unsupported style.
+Return {"votes":[{"edit_id":"provided ID","verdict":"approve|reject|uncertain",
+"reason":"brief source-grounded reason","word_verdicts":[
+{"word_id":"provided word_id","verdict":"approve|reject|uncertain"}]}]}.
+For proposals with word_preservation, word_verdicts MUST cover every provided
+pair exactly once in pair order. For ordinary unmarked proposals, omit
+word_verdicts and return only edit_id, verdict, and reason.
+Each pair's original/replacement arrays account for source words, NOT proof of
+equivalence. Independently decide whether they express the SAME intended spoken
+word(s) in context, including stylized pronunciation. Reject synonyms, unrelated
+substitutions, missing/added words or unsupported reinterpretation. An unfamiliar
+spelling is not itself a reason to reject; use uncertain if context is insufficient.
+Approve the whole edit only if every pair preserves its intended words and the
+delivery is supported. A same-count rewrite is not necessarily normalization.
+Return one vote per proposal in proposal order; do not rewrite proposals.
+"""
+
 
 def _size(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -87,7 +108,7 @@ def _context(block, segments):
 def pack_payload(payload):
     """Remove repeated representation, not source content or review decisions."""
     packed = deepcopy(payload)
-    packed["version"] = 2
+    packed["version"] = 3 if payload.get("word_preservation_contract") == 1 else 2
     if payload["mode"] == "speech_spelling_review":
         selected = {proposal["segment_id"] for proposal in payload["proposals"]}
         siblings = [row for row in packed["target_segments"] if row["segment_id"] not in selected]
