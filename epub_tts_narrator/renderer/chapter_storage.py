@@ -8,6 +8,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .chapter_protocol import ARTIFACT_NAMES, require_hash
 from .common import file_hash
+from .diagnostics import exception_detail
 
 
 class S3ArtifactPublisher:
@@ -69,9 +70,11 @@ class S3ArtifactPublisher:
             if (stored.get("ContentLength") != record["size"] or stored.get("Metadata", {}).get("sha256") != sha256
                     or file_hash(path) != sha256):
                 raise ValueError("Artifact upload failed its size/hash metadata check")
-        except Exception:
-            # SDK errors can include private endpoint or credential information.
-            raise RuntimeError("Unable to publish chapter artifacts; saved audio is retained for retry") from None
+        except Exception as exc:
+            # SDK errors can include private endpoint or credential information;
+            # report only the safe type and provider status/code, never raw text.
+            raise RuntimeError(f"Unable to publish chapter artifacts ({exception_detail(exc)}); "
+                               "saved audio is retained for retry") from None
         return record
 
     def url(self, record):
@@ -81,8 +84,8 @@ class S3ArtifactPublisher:
             return self.client.generate_presigned_url(
                 "get_object", Params={"Bucket": self.bucket, "Key": record["key"]},
                 ExpiresIn=self.settings.get("download_expiry_seconds", 3600))
-        except Exception:
-            raise RuntimeError("Unable to create a chapter download URL") from None
+        except Exception as exc:
+            raise RuntimeError(f"Unable to create a chapter download URL ({exception_detail(exc)})") from None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -102,5 +105,6 @@ def stop_runpod(settings):
         with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=30) as response:
             if not 200 <= response.status < 300:
                 raise ValueError("Provider did not acknowledge stopping the Pod")
-    except (HTTPError, URLError, OSError, ValueError):
-        raise RuntimeError("Runpod did not confirm the stop request; the server may still be billed") from None
+    except (HTTPError, URLError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Runpod did not confirm the stop request ({exception_detail(exc)}); "
+                           "the server may still be billed") from None

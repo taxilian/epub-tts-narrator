@@ -231,6 +231,28 @@ class RunpodLifecycleTests(unittest.TestCase):
         for secret in fake.secrets:
             self.assertNotIn(secret, str(caught.exception))
 
+    def test_operation_failure_skips_stop_delay_and_still_stops(self):
+        fake = self.fake_deployment()
+        fake.encode.side_effect = RuntimeError("encode fixture failure")
+        with self.assertRaisesRegex(RuntimeError, "encode fixture failure"):
+            self.run_fake(fake, self.args("encode", "book", "--stop-delay", "300"))
+        self.sleep.assert_not_called()
+        fake.stop.assert_called_once()
+
+    def test_double_failure_retains_operation_and_stop_diagnostics(self):
+        fake = self.fake_deployment()
+        fake.install.side_effect = RuntimeError("install fixture failure")
+        fake.stop.side_effect = RuntimeError("stop fixture failure fixture-provider-secret")
+        with self.assertRaises(RuntimeError) as caught:
+            self.run_fake(fake, self.args("update", "--stop-delay", "300"))
+        message = str(caught.exception)
+        self.assertIn("install fixture failure", message)
+        self.assertIn("stop fixture failure", message)
+        self.assertIn("billing may continue", message)
+        self.assertNotIn("fixture-provider-secret", message)
+        self.sleep.assert_not_called()
+        fake.stop.assert_called_once()
+
     def test_status_only_prints_selected_fields_without_credentials(self):
         fake = self.fake_deployment()
         fake.api.get_pod.return_value = {

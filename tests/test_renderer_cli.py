@@ -221,6 +221,30 @@ class RendererCLITests(unittest.TestCase):
         engine.close.assert_called_once()
         verifier.close.assert_called_once()
 
+    def test_fatal_failure_reports_type_location_and_redacts_configured_secrets(self):
+        self.config.write_text(self.config.read_text() + '\n[[render_pool.workers]]\n'
+            'name="other"\ntype="fish_http"\nurl="http://127.0.0.1:9999/v1/tts"\n'
+            'api_key="private-worker-key"\n')
+        with patch("epub_tts_narrator.renderer.cli.load_bundle",
+                   side_effect=RuntimeError("unreadable bundle: private-worker-key")):
+            status, _, error = self.run_cli("render", self.bundle, "--config", self.config)
+        self.assertEqual(status, 2)
+        self.assertIn("Renderer stopped: RuntimeError: unreadable bundle: [REDACTED]", error)
+        self.assertNotIn("private-worker-key", error)
+        self.assertIn("at main (", error)
+        self.assertRegex(error, r"cli\.py:\d+")
+        self.assertNotIn("bundle = load_bundle", error)
+
+    def test_provider_failure_reports_type_location_and_keeps_cache_note(self):
+        from epub_tts_narrator.provider import ProviderError
+        with patch("epub_tts_narrator.renderer.cli.load_bundle",
+                   side_effect=ProviderError("provider unreachable fixture")):
+            status, _, error = self.run_cli("render", self.bundle, "--config", self.config)
+        self.assertEqual(status, 2)
+        self.assertIn("Renderer stopped: ProviderError: provider unreachable fixture", error)
+        self.assertIn("at main (", error)
+        self.assertIn("Validated text-model responses remain cached", error)
+
     def test_render_loudness_and_encoding_defaults_and_validation(self):
         settings = load_config(self.config)["render"]
         self.assertIs(settings["normalize_loudness"], True)

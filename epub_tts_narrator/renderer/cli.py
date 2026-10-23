@@ -15,6 +15,7 @@ from epub_tts_narrator.provider import ProviderError
 from .bundle import load_bundle, make_plan
 from .config import load_config, select_voice_designer
 from .book_context import resolve_book_config, voice_store
+from .diagnostics import configured_secrets, format_fatal
 
 
 def parser():
@@ -221,6 +222,7 @@ def doctor(config):
 def main(argv=None):
     args = parser().parse_args(argv)
     engine = verifier = None
+    config = None
     interrupts = None
     try:
         if args.command == "runpod":
@@ -438,12 +440,14 @@ def main(argv=None):
                 print(f"Completed audiobook: {config['render']['output_dir']}")
         return 0
     except ProviderError as exc:
-        print(f"Renderer stopped: {exc}", file=sys.stderr)
+        secrets = configured_secrets(config) if isinstance(config, dict) else ()
+        print("Renderer stopped: " + format_fatal(exc, secrets), file=sys.stderr)
         print("Validated text-model responses remain cached. Rerun the same command to retry incomplete requests.",
               file=sys.stderr)
         return 2
     except (ValueError, RuntimeError, OSError, KeyError) as exc:
-        print(f"Renderer stopped: {exc}", file=sys.stderr)
+        secrets = configured_secrets(config) if isinstance(config, dict) else ()
+        print("Renderer stopped: " + format_fatal(exc, secrets), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("Interrupted; verified clips are retained for resume.", file=sys.stderr)

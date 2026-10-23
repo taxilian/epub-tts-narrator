@@ -54,6 +54,32 @@ class ChapterStorageTests(unittest.TestCase):
             self.publisher.publish("a" * 64, "sync.json", self.path, file_hash(self.path))
         self.assertNotIn("private-credential-value", str(raised.exception))
 
+    def test_publish_failure_identifies_sdk_type_and_provider_codes_only(self):
+        class ClientError(Exception):
+            pass
+        failure = ClientError("raw text with fixture-ceph-secret embedded")
+        failure.response = {"Error": {"Code": "AccessDenied", "Message": "raw text"},
+                            "ResponseMetadata": {"HTTPStatusCode": 403}}
+        self.client.upload_file.side_effect = failure
+        with self.assertRaises(RuntimeError) as raised:
+            self.publisher.publish("a" * 64, "sync.json", self.path, file_hash(self.path))
+        message = str(raised.exception)
+        self.assertIn("ClientError", message)
+        self.assertIn("AccessDenied", message)
+        self.assertIn("403", message)
+        self.assertIn("saved audio is retained", message)
+        self.assertNotIn("raw text", message)
+        self.assertNotIn("fixture-ceph-secret", message)
+
+    def test_url_failure_identifies_sdk_type_without_raw_text(self):
+        self.client.generate_presigned_url.side_effect = KeyError("raw-key-material")
+        record = {"key": "k", "bucket": "fixture", "endpoint_url": self.settings["endpoint_url"],
+                  "region": "test-1"}
+        with self.assertRaises(RuntimeError) as raised:
+            self.publisher.url(record)
+        self.assertIn("KeyError", str(raised.exception))
+        self.assertNotIn("raw-key-material", str(raised.exception))
+
     def test_credentials_must_be_explicit(self):
         with self.assertRaisesRegex(ValueError, "explicit"):
             S3ArtifactPublisher(self.settings)
@@ -86,6 +112,31 @@ class ChapterStorageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 stop_runpod({"runpod_pod_id": "../../other", "runpod_api_key": "fixture"})
             opener.assert_not_called()
+
+    def test_stop_failure_identifies_http_status_and_type(self):
+        from urllib.error import HTTPError
+        opener = Mock()
+        opener.open.side_effect = HTTPError("https://rest.runpod.io/v1/pods/pod_fixture/stop",
+                                            503, "unavailable", {}, None)
+        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener", return_value=opener):
+            with self.assertRaises(RuntimeError) as raised:
+                stop_runpod({"runpod_pod_id": "pod_fixture", "runpod_api_key": "fixture-key"})
+        message = str(raised.exception)
+        self.assertIn("HTTPError", message)
+        self.assertIn("HTTP status 503", message)
+        self.assertIn("may still be billed", message)
+        self.assertNotIn("fixture-key", message)
+
+    def test_stop_failure_identifies_network_error_type_without_raw_reason(self):
+        from urllib.error import URLError
+        opener = Mock()
+        opener.open.side_effect = URLError("raw connection detail fixture-key")
+        with patch("epub_tts_narrator.renderer.chapter_storage.build_opener", return_value=opener):
+            with self.assertRaises(RuntimeError) as raised:
+                stop_runpod({"runpod_pod_id": "pod_fixture", "runpod_api_key": "fixture-key"})
+        message = str(raised.exception)
+        self.assertIn("URLError", message)
+        self.assertNotIn("raw connection detail", message)
 
 
 if __name__ == "__main__":

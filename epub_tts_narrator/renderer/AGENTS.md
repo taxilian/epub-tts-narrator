@@ -72,3 +72,4 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - See root `REMOTE_RENDERING.md` for distributed rendering contracts.
 - `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.
 - Local `workflow.render()` overlaps one chapter assembly with the next chapter's synthesis; drain assembly before releasing locks. Chunk/recovery algorithms remain shared with chapter jobs.
+- `diagnostics.py` owns fatal frame formatting and payload-free SDK/HTTP error details; managed Runpod failures skip optional stop delays.

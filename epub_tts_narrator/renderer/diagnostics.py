@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import traceback
 import unicodedata
 from urllib.parse import quote, quote_plus
 
@@ -54,3 +55,45 @@ def safe_error_text(value, secrets=()):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return "".join(character for character in text if character in "\n\t"
                    or not unicodedata.category(character).startswith("C"))
+
+
+_SAFE_PROVIDER_CODE = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
+
+
+def exception_detail(exc):
+    """Identify a failure by type and status codes only, never by its raw text.
+
+    SDK and HTTP errors can embed credentials, endpoints, or request payloads
+    in their message; the structured status and provider code stay actionable
+    without echoing that text.
+    """
+    parts = [type(exc).__name__]
+    status = getattr(exc, "status", None) or getattr(exc, "code", None)
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error")
+        code = error.get("Code") if isinstance(error, dict) else None
+        if isinstance(code, str) and _SAFE_PROVIDER_CODE.fullmatch(code):
+            parts.append(f"provider code {code}")
+        metadata = response.get("ResponseMetadata")
+        if isinstance(metadata, dict) and status is None:
+            status = metadata.get("HTTPStatusCode")
+    if isinstance(status, int) and not isinstance(status, bool):
+        parts.append(f"HTTP status {status}")
+    errno = getattr(exc, "errno", None)
+    if isinstance(errno, int) and not isinstance(errno, bool):
+        parts.append(f"errno {errno}")
+    return ", ".join(parts)
+
+
+def format_fatal(exc, secrets=()):
+    """Fatal CLI report: exception type, redacted message, and code location.
+
+    Frames report file, line, and function only — no source lines, no locals,
+    no exception chains — so book text never reaches the output.
+    """
+    lines = [f"{type(exc).__name__}: {exc}"]
+    if exc.__traceback__ is not None:
+        for frame in traceback.extract_tb(exc.__traceback__):
+            lines.append(f"  at {frame.name} ({frame.filename}:{frame.lineno})")
+    return safe_error_text("\n".join(lines), secrets)

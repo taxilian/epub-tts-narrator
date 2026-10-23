@@ -746,6 +746,7 @@ def run_command(args):
         previous = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         interrupted = False
+        operation_error = None
         try:
             if args.runpod_action == "bootstrap":
                 deployment.provision()
@@ -764,10 +765,14 @@ def run_command(args):
         except KeyboardInterrupt:
             interrupted = True
             raise
+        except Exception as exc:
+            operation_error = exc
+            raise
         finally:
             try:
                 if deployment.pod_id:
-                    if args.stop_delay and not interrupted:
+                    # A failed operation skips the delay; paid time is not spent beside stopped work.
+                    if args.stop_delay and not interrupted and operation_error is None:
                         print(f"Stopping in {args.stop_delay} seconds; press Ctrl-C to stop now.", flush=True)
                         try:
                             time.sleep(args.stop_delay)
@@ -779,8 +784,12 @@ def run_command(args):
                     try:
                         deployment.stop()
                     except Exception as exc:
-                        raise RuntimeError("Could not confirm shutdown of the Runpod deployment; GPU billing may continue. "
-                                           "Stop it in the Runpod console. " + safe_error_text(exc, deployment.secrets)) from None
+                        message = ("Could not confirm shutdown of the Runpod deployment; GPU billing may continue. "
+                                   "Stop it in the Runpod console. " + safe_error_text(exc, deployment.secrets))
+                        if operation_error is not None:
+                            message += (f" Operation failure ({type(operation_error).__name__}): "
+                                        + safe_error_text(operation_error, deployment.secrets))
+                        raise RuntimeError(message) from None
                     finally:
                         signal.signal(signal.SIGINT, saved_interrupt)
                 elif deployment.state.get("pod_creation_pending"):
