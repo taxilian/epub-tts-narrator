@@ -1838,6 +1838,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
     book_lock = None
     voice_lock = None
+    assembly_executor = None
     try:
         book_lock = _lock_book_audio(bundle)
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
@@ -1867,8 +1868,35 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         engine_identity, verifier_identity = engine.identity, verifier.identity
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
+        assembly_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audiobook-assemble")
+        pending_assembly = None
+
+        def completed(composed, chapter_acceptance, chapter_label, chapter_started):
+            rendered.append(composed)
+            acceptance.extend(chapter_acceptance)
+            notify(f"Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
+                   f"run elapsed {format_duration(monotonic() - run_started)} "
+                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready).")
+
+        def finish_pending():
+            nonlocal pending_assembly
+            if pending_assembly is not None:
+                future, chapter_acceptance, chapter_label, chapter_started = pending_assembly
+                completed(future.result(), chapter_acceptance, chapter_label, chapter_started)
+                pending_assembly = None
+
+        def compose(chapter, clips, context, chapter_acceptance):
+            composed = prepare_chapter(
+                dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+                clips, work / "chapters", book=bundle["source"]["book"],
+                render_settings=config["render"], context=context, notify=notify)
+            _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+            return composed
+
         for chapter_index, chapter in enumerate(plan["chapters"]):
             stop_if_requested()
+            if pending_assembly is not None and pending_assembly[0].done():
+                finish_pending()
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
@@ -1895,16 +1923,13 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     write_json(work / "runs" / digest(plan) / "plan.json", plan)
                 context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
                 stop_if_requested()
-                composed = prepare_chapter(
-                    dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
-                    clips, work / "chapters", book=bundle["source"]["book"],
-                    render_settings=config["render"], context=context, notify=notify)
-                _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
-            rendered.append(composed)
-            acceptance.extend(chapter_acceptance)
-            notify(f"Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
-                   f"run elapsed {format_duration(monotonic() - run_started)} "
-                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready).")
+                finish_pending()
+                future = assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance)
+                pending_assembly = (future, chapter_acceptance, chapter_label, chapter_started)
+            else:
+                finish_pending()
+                completed(composed, chapter_acceptance, chapter_label, chapter_started)
+        finish_pending()
         stop_if_requested()
         if chapters_only:
             result = {
@@ -1927,6 +1952,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         _failed_run(work, exc, notify)
         raise
     finally:
+        if assembly_executor is not None:
+            assembly_executor.shutdown(wait=True, cancel_futures=True)
         if voice_lock is not None:
             voice_lock.rmdir()
         if book_lock is not None:
