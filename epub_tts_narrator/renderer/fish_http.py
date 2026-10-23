@@ -242,11 +242,17 @@ class FishHTTPEngine:
             raise FishHTTPError("Fish HTTP requires msgpack; install renderer.requirements.txt", retryable=False) from exc
         body = {"text": text, "references": references, "format": "wav", "normalize": False,
                 **{key: value for key, value in self.sampling.items() if key != "top_k"}}
+        effective_seed = seed
         if self.protocol == "fish_native_drama3":
+            # Fish Speech 5415669's fish_speech/utils/utils.py:set_seed clamps
+            # every seed above 2**31 to the same value. Fold our uint32 attempt
+            # seeds into 31 bits so consecutive retries remain distinct, including
+            # across the boundary. Keep the original seed and cache identity.
+            effective_seed = seed % (1 << 31)
             # Preserve the paragraph as one take and reuse native encoded voice
             # references. The chapter API already registers the FLAC bytes once;
             # this cache prevents re-encoding them on each loopback request.
-            body.update(seed=seed, single_chunk=True, use_memory_cache="on")
+            body.update(seed=effective_seed, single_chunk=True, use_memory_cache="on")
         payload = msgpack.packb(body, use_bin_type=True)
         if len(payload) > MAX_AUDIO_BYTES:
             raise EngineError("Fish HTTP request is larger than 100 MiB")
@@ -281,9 +287,11 @@ class FishHTTPEngine:
                     )
                 metadata = inspect_wav(staged)
                 os.link(staged, output)
+                if self.protocol == "fish_native_drama3":
+                    metadata["seed_effective"] = effective_seed
                 return {**metadata, "backend": "fish_http", "worker": self.name,
                         "model": self.model, "seed_requested": seed,
-                        "seed_applied": response.headers.get("X-Audiobook-Seed-Applied") == str(seed)}
+                        "seed_applied": response.headers.get("X-Audiobook-Seed-Applied") == str(effective_seed)}
         except HTTPError as exc:
             try:
                 try:

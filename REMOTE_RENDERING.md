@@ -156,6 +156,9 @@ For the pinned official native Fish server, set the worker's
 memory caching, preserves our paragraph boundaries, and puts the seed in the
 native request body. The default `fish_inline` profile remains available for
 existing compatible workers. The native profile requires `engine.top_k = 30`.
+The native adapter folds generated seeds into the server's supported 31-bit
+range so retries do not collapse to the same clamped seed. Take metadata retains
+the requested and submitted seeds; previously accepted audio remains reusable.
 
 For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and

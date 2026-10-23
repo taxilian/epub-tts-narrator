@@ -187,13 +187,14 @@ class NativeDrama3TransportTests(unittest.TestCase):
         self.voice = {"kind": "reference", "reference_audio": str(reference),
                       "reference_text": "Reference words.", "voice_id": "one"}
         self.requests = []
+        self.response_headers = {}
         opener = Mock()
 
         def respond(request, **kwargs):
             self.requests.append(request)
             response = io.BytesIO(wav_bytes())
             response.status = 200
-            response.headers = {"Content-Length": str(len(wav_bytes()))}
+            response.headers = {"Content-Length": str(len(wav_bytes())), **self.response_headers}
             return response
 
         opener.open.side_effect = respond
@@ -224,11 +225,95 @@ class NativeDrama3TransportTests(unittest.TestCase):
         self.assertNotIn("X-audiobook-top-k", headers)
         self.assertNotIn("X-audiobook-seed", headers)
         self.assertEqual(result["seed_requested"], 19)
+        self.assertEqual(result["seed_effective"], 19)
         # Native Fish does not acknowledge the seed; do not claim verification.
         self.assertFalse(result["seed_applied"])
         self.assertEqual((self.root / "native.wav").read_bytes(), wav_bytes())
         self.assertEqual(client.identity["protocol"], "fish-native-drama3-wav-v1")
         self.assertEqual(client.identity["request_options"]["fixed_top_k"], 30)
+
+    def test_native_upper_half_retries_remain_distinct_after_upstream_seed_clamp(self):
+        client = self.client(protocol="fish_native_drama3")
+        applied = []
+        for attempt in range(12):
+            seed = 3_000_000_000 + attempt
+            result = client.synthesize("A new take.", self.voice,
+                                       self.root / f"retry-{attempt}.wav", seed=seed)
+            payload, _ = self.payload()
+            wire_seed = payload["seed"]
+            # Model-free simulation of pinned native set_seed's upper bound.
+            applied.append(min(wire_seed, 1 << 31))
+            self.assertEqual(result["seed_requested"], seed)
+            self.assertEqual(result["seed_effective"], wire_seed)
+            self.assertGreaterEqual(wire_seed, 0)
+            self.assertLess(wire_seed, 1 << 31)
+            self.assertFalse(result["seed_applied"])
+        self.assertEqual(len(set(applied)), 12)
+
+    def test_native_seed_mapping_handles_boundaries_without_changing_cache_identity(self):
+        client = self.client(protocol="fish_native_drama3")
+        expected_identity = {
+            "engine": "fish_http", "model": "drama-3", "protocol": "fish-native-drama3-wav-v1",
+            "sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
+            "multi_speaker": True,
+            "request_options": {"single_chunk": True, "use_memory_cache": "on",
+                                "seed_transport": "body", "fixed_top_k": 30},
+        }
+        cases = ((0, 0), (1, 1), ((1 << 31) - 1, (1 << 31) - 1),
+                 (1 << 31, 0), ((1 << 31) + 1, 1),
+                 (0xFFFFFFFE, (1 << 31) - 2), (0xFFFFFFFF, (1 << 31) - 1))
+        for seed, effective in cases:
+            with self.subTest(seed=seed):
+                result = client.synthesize("Hello.", self.voice,
+                                           self.root / f"boundary-{seed}.wav", seed=seed)
+                payload, headers = self.payload()
+                self.assertEqual(payload["seed"], effective)
+                self.assertNotIn("X-audiobook-seed", headers)
+                self.assertEqual(result["seed_requested"], seed)
+                self.assertEqual(result["seed_effective"], effective)
+                self.assertEqual(client.identity, expected_identity)
+
+    def test_native_seed_acknowledgement_compares_effective_seed(self):
+        client = self.client(protocol="fish_native_drama3")
+        seed, effective = (1 << 31) + 7, 7
+        for index, (acknowledged, expected) in enumerate(((seed, False), (effective, True))):
+            self.response_headers["X-Audiobook-Seed-Applied"] = str(acknowledged)
+            result = client.synthesize("Hello.", self.voice,
+                                       self.root / f"acknowledged-{index}.wav", seed=seed)
+            self.assertEqual(result["seed_requested"], seed)
+            self.assertEqual(result["seed_effective"], effective)
+            self.assertEqual(result["seed_applied"], expected)
+
+    def test_seed_diagnostics_do_not_invalidate_accepted_speech_identity(self):
+        from epub_tts_narrator.renderer.common import digest
+        from epub_tts_narrator.renderer.speech_identity import generation_identity
+
+        client = self.client(protocol="fish_native_drama3")
+        voice = {**self.voice, "asset_hash": digest("saved-voice"),
+                 "reference_sha256": hashlib.sha256(wav_bytes()).hexdigest()}
+        request = {"kind": "speech", "engine": client.identity, "base_seed": 42,
+                   "sample_rate": 44100, "voice_asset_hash": voice["asset_hash"],
+                   "chunk": {"spoken_text": "Hello.", "segment": {"delivery": {"direction": ""}}}}
+        request_hash = digest(request)
+        current = client.synthesize("Hello.", voice, self.root / "identity.wav", seed=0xFFFFFFFF)
+        legacy = {key: value for key, value in current.items() if key != "seed_effective"}
+        voices = {voice["asset_hash"]: voice}
+        expected = generation_identity(request, voices)
+        self.assertEqual(generation_identity(request, voices, engine_metadata=legacy), expected)
+        self.assertEqual(generation_identity(request, voices, engine_metadata=current), expected)
+        self.assertEqual(digest(request), request_hash)
+
+    def test_inline_protocol_keeps_full_uint32_seed_and_acknowledgement(self):
+        seed = 0xFFFFFFFF
+        self.response_headers["X-Audiobook-Seed-Applied"] = str(seed)
+        result = self.client().synthesize("Hello.", self.voice,
+                                          self.root / "inline-seed.wav", seed=seed)
+        payload, headers = self.payload()
+        self.assertNotIn("seed", payload)
+        self.assertEqual(headers["X-audiobook-seed"], str(seed))
+        self.assertEqual(result["seed_requested"], seed)
+        self.assertTrue(result["seed_applied"])
+        self.assertNotIn("seed_effective", result)
 
     def test_http_target_quotes_are_trimmed_before_controls_but_reference_is_unchanged(self):
         voice = {**self.voice, "reference_text": ' “Saved reference.” '}
