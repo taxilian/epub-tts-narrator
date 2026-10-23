@@ -88,7 +88,14 @@ weights, voices and job checkpoints on `/workspace`:
 | `/workspace/.epub-tts-runtime` | Installer, managed Python and dependency cache |
 | `/workspace/models` | Drama 3 and CPU Whisper weights |
 | `/workspace/chapter-server-data` | Registered voices, durable jobs and resumable audio |
+| `/workspace/chapter-server-data/runtime-cache/sglang` | SGLang, Triton, Inductor, FlashInfer and CUDA compilation caches |
 | `/workspace/epub-tts-narrator.remote.toml` | Private merged server configuration |
+
+The launcher places the selected backend's virtual-environment tools first in
+its subprocess search path, including `ninja` used for kernel compilation.
+SGLang compilation caches are derived from `chapter_server.data_dir` and retained
+across stops; no environment-variable configuration is required. Restarting
+still loads model weights and captures process-local CUDA graphs.
 
 A network volume retains these files even if the Pod is replaced. Ceph retains
 finished exports independently. Persistent storage continues to cost money

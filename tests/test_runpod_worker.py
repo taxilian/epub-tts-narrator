@@ -319,6 +319,46 @@ class RunpodWorkerTests(unittest.TestCase):
         with self.assertRaises(worker.WorkerStopped):
             worker.wait_ready(process, stop, protocol="fish_sglang_drama3", fetch=wrong)
 
+    def test_backend_environment_finds_venv_tools_and_preserves_compile_caches(self):
+        root = self.batched_image()
+        for name in ("ninja", "python"):
+            executable = root / ".venv/bin" / name
+            executable.write_text(f"#!/bin/sh\nprintf 'selected-{name}'\n")
+            executable.chmod(0o755)
+        inherited = {"PATH": "/usr/bin:/bin", "HOME": "/unchanged-home",
+                     "TORCHINDUCTOR_CACHE_DIR": "/ephemeral-cache", "KEEP_ME": "fixture"}
+        config_before = deepcopy(self.config)
+        with patch.dict(os.environ, inherited, clear=True):
+            environment = worker.inference_environment(self.config, root)
+            self.assertEqual(dict(os.environ), inherited)
+        self.assertEqual(environment["PATH"], str(root / ".venv/bin") + ":/usr/bin:/bin")
+        self.assertEqual(environment["HOME"], "/unchanged-home")
+        self.assertEqual(environment["KEEP_ME"], "fixture")
+        self.assertEqual(self.config, config_before)
+        for name in ("ninja", "python"):
+            result = subprocess.run([name], env=environment, text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout, "selected-" + name)
+        cache = self.root / "data/runtime-cache/sglang"
+        expected = {
+            "SGLANG_CACHE_DIR": cache, "SGLANG_JIT_CACHE_DIR": cache / "jit",
+            "TORCHINDUCTOR_CACHE_DIR": cache / "inductor", "TRITON_CACHE_DIR": cache / "triton",
+            "FLASHINFER_WORKSPACE_BASE": cache, "CUDA_CACHE_PATH": cache / "nv"}
+        for key, directory in expected.items():
+            self.assertEqual(environment[key], str(directory))
+            self.assertTrue(directory.is_dir())
+        marker = cache / "triton/compiled-fixture"
+        marker.write_bytes(b"keep across launches")
+        worker.inference_environment(self.config, root)
+        self.assertEqual(marker.read_bytes(), b"keep across launches")
+
+    def test_native_backend_environment_selects_its_venv_without_sglang_cache_controls(self):
+        root = self.native_image()["fish_source"]
+        with patch.dict(os.environ, {}, clear=True):
+            environment = worker.inference_environment(self.config, root)
+        self.assertEqual(environment["PATH"], str(root / ".venv/bin") + os.pathsep + os.defpath)
+        self.assertEqual(set(environment), {"PATH"})
+        self.assertFalse((self.root / "data/runtime-cache").exists())
+
     def test_isolated_tts_mode_never_starts_or_resumes_chapter_jobs(self):
         root = self.batched_image()
         self.prepare()
@@ -331,6 +371,9 @@ class RunpodWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exited"):
                 worker.serve(self.config, self.root / "config.toml", sglang_source=root, chapters=False)
         self.assertEqual(popen.call_count, 1)
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual(environment["PATH"].split(os.pathsep)[0], str(root / ".venv/bin"))
+        self.assertEqual(environment["TORCHINDUCTOR_CACHE_DIR"], str(self.root / "data/runtime-cache/sglang/inductor"))
         self.assertEqual(ready.call_args.kwargs["protocol"], "fish_sglang_drama3")
         cleanup.assert_called_once_with([inference])
 
@@ -352,6 +395,9 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(native_command[native_command.index("--workers") + 1], "1")
         self.assertEqual(native_command[native_command.index("--device") + 1], "cuda:0")
         self.assertIn("serve-chapters", chapter_command)
+        self.assertEqual(popen.call_args_list[0].kwargs["env"]["PATH"].split(os.pathsep)[0],
+                         str(image["fish_source"] / ".venv/bin"))
+        self.assertNotIn("env", popen.call_args_list[1].kwargs)
         self.assertTrue(all(call.kwargs["start_new_session"] for call in popen.call_args_list))
         ready.assert_called_once()
         cleanup.assert_called_once_with([native, chapter])

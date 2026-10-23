@@ -30,7 +30,7 @@ fi
 # Container packages disappear when Runpod restarts a stopped Pod. Check first,
 # then restore only missing system dependencies. Python, both environments,
 # downloaded packages and all models live on the persistent /workspace mount.
-worker_packages='build-essential ca-certificates cmake ffmpeg git libasound2-dev libportaudio2 libportaudiocpp0 libsndfile1 libsox-dev portaudio19-dev python3 python3-dev python3-venv'
+worker_packages='build-essential ca-certificates cmake ffmpeg git libasound2-dev libportaudio2 libportaudiocpp0 libsndfile1 libsox-dev ninja-build portaudio19-dev python3 python3-dev python3-venv'
 missing_packages=''
 for worker_package in $worker_packages; do
     if [ "$(dpkg-query -W -f='${db:Status-Status}' "$worker_package" 2>/dev/null || true)" != installed ]; then

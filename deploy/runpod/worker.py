@@ -403,6 +403,35 @@ def inference_command(config, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_S
             "--device", "cuda:0", "--workers", "1"], fish_source
 
 
+def inference_environment(config, backend_directory):
+    """Resolve compiler tools and caches before the backend imports its libraries."""
+    environment = os.environ.copy()
+    backend_bin = str(Path(backend_directory) / ".venv/bin")
+    inherited_path = environment.get("PATH", os.defpath)
+    environment["PATH"] = os.pathsep.join(
+        [backend_bin, *(entry for entry in inherited_path.split(os.pathsep)
+                        if entry and entry != backend_bin)])
+    if config["render_pool"]["workers"][0].get("protocol") == "fish_sglang_drama3":
+        # These are stock upstream cache controls, not user configuration via
+        # environment variables. Derive their location from the configured
+        # persistent store and override ambient ephemeral paths before imports.
+        # Omni otherwise selects /root/.cache/sglang-omni/torchinductor early.
+        cache = Path(config["chapter_server"]["data_dir"]) / "runtime-cache" / "sglang"
+        directories = {
+            "SGLANG_CACHE_DIR": cache,
+            "SGLANG_JIT_CACHE_DIR": cache / "jit",
+            "TORCHINDUCTOR_CACHE_DIR": cache / "inductor",
+            "TRITON_CACHE_DIR": cache / "triton",
+            # FlashInfer appends .cache/flashinfer/<version>/<architecture>.
+            "FLASHINFER_WORKSPACE_BASE": cache,
+            "CUDA_CACHE_PATH": cache / "nv",
+        }
+        for key, directory in directories.items():
+            directory.mkdir(parents=True, exist_ok=True)
+            environment[key] = str(directory)
+    return environment
+
+
 def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_SOURCE,
           application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True):
     check(config)
@@ -426,7 +455,8 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
             for number in handlers:
                 signal.signal(number, on_signal)
             print("Starting the private Fish CUDA process; model loading may take several minutes.", flush=True)
-            native = subprocess.Popen(native_command, cwd=native_directory, start_new_session=True)
+            native = subprocess.Popen(native_command, cwd=native_directory, start_new_session=True,
+                                      env=inference_environment(config, native_directory))
             children.append(native)
             wait_ready(native, stop, timeout=startup_timeout,
                        protocol=config["render_pool"]["workers"][0]["protocol"])
