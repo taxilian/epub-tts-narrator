@@ -56,10 +56,14 @@ def split_recovery_text(text):
     return parts
 
 
-def _requests(text, request, config):
-    if (not isinstance(request, dict) or request.get("kind") != "speech"
+def _requests(text, request, config, voices_by_asset=None):
+    if (not isinstance(request, dict) or request.get("kind") not in {"speech", "paragraph_speech"}
             or "recovery" in request or request.get("chunk", {}).get("spoken_text") != text):
         return None
+    if request["kind"] == "paragraph_speech":
+        from .speech_identity import paragraph_rewrite_turn
+        if paragraph_rewrite_turn(request, voices_by_asset or {}) is None:
+            return None
     parts = split_recovery_text(text)
     if parts is None:
         return None
@@ -90,7 +94,7 @@ def _existing_marker(directory, marker):
     return True
 
 
-def recovery_available(directory, request, text, verifier, config):
+def recovery_available(directory, request, text, verifier, config, *, voices_by_asset=None):
     """Return whether this request has a valid persisted strategy to resume."""
     from .workflow import RenderBlocked
 
@@ -99,7 +103,7 @@ def recovery_available(directory, request, text, verifier, config):
         path = directory / _MARKER
         if not path.exists() and not path.is_symlink():
             return False
-        planned = _requests(text, request, config)
+        planned = _requests(text, request, config, voices_by_asset)
         if planned is None or directory.name != digest(request):
             raise ValueError("Saved speech recovery has no matching eligible parent request")
         return _existing_marker(directory, planned[1])
@@ -139,7 +143,7 @@ def _concatenate(parts, target, sample_rate):
 
 
 def recover_speech(text, synthesize_part, parent_directory, parent_request, verifier, config,
-                   *, notify=print, retry_budget=None, resolution_episode=None):
+                   *, notify=print, retry_budget=None, resolution_episode=None, voices_by_asset=None):
     """Verify split parts with the caller's bounded allowance for this invocation.
 
     The caller selects this strategy only after ordinary speech takes fail.
@@ -150,7 +154,7 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
     from .workflow import RenderBlocked, SpeechVerificationFailed, VerificationUnavailable, verified_take
 
     try:
-        planned = _requests(text, parent_request, config)
+        planned = _requests(text, parent_request, config, voices_by_asset)
         if planned is None:
             raise ValueError("Speech has no safe sentence boundary for automatic recovery")
         request, marker = planned
@@ -178,6 +182,9 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
             child_request = {"kind": "speech_recovery_part", "version": _VERSION,
                              "parent_request_hash": digest(parent_request),
                              "recovery_request_hash": digest(request), "part": part}
+            if parent_request["kind"] == "paragraph_speech":
+                from .speech_identity import paragraph_recovery_part
+                child_request["synthesis_request"] = paragraph_recovery_part(parent_request, part, voices_by_asset)
             child_directory = _directory(directory / "parts" / digest(child_request))
             def generate_part(output, child_seed, piece=part["text"]):
                 return synthesize_part(piece, output, child_seed)
@@ -193,6 +200,10 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                           "validation_key": record["validation_key"],
                           "accepted_sha256": file_hash(wav.parent / "accepted.json"),
                           "audio_file": str(wav.relative_to(directory))})
+            if parent_request["kind"] == "paragraph_speech":
+                # Retain actual child inputs, including any audited rewrite.
+                # The joined file is not represented as a one-shot model call.
+                audit[-1]["acceptance"] = deepcopy(record)
         _concatenate(verified, path, config["render"]["sample_rate"])
         return {"synthesis_text": trim_speech_text(text),
                 "recovery": {"version": _VERSION, "strategy": _STRATEGY,

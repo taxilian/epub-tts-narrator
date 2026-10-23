@@ -5,6 +5,14 @@ assembly, loudness normalization, and encoding. The client submits several
 chapters, watches progress, and downloads completed chapters. Closing the client
 does not cancel submitted jobs.
 
+Local and remote rendering share the clip-generation, verification, and recovery
+pipeline. When a paragraph uses one saved voice and delivery style, recovery can
+render exact sentence slices, verify each slice, then join and verify the whole
+paragraph. It retains the original chapter plan and text links, and accepted
+audio (including completed recovery slices) remains reusable after interruption.
+Mixed-voice or mixed-delivery paragraphs cannot use this sentence fallback;
+source-boundary replanning currently requires the local book-rendering wrapper.
+
 **Only compressed audio crosses the chapter-service API.** Voice references are
 registered as FLAC once, finished chapters are M4A/AAC, and lossless chapter
 masters are FLAC. JSON sidecars preserve source links and timing. No WAV download

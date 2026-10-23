@@ -1284,6 +1284,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
+    voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
 
     def take(text, generate, request, *, synthesize_part=None, generate_repaired=None):
         set_phase(notify, "checking saved audio")
@@ -1319,7 +1320,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 directory = work / "clips" / digest(request)
                 from .speech_recovery import recovery_available, recover_speech, split_recovery_text
                 if synthesize_part is not None and recovery_available(
-                        directory, request, text, verifier, config):
+                        directory, request, text, verifier, config, voices_by_asset=voices_by_asset):
                     result = None
                     if getattr(verifier, "speech_resolver", None) is not None:
                         result = _recheck_saved_whole_take(
@@ -1330,7 +1331,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                         stop_if_requested()
                         result = recover_speech(text, synthesize_part, directory, request,
                                                 verifier, config, notify=notify, retry_budget=retry_budget,
-                                                resolution_episode=resolution_episode)
+                                                resolution_episode=resolution_episode, voices_by_asset=voices_by_asset)
                 else:
                     try:
                         result = verified_take(text, generate, directory, request,
@@ -1338,7 +1339,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                seed_identity=identity,
                                                generate_repaired=generate_repaired or synthesize_part,
                                                resolution_episode=resolution_episode,
-                                               paragraph_split_available=paragraph_split_available)
+                                               paragraph_split_available=(paragraph_split_available or
+                                                   (synthesize_part is not None and split_recovery_text(text) is not None)))
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
@@ -1348,7 +1350,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             raise
                         result = recover_speech(text, synthesize_part, directory, request,
                                                 verifier, config, notify=notify, retry_budget=retry_budget,
-                                                resolution_episode=resolution_episode)
+                                                resolution_episode=resolution_episode, voices_by_asset=voices_by_asset)
                 speech_cache.remember(identity, result[1])
                 return result
             except RenderBlocked:
@@ -1365,6 +1367,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         repaired_turn = paragraph_rewrite_turn(
             request, {voice["asset_hash"]: voice for voice in voices.values()})
         generate_repaired = None
+        synthesize_part = None
         if repaired_turn is not None:
             def generate_repaired(text, path, seed):
                 from .engines import format_dialogue
@@ -1372,11 +1375,16 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 formatted, _, _ = format_dialogue(repaired)
                 metadata = engine.synthesize_dialogue(repaired, path, seed=seed)
                 return {"synthesis_text": formatted, **metadata}
+            def synthesize_part(text, path, seed):
+                prepared = trim_speech_text(text)
+                metadata = engine.synthesize(prepared, repaired_turn["voice"], path, seed=seed,
+                                             direction=repaired_turn["direction"])
+                return {"synthesis_text": prepared, **metadata}
         notify(f"  Chunk {number}/{total}: checking paragraph cache "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request,
-            generate_repaired=generate_repaired)
+            generate_repaired=generate_repaired, synthesize_part=synthesize_part)
         acceptance = dict(chunk_id=chunk["chunk_id"], **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance
