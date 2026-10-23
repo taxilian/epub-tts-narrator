@@ -223,19 +223,19 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         self.assertTrue(list((self.work / "clips").glob("*/speech-resolution-*.json")))
         self.assertTrue(all(file_hash(path) == checksum for path, checksum in saved.items()))
 
-    def test_exhausted_shared_budget_resumes_parts_without_new_whole_takes(self):
+    def test_small_shared_budget_reserves_real_starts_for_split_parts(self):
         self.config["verification"]["max_resolution_attempts"] = 3
         self.executor.config = deepcopy(self.config)
         self.adaptive([{"action": "split", "reason": "Use complete sentences.", "edits": []}])
-        with self.assertRaises(SpeechVerificationFailed):
-            self.render()
-        self.assertEqual(len(self.engine.dialogue_calls), 3)
-        self.assertEqual(self.engine.calls, [])
-        self.assertEqual(len(list((self.work / "clips").glob("*/speech-recovery.json"))), 1)
         prepared = self.render()
-        self.assertEqual(len(self.engine.dialogue_calls), 3)
+        self.assertEqual(len(self.engine.dialogue_calls), 1)
         self.assertEqual(len(self.engine.calls), 2)
+        self.assertEqual(len(list((self.work / "clips").glob("*/speech-recovery.json"))), 1)
         self.assertTrue(prepared["acceptance"][0]["report"]["passed"])
+        self.assertFalse(any("after 0 attempts" in row for row in self.messages))
+        self.render()
+        self.assertEqual(len(self.engine.dialogue_calls), 1)
+        self.assertEqual(len(self.engine.calls), 2)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from epub_tts_narrator.config import load_config
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, regular_file, write_json
+from epub_tts_narrator.renderer.delivery_recovery import plain_delivery_request
 from epub_tts_narrator.renderer.quality import compare_words
+from epub_tts_narrator.renderer.recurring_resolution import failed_take_context
 from epub_tts_narrator.renderer.speech_resolver import validate_resolution
 from epub_tts_narrator.renderer.verification import create_speech_resolver
 
@@ -42,12 +44,13 @@ CASES = (
 
 def synthetic_case(case):
     name, expected, heard, reasons, actions = case
-    failures = [{"attempt": attempt, "audio_sha256": digest(f"synthetic:{name}:{attempt}"),
-                 "transcript": heard, "reasons": list(reasons), "tts_text": expected,
-                 "metrics": compare_words(expected, heard) if heard else {"rms_dbfs": None}}
+    failures = [failed_take_context(expected, {
+                    "attempt": attempt, "audio_sha256": digest(f"synthetic:{name}:{attempt}"),
+                    "report": {"transcript": heard, "reasons": list(reasons),
+                               "metrics": compare_words(expected, heard) if heard else {"rms_dbfs": None}}})
                 for attempt in range(1, 4)]
     return {"case": name, "origin": "synthetic", "expected_text": expected,
-            "failures": failures, "expected_actions": sorted(actions)}
+            "failures": failures, "expected_actions": sorted(actions), "can_plain_delivery": False}
 
 
 def saved_case(directory):
@@ -66,11 +69,17 @@ def saved_case(directory):
         report = record.get("report", {})
         if report.get("passed") is True:
             continue
-        if report.get("reasons") != ["text_mismatch"]:
+        reasons = report.get("reasons")
+        if (not isinstance(reasons, list) or not reasons
+                or any(reason not in {"text_mismatch", "silent_audio", "audio_too_quiet",
+                                      "excessive_silence", "internal_silence_stall", "excessive_clipping",
+                                      "audio_too_short", "audio_too_long"} for reason in reasons)):
             continue
         expected, heard = report.get("expected_text"), report.get("transcript")
-        if not isinstance(expected, str) or not isinstance(heard, str):
+        if not isinstance(expected, str) or (heard is not None and not isinstance(heard, str)):
             raise ValueError(f"Missing saved text evidence in {path.name}")
+        if "text_mismatch" in reasons and not isinstance(heard, str):
+            raise ValueError(f"Missing saved transcript in {path.name}")
         if record.get("attempt") != number:
             raise ValueError(f"Attempt number mismatch in {path.name}")
         name = record.get("audio_file")
@@ -79,38 +88,52 @@ def saved_case(directory):
         audio = regular_file(directory / name)
         if file_hash(audio) != record.get("audio_sha256"):
             raise ValueError(f"Saved audio hash mismatch in {path.name}")
-        failure = {"attempt": number, "audio_sha256": record["audio_sha256"],
-                   "transcript": heard, "reasons": report["reasons"]}
-        resolution = record.get("engine_metadata", {}).get("speech_resolution", {})
-        failure["tts_text"] = resolution.get("tts_text", expected)
-        secondary = report.get("corroboration", {}).get("transcript")
-        if isinstance(secondary, str):
-            failure["secondary_transcript"] = secondary
-        if isinstance(report.get("metrics"), dict):
-            failure["metrics"] = report["metrics"]
-        records.append((number, expected, failure))
+        request = record.get("request")
+        bound_hash = None
+        if request is not None:
+            if not isinstance(request, dict) or record.get("request_hash") != digest(request):
+                raise ValueError(f"Saved synthesis request hash mismatch in {path.name}")
+            part = request.get("kind") == "speech_recovery_part"
+            source = request.get("part" if part else "chunk")
+            requested_text = source.get("text" if part else "spoken_text") if isinstance(source, dict) else None
+            if requested_text != expected:
+                raise ValueError(f"Saved request text differs from its verification text in {path.name}")
+            bound_hash = record["request_hash"]
+        failure = failed_take_context(expected, record)
+        can_plain = request is not None and plain_delivery_request(request) is not None
+        records.append((number, expected, failure, bound_hash, can_plain))
     records.sort(key=lambda row: row[0])
     records = records[-30:]
     if not records:
-        raise ValueError("No failed, text-mismatch takes with saved audio were found")
+        raise ValueError("No failed speech takes with saved audio and verification evidence were found")
     expected = records[0][1]
     if any(row[1] != expected for row in records):
         raise ValueError("Saved takes do not share one exact expected passage")
+    if len({row[3] for row in records}) != 1:
+        raise ValueError("Saved takes do not share one bound synthesis request")
     return {"case": "saved_failures", "origin": str(directory), "expected_text": expected,
-            "failures": [row[2] for row in records], "expected_actions": ["accept"]}
+            "failures": [row[2] for row in records], "expected_actions": None,
+            "can_plain_delivery": all(row[4] for row in records)}
 
 
 def evaluate(case, provider):
     resolver = create_speech_resolver({}, provider)
     if resolver is None:
         raise ValueError("The configured provider could not create a speech resolver")
-    audit = resolver.resolve(case["expected_text"], case["failures"])
-    proposal = validate_resolution(audit, case["expected_text"], case["failures"], resolver.identity)
+    can_plain = case.get("can_plain_delivery", False)
+    audit = resolver.resolve(case["expected_text"], case["failures"], can_plain_delivery=can_plain)
+    proposal = validate_resolution(audit, case["expected_text"], case["failures"], resolver.identity,
+                                   can_plain_delivery=can_plain)
     action = proposal["action"] if proposal else None
     votes = [[answer["plausible"] for answer in review.get("response", {}).get("pairs", [])]
              for review in audit["reviews"] if isinstance(review.get("response"), dict)
              and isinstance(review["response"].get("pairs"), list)]
-    return {**case, "action": action, "correct": action in case["expected_actions"],
+    expected_actions = case["expected_actions"]
+    # Saved failures have no human ground-truth action label. Their evaluation
+    # establishes that a proposal is valid, not that the rejected audio is good.
+    correct = proposal is not None if expected_actions is None else action in expected_actions
+    return {**case, "action": action, "correct": correct,
+            "evaluation_basis": "valid_proposal" if expected_actions is None else "expected_action",
             "decision": audit["decision"], "votes": votes, "validated_proposal": proposal,
             "audit": audit}
 
@@ -144,7 +167,8 @@ def main():
             print(f"{row['case']}: {'PASS' if row['correct'] else 'FAIL'} "
                   f"(decision={row['decision']}, action={row['action']}, "
                   f"votes={json.dumps(row['votes'])})", flush=True)
-    summary = [{key: row[key] for key in ("case", "origin", "expected_actions", "action", "correct", "decision", "votes")}
+    summary = [{key: row[key] for key in ("case", "origin", "expected_actions", "evaluation_basis",
+                                         "action", "correct", "decision", "votes")}
                for row in sorted(results, key=lambda row: row["case"])]
     write_json(args.output / "summary.json", summary)
     print(f"Saved {len(results)} full audits to {args.output}", flush=True)

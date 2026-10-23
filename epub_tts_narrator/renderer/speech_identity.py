@@ -283,7 +283,23 @@ def paragraph_recovery_part(request, part, voices_by_asset):
             "voice_asset_hash": collapsed["voice"]["asset_hash"], "chunk": turn}
 
 
-def _recovered_paragraph_identity(request, voices_by_asset, metadata):
+def single_speech_recovery_part(request, part):
+    """Bind an exact sentence to its original single speaker and generation settings."""
+    from .speech_recovery import split_recovery_text
+
+    if (not isinstance(request, Mapping) or request.get("kind") != "speech"
+            or "recovery" in request or not isinstance(request.get("chunk"), Mapping)):
+        raise ValueError("Single speech recovery requires its original speech request")
+    parts = split_recovery_text(request["chunk"].get("spoken_text"))
+    if parts is None or part not in parts:
+        raise ValueError("Single speech recovery requires an exact original sentence slice")
+    actual = deepcopy(dict(request))
+    actual.pop("synthesis_identity", None)
+    actual["chunk"]["spoken_text"] = part["text"]
+    return actual
+
+
+def _recovered_generation_identity(request, voices_by_asset, metadata):
     """Validate actual child inputs before reusing an independently verified join."""
     import hashlib
     import json
@@ -295,21 +311,30 @@ def _recovered_paragraph_identity(request, voices_by_asset, metadata):
     parts = split_recovery_text(parent["chunk"].get("spoken_text"))
     audit = metadata.get("recovery")
     if (parts is None or recovery != {"version": 1, "strategy": "sentence_split", "parts": parts}
-            or paragraph_rewrite_turn(parent, voices_by_asset) is None
+            or (parent["kind"] == "paragraph_speech"
+                and paragraph_rewrite_turn(parent, voices_by_asset) is None)
+            or (parent["kind"] == "speech" and (not isinstance(audit, Mapping)
+                or type(audit.get("child_acceptance_version")) is not int
+                or audit["child_acceptance_version"] != 1))
             or not isinstance(audit, Mapping) or audit.get("version") != 1
             or audit.get("strategy") != "sentence_split"
             or audit.get("parent_request_hash") != digest(parent)
             or not isinstance(audit.get("parts"), list) or len(audit["parts"]) != len(parts)
             or metadata.get("synthesis_text") != trim_speech_text(parent["chunk"]["spoken_text"])):
-        raise ValueError("Invalid uniform paragraph sentence recovery audit")
+        raise ValueError("Invalid sentence recovery generation audit")
     for part, evidence in zip(parts, audit["parts"]):
-        actual = paragraph_recovery_part(parent, part, voices_by_asset)
+        actual = (paragraph_recovery_part(parent, part, voices_by_asset)
+                  if parent["kind"] == "paragraph_speech" else single_speech_recovery_part(parent, part))
         child = {"kind": "speech_recovery_part", "version": 1,
                  "parent_request_hash": digest(parent), "recovery_request_hash": digest(request),
-                 "part": part, "synthesis_request": actual}
+                 "part": part}
         accepted = evidence.get("acceptance") if isinstance(evidence, Mapping) else None
         if not isinstance(accepted, Mapping):
-            raise ValueError("Paragraph recovery is missing child acceptance provenance")
+            raise ValueError("Sentence recovery is missing child acceptance provenance")
+        saved_child = accepted.get("request")
+        if parent["kind"] == "paragraph_speech" or (isinstance(saved_child, Mapping)
+                                                    and "synthesis_request" in saved_child):
+            child["synthesis_request"] = actual
         encoded = (json.dumps(accepted, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
         report = accepted.get("report", {})
         actual_metadata = accepted.get("engine_metadata")
@@ -324,7 +349,7 @@ def _recovered_paragraph_identity(request, voices_by_asset, metadata):
                 or report.get("reasons") or report.get("expected_text") != part["text"]
                 or not isinstance(actual_metadata, Mapping)
                 or not isinstance(actual_metadata.get("synthesis_text"), str)):
-            raise ValueError("Paragraph recovery child binding changed")
+            raise ValueError("Sentence recovery child binding changed")
         generation_identity(actual, voices_by_asset, engine_metadata=actual_metadata)
     return generation_identity(parent, voices_by_asset)
 
@@ -386,6 +411,29 @@ def _resolved_generation_identity(request, voices_by_asset, metadata):
     return generation_identity(request, voices_by_asset)
 
 
+def _plain_delivery_generation_identity(request, voices_by_asset, metadata):
+    """Check the recorded plain take before retaining the original intention.
+
+    Delivery recovery is the outer layer: an independently audited pronunciation
+    rewrite may also be present, and the normal rewrite path checks it against
+    this neutral performance. Neither marker excuses changed words or voices.
+    """
+    from .delivery_recovery import validate_delivery_marker
+
+    actual_request = validate_delivery_marker(request, metadata["delivery_recovery"])
+    actual_request.pop("synthesis_identity", None)
+    actual_metadata = dict(metadata)
+    actual_metadata.pop("delivery_recovery")
+    if (not isinstance(actual_metadata.get("synthesis_text"), str)
+            or not actual_metadata["synthesis_text"].strip()
+            or actual_metadata.get("direction", "") != ""
+            or actual_metadata.get("direction_applied", False) is not False
+            or actual_metadata.get("applied_control") is not None):
+        raise ValueError("Recorded delivery does not confirm the audited plain performance")
+    generation_identity(actual_request, voices_by_asset, engine_metadata=actual_metadata)
+    return generation_identity(request, voices_by_asset)
+
+
 def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     """Return generation inputs without position, source IDs or cast bookkeeping.
 
@@ -403,9 +451,13 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     chunk = request.get("chunk")
     if not isinstance(chunk, Mapping):
         raise ValueError("Speech request is missing its chunk")
-    if (request["kind"] == "paragraph_speech" and isinstance(engine_metadata, Mapping)
-            and "recovery" in engine_metadata):
-        return _recovered_paragraph_identity(request, voices_by_asset, engine_metadata)
+    if (isinstance(engine_metadata, Mapping) and "recovery" in engine_metadata
+            and (request["kind"] == "paragraph_speech"
+                 or (isinstance(engine_metadata["recovery"], Mapping)
+                     and "child_acceptance_version" in engine_metadata["recovery"]))):
+        return _recovered_generation_identity(request, voices_by_asset, engine_metadata)
+    if isinstance(engine_metadata, Mapping) and "delivery_recovery" in engine_metadata:
+        return _plain_delivery_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and "speech_resolution" in engine_metadata:
         return _resolved_generation_identity(request, voices_by_asset, engine_metadata)
     engine = request.get("engine")

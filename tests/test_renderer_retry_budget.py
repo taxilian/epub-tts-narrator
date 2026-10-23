@@ -5,7 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_tts_narrator.renderer.retry_budget import SpeechRetryBudget, generation_attempts
+from epub_tts_narrator.renderer.retry_budget import (
+    SpeechRetryBudget, generation_attempts, whole_strategy_allowance,
+)
 
 
 class SpeechRetryBudgetTests(unittest.TestCase):
@@ -57,6 +59,31 @@ class SpeechRetryBudgetTests(unittest.TestCase):
             with self.subTest(limit=limit), self.assertRaises(ValueError):
                 budget.claim(self.directory, "request", limit)
         self.assertEqual(budget.started(self.directory, "request"), 0)
+
+    def test_whole_strategy_reserves_a_real_shorter_part_opportunity(self):
+        self.assertEqual(whole_strategy_allowance(12, 0), 12)
+        self.assertEqual(whole_strategy_allowance(12, 2), 6)
+        self.assertEqual(whole_strategy_allowance(12, 4), 6)
+        self.assertEqual(whole_strategy_allowance(3, 2), 1)
+        self.assertEqual(whole_strategy_allowance(3, 4), 1)
+
+    def test_child_cannot_spend_the_remaining_siblings_reserved_starts(self):
+        budget = SpeechRetryBudget()
+        for number in range(1, 7):
+            self.assertEqual(budget.claim(self.directory, "whole", 6,
+                                          episode="parent", episode_maximum=12), number)
+        for number in range(1, 6):
+            self.assertEqual(budget.claim(self.directory / "first", "first", 12,
+                                          episode="parent", episode_maximum=12,
+                                          episode_reserve=1), number)
+        self.assertIsNone(budget.claim(self.directory / "first", "first", 12,
+                                       episode="parent", episode_maximum=12, episode_reserve=1))
+        self.assertEqual(budget.episode_started("parent"), 11)
+        self.assertEqual(budget.claim(self.directory / "second", "second", 12,
+                                      episode="parent", episode_maximum=12), 1)
+        self.assertEqual(budget.episode_started("parent"), 12)
+        self.assertIsNone(budget.claim(self.directory / "second", "second", 12,
+                                       episode="parent", episode_maximum=12))
 
     def test_inventory_includes_saved_orphan_and_high_ids_once_in_numeric_order(self):
         names = ["attempt-003.json", "attempt-003.wav", "attempt-002-raw.wav",

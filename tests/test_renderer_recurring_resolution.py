@@ -368,17 +368,47 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         budget = SpeechRetryBudget()
         with self.assertRaises(SpeechVerificationFailed):
             self.render_chunk(budget)
-        self.assertEqual(len(self.engine.calls), 12)
-        self.assertEqual([row["text"] for row in self.engine.calls[:9]],
+        self.assertEqual(len(self.engine.calls), 11)
+        self.assertEqual([row["text"] for row in self.engine.calls[:7]],
                          [text] * 3 + [text.replace("Insang", "Insaan")] * 3
-                         + [text.replace("Insang", "Eensang")] * 3)
-        self.assertEqual([row["text"] for row in self.engine.calls[9:]],
-                         ["Insang waited beside the old gate."] * 3)
+                         + [text.replace("Insang", "Eensang")])
+        self.assertEqual([row["text"] for row in self.engine.calls[7:]],
+                         ["Insang waited beside the old gate."] * 4)
+        self.assertTrue(any("Testing the new pronunciation once" in row for row in self.messages))
         self.assertTrue(list((self.work / "clips").glob("*/speech-recovery.json")))
         self.assertFalse(list((self.work / "speech-cache").glob("*.json")))
-        with self.assertRaises(SpeechVerificationFailed):
+        with self.assertRaises(SpeechVerificationFailed) as failure:
             self.render_chunk(budget)
-        self.assertEqual(len(self.engine.calls), 12, "Reentering a split plan cannot reset its parent budget")
+        self.assertEqual(len(self.engine.calls), 11, "Reentry cannot spend the remaining sibling's reserved start")
+        self.assertIn("11/12 starts", str(failure.exception))
+        self.assertNotIn("after 0 attempts", str(failure.exception))
+
+    def test_exhausted_whole_strategy_really_renders_and_caches_shorter_parts(self):
+        text = "Insang waited beside the old gate. Everyone watched the river."
+        self.chunk["spoken_text"] = text
+        self.chunk["source_ranges"][0]["end"] = 7 + len(text)
+        self.client.actions = [{"action": "retry", "edits": [], "reason": "Try another take."}]
+        self.engine.heard = lambda given, number: given.replace("old ", "") if given == text else given
+        budget = SpeechRetryBudget()
+        result, accepted = self.render_chunk(budget)
+        self.assertEqual([row["text"] for row in self.engine.calls],
+                         [text] * 6 + ["Insang waited beside the old gate.", "Everyone watched the river."])
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertTrue(any("6 of 12 generation starts remaining" in row for row in self.messages))
+        self.assertEqual(self.render_chunk(budget), (result, accepted))
+        self.assertEqual(len(self.engine.calls), 8, "Accepted parts and whole cache survive the strategy change")
+
+    def test_small_budget_tries_parts_instead_of_exhausting_every_whole_take(self):
+        self.config["verification"]["max_resolution_attempts"] = 3
+        text = "Insang waited beside the old gate. Everyone watched the river."
+        self.chunk["spoken_text"] = text
+        self.chunk["source_ranges"][0]["end"] = 7 + len(text)
+        self.engine.heard = lambda given, number: given.replace("old ", "") if given == text else given
+        _, accepted = self.render_chunk()
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(self.engine.calls), 3)
+        self.assertEqual(sum(row["text"] == text for row in self.engine.calls), 1)
+        self.assertEqual(self.client.plans, [])
 
     def test_omission_cannot_be_accepted_even_if_planner_and_sound_judges_say_yes(self):
         self.config["verification"]["max_resolution_attempts"] = 6
@@ -446,18 +476,30 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
     def test_split_assembly_with_extra_words_fails_despite_accepted_pronunciation_parts(self):
         original = self.configure_split_rewrite()
         self.base.fail_assembly = True
-        with self.assertRaises(SpeechVerificationFailed) as error:
-            self.render_chunk()
-        self.assertEqual(error.exception.report["expected_text"], original)
-        self.assertTrue(error.exception.report["transcript"].endswith("Thank you."))
-        self.assertEqual(error.exception.report["reasons"], ["text_mismatch"])
-        self.assertEqual(len(self.engine.calls), 8)
+        result, accepted = self.render_chunk()
+        marker = read_json(next((self.work / "clips").glob("*/speech-recovery.json")))
+        joined = self.work / "clips" / marker["recovery_request_hash"]
+        rejected = read_json(joined / "attempt-001.json")
+        self.assertEqual(rejected["report"]["expected_text"], original)
+        self.assertTrue(rejected["report"]["transcript"].endswith("Thank you."))
+        self.assertEqual(rejected["report"]["reasons"], ["text_mismatch"])
+        self.assertFalse(rejected["report"]["passed"])
+        self.assertFalse((joined / "accepted.json").exists(), "The join with extra speech must remain rejected")
+        self.assertEqual(len(self.engine.calls), 9, "The ninth synthesis must be a fresh complete performance")
+        self.assertEqual(self.engine.calls[-1]["text"], original.replace("Insang", "Insaan"))
         self.assertEqual(len(list((self.work / "clips").glob("*/parts/*/accepted.json"))), 2)
-        self.assertFalse(list((self.work / "clips").glob("*/accepted.json")))
-        self.assertFalse(list((self.work / "speech-cache").glob("*.json")))
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(accepted["report"]["expected_text"], original)
+        self.assertEqual(accepted["report"]["transcript"], original.replace("Insang", "Insaan"))
+        self.assertEqual(accepted["report"]["text_confirmation_method"], "pronunciation_rewrite")
+        wav = Path(result["wav_path"])
+        self.assertNotEqual(wav, joined / "attempt-001.wav")
+        self.assertNotEqual(file_hash(wav), rejected["audio_sha256"])
+        self.assertNotIn("recovery", read_json(wav.parent / "accepted.json")["request"])
+        self.assertTrue(list((self.work / "speech-cache").glob("*.json")))
 
     def test_split_assembly_cannot_use_changed_child_acceptance_record(self):
-        self.configure_split_rewrite()
+        original = self.configure_split_rewrite()
         transcribe = self.base.transcribe
         changed = []
 
@@ -474,13 +516,29 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
             return result
 
         self.base.transcribe = tamper_after_assembly
-        with self.assertRaises(SpeechVerificationFailed) as error:
-            self.render_chunk()
+        result, accepted = self.render_chunk()
         self.assertEqual(len(changed), 1)
-        self.assertEqual(error.exception.report["reasons"], ["text_mismatch"])
-        self.assertEqual(len(self.engine.calls), 8)
-        self.assertFalse(list((self.work / "clips").glob("*/accepted.json")))
-        self.assertFalse(list((self.work / "speech-cache").glob("*.json")))
+        marker = read_json(next((self.work / "clips").glob("*/speech-recovery.json")))
+        joined = self.work / "clips" / marker["recovery_request_hash"]
+        rejected = read_json(joined / "attempt-001.json")
+        self.assertEqual(rejected["report"]["reasons"], ["text_mismatch"])
+        self.assertFalse(rejected["report"]["passed"])
+        self.assertFalse((joined / "accepted.json").exists(), "Changed child evidence cannot authorize the join")
+        bound_child = next(row for row in rejected["engine_metadata"]["recovery"]["parts"]
+                           if row["request_hash"] == changed[0].parent.name)
+        self.assertNotEqual(file_hash(changed[0]), bound_child["accepted_sha256"])
+        self.assertEqual(read_json(changed[0])["diagnostic"], "Altered after assembly evidence was bound")
+        self.assertEqual(len(self.engine.calls), 9)
+        self.assertEqual(self.engine.calls[-1]["text"], original.replace("Insang", "Insaan"))
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(accepted["report"]["expected_text"], original)
+        self.assertEqual(accepted["report"]["transcript"], original.replace("Insang", "Insaan"))
+        self.assertEqual(accepted["report"]["text_confirmation_method"], "pronunciation_rewrite")
+        wav = Path(result["wav_path"])
+        self.assertNotEqual(wav, joined / "attempt-001.wav")
+        self.assertNotEqual(file_hash(wav), rejected["audio_sha256"])
+        self.assertNotIn("recovery", read_json(wav.parent / "accepted.json")["request"])
+        self.assertTrue(list((self.work / "speech-cache").glob("*.json")))
 
 
 if __name__ == "__main__":

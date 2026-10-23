@@ -33,9 +33,12 @@ def failure_signatures(expected, report):
                 found.add(digest({'start': changes[0]['expected_start'],
                                   'end': changes[-1]['expected_end'],
                                   'expected': [word for row in changes for word in row['expected']],
-                                  'kind': 'missing' if all(row['operation'] == 'delete' for row in changes)
-                                  else 'extra' if all(row['operation'] == 'insert' for row in changes)
-                                  else 'pronunciation'}))
+                                  # A source span that disappears and one that
+                                  # gets misrecognized are the same unresolved
+                                  # source content. Keep insertions separate;
+                                  # their anchor has no missing source words.
+                                  'kind': 'extra' if all(row['operation'] == 'insert' for row in changes)
+                                  else 'source'}))
                 changes.clear()
         for row in compare_words(expected, transcript)['alignment']:
             if row['operation'] == 'equal':
@@ -46,18 +49,50 @@ def failure_signatures(expected, report):
     return found
 
 
+def failed_take_context(expected_text, record):
+    report = record['report']
+    metadata = record.get('engine_metadata', {})
+    marker = metadata.get('speech_resolution') or {}
+    result = {'attempt': record['attempt'], 'audio_sha256': record.get('audio_sha256'),
+            'transcript': report.get('transcript') or '',
+            'secondary_transcript': (report.get('secondary_transcript')
+                                     or report.get('corroboration', {}).get('transcript') or ''),
+            'tts_text': marker.get('tts_text', expected_text),
+            'reasons': report.get('reasons', [])}
+    # Give the planner actual synthesis context instead of making it infer
+    # performance problems from spellings alone. These remain data, never
+    # instructions or evidence that an omitted sound really occurred.
+    generation = {key: metadata[key] for key in ('synthesis_text', 'direction', 'applied_control')
+                  if isinstance(metadata.get(key), str) and len(metadata[key]) <= 20000}
+    if generation:
+        result['generation'] = generation
+    if isinstance(report.get('metrics'), dict):
+        # Full alignments/ASR segments repeat the supplied transcripts and
+        # can exhaust the planner's input limit after many long takes.
+        result['metrics'] = {key: report['metrics'][key] for key in (
+            'duration_seconds', 'rms_dbfs', 'peak_dbfs', 'silence_fraction',
+            'longest_internal_silence_seconds', 'clipped_fraction',
+            'insertions', 'deletions', 'substitutions', 'expected_word_count',
+            'actual_word_count', 'wer') if type(report['metrics'].get(key)) in (int, float)}
+    return result
+
+
 class RecurringResolution:
-    def __init__(self, directory, request, text, resolver, settings, *, can_rewrite, can_split):
+    def __init__(self, directory, request, text, resolver, settings, *, can_rewrite, can_split,
+                 can_plain_delivery=False):
         self.directory, self.request, self.text = Path(directory), request, text
         self.resolver, self.identity = resolver, resolver.identity
         self.can_rewrite, self.can_split = can_rewrite, can_split
+        self.can_plain_delivery = can_plain_delivery
         self.threshold = settings.get('recurrence_threshold', 3)
         self.maximum_rounds = settings.get('max_resolution_rounds', 2)
         self.rounds = 0
         self.path = self.directory / 'speech-resolution.json'
-        self.binding = {'version': 1, 'request_hash': digest(request), 'expected_text': text,
+        self.binding = {'version': 2, 'request_hash': digest(request), 'expected_text': text,
                         'resolver': self.identity, 'threshold': self.threshold,
                         'can_rewrite': can_rewrite, 'can_split': can_split}
+        if can_plain_delivery:
+            self.binding['can_plain_delivery'] = True
         self.state = {'binding': self.binding, 'handled': {}, 'history': []}
         if self.path.exists() or self.path.is_symlink():
             saved = read_json(regular_file(self.path))
@@ -78,6 +113,21 @@ class RecurringResolution:
                 raise ValueError('Invalid saved speech resolution state')
             if body.get('binding') == self.binding:
                 self.state = body
+            elif (set(body['binding']) == set(self.binding)
+                  and {k: v for k, v in body['binding'].items() if k != 'can_split'}
+                      == {k: v for k, v in self.binding.items() if k != 'can_split'}):
+                # A failed assembled performance removes splitting as a useful
+                # action. Keep already reviewed spelling/delivery repairs and
+                # their outcomes while reconsidering the remaining actions.
+                archive = self.directory / ('speech-resolution-' + digest(body) + '.json')
+                if not archive.exists():
+                    write_json(archive, saved)
+                self.state = dict(body, binding=self.binding, handled={})
+            elif body.get('binding') == dict(self.binding, version=1):
+                # Source-span signatures changed, not the reviewed evidence.
+                # Retain approved rewrites and feedback; recalculate recurrence
+                # from the saved distinct takes using the new signature policy.
+                self.state = dict(body, binding=self.binding, handled={})
             else:
                 # Retain old decisions for inspection when a model/policy changes.
                 archive = self.directory / ('speech-resolution-' + digest(body) + '.json')
@@ -100,14 +150,7 @@ class RecurringResolution:
         write_json(self.path, {**self.state, 'record_sha256': digest(self.state)})
 
     def _failure(self, record):
-        report = record['report']
-        marker = record.get('engine_metadata', {}).get('speech_resolution') or {}
-        return {'attempt': record['attempt'], 'audio_sha256': record.get('audio_sha256'),
-                'transcript': report.get('transcript') or '',
-                'secondary_transcript': (report.get('secondary_transcript')
-                                         or report.get('corroboration', {}).get('transcript') or ''),
-                'tts_text': marker.get('tts_text', self.text),
-                'reasons': report.get('reasons', [])}
+        return failed_take_context(self.text, record)
 
     def _feedback(self, history):
         """Keep bounded outcomes, not nested prompts or old failed-take payloads."""
@@ -165,10 +208,12 @@ class RecurringResolution:
         from .speech_resolver import validate_resolution
         for index in range(len(self.state['history']) - 1, -1, -1):
             row = self.state['history'][index]
-            if row['audit'].get('decision') != 'resolved':
+            if (row['audit'].get('decision') != 'resolved'
+                    or row['audit'].get('proposal', {}).get('action') != 'rewrite'):
                 continue
             proposal = validate_resolution(row['audit'], self.text, row['failures'], self.identity,
-                                           can_rewrite=self.can_rewrite, can_split=self.can_split,
+                                           can_rewrite=self.can_rewrite,
+                                           can_split='split' in row['audit'].get('payload', {}).get('permitted_actions', []),
                                            previous_decisions=self._saved_feedback(index))
             if proposal is None:
                 raise ValueError('Saved speech resolution no longer validates')
@@ -177,6 +222,54 @@ class RecurringResolution:
                         'tts_text': proposal['tts_text'], 'audit': row['audit'],
                         'failures': row['failures']}
         return None
+
+    def active_delivery(self):
+        """Restore a validated performance repair without asking or spending again."""
+        if not self.can_plain_delivery:
+            return None
+        from .speech_resolver import validate_resolution
+        for index in range(len(self.state['history']) - 1, -1, -1):
+            row = self.state['history'][index]
+            if (row['audit'].get('decision') != 'resolved'
+                    or row['audit'].get('proposal', {}).get('action') != 'plain_delivery'):
+                continue
+            proposal = validate_resolution(
+                row['audit'], self.text, row['failures'], self.identity,
+                can_rewrite=self.can_rewrite,
+                can_split='split' in row['audit'].get('payload', {}).get('permitted_actions', []),
+                can_plain_delivery=True,
+                previous_decisions=self._saved_feedback(index))
+            if proposal is None:
+                raise ValueError('Saved plain delivery decision no longer validates')
+            return {**proposal, 'audit': row['audit'], 'failures': row['failures']}
+        return None
+
+    def note_failed_split(self, report):
+        """Give the planner the renderer's actual strategy outcome once.
+
+        This is local feedback, not a model vote or permission to accept audio.
+        It removes the exhausted strategy without discarding previous repairs.
+        """
+        if (not isinstance(report, dict) or report.get('expected_text') != self.text
+                or report.get('passed') is not False or not report.get('reasons')):
+            raise ValueError('Split feedback must describe failed verification of the complete source')
+        evidence = {'reasons': report['reasons'], 'transcript': report.get('transcript'),
+                    'secondary_transcript': (report.get('secondary_transcript')
+                        or report.get('corroboration', {}).get('transcript'))}
+        fingerprint = digest(evidence)
+        if any(row.get('strategy_feedback_sha256') == fingerprint for row in self.state['history']):
+            return
+        summary = {key: value[:300] if isinstance(value, str) else value
+                   for key, value in evidence.items()}
+        self.state['history'].append({
+            'attempt': max(self.records, default=1), 'failures': [], 'origin': 'renderer',
+            'strategy_feedback_sha256': fingerprint,
+            'audit': {'decision': 'blocked', 'error_code': 'split_full_verification_failed',
+                      'proposal': {'action': 'split', 'edits': [],
+                                   'reason': 'Parts passed individually, but the complete joined recording failed verification. Do not repeat that assembly.'},
+                      'validation_error': json.dumps(summary, ensure_ascii=False)[:800]}})
+        self.state['handled'] = {}
+        self._save()
 
     def _check_candidate_audio(self, record):
         wav = self.directory / str(record.get('audio_file'))
@@ -222,15 +315,19 @@ class RecurringResolution:
         notify(f'  Recurring speech discrepancy ({max(counts[s] for s in ready)} takes); asking the analysis model how to recover.')
         self.rounds += 1
         feedback = self._feedback(self.state['history'])
+        # Once selected, plain delivery remains active for subsequent takes.
+        # Do not waste a later review choosing the already-applied repair again.
+        can_plain = self.can_plain_delivery and self.active_delivery() is None
         audit = self.resolver.resolve(self.text, failures, can_rewrite=self.can_rewrite,
-                                      can_split=self.can_split, previous_decisions=feedback)
+                                      can_split=self.can_split, previous_decisions=feedback,
+                                      can_plain_delivery=can_plain)
         row = {'trigger_counts': {key: counts[key] for key in ready},
                'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
                'failures': failures, 'audit': audit, 'previous_decisions': feedback}
         self.state['history'].append(row)
         proposal = validate_resolution(audit, self.text, failures, self.identity,
                                        can_rewrite=self.can_rewrite, can_split=self.can_split,
-                                       previous_decisions=feedback)
+                                       previous_decisions=feedback, can_plain_delivery=can_plain)
         if audit.get('decision') != 'unavailable':
             self.state['handled'].update(row['trigger_counts'])
         self._save()  # Commit the decision before changing input or accepting audio.

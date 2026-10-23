@@ -142,8 +142,39 @@ def _concatenate(parts, target, sample_rate):
         target.hardlink_to(staged)
 
 
+def _legacy_accepted_part(directory, request):
+    """Keep an existing successful child ID after adding richer input bindings.
+
+    The normal verified-take path checks this again before reuse. A mere passed
+    flag is insufficient: the complete request, source text, and saved bytes must
+    match. A corrupt old acceptance is an error, never silently bypassed.
+    """
+    path = directory / "accepted.json"
+    if not path.exists() and not path.is_symlink():
+        return False
+    accepted = read_json(regular_file(path))
+    if (not isinstance(accepted, dict) or accepted.get("request") != request
+            or accepted.get("request_hash") != digest(request)):
+        raise ValueError("Existing recovery part acceptance differs from its original request")
+    report = accepted.get("report")
+    if not isinstance(report, dict) or report.get("passed") is not True:
+        return False
+    if report.get("reasons") or report.get("expected_text") != request["part"]["text"]:
+        raise ValueError("Existing recovery part acceptance differs from its source speech")
+    name = accepted.get("audio_file")
+    if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
+        raise ValueError("Invalid existing recovery part audio path")
+    wav = directory / name
+    if not wav.exists() and not wav.is_symlink():
+        return False
+    if file_hash(regular_file(wav)) != accepted.get("audio_sha256"):
+        raise ValueError("Existing recovery part audio changed")
+    return True
+
+
 def recover_speech(text, synthesize_part, parent_directory, parent_request, verifier, config,
-                   *, notify=print, retry_budget=None, resolution_episode=None, voices_by_asset=None):
+                   *, notify=print, retry_budget=None, resolution_episode=None, voices_by_asset=None,
+                   synthesize_plain=None):
     """Verify split parts with the caller's bounded allowance for this invocation.
 
     The caller selects this strategy only after ordinary speech takes fail.
@@ -175,6 +206,9 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
     except (ValueError, OSError) as exc:
         raise RenderBlocked(f"Could not prepare speech recovery: {exc}") from exc
     notify(f"  Recovering speech as {len(request['recovery']['parts'])} separately verified parts.")
+    from .delivery_recovery import plain_delivery_request
+    bind_single_inputs = (parent_request["kind"] == "speech" and callable(synthesize_plain)
+                          and plain_delivery_request(parent_request) is not None)
 
     def assemble(path, seed):
         verified, audit = [], []
@@ -185,6 +219,11 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
             if parent_request["kind"] == "paragraph_speech":
                 from .speech_identity import paragraph_recovery_part
                 child_request["synthesis_request"] = paragraph_recovery_part(parent_request, part, voices_by_asset)
+            elif bind_single_inputs:
+                from .speech_identity import single_speech_recovery_part
+                legacy_directory = _directory(directory / "parts" / digest(child_request))
+                if not _legacy_accepted_part(legacy_directory, child_request):
+                    child_request["synthesis_request"] = single_speech_recovery_part(parent_request, part)
             child_directory = _directory(directory / "parts" / digest(child_request))
             def generate_part(output, child_seed, piece=part["text"]):
                 return synthesize_part(piece, output, child_seed)
@@ -193,21 +232,26 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                                         child_request, verifier, config, notify=notify,
                                         purpose="speech", retry_budget=retry_budget,
                                         generate_repaired=synthesize_part,
-                                        resolution_episode=resolution_episode)
+                                        generate_plain=(synthesize_plain if "synthesis_request" in child_request
+                                                        else None),
+                                        resolution_episode=resolution_episode,
+                                        episode_reserve=len(request["recovery"]["parts"]) - number)
             verified.append((wav, record))
             audit.append({**part, "request_hash": record["request_hash"],
                           "audio_sha256": record["audio_sha256"],
                           "validation_key": record["validation_key"],
                           "accepted_sha256": file_hash(wav.parent / "accepted.json"),
                           "audio_file": str(wav.relative_to(directory))})
-            if parent_request["kind"] == "paragraph_speech":
+            if parent_request["kind"] == "paragraph_speech" or bind_single_inputs:
                 # Retain actual child inputs, including any audited rewrite.
                 # The joined file is not represented as a one-shot model call.
                 audit[-1]["acceptance"] = deepcopy(record)
         _concatenate(verified, path, config["render"]["sample_rate"])
-        return {"synthesis_text": trim_speech_text(text),
-                "recovery": {"version": _VERSION, "strategy": _STRATEGY,
-                             "parent_request_hash": digest(parent_request), "parts": audit}}
+        recovery_audit = {"version": _VERSION, "strategy": _STRATEGY,
+                          "parent_request_hash": digest(parent_request), "parts": audit}
+        if bind_single_inputs:
+            recovery_audit["child_acceptance_version"] = 1
+        return {"synthesis_text": trim_speech_text(text), "recovery": recovery_audit}
 
     assembly_config = deepcopy(config)
     assembly_config["render"]["max_attempts"] = 1

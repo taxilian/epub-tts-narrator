@@ -65,13 +65,16 @@ class SpeechRetryBudget:
     def _key(directory, request_hash):
         return Path(directory).resolve(), request_hash
 
-    def claim(self, directory, request_hash, maximum, *, episode=None, episode_maximum=None):
+    def claim(self, directory, request_hash, maximum, *, episode=None, episode_maximum=None,
+              episode_reserve=0):
         """Return this run's next ordinal, or None if its allowance is spent."""
         if type(maximum) is not int or maximum < 1:
             raise ValueError("Speech generation allowance must be a positive integer")
         if episode is not None and (not isinstance(episode, str) or
                 type(episode_maximum) is not int or episode_maximum < 1):
             raise ValueError("Speech resolution requires a bounded parent allowance")
+        if type(episode_reserve) is not int or episode_reserve < 0:
+            raise ValueError("Speech recovery reserve must be a nonnegative integer")
         key = self._key(directory, request_hash)
         with self._lock:
             started = self._counts.get(key, 0)
@@ -79,7 +82,7 @@ class SpeechRetryBudget:
                 return None
             if episode is not None:
                 total = self._episodes.get(episode, 0)
-                if total >= episode_maximum:
+                if total >= episode_maximum - episode_reserve:
                     return None
                 self._episodes[episode] = total + 1
             started += 1
@@ -91,3 +94,23 @@ class SpeechRetryBudget:
         key = self._key(directory, request_hash)
         with self._lock:
             return self._counts.get(key, 0)
+
+    def episode_started(self, episode):
+        """Return total starts across a whole take and all of its recovery parts."""
+        with self._lock:
+            return self._episodes.get(episode, 0)
+
+
+def whole_strategy_allowance(maximum, fallback_parts):
+    """Keep roughly half the bounded episode for shorter generation requests.
+
+    At least one whole take is tried. Where the total limit permits, every
+    fallback part retains one opportunity; no new allowance is created.
+    """
+    if type(maximum) is not int or maximum < 1:
+        raise ValueError("Speech generation allowance must be a positive integer")
+    if type(fallback_parts) is not int or fallback_parts < 0:
+        raise ValueError("Speech fallback count must be a nonnegative integer")
+    if not fallback_parts:
+        return maximum
+    return max(1, min(maximum // 2, maximum - fallback_parts))

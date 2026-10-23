@@ -103,11 +103,16 @@ class ResolvedSpeechIdentityTests(unittest.TestCase):
             with self.subTest(metadata=metadata), self.validator(), self.assertRaises(ValueError):
                 self.identity(request=request, metadata=metadata)
 
-    def test_rewrite_marker_is_not_supported_for_paragraph_speech(self):
-        request = paragraph_request([(self.original, self.voice, "")])
+    def test_paragraph_rewrite_still_requires_actual_dialogue_formatted_input(self):
+        from epub_tts_narrator.renderer.engines import format_dialogue
+        request = paragraph_request([("Vandire ", self.voice, ""), ("is waiting here.", self.voice, "")])
         with self.validator() as validate, self.assertRaises(ValueError):
             self.identity(request=request)
-        validate.assert_not_called()
+        validate.assert_called_once()
+        text, _, controls = format_dialogue([{"text": self.rewritten, "voice": self.voice, "direction": ""}])
+        with self.validator():
+            actual = self.identity(request=request, metadata={**self.metadata, **controls, "synthesis_text": text})
+        self.assertEqual(actual, generation_identity(request, self.voices))
 
     def test_original_source_text_is_bound_exactly(self):
         request = deepcopy(self.request)
