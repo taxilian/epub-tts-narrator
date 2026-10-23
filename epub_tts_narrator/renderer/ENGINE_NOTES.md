@@ -62,7 +62,15 @@ temperature = 0.7
 max_tokens = 2048
 ```
 
-For either designer, the design prompt and spoken script are separate inputs. The resulting
+Two hosted designers are also supported: `type = "gemini"` (settings:
+`api_key`, `model`, `language_code`, `timeout_seconds`) and
+`type = "elevenlabs"` (`api_key`, `model`, `timeout_seconds`, `guidance_scale`,
+`loudness`). When a Gemini API key is configured, new voice creation prefers
+Gemini unless `[voice_design] type` or `cast --voice-designer
+(local|gemini|elevenlabs)` says otherwise. Hosted designers send the voice
+description and audition text to the provider; no book text is included.
+
+For any designer, the design prompt and spoken script are separate inputs. The resulting
 recording passes the same acoustic and independent transcript checks as other
 references before it becomes a saved voice. Later Drama 3 synthesis receives
 that recording and transcript, rather than designing a new voice on each line.
@@ -83,10 +91,12 @@ remain fixed across books until an explicit regeneration replaces the active
 selection; previous samples remain available for recovery.
 
 Narration, dialogue, and other roles attached to one explicit character ID use
-that character's canonical reference. Additional sharing uses
-`[voices.aliases]`, mapping an alias voice ID to its canonical voice ID.
-Character names are not used to infer voice sharing, and voice aliases do not
-merge distinct analyzer character records.
+that character's canonical reference. Additional sharing uses the book's
+`voice-aliases.json`, mapping an alias voice ID to its canonical voice ID;
+edit it with `audiobook-render voice-aliases BOOK --set/--remove`. Aliases are
+book-specific: global `[voices.aliases]` configuration is rejected. Character
+names are not used to infer voice sharing, and voice aliases do not merge
+distinct analyzer character records.
 
 ## Failure behavior
 

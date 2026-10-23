@@ -12,14 +12,14 @@ Prepare the corpus once, while reading the book's current saved voices:
 
 ```sh
 python scripts/benchmark_rendering.py prepare /path/to/book \
-  --config epub-audiobook.toml --output /path/to/benchmark/corpus
+  --config epub-tts-narrator.toml --output /path/to/benchmark/corpus
 ```
 
 When the local renderer is idle, generate the M5 baseline:
 
 ```sh
 python scripts/benchmark_rendering.py generate /path/to/benchmark/corpus/corpus.json \
-  --config epub-audiobook.toml --worker local --concurrency 1 \
+  --config epub-tts-narrator.toml --worker local --concurrency 1 \
   --output /path/to/benchmark/m5-first
 ```
 
