@@ -712,6 +712,7 @@ class CachedRequests:
                        and isinstance(payload.get("target_units"), list)
                        and all(isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
                                for unit in payload["target_units"]))
+        speech_spelling = payload.get("mode") == "speech_spelling_scan"
         correction = {
             "validator_error": str(error)[:2000],
             "instruction": ("Return one corrected JSON response using the original schema and scope; "
@@ -733,7 +734,21 @@ class CachedRequests:
                 'Check EVERY delivery object. The default is {"direction":"","evidence":[]}; a nonempty '
                 "direction needs exact supporting evidence. Keep unsupported directions empty.",
             ])
-        if attribution or any(word in str(error).casefold() for word in ("evidence", "quote", "substring")):
+        if speech_spelling:
+            correction["instruction"] = (
+                'Return one complete {"segments":[...]} response, not a patch. Include EVERY target_segments '
+                'entry exactly once in its original order, each with only segment_id and edits. '
+                'Keep unchanged entries with edits=[]. Copy segment_id verbatim; never recalculate it from text or offsets.'
+            )
+            guidance.extend([
+                "Edit start/end are zero-based Unicode character offsets relative to that segment's original text, "
+                "not the containing block or the rewritten speech; end is exclusive. original must equal text[start:end] exactly.",
+                "Only replacement contains the normalized spelling. Preserve every source character in original, "
+                "including stretched letters and quotation marks. Correct all reported bounds and field errors.",
+                "Omit edits whose original and replacement are identical or differ only in capitalization. "
+                "Do not invent a spelling change just to retain an edit; return edits=[] when no changes are needed.",
+            ])
+        if not speech_spelling and (attribution or any(word in str(error).casefold() for word in ("evidence", "quote", "substring"))):
             guidance.append(
                 "Copy evidence verbatim from the referenced visible block. Prefer a short, sufficient exact "
                 "substring; preserve typography and spelling. Do not paraphrase, add ellipses, or invent block IDs."
@@ -759,7 +774,9 @@ class CachedRequests:
                 return current
         correction["instruction"] = (
             "Return ALL target units once in input order, with complete exact text, including unaffected units; no patches."
-            if attribution else "Return a corrected complete response within the original schema and scope."
+            if attribution else
+            "Return ALL target_segments once in input order, copying each segment_id verbatim with an edits array; no patches."
+            if speech_spelling else "Return a corrected complete response within the original schema and scope."
         )
         if fits(current):
             return current
@@ -888,10 +905,11 @@ class CachedRequests:
             try:
                 accepted = validate(result)
             except (ValueError, TypeError, KeyError, IndexError) as exc:
-                write_json(self.cache_dir / "failed" / f"{key}-attempt{attempt + 1}.json",
-                           result, overwrite=True)
+                failed_path = self.cache_dir / "failed" / f"{key}-attempt{attempt + 1}.json"
+                write_json(failed_path, result, overwrite=True)
                 if attempt == self.repair_attempts:
-                    raise ValueError(f"Model output failed validation after {attempt + 1} attempt(s): {exc}") from exc
+                    raise ValueError(f"Model output failed validation after {attempt + 1} attempt(s): {exc}\n"
+                                     f"Rejected model response: {failed_path.resolve()}") from exc
                 current = self._repair_payload(system, payload, result, exc)
                 with self.progress_lock:
                     self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {str(exc)[:240]}")

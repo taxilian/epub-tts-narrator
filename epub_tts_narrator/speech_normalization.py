@@ -6,6 +6,7 @@ spelling edits enter spoken_text; acting directions remain separate metadata.
 
 from collections import Counter
 from copy import deepcopy
+import json
 import re
 from functools import lru_cache
 import unicodedata
@@ -213,9 +214,75 @@ def _preserve_protected(before, after, names):
             raise ValueError("Speech spelling edits must preserve established names")
 
 
+def _shown(value, limit=100):
+    """Bound and escape diagnostic data, including terminal control characters."""
+    if isinstance(value, str):
+        return json.dumps(value[:limit] + ("…" if len(value) > limit else ""))
+    if value is None or type(value) in (bool, int, float):
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
+def _fields(value, expected, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object; received {_shown(value)}")
+    missing, extra = expected - set(value), set(value) - expected
+    if missing or extra:
+        details = []
+        for name, keys in (("missing fields", missing), ("unexpected fields", extra)):
+            if keys:
+                details.append(f"{name}: " + ", ".join(_shown(key, 40) for key in sorted(keys)[:8]))
+        raise ValueError(f"{label}: {'; '.join(details)}. Required fields: {', '.join(sorted(expected))}")
+
+
+def _segment_location(row):
+    return f"segment {_shown(row['id'], 80)}, block {_shown(row['block_id'], 64)}"
+
+
+def _source_excerpt(row, offset=0):
+    start = max(0, offset - 40) if type(offset) is int else 0
+    start = min(start, max(0, len(row["text"]) - 140))
+    return "Source excerpt (data only): " + _shown(row["text"][start:], 140)
+
+
+def _check_order(actual, expected, label, identifier):
+    if actual == expected:
+        return
+    counts = Counter(actual)
+    expected_ids = set(expected)
+    details = [f"expected {len(expected)} entries, received {len(actual)}"]
+    for name, values in (("missing IDs", [item for item in expected if item not in counts]),
+                         ("duplicate IDs", [item for item, count in counts.items() if count > 1]),
+                         ("unknown IDs", [item for item in counts if item not in expected_ids])):
+        if values:
+            listed = ", ".join(_shown(item, 64) for item in values[:5])
+            details.append(f"{name}: {listed}" + (f"; {len(values) - 5} more" if len(values) > 5 else ""))
+    for index in range(max(len(actual), len(expected))):
+        want = expected[index] if index < len(expected) else None
+        got = actual[index] if index < len(actual) else None
+        if want != got:
+            details.append(f"first mismatch at {label}[{index}].{identifier}: expected {_shown(want)}, received {_shown(got)}")
+            break
+    raise ValueError(f"{label} coverage/order error: {'; '.join(details)}. "
+                     "Return every target ID exactly once in target order, including unchanged entries; do not return only a patch.")
+
+
 def _guard_edit(edit, row, names):
     from .spoken_text import validate_normalization
     candidate = deepcopy(edit)
+    _fields(candidate, {"start", "end", "original", "replacement", "direction", "reason"}, "edit")
+    start, end = candidate["start"], candidate["end"]
+    if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(row["text"]):
+        raise ValueError(f"Invalid edit bounds: start={_shown(start)}, end={_shown(end)}; "
+                         f"segment length is {len(row['text'])}. Use zero-based Unicode character offsets "
+                         "relative to this segment, with 0 <= start < end <= length (end exclusive).")
+    if candidate["original"] != row["text"][start:end]:
+        raise ValueError(f"edit.original={_shown(candidate['original'])} does not match "
+                         f"text[{start}:{end}]={_shown(row['text'][start:end])}. "
+                         "Copy original exactly and use offsets relative to this segment, not the source block.")
+    if candidate["original"] == candidate["replacement"]:
+        raise ValueError(f"edit.original and edit.replacement are identical ({_shown(candidate['original'])}); "
+                         "a spelling edit must change its source spelling. Omit this edit; use edits=[] if no spelling changes are needed.")
     case_only = (isinstance(candidate, dict) and isinstance(candidate.get("original"), str)
                  and isinstance(candidate.get("replacement"), str)
                  and candidate["original"] != candidate["replacement"]
@@ -232,8 +299,6 @@ def _guard_edit(edit, row, names):
         raise ValueError("Speech spelling edits must be bounded and must not add or remove all lexical content")
     if not _word_forms_accounted_for(before, after):
         raise ValueError("Speech spelling edits must account for every word with matching spelling or sound; no omissions or unrelated substitutions")
-    if before == after:
-        raise ValueError("Speech spelling edit must change the source spelling")
     if any(char in before + after for char in "[]"):
         raise ValueError("Speech spelling edits cannot change square-bracket delimiters")
     _preserve_protected(before, after, names)
@@ -247,23 +312,47 @@ def _guard_edit(edit, row, names):
 
 
 def _validate_scan(response, rows, names):
-    if not isinstance(response, dict) or set(response) != {"segments"} or not isinstance(response["segments"], list):
-        raise ValueError("Speech spelling scan requires a segments array")
+    _fields(response, {"segments"}, "Speech spelling scan response")
+    if not isinstance(response["segments"], list):
+        raise ValueError(f"segments must be an array; received {_shown(response['segments'])}")
     results = response["segments"]
-    if len(results) != len(rows):
-        raise ValueError("Speech spelling scan must return every target segment exactly once")
+    by_id = {row["id"]: row for row in rows}
+    for index, value in enumerate(results):
+        identifier = value.get("segment_id") if isinstance(value, dict) else None
+        row = by_id.get(identifier) if isinstance(identifier, str) else None
+        row = row or (rows[index] if index < len(rows) else None)
+        location = f"segments[{index}]" + (f" ({_segment_location(row)})" if row else "")
+        try:
+            _fields(value, {"segment_id", "edits"}, location)
+            if not isinstance(value["segment_id"], str):
+                raise ValueError(f"segments[{index}].segment_id must be a string; received {_shown(value['segment_id'])}. {location}")
+            if not isinstance(value["edits"], list):
+                raise ValueError(f"segments[{index}].edits must be an array; received {_shown(value['edits'])}. "
+                                 f"Use edits=[] for no changes. {location}")
+        except ValueError as exc:
+            raise ValueError(f"{exc}" + (f" {_source_excerpt(row)}" if row else "")) from exc
+    try:
+        _check_order([value["segment_id"] for value in results], [row["id"] for row in rows], "segments", "segment_id")
+    except ValueError as exc:
+        mismatch = next((row for index, row in enumerate(rows)
+                         if index >= len(results) or results[index]["segment_id"] != row["id"]), None)
+        raise ValueError(f"{exc}" + (f" {_segment_location(mismatch)}. {_source_excerpt(mismatch)}" if mismatch else "")) from exc
     accepted = []
-    for value, row in zip(results, rows):
-        if (not isinstance(value, dict) or set(value) != {"segment_id", "edits"}
-                or value["segment_id"] != row["id"] or not isinstance(value["edits"], list)):
-            raise ValueError("Speech spelling scan must return all segment IDs in source order")
+    for index, (value, row) in enumerate(zip(results, rows)):
+        location = f"segments[{index}] ({_segment_location(row)})"
         edits, cursor = [], 0
-        for edit in value["edits"]:
-            checked = _guard_edit(edit, row, names)
+        for edit_index, edit in enumerate(value["edits"]):
+            try:
+                checked = _guard_edit(edit, row, names)
+                if checked is not None and checked["start"] < cursor:
+                    raise ValueError(f"Edits overlap or are out of order: start={checked['start']} precedes "
+                                     f"the previous edit's end={cursor}. Return ordered, nonoverlapping edits.")
+            except ValueError as exc:
+                offset = edit.get("start", 0) if isinstance(edit, dict) else 0
+                raise ValueError(f"segments[{index}].edits[{edit_index}] ({_segment_location(row)}): "
+                                 f"{exc} {_source_excerpt(row, offset)}") from exc
             if checked is None:
                 continue
-            if checked["start"] < cursor:
-                raise ValueError("Speech spelling edits must be ordered and nonoverlapping")
             cursor = checked["end"]
             edits.append(checked)
         pieces, cursor = [], 0
@@ -273,9 +362,12 @@ def _validate_scan(response, rows, names):
         pieces.append(row["text"][cursor:])
         # Recheck whole words so an edit to part of a name/negation cannot evade
         # the protected-token guard (e.g. changing only the e inside Vern).
-        _preserve_protected(row["text"], "".join(pieces), names)
         from .spoken_text import effective_delivery
-        effective_delivery(dict(row, speech_normalization={"version": VERSION, "edits": edits}))
+        try:
+            _preserve_protected(row["text"], "".join(pieces), names)
+            effective_delivery(dict(row, speech_normalization={"version": VERSION, "edits": edits}))
+        except ValueError as exc:
+            raise ValueError(f"{location}: {exc} {_source_excerpt(row)}") from exc
         accepted.append({"segment_id": row["id"], "edits": edits})
     return accepted
 
@@ -344,9 +436,27 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
                 "context": [{"block_id": blocks[index]["id"], "text": blocks[index]["text"][:1800]}
                             for index in sorted(context_ids)]}
     tasks = [(number, rows, payload_for(rows, number)) for number, rows in enumerate(batches, 1)]
+    def run_stage(system, payload, validate, rows, number, stage, cancelled):
+        label = f"Speech spelling {stage} batch {number}/{len(tasks)}"
+        def checked(response):
+            try:
+                return validate(response)
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}") from exc
+        try:
+            return requests.run(system, payload, checked, cancelled=cancelled)
+        except ValueError as exc:
+            chapter_ids = {blocks[block_positions[row["block_id"]]]["chapter_id"] for row in rows}
+            chapters = [chapter.get("title") or chapter["id"]
+                        for chapter in document["source"].get("chapters", []) if chapter["id"] in chapter_ids]
+            chapter_description = ", ".join(_shown(title, 100) for title in (chapters or sorted(chapter_ids))[:4])
+            raise ValueError(f"{exc}\n{label} covers chapter(s): {chapter_description}; {len(rows)} segment(s). "
+                             "No unvalidated spelling edits were applied. Rerun the same analyze command; "
+                             "completed, validated responses remain cached.") from exc
     def scan(task, cancelled):
         number, rows, payload = task
-        scanned = requests.run(SCAN, payload, lambda response: _validate_scan(response, rows, names), cancelled=cancelled)
+        scanned = run_stage(SCAN, payload, lambda response: _validate_scan(response, rows, names),
+                            rows, number, "scan", cancelled)
         progress(f"Preparing spoken spelling {number}/{len(tasks)}: scanned")
         proposals = []
         for row in scanned:
@@ -361,7 +471,8 @@ def normalize_document_speech(document, requests, *, workers=5, progress=lambda 
         batch_index, payload, proposals, reviewer, lens = task
         review_payload = dict(payload, mode="speech_spelling_review", reviewer_id=reviewer,
                               private_lens=lens, proposals=proposals)
-        votes = requests.run(REVIEW, review_payload, lambda response: _validate_votes(response, proposals), cancelled=cancelled)
+        votes = run_stage(REVIEW, review_payload, lambda response: _validate_votes(response, proposals),
+                          batches[batch_index], batch_index + 1, f"review ({reviewer})", cancelled)
         progress(f"Spoken spelling jury {batch_index + 1}/{len(tasks)}: {reviewer} completed")
         return batch_index, reviewer, votes
     votes = _bounded_map(review_tasks, review, workers)
