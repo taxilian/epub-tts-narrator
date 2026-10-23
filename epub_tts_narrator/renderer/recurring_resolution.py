@@ -344,7 +344,7 @@ class RecurringResolution:
                 notify('  Resuming saved speech recovery decision: ' + proposal['action'] + '.')
                 return {**proposal, 'audit': previous['audit'], 'failures': previous['failures']}
         signatures = failure_signatures(self.text, record['report'])
-        if not signatures or self.rounds >= self.maximum_rounds:
+        if not signatures:
             return None
         counts = Counter(signature for saved in self.records.values()
                          for signature in failure_signatures(self.text, saved['report']))
@@ -357,27 +357,48 @@ class RecurringResolution:
         # rounds stay the only limit on reconsidering the same evidence.
         takes = self._failed_takes()
         repeat = self._failed_repair(record)
-        if takes - self.state['handled'].get('takes', 0) < self.threshold and repeat is None:
-            return None
-        # Historical reports can trigger review, but only a current byte-bound
-        # waveform can be accepted. The latest failure is always last in payload.
-        self._check_candidate_audio(record)
         failures = [self._failure(saved) for number, saved in sorted(self.records.items())
                     if number <= record['attempt'] and failure_signatures(self.text, saved['report'])][-30:]
-        ready = sorted(signature for signature in signatures if counts[signature] >= self.threshold)
-        if repeat is not None:
-            notify(f'  The applied {repeat} recovery failed its new take; asking the analysis '
-                   f'model how to recover ({takes} takes).')
-        else:
-            notify(f'  Recurring speech discrepancy ({takes} takes); asking the analysis model how to recover.')
-        self.rounds += 1
         feedback = self._feedback(self.state['history'])
-        # Once selected, plain delivery remains active for subsequent takes.
-        # Do not waste a later review choosing the already-applied repair again.
         can_plain = self.can_plain_delivery and self.active_delivery() is None
-        audit = self.resolver.resolve(self.text, failures, can_rewrite=self.can_rewrite,
-                                      can_split=self.can_split, previous_decisions=feedback,
-                                      can_plain_delivery=can_plain)
+        pending_index = None
+        if (previous is not None and previous['audit'].get('decision') == 'unavailable'
+                and 'reconsidered' in previous['audit']
+                and previous.get('attempt') == record['attempt']
+                and previous.get('audio_sha256') == record.get('audio_sha256')
+                and previous['failures'] and previous['failures'][-1] == self._failure(record)):
+            pending_index = len(self.state['history']) - 1
+            feedback = self._saved_feedback(pending_index)
+        reconsider = getattr(self.resolver, 'reconsider', None)
+        audit = None
+        if (callable(reconsider) and self.can_rewrite and repeat is None
+                and any(row.get('decision') == 'blocked' and row.get('error_code') == 'invalid_proposal'
+                        and isinstance(row.get('proposal'), dict) and row['proposal'].get('action') == 'rewrite'
+                        for row in feedback or [])):
+            self._check_candidate_audio(record)
+            audit = reconsider(self.text, failures, can_rewrite=self.can_rewrite, can_split=self.can_split,
+                               previous_decisions=feedback, can_plain_delivery=can_plain)
+        reconsidered = audit is not None
+        ready = sorted(signature for signature in signatures if counts[signature] >= self.threshold)
+        if reconsidered:
+            notify('  Reconsidering a previously blocked spelling repair with fresh sound reviews; '
+                   'no new planner request or failed TTS take is needed.')
+        else:
+            if pending_index is not None:
+                raise ValueError('Saved spelling-repair reconsideration is no longer eligible; retained audio was not regenerated')
+            if (self.rounds >= self.maximum_rounds
+                    or takes - self.state['handled'].get('takes', 0) < self.threshold and repeat is None):
+                return None
+            self._check_candidate_audio(record)
+            if repeat is not None:
+                notify(f'  The applied {repeat} recovery failed its new take; asking the analysis '
+                       f'model how to recover ({takes} takes).')
+            else:
+                notify(f'  Recurring speech discrepancy ({takes} takes); asking the analysis model how to recover.')
+            self.rounds += 1
+            audit = self.resolver.resolve(self.text, failures, can_rewrite=self.can_rewrite,
+                                          can_split=self.can_split, previous_decisions=feedback,
+                                          can_plain_delivery=can_plain)
         proposal = validate_resolution(audit, self.text, failures, self.identity,
                                        can_rewrite=self.can_rewrite, can_split=self.can_split,
                                        previous_decisions=feedback, can_plain_delivery=can_plain)
@@ -385,7 +406,10 @@ class RecurringResolution:
                'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
                'failures': failures, 'audit': audit, 'previous_decisions': feedback,
                'applied': proposal is not None}
-        self.state['history'].append(row)
+        if pending_index is None:
+            self.state['history'].append(row)
+        else:
+            self.state['history'][pending_index] = row
         if audit.get('decision') == 'resolved':
             self.state['handled'] = {'takes': takes}
         self._save()  # Commit the decision before changing input or accepting audio.
