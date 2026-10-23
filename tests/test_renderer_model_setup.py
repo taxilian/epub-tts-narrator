@@ -1,3 +1,5 @@
+"""Model setup tests validate checkpoint layouts without downloading weights."""
+
 import io
 import json
 from pathlib import Path
@@ -9,11 +11,7 @@ from unittest.mock import Mock, patch
 from epub_tts_narrator.renderer.model_setup import (
     DRAMA, PARAKEET, QWEN, WHISPER, ModelSetup, ModelSetupError,
 )
-
-
-class Terminal(io.StringIO):
-    def isatty(self):
-        return True
+from shared_fixtures import Terminal
 
 
 def files(path, names):

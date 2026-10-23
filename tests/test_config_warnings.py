@@ -1,3 +1,5 @@
+"""Configuration warnings name unknown keys without echoing their values or mutating settings."""
+
 from contextlib import redirect_stderr
 import io
 import tempfile

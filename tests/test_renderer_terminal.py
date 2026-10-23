@@ -1,3 +1,5 @@
+"""Terminal playback tests use PTYs and pipes; a child process proves the terminal is restored."""
+
 import io
 import json
 import os
@@ -166,10 +168,12 @@ class TerminalPlaybackTests(unittest.TestCase):
         self.assertEqual(result["stops"], 1)
 
     def test_split_crlf_does_not_leak_into_menu(self):
-        self.run_child(writes=[(0, b"\r"), (0.01, b"\n")])
+        result = self.run_child(writes=[(0, b"\r"), (0.01, b"\n")])
+        self.assertEqual(result["stops"], 1)
 
     def test_utf8_key_does_not_leak_into_menu(self):
-        self.run_child(writes=[(0, "é".encode("utf-8"))])
+        result = self.run_child(writes=[(0, "é".encode("utf-8"))])
+        self.assertEqual(result["stops"], 1)
 
     def test_ctrl_c_propagates_after_cleanup(self):
         result = self.run_child(writes=[(0, b"\x03")])

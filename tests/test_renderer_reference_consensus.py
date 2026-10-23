@@ -1,3 +1,5 @@
+"""Reference consensus tests supply the shared verifier fixtures for the reference_* files."""
+
 from copy import deepcopy
 import json
 import math

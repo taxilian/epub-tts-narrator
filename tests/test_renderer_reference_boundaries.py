@@ -1,3 +1,5 @@
+"""Word-boundary reference comparisons share fixtures from test_renderer_reference_consensus."""
+
 import unittest
 from unittest.mock import patch
 

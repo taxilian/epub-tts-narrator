@@ -10,6 +10,7 @@ from epub_tts_narrator.renderer.book_aliases import alias_record
 from epub_tts_narrator.renderer.book_context import voice_store
 from epub_tts_narrator.renderer.common import digest, read_json, write_json
 from epub_tts_narrator.renderer.voices import VoiceStore
+from shared_fixtures import snapshot
 
 
 class AuthorVoiceInheritanceTests(unittest.TestCase):
@@ -50,32 +51,28 @@ class AuthorVoiceInheritanceTests(unittest.TestCase):
         return store.publish(voice_id, {"description": "An audiobook author voice."}, self.wav, text,
                              {"engine": "fixture"}, {"passed": True}, {"description_applied": True})
 
-    def snapshot(self):
-        return {str(path.relative_to(self.root)): path.read_bytes()
-                for path in self.root.rglob("*") if path.is_file()}
-
     def test_old_books_keep_local_voices_and_missing_books_inherit_nearest(self):
         original = [self.publish(self.raw_store(index), f"author-{index + 1}", f"Book {index + 1} voice.")
                     for index in range(4)]
-        before = self.snapshot()
+        before = snapshot(self.root)
         for index in range(6):
             store = self.store(index)
             binding = store.load(f"author-{index + 1}")
             expected = original[min(index, 3)]
             self.assertEqual(binding["asset_hash"], expected["asset_hash"])
             self.assertEqual(binding["inherited"], index >= 4)
-        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(snapshot(self.root), before)
         self.assertFalse((Path(self.books[4]["directory"]) / "voices").exists())
 
     def test_ancestor_created_after_lookup_is_available_without_reopening(self):
         child = self.store(2)
         self.assertIsNone(child.load("author-3"))
         first = self.publish(self.store(0), "author-1")
-        before = self.snapshot()
+        before = snapshot(self.root)
         inherited = child.load("author-3")
         self.assertEqual(inherited["asset_hash"], first["asset_hash"])
         self.assertTrue(inherited["inherited"])
-        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_local_regeneration_under_canonical_id_is_seen_by_descendants(self):
         original = self.publish(self.raw_store(0), "author-1")

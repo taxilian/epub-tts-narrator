@@ -11,7 +11,6 @@ from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import (
     CachedRequests, DEFAULT_POLICY, align_units, analyze, apply_edits, fingerprint, make_units, merge_patch, seed_cast,
 )
-from epub_tts_narrator.prompts import DISCOVER
 from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from audition_fixtures import script_response
@@ -765,23 +764,21 @@ class PipelineTests(unittest.TestCase):
         client = FakeClient()
         self.run_analysis(client, whole_book_discovery=True)
         original_system, original_payload = client.calls[0]
-        expected_system = DISCOVER.replace(
-            "brief scene/identity/narrator summary, at most 1200 characters",
-            "brief book-wide identity/narrator summary, at most 2400 characters",
-        ) + """
-In discovery mode, target_units contain the complete book in source order.
-Use each unit's chapter_id to track chapter scope and resolve recurring identities
-across the entire book. Return one concise book-wide summary, at most 2400
-characters, covering identities, aliases, narrator scope, and important ambiguity.
-"""
-        self.assertEqual(original_system, expected_system)
-        self.assertEqual(original_payload, {
-            "mode": "discover", "book": self.source["book"], "known_cast": seed_cast(),
-            "available_ids": {key: [f"{prefix}_0001_{number:03d}" for number in range(1, 257)]
-                              for key, prefix in (("characters", "char"), ("roles", "role"), ("voices", "voice"))},
-            "target_units": [unit for batch in make_units(self.source) for unit in batch],
-            "context_units": [], "scene_summaries": [], "performance_policy": DEFAULT_POLICY,
-        })
+        # Whole-book mode swaps the batched discovery prompt for one book-wide
+        # pass: distinctive markers, not a verbatim copy of the prompt source.
+        self.assertIn("brief book-wide identity/narrator summary, at most 2400 characters", original_system)
+        self.assertIn("target_units contain the complete book in source order", original_system)
+        self.assertNotIn("brief scene/identity/narrator summary", original_system)
+        self.assertEqual(original_payload["mode"], "discover")
+        self.assertEqual(original_payload["book"], self.source["book"])
+        self.assertEqual(original_payload["known_cast"], seed_cast())
+        self.assertEqual(original_payload["target_units"],
+                         [unit for batch in make_units(self.source) for unit in batch])
+        self.assertEqual(original_payload["context_units"], [])
+        self.assertEqual(original_payload["scene_summaries"], [])
+        self.assertEqual(original_payload["performance_policy"], DEFAULT_POLICY)
+        self.assertEqual(set(original_payload["available_ids"]), {"characters", "roles", "voices"})
+        self.assertTrue(all(len(ids) == 256 for ids in original_payload["available_ids"].values()))
         notes = "Check whether an unnamed voice has a solo turn."
         repeat = FakeClient()
         document = self.run_analysis(repeat, whole_book_discovery=True, cast_review_notes=notes)

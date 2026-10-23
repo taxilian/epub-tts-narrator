@@ -1,3 +1,5 @@
+"""Renderer CLI tests exercise commands against fixture bundles without loading speech models."""
+
 import contextlib
 import io
 import json

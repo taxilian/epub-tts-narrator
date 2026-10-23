@@ -1,3 +1,5 @@
+"""Verification factory tests compose fake verifiers without loading ASR models."""
+
 from copy import deepcopy
 import math
 from pathlib import Path
@@ -10,17 +12,7 @@ import wave
 
 from epub_tts_narrator.renderer.quality import validate_audio, validation_key
 from epub_tts_narrator.renderer.verification import ReferenceCorroboratingVerifier, create_verifier
-
-
-def timed_transcript(text):
-    words = text.split()
-    return {"text": text, "segments": [{
-        "text": text, "start": 0.0, "end": 1.0,
-        "words": [
-            {"word": word, "start": index / len(words), "end": (index + 1) / len(words)}
-            for index, word in enumerate(words)
-        ],
-    }]}
+from shared_fixtures import timed_transcript
 
 
 def fake_primary(model="primary-v1"):

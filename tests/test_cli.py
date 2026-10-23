@@ -1,3 +1,5 @@
+"""CLI tests run the analysis pipeline with scripted clients and never open a network socket."""
+
 import contextlib
 from copy import deepcopy
 import hashlib
@@ -7,12 +9,12 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
 
 from epub_tts_narrator.cli import export_bundle, main, read_json
 from epub_tts_narrator.pipeline import fingerprint, write_json
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis, load_registry, save_registry
+from shared_fixtures import make_epub
 from test_contracts import valid_document
 from audition_fixtures import script_response
 
@@ -87,13 +89,8 @@ class CLITests(unittest.TestCase):
         return status, stdout.getvalue(), stderr.getvalue()
 
     def make_epub(self, paragraph="The rain stopped."):
-        path = self.root / "story.epub"
-        with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("mimetype", "application/epub+zip")
-            archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
-            archive.writestr("content.opf", '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Story</dc:title><dc:identifier id="id">test</dc:identifier><dc:language>en</dc:language></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>')
-            archive.writestr("one.xhtml", f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>{paragraph}</p></body></html>')
-        return path
+        return make_epub(self.root / "story.epub", "Test Story", "test",
+                         f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>{paragraph}</p></body></html>')
 
     def test_fresh_analyze_exports_reviewed_spoken_spelling_without_changing_source(self):
         output = self.root / "styled-book"

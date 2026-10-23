@@ -25,6 +25,7 @@ from epub_tts_narrator.renderer.fish_http import FishHTTPEngine, FishHTTPError
 from epub_tts_narrator.renderer.fish_http import trim_wire_text
 from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.server import make_server, serve
+from shared_fixtures import PARENTHESIS_TRIM_CASES
 
 
 def wav_bytes():
@@ -424,13 +425,7 @@ class NativeDrama3TransportTests(unittest.TestCase):
     def test_http_parenthesis_fragments_are_cleaned_without_changing_reference(self):
         voice = {**self.voice, "reference_text": "(A saved reference)."}
         original = dict(voice)
-        cases = (
-            ("(Lie, ", "Lie,"),
-            ("I thought fiercely). ", "I thought fiercely."),
-            ("(Lie.)", "Lie."),
-            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
-            ("He said (quietly).", "He said (quietly)."),
-        )
+        cases = PARENTHESIS_TRIM_CASES
         for index, (source, target) in enumerate(cases):
             with self.subTest(source=source):
                 self.client().synthesize(

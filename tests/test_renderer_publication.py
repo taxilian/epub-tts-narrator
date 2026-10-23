@@ -11,11 +11,10 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.assembly import package_audio
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
-from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.publication import check_selection, published_book, publish
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import render
 from audition_fixtures import prepare_document
+from shared_fixtures import renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 
@@ -143,14 +142,7 @@ class LegacyPublicationTests(unittest.TestCase):
             ]))
             export_bundle(document, root / "bundle")
             bundle = load_bundle(root / "bundle")
-            config = deepcopy(DEFAULTS)
-            config["engine"]["checkpoint"] = str(root / "unused-tts")
-            config["verification"]["model"] = str(root / "unused-asr")
-            config["voices"].update(directory=str(root / "voices"), series_id="legacy-fixture")
-            config["render"].update(
-                work_dir=str(root / "work"), output_dir=str(root / "output"),
-                max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE)
-            config["quality"] = validate_policy({})
+            config = renderer_config(root, series_id="legacy-fixture")
             engine = FixtureEngine({})
             verifier = FixtureVerifier(engine.fixture_transcripts)
 

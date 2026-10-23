@@ -1,7 +1,6 @@
 """Casting must honor descriptions and preserve one identity across character roles."""
 
 from copy import deepcopy
-import hashlib
 import math
 from pathlib import Path
 import shutil
@@ -12,6 +11,7 @@ import wave
 
 from epub_tts_narrator.renderer.bundle import load_bundle
 from audition_fixtures import prepare_bundle
+from shared_fixtures import pcm_hash
 from epub_tts_narrator.renderer.casting import CastingSession
 from epub_tts_narrator.renderer.common import digest, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
@@ -25,11 +25,6 @@ from epub_tts_narrator.cli import export_bundle
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern"
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-
-
-def pcm_hash(path):
-    with wave.open(str(path), "rb") as audio:
-        return hashlib.sha256(audio.readframes(audio.getnframes())).hexdigest()
 
 
 class ReferenceDesigner:

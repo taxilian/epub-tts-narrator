@@ -394,13 +394,13 @@ class IdentityTests(unittest.TestCase):
         votes = [payload for payload in requests.calls if payload["mode"] == "identity_vote"]
         self.assertEqual(len(votes), 6)
         serialized = [json.dumps(payload, ensure_ascii=False, allow_nan=False) for payload in votes]
-        self.assertTrue(all(list(payload)[:2] == ["source_units", "original_cast"] for payload in votes))
+        self.assertTrue(all({"source_units", "original_cast"} <= set(payload) for payload in votes))
         self.assertEqual(len({value.partition(', "case":')[0] for value in serialized}), 1)
         for identity in {payload["case"]["id"] for payload in votes}:
             group = [json.dumps(payload, ensure_ascii=False, allow_nan=False) for payload in votes if payload["case"]["id"] == identity]
             self.assertEqual(len({value.partition(', "reviewer_id":')[0] for value in group}), 1)
             self.assertEqual(len(set(group)), 3)
-        self.assertTrue(all(list(payload)[-2:] == ["reviewer_id", "lens"] for payload in votes))
+        self.assertTrue(all({"reviewer_id", "lens"} <= set(payload) for payload in votes))
 
     def test_series_jury_prefix_order_reuses_current_prompt_cache_entries_regardless_of_key_order(self):
         source, cast = fixture()

@@ -1,3 +1,5 @@
+"""Reference ASR tests stub the Parakeet model so no audio is decoded."""
+
 from importlib import metadata
 from pathlib import Path
 import sys

@@ -41,9 +41,12 @@ class SampleLoudnessTests(unittest.TestCase):
 
     def measurement(self, path):
         # Re-measure the encoded WAV, independently of the cached report.
+        settings = self.normalizer.settings
+        loudnorm = (f"loudnorm=I={settings['target_lufs']}:TP={settings['true_peak_db']}"
+                    f":LRA={settings['loudness_range']}:print_format=json")
         result = subprocess.run([
             "ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-i", str(path),
-            "-af", "loudnorm=I=-20:TP=-1.5:LRA=50:print_format=json", "-f", "null", "-",
+            "-af", loudnorm, "-f", "null", "-",
         ], capture_output=True, check=True)
         report = result.stderr.decode()
         return json.JSONDecoder().raw_decode(report[report.rindex('{'):])[0]

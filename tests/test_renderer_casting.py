@@ -20,15 +20,11 @@ from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, au
 from epub_tts_narrator.renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
+from shared_fixtures import pcm_hash
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
 FFMPEG = shutil.which("ffmpeg")
-
-
-def pcm_hash(path):
-    with wave.open(str(path), "rb") as audio:
-        return hashlib.sha256(audio.readframes(audio.getnframes())).hexdigest()
 
 
 class CastingEngine:

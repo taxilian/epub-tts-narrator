@@ -14,16 +14,12 @@ from epub_tts_narrator.renderer.drama3_models import (
     DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS, get_drama3_model,
 )
 from epub_tts_narrator.renderer.model_setup import ModelSetup, ModelSetupError
+from shared_fixtures import Terminal
 
 
 QUANTIZED = [model for model in DRAMA3_MODELS.values() if model.runtime == "mlx_audio"]
 FOUR_BIT = get_drama3_model("mlx-community/fish-audio-drama-3-4bit")
 EIGHT_BIT = get_drama3_model("mlx-community/fish-audio-drama-3-8bit")
-
-
-class Terminal(io.StringIO):
-    def isatty(self):
-        return True
 
 
 def write_quantized(path, model=FOUR_BIT):

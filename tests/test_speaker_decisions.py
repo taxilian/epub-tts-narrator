@@ -13,12 +13,8 @@ from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+from shared_fixtures import Terminal
 from test_contracts import valid_document
-
-
-class Terminal(StringIO):
-    def isatty(self):
-        return True
 
 
 def missing(indices=(1,)):
@@ -617,8 +613,8 @@ class SpeakerDecisionTests(unittest.TestCase):
 
     def test_cli_analyze_runs_decisions_after_model_and_before_publication(self):
         from epub_tts_narrator.cli import main
-        document = missing()
-        events = []
+        document = missing((1, 2))
+        events, prepared_roles, published = [], [], []
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
                   "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
@@ -633,12 +629,16 @@ class SpeakerDecisionTests(unittest.TestCase):
             return document
         def decide(doc, **kwargs):
             events.append("decisions")
-            return doc
-        def publish(*args, **kwargs):
+            decided = deepcopy(doc)
+            decided["segments"][1].update(role_id="mara", voice_id="v1")
+            return decided
+        def publish(doc, *args, **kwargs):
             events.append("publish")
+            published.append(doc)
             return {"ready": False, "review_count": 1}
         def prepare(doc, *args, **kwargs):
             events.append("auditions")
+            prepared_roles.append(doc["segments"][1]["role_id"])
             return doc
         def normalize(doc, *args, **kwargs):
             events.append("spelling")
@@ -656,6 +656,9 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
             self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
         self.assertEqual(events, ["automatic", "spelling", "auditions", "decisions", "spelling", "auditions", "publish"])
+        self.assertEqual(prepared_roles, [None, "mara"])
+        self.assertEqual(published[0]["segments"][1]["role_id"], "mara")
+        self.assertEqual(published[0]["segments"][1]["voice_id"], "v1")
 
 
 if __name__ == "__main__":

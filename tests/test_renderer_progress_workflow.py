@@ -1,6 +1,5 @@
 """Visible render progress preserves truthful completion and accepted audio."""
 
-from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,10 +9,9 @@ from audition_fixtures import prepare_bundle
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.progress import ChapterProgress
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_take
+from shared_fixtures import renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
@@ -25,15 +23,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.config = deepcopy(DEFAULTS)
-        self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
-        self.config["verification"]["model"] = str(self.root / "unused-asr")
-        self.config["voices"].update(directory=str(self.root / "voices"), series_id="progress-fixture")
-        self.config["render"].update(
-            work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE,
-        )
-        self.config["quality"] = validate_policy({})
+        self.config = renderer_config(self.root, series_id="progress-fixture")
         self.engine = FixtureEngine({})
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
         self.messages = []

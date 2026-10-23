@@ -11,14 +11,13 @@ from unittest.mock import patch
 from epub_tts_narrator.renderer.chapter_executor import ChapterExecutor
 from epub_tts_narrator.renderer.chapter_client import _validate_timing_sources
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.engines import format_dialogue
 from epub_tts_narrator.renderer.paragraphs import _group
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.speech_identity import generation_identity
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+from shared_fixtures import renderer_config
 from test_renderer_recurring_resolution import PlanClient
 from test_renderer_speech_identity import reference
 from test_renderer_speech_recovery_integration import RecoveryEngine, RecoveryVerifier, TEXT, FIRST, LAST
@@ -42,9 +41,7 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.config = deepcopy(DEFAULTS)
-        self.config["quality"] = validate_policy({})
-        self.config["render"].update(max_attempts=3, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.config = renderer_config(max_attempts=3)
         registry = {}
         self.engine, self.verifier = UniformEngine(registry), RecoveryVerifier(registry)
         self.voice = reference("voice")
@@ -77,7 +74,10 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
 
     def adaptive(self, actions):
         client = PlanClient(actions)
-        self.executor._verifier = RecurringSpeechVerifier(self.verifier, SpeechResolver(client))
+        verifier = RecurringSpeechVerifier(self.verifier, SpeechResolver(client))
+        self.executor.close()
+        self.executor = ChapterExecutor(self.config, engine=self.engine, verifier=verifier)
+        self.addCleanup(self.executor.close)
         return client
 
     def test_remote_failure_splits_preserves_one_parent_assembles_and_resumes(self):

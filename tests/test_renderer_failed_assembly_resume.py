@@ -1,6 +1,5 @@
 """A definitively rejected join must not trap every later render in the same join."""
 
-from copy import deepcopy
 from pathlib import Path
 import tempfile
 from threading import Lock
@@ -9,14 +8,13 @@ from unittest.mock import patch
 import wave
 
 from epub_tts_narrator.renderer.common import file_hash, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import (
     SpeechRetryBudget, SpeechVerificationFailed, VerificationUnavailable, _render_chunk,
 )
 import epub_tts_narrator.renderer.speech_recovery as speech_recovery
+from shared_fixtures import renderer_config
 from test_renderer_plain_delivery_integration import DirectedFixtureEngine, DIRECTION
 from test_renderer_recurring_resolution import PlanClient
 from test_renderer_speech_identity import reference, speech_request
@@ -33,9 +31,7 @@ class FailedAssemblyResumeTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.config = deepcopy(DEFAULTS)
-        self.config["quality"] = validate_policy({})
-        self.config["render"].update(max_attempts=3, sample_rate=44100, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.config = renderer_config(max_attempts=3, sample_rate=44100)
         registry = {}
         self.engine = DirectedFixtureEngine(registry)
         self.engine.heard_override = lambda given, direction, number: (

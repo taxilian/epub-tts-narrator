@@ -17,6 +17,7 @@ from epub_tts_narrator.cli import export_bundle, main
 from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import analyze, fingerprint, write_json
 from epub_tts_narrator.series import link_analysis
+from shared_fixtures import snapshot
 from test_contracts import valid_document
 from test_pipeline import FakeClient
 
@@ -107,10 +108,6 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
         judge.assert_not_called()
         return status, output.getvalue(), error.getvalue()
 
-    @staticmethod
-    def snapshot(path):
-        return {str(item.relative_to(path)): item.read_bytes() for item in path.rglob("*") if item.is_file()}
-
     def assert_repaired(self, document):
         self.assertEqual(validate_document(document), [])
         rows = [row for row in document["segments"] if row["block_id"] == "b1"]
@@ -164,7 +161,7 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
             with self.subTest(source_input=use_source):
                 path, source, original = self.seed(number)
                 self.assertTrue(original["readiness"]["ready"])
-                before = self.snapshot(path)
+                before = snapshot(path)
                 args = [source, "-o", path] if use_source else [path]
                 status, _, error = self.run_cli(*args)
                 self.assertEqual(status, 0, error)
@@ -181,10 +178,10 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
                 self.assertEqual(journal["status"], "complete")
                 backup = Path(journal["books"][0]["backup"])
                 self.assertEqual((backup / "analysis.json").read_bytes(), before["analysis.json"])
-                repaired_snapshot = self.snapshot(path)
+                repaired_snapshot = snapshot(path)
                 status, _, error = self.run_cli(*args)
                 self.assertEqual(status, 0, error)
-                self.assertEqual(self.snapshot(path), repaired_snapshot)
+                self.assertEqual(snapshot(path), repaired_snapshot)
 
     def test_repair_keeps_descendant_continuation_valid_without_recasting(self):
         parent, _, original = self.seed()

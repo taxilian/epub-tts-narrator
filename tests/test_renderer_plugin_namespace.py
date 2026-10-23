@@ -10,15 +10,11 @@ from epub_tts_narrator.renderer.cli import doctor
 from epub_tts_narrator.renderer.engines import (
     EngineError, create_engine, engine_entry_points,
 )
+from shared_fixtures import FakeEntryPoints as EntryPoints
 
 
 CURRENT = "epub_tts_narrator.tts"
 LEGACY = "audiobook_renderer.tts"
-
-
-class EntryPoints(list):
-    def select(self, *, name):
-        return EntryPoints(entry for entry in self if entry.name == name)
 
 
 class PluginNamespaceTests(unittest.TestCase):

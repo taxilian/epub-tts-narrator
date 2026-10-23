@@ -1,3 +1,5 @@
+"""Directory analysis publishes validated bundles and registries without rewriting prior outputs."""
+
 from copy import deepcopy
 import hashlib
 import json
@@ -13,6 +15,7 @@ from epub_tts_narrator.analysis_directory import (
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.series import link_analysis, load_registry
+from shared_fixtures import snapshot
 from test_series import fixture, propose
 
 
@@ -31,10 +34,6 @@ class AnalysisDirectoryTests(unittest.TestCase):
 
     def read(self, path):
         return json.loads(path.read_text())
-
-    def snapshot(self, directory):
-        return {str(path.relative_to(directory)): path.read_bytes()
-                for path in directory.rglob("*") if path.is_file()}
 
     def rehash_metadata(self, directory, name):
         manifest = self.read(directory / "manifest.json")
@@ -73,7 +72,7 @@ class AnalysisDirectoryTests(unittest.TestCase):
         previous, first = self.first()
         original_character = first["cast"]["characters"][0]
         prior_outputs = [previous]
-        snapshots = [self.snapshot(previous)]
+        snapshots = [snapshot(previous)]
         for number in (2, 3):
             current = fixture(sequel=True)
             current["source"]["book"]["id"] = f"book{number}"
@@ -86,10 +85,10 @@ class AnalysisDirectoryTests(unittest.TestCase):
             output = self.root / f"book-{number}"
             publish_directory(linked, registry, output, export_bundle, continue_from=previous)
             self.assertEqual(len(self.read(output / "series-cast.json")["books"]), number)
-            for prior, snapshot in zip(prior_outputs, snapshots):
-                self.assertEqual(self.snapshot(prior), snapshot)
+            for prior, preserved in zip(prior_outputs, snapshots):
+                self.assertEqual(snapshot(prior), preserved)
             prior_outputs.append(output)
-            snapshots.append(self.snapshot(output))
+            snapshots.append(snapshot(output))
             previous = output
 
     def test_publication_is_renderer_compatible_and_preserves_input_objects(self):
@@ -134,10 +133,10 @@ class AnalysisDirectoryTests(unittest.TestCase):
             write_json(output / name, record, overwrite=True)
             if name != "manifest.json":
                 self.rehash_metadata(output, name)
-        before = self.snapshot(output)
+        before = snapshot(output)
         continued = continuation_registry(output, fixture(sequel=True)["source"])
         self.assertEqual(continued["books"][-1]["readiness"], legacy)
-        self.assertEqual(self.snapshot(output), before)
+        self.assertEqual(snapshot(output), before)
 
     def test_readiness_compatibility_does_not_accept_wrong_review_counts(self):
         output, _ = self.first()

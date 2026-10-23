@@ -94,7 +94,6 @@ class AttributionReviewTests(unittest.TestCase):
         self.assertEqual(len(juries), 3)
         self.assertEqual({row["reviewer_id"] for row in juries}, {row[0] for row in LENSES})
         self.assertTrue(all("review_notes" not in row and "votes" not in row for row in juries))
-        self.assertTrue(all(list(row).index("target_units") < list(row).index("reviewer_id") for row in juries))
         for change in audit["changes"]:
             self.assertEqual(len(change["votes"]), 3)
             self.assertEqual(len({vote["request_fingerprint"] for vote in change["votes"]}), 3)

@@ -15,9 +15,12 @@ from test_contracts import valid_document
 
 HELPERS = Path(__file__).resolve().parents[1] / "scripts" / "legacy_series"
 sys.path.insert(0, str(HELPERS))
-import bundle_validation as validation
-import migrate_chapter_bundles as migration
-import package_results as packaging
+try:
+    import bundle_validation as validation
+    import migrate_chapter_bundles as migration
+    import package_results as packaging
+finally:
+    sys.path.remove(str(HELPERS))
 
 
 def legacy_bundle(document, folder):

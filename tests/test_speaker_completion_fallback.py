@@ -14,6 +14,7 @@ from epub_tts_narrator.speaker_completion import (
     complete_speakers, unassigned_segments,
 )
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+from shared_fixtures import Terminal
 from test_speaker_completion import Requests, PairedRequests, missing_document, paired_document
 
 
@@ -22,11 +23,6 @@ def uncertain(result, payload):
         piece.update(role_id=None, basis="unresolved", review_required=True)
         piece.pop("simultaneous_role_ids", None)
     return result
-
-
-class Terminal(StringIO):
-    def isatty(self):
-        return True
 
 
 class AutomaticCompletionTargetsTests(unittest.TestCase):

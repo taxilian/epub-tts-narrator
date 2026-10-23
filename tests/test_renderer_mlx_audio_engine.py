@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError
 from epub_tts_narrator.renderer.mlx_audio_engine import MLXAudioDrama3Engine
+from shared_fixtures import PARENTHESIS_TRIM_CASES
 
 
 MODEL = "mlx-community/fish-audio-drama-3-4bit"
@@ -205,13 +206,7 @@ class MLXAudioEngineTests(unittest.TestCase):
         self.voice["reference_text"] = "(A saved reference)."
         original = deepcopy(self.voice)
         reference_bytes = Path(self.voice["reference_audio"]).read_bytes()
-        cases = (
-            ("(Lie, ", "Lie,"),
-            ("I thought fiercely). ", "I thought fiercely."),
-            ("(Lie.)", "Lie."),
-            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
-            ("He said (quietly).", "He said (quietly)."),
-        )
+        cases = PARENTHESIS_TRIM_CASES
         for index, (source, target) in enumerate(cases):
             with self.subTest(source=source):
                 self.generate(self.segment())

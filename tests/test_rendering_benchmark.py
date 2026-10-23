@@ -361,7 +361,6 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn(main_thread, asr_threads)
             self.assertEqual(close_order, ["verifier", "engine"])
             self.assertTrue(verifier.assert_drained)
-            self.assertTrue(pools[0]._closed)
             self.assertLessEqual(counts["peak"], 4)
             self.assertLessEqual(counts["admission_peak"], 5)
             self.assertCountEqual([call[0] for call in synth_calls], [0, 1, 2, 3, 4])

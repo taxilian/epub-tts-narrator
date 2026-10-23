@@ -9,13 +9,13 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
 
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.cli import main, read_json
 from epub_tts_narrator.pipeline import analyze
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import validate_registry
+from shared_fixtures import make_epub, snapshot
 from test_pipeline import FakeClient
 
 
@@ -90,18 +90,8 @@ class DirectoryCLITests(unittest.TestCase):
         return status, stdout.getvalue(), stderr.getvalue()
 
     def make_epub(self, number=1):
-        path = self.root / f"Book {number}.epub"
-        with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("mimetype", "application/epub+zip")
-            archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
-            archive.writestr("content.opf", f'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book {number}</dc:title><dc:identifier id="id">book-{number}</dc:identifier><dc:language>en</dc:language></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>')
-            archive.writestr("one.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>Mara, the lighthouse keeper, said softly, “Hello.”</p><p>They left.</p></body></html>')
-        return path
-
-    @staticmethod
-    def snapshot(directory):
-        return {str(path.relative_to(directory)): path.read_bytes()
-                for path in directory.rglob("*") if path.is_file()}
+        return make_epub(self.root / f"Book {number}.epub", f"Book {number}", f"book-{number}",
+                         '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>Mara, the lighthouse keeper, said softly, “Hello.”</p><p>They left.</p></body></html>')
 
     def seed_book(self):
         source, output = self.make_epub(), self.root / "book-one"
@@ -144,12 +134,12 @@ class DirectoryCLITests(unittest.TestCase):
                 status, _, stderr = self.run_cli(*args)
                 self.assertEqual(status, 0, stderr)
                 for previous, before in zip(outputs, prior_snapshots):
-                    self.assertEqual(self.snapshot(previous), before)
+                    self.assertEqual(snapshot(previous), before)
                 document, registry = self.assert_bundle(output, number)
                 documents.append(document)
                 registries.append(registry)
                 outputs.append(output)
-                prior_snapshots.append(self.snapshot(output))
+                prior_snapshots.append(snapshot(output))
             self.assertEqual(pipeline.call_count, 3)
             self.assertTrue(all(call.kwargs["attribution_workers"] == 5 for call in pipeline.call_args_list))
         self.assertEqual(self.config.read_bytes(), original_config)
@@ -213,24 +203,24 @@ class DirectoryCLITests(unittest.TestCase):
     def test_plan_for_a_continuation_does_not_call_model_or_write_any_files(self):
         _, prior = self.seed_book()
         epub, output = self.make_epub(2), self.root / "planned-book"
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, stdout, stderr = self.run_cli("plan", epub, "-o", output, "--continue-from", prior)
         self.assertEqual(status, 0, stderr)
         provider.assert_not_called()
         self.assertEqual(json.loads(stdout)["series"]["books"], 1)
-        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual(snapshot(self.root), before)
         self.assertFalse(output.exists())
 
     def test_default_plan_does_not_create_the_output_or_cache(self):
         epub = self.make_epub()
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, stdout, stderr = self.run_cli("plan", epub)
         self.assertEqual(status, 0, stderr)
         provider.assert_not_called()
         self.assertEqual(json.loads(stdout)["series"]["books"], 0)
-        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual(snapshot(self.root), before)
         self.assertFalse((self.root / "Book 1.audiobook").exists())
 
     def test_failed_run_resumes_completed_requests_using_the_same_command(self):
@@ -293,20 +283,20 @@ class DirectoryCLITests(unittest.TestCase):
         ]
         for extra in cases:
             with self.subTest(extra=extra), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-                before = self.snapshot(self.root)
+                before = snapshot(self.root)
                 status, _, stderr = self.run_cli("analyze", epub, "--continue-from", prior, *extra)
                 self.assertNotEqual(status, 0, stderr)
                 provider.assert_not_called()
-                self.assertEqual(self.snapshot(self.root), before)
+                self.assertEqual(snapshot(self.root), before)
         with self.config.open("a", encoding="utf-8") as stream:
             stream.write('series_registry = "other-series.json"\n')
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-            before = self.snapshot(self.root)
+            before = snapshot(self.root)
             status, _, stderr = self.run_cli("analyze", epub, "--continue-from", prior,
                                            "-o", self.root / "new-book")
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_missing_or_invalid_continuation_fails_before_model_calls(self):
         epub = self.make_epub()
@@ -319,53 +309,53 @@ class DirectoryCLITests(unittest.TestCase):
             for command in ("analyze", "plan"):
                 with self.subTest(previous=previous, command=command), \
                         patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-                    before = self.snapshot(self.root)
+                    before = snapshot(self.root)
                     status, _, stderr = self.run_cli(command, epub, "-o", self.root / "new-book",
                                                    "--continue-from", previous)
                     self.assertNotEqual(status, 0, stderr)
                     provider.assert_not_called()
-                    self.assertEqual(self.snapshot(self.root), before)
+                    self.assertEqual(snapshot(self.root), before)
 
     def test_same_book_cannot_be_appended_as_its_own_sequel(self):
         epub, prior = self.seed_book()
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, _, stderr = self.run_cli("analyze", epub, "-o", self.root / "duplicate",
                                            "--continue-from", prior)
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_output_cannot_replace_or_nest_inside_continuation_directory(self):
         _, prior = self.seed_book()
         epub = self.make_epub(2)
         for output in (prior, prior / "nested-output", prior.parent):
             with self.subTest(output=output), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-                before = self.snapshot(self.root)
+                before = snapshot(self.root)
                 status, _, stderr = self.run_cli("analyze", epub, "-o", output, "--continue-from", prior)
                 self.assertNotEqual(status, 0, stderr)
                 provider.assert_not_called()
-                self.assertEqual(self.snapshot(self.root), before)
+                self.assertEqual(snapshot(self.root), before)
 
     def test_cache_cannot_write_into_prior_book_even_with_an_external_output(self):
         _, prior = self.seed_book()
         epub = self.make_epub(2)
         with self.config.open("a", encoding="utf-8") as stream:
             stream.write(f'cache_dir = "{prior / "new-cache"}"\n')
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, _, stderr = self.run_cli("analyze", epub, "-o", self.root / "new-book",
                                            "--continue-from", prior)
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_third_book_output_cannot_be_inside_a_grandparent_analysis(self):
         _, first = self.seed_book()
         second = self.seed_second_book(first)
         epub = self.make_epub(3)
         output = first / "nested-third-book"
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         for command in ("analyze", "plan"):
             with self.subTest(command=command), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
                 status, _, stderr = self.run_cli(command, epub, "-o", output,
@@ -374,7 +364,7 @@ class DirectoryCLITests(unittest.TestCase):
                 self.assertIn("every ancestor book", stderr)
                 provider.assert_not_called()
                 self.assertFalse(output.exists())
-                self.assertEqual(self.snapshot(self.root), before)
+                self.assertEqual(snapshot(self.root), before)
 
     def test_third_book_cache_cannot_be_inside_a_grandparent_analysis(self):
         _, first = self.seed_book()
@@ -382,7 +372,7 @@ class DirectoryCLITests(unittest.TestCase):
         epub, output, cache = self.make_epub(3), self.root / "book-three", first / "nested-cache"
         with self.config.open("a", encoding="utf-8") as stream:
             stream.write(f'cache_dir = "{cache}"\n')
-        before = self.snapshot(self.root)
+        before = snapshot(self.root)
         for command in ("analyze", "plan"):
             with self.subTest(command=command), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
                 status, _, stderr = self.run_cli(command, epub, "-o", output,
@@ -392,16 +382,16 @@ class DirectoryCLITests(unittest.TestCase):
                 provider.assert_not_called()
                 self.assertFalse(cache.exists())
                 self.assertFalse(output.exists())
-                self.assertEqual(self.snapshot(self.root), before)
+                self.assertEqual(snapshot(self.root), before)
 
     def test_existing_completed_output_is_preserved_without_model_calls_on_rerun(self):
         epub, output = self.seed_book()
-        before = self.snapshot(output)
+        before = snapshot(output)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             status, _, stderr = self.run_cli("analyze", epub, "-o", output)
         self.assertEqual(status, 0, stderr)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(output), before)
+        self.assertEqual(snapshot(output), before)
 
 
 if __name__ == "__main__":

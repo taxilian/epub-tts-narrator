@@ -1,7 +1,6 @@
 """Exercise cleanup through accepted speech, configuration, locks, and the CLI."""
 
 import contextlib
-from copy import deepcopy
 import io
 from pathlib import Path
 import tempfile
@@ -13,9 +12,9 @@ from epub_tts_narrator.renderer import workflow
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.cli import main
 from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
-from epub_tts_narrator.renderer.config import DEFAULTS, load_config
-from epub_tts_narrator.renderer.quality import validate_policy
+from epub_tts_narrator.renderer.config import load_config
 from audition_fixtures import prepare_document
+from shared_fixtures import renderer_config
 from test_contracts import valid_document
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
@@ -27,9 +26,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.directory = self.root / "take"
-        self.config = deepcopy(DEFAULTS)
-        self.config["render"].update(max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE)
-        self.config["quality"] = validate_policy({})
+        self.config = renderer_config()
         self.fixtures = {}
         self.engine = FixtureEngine(self.fixtures)
         self.verifier = FixtureVerifier(self.fixtures)

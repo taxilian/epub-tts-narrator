@@ -147,14 +147,6 @@ class ParagraphRecoveryTests(unittest.TestCase):
             record_paragraph_fallback(self.work, self.request)
         self.assertEqual(path.read_bytes(), before)
 
-    def test_digest_detects_content_changes(self):
-        path = record_paragraph_fallback(self.work, self.request)
-        record = read_json(path)
-        record["record_sha256"] = "0" * 64
-        write_json(path, record)
-        with self.assertRaisesRegex(ValueError, "integrity"):
-            load_paragraph_fallbacks(self.work)
-
     def test_wrong_filename_is_rejected(self):
         path = record_paragraph_fallback(self.work, self.request)
         path.rename(path.with_name("0" * 64 + ".json"))

@@ -7,14 +7,13 @@ import tempfile
 import unittest
 
 from epub_tts_narrator.renderer.common import digest, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.engines import format_dialogue
 from epub_tts_narrator.renderer.paragraphs import _group
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.speech_identity import generation_identity, paragraph_rewrite_turn
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import _render_chunk
+from shared_fixtures import renderer_config
 from test_renderer_recurring_resolution import PlanClient, ResolutionEngine, TEXT
 from test_renderer_speech_identity import paragraph_request, reference
 from test_renderer_speech_recovery_integration import RecoveryVerifier
@@ -63,9 +62,7 @@ class ParagraphPronunciationIntegrationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.config = deepcopy(DEFAULTS)
-        self.config["quality"] = validate_policy({})
-        self.config["render"].update(max_attempts=3, ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.config = renderer_config(max_attempts=3)
         registry = {}
         self.engine = ParagraphResolutionEngine(registry)
         self.base = RecoveryVerifier(registry)

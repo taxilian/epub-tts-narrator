@@ -23,6 +23,7 @@ from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 from epub_tts_narrator.speech_normalization import normalize_document_speech, normalization_pending
 import test_directory_cli as directory_fixtures
+from shared_fixtures import snapshot
 from test_pipeline import FakeClient
 
 
@@ -151,9 +152,6 @@ class AnalyzeResumeTests(unittest.TestCase):
             status = main([command, *map(str, args), "--config", str(self.config)])
         return status, output.getvalue(), error.getvalue(), provider
 
-    def snapshot(self, path):
-        return {str(item.relative_to(path)): item.read_bytes() for item in path.rglob("*") if item.is_file()}
-
     def enable_jev(self):
         with self.config.open("a") as stream:
             stream.write('[jev]\nenabled=true\napi_key="fixture-suggestion-key"\n'
@@ -200,14 +198,14 @@ class AnalyzeResumeTests(unittest.TestCase):
         for number, command in enumerate(("analyze", "resolve-speakers"), 1):
             with self.subTest(command=command):
                 _, path, _ = self.seed(number, missing=False)
-                before = self.snapshot(path)
+                before = snapshot(path)
                 judge = SpeakerJudge()
                 with patch("epub_tts_narrator.cli.JevClient", return_value=judge):
                     status, _, error, provider = self.run_cli(path, command=command)
                 self.assertEqual(status, 0, error)
                 provider.assert_not_called()
                 self.assertFalse(judge.calls)
-                self.assertEqual(self.snapshot(path), before)
+                self.assertEqual(snapshot(path), before)
 
     def test_jev_failure_keeps_manual_menu_usable_for_both_commands(self):
         self.enable_jev()
@@ -255,13 +253,13 @@ class AnalyzeResumeTests(unittest.TestCase):
     def test_advisory_notes_alone_need_no_model_or_file_rewrite(self):
         epub, path, _ = self.seed(missing=False, advisory=True)
         self.assertTrue(json.loads((path / "review.json").read_text()))
-        before = self.snapshot(path)
+        before = snapshot(path)
         for args in ([path], [epub, "-o", path]):
             status, output, error, provider = self.run_cli(*args)
             self.assertEqual(status, 0, error)
             provider.assert_not_called()
             self.assertIn("no model calls or file changes", output)
-            self.assertEqual(self.snapshot(path), before)
+            self.assertEqual(snapshot(path), before)
 
     def test_completed_legacy_book_gets_spelling_scan_once_without_reanalysis_or_new_voices(self):
         _, path, original = self.seed(missing=False, normalized=False)
@@ -277,16 +275,16 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual(updated["cast"], original["cast"])
         self.assertFalse(normalization_pending(updated))
         self.assertEqual((path / "voices/reference.wav").read_bytes(), b"Existing voice remains unchanged")
-        before = self.snapshot(path)
+        before = snapshot(path)
         status, output, error, provider = self.run_cli(path)
         self.assertEqual(status, 0, error)
         provider.assert_not_called()
         self.assertIn("no model calls or file changes", output)
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
 
     def test_spelling_timeout_preserves_completed_legacy_book_and_can_resume(self):
         _, path, original = self.seed(missing=False, normalized=False)
-        before = self.snapshot(path)
+        before = snapshot(path)
         class InterruptedSpellingClient(CompletionClient):
             def complete(self, system, payload):
                 if payload.get("mode") == "speech_spelling_scan":
@@ -295,7 +293,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, _, error, _ = self.run_cli(path, client=InterruptedSpellingClient())
         self.assertEqual(status, 1, error)
         self.assertIn("Resume cache", error)
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
         retry = CompletionClient()
         status, _, error, _ = self.run_cli(path, client=retry)
         self.assertEqual(status, 0, error)
@@ -306,27 +304,27 @@ class AnalyzeResumeTests(unittest.TestCase):
     def test_wrong_epub_cannot_overwrite_existing_book_or_call_model(self):
         _, path, _ = self.seed()
         other = directory_fixtures.DirectoryCLITests.make_epub(self, 2)
-        before = self.snapshot(path)
+        before = snapshot(path)
         status, _, error, provider = self.run_cli(other, "-o", path)
         self.assertEqual(status, 1)
         self.assertIn("Input source does not match", error)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
 
     def test_invalid_existing_bundle_is_rejected_before_model_calls(self):
         _, path, _ = self.seed()
         (path / "cast.json").write_text("{}")
-        before = self.snapshot(path)
+        before = snapshot(path)
         status, _, error, provider = self.run_cli(path)
         self.assertEqual(status, 1)
         self.assertIn("checksum mismatch", error)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
 
     def test_continue_from_must_match_saved_parent_and_parent_is_unchanged(self):
         _, parent, _ = self.seed(missing=False)
         epub, current, _ = self.seed(2, parent=parent)
-        original_parent = self.snapshot(parent)
+        original_parent = snapshot(parent)
         status, _, error, provider = self.run_cli(epub, "-o", current, "--continue-from", self.root / "wrong")
         self.assertEqual(status, 1)
         self.assertIn("saved continuation parent", error)
@@ -334,7 +332,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, _, error, _ = self.run_cli(epub, "-o", current, "--continue-from", parent)
         self.assertEqual(status, 0, error)
         self.assertEqual(continuation_directories(current), [parent])
-        self.assertEqual(self.snapshot(parent), original_parent)
+        self.assertEqual(snapshot(parent), original_parent)
 
     def test_parent_revision_refreshes_descendant_links_and_keeps_descendant_voices(self):
         _, parent, _ = self.seed()
@@ -360,12 +358,12 @@ class AnalyzeResumeTests(unittest.TestCase):
 
     def test_timeout_preserves_bundle_and_reuses_completed_jury_requests_on_next_run(self):
         _, path, _ = self.seed()
-        before = self.snapshot(path)
+        before = snapshot(path)
         first = CompletionClient(fail_after=1)
         status, _, error, _ = self.run_cli(path, client=first)
         self.assertEqual(status, 1)
         self.assertIn("Resume cache", error)
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
         retry = CompletionClient()
         status, _, error, _ = self.run_cli(path, client=retry)
         self.assertEqual(status, 0, error)
@@ -472,12 +470,12 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, _, error, _ = self.run_cli(path, answers="q\n", client=first)
         self.assertEqual(status, 2, error)
         self.assertEqual(len(first.calls), 9)
-        before_interruption = self.snapshot(path)
+        before_interruption = snapshot(path)
         interrupted = CompletionClient(fail_after=1)
         status, _, error, _ = self.run_cli(path, client=interrupted)
         self.assertEqual(status, 1, error)
         self.assertEqual(len(interrupted.calls), 1)
-        self.assertEqual(self.snapshot(path), before_interruption)
+        self.assertEqual(snapshot(path), before_interruption)
         self.assertNotEqual(interrupted.calls[0]["completion_retry_token"],
                             first.calls[0]["completion_retry_token"])
         retry = CompletionClient()
@@ -525,12 +523,12 @@ class AnalyzeResumeTests(unittest.TestCase):
         edits = self.root / "cast-edits.json"
         write_json(edits, {"source_fingerprint": fingerprint(document["source"]),
                            "cast_fingerprint": fingerprint(document["cast"]), "cast": cast})
-        before = self.snapshot(path)
+        before = snapshot(path)
         status, _, error, provider = self.run_cli(path, "--edits", edits)
         self.assertEqual(status, 1)
         self.assertIn("attribution edits only", error)
         provider.assert_not_called()
-        self.assertEqual(self.snapshot(path), before)
+        self.assertEqual(snapshot(path), before)
 
     def test_directory_input_rejects_different_output_and_force(self):
         _, path, _ = self.seed()

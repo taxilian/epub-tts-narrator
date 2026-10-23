@@ -1,6 +1,5 @@
 """Staged rendering retains verified chapters across independent runs and failures."""
 
-from copy import deepcopy
 from pathlib import Path
 import shutil
 import tempfile
@@ -10,11 +9,10 @@ from unittest.mock import patch
 from epub_tts_narrator.renderer.assembly import probe_audio
 from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
-from epub_tts_narrator.renderer.config import DEFAULTS
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
 from epub_tts_narrator.cli import export_bundle
+from shared_fixtures import renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 from audition_fixtures import prepare_bundle
@@ -34,14 +32,7 @@ class StagedWorkflowTests(unittest.TestCase):
         ])
         export_bundle(document, self.root / "bundle")
         self.bundle = prepare_bundle(load_bundle(self.root / "bundle"))
-        self.config = deepcopy(DEFAULTS)
-        self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
-        self.config["verification"]["model"] = str(self.root / "unused-asr")
-        self.config["voices"].update(directory=str(self.root / "voices"), series_id="staged-fixture")
-        self.config["render"].update(
-            work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE)
-        self.config["quality"] = validate_policy({})
+        self.config = renderer_config(self.root, series_id="staged-fixture")
         self.engine = FixtureEngine({})
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
         self.messages = []

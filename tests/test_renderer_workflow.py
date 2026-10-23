@@ -15,12 +15,11 @@ import wave
 from epub_tts_narrator.renderer.assembly import probe_audio
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_take
 from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
+from shared_fixtures import renderer_config, timed_transcript
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern"
@@ -40,19 +39,6 @@ def write_tone(path, frequency=220):
     with wave.open(str(path), "wb") as handle:
         handle.setparams((1, 2, rate, 0, "NONE", "not compressed"))
         handle.writeframes(struct.pack("<" + "h" * count, *samples))
-
-
-def timed_transcript(text):
-    words = text.split()
-    return {"text": text, "segments": [{
-        "text": text, "start": 0.0, "end": 1.0,
-        "avg_logprob": -0.1, "no_speech_prob": 0.001,
-        "words": [
-            {"word": word, "start": index / len(words),
-             "end": (index + 1) / len(words), "probability": 0.99}
-            for index, word in enumerate(words)
-        ],
-    }]}
 
 
 class FixtureEngine:
@@ -108,15 +94,8 @@ class RendererWorkflowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.config = deepcopy(DEFAULTS)
-        self.config["engine"]["checkpoint"] = str(self.root / "unused-tts-model")
-        self.config["verification"]["model"] = str(self.root / "unused-asr-model")
-        self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")
-        self.config["render"].update(
-            work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE,
-        )
-        self.config["quality"] = validate_policy({})
+        self.config = renderer_config(self.root, series_id="fixture-series",
+                                      checkpoint="unused-tts-model", asr_model="unused-asr-model")
         self.fixtures = {}
         self.engine = FixtureEngine(self.fixtures)
         self.verifier = FixtureVerifier(self.fixtures)

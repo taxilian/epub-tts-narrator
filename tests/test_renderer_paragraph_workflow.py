@@ -9,14 +9,13 @@ from unittest.mock import patch
 from audition_fixtures import prepare_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json
-from epub_tts_narrator.renderer.config import DEFAULTS
-from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.paragraphs import group_paragraphs
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import (
     RenderBlocked, _render_chapter_chunks, assemble, make_render_plan, render,
 )
 from epub_tts_narrator.cli import export_bundle
+from shared_fixtures import renderer_config
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
 
@@ -56,16 +55,8 @@ class ParagraphWorkflowTests(unittest.TestCase):
         for row in self.bundle["chapters"][0]["rows"]:
             if row["block_id"] == "b000003":
                 row["role_id"] = "mara_dialogue"
-        self.config = deepcopy(DEFAULTS)
-        self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
-        self.config["verification"]["model"] = str(self.root / "unused-asr")
-        self.config["voices"].update(directory=str(self.root / "voices"), series_id="paragraph-fixture")
-        self.config["render"].update(
-            work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE,
-            paragraph_synthesis=True, max_paragraph_chars=1000,
-        )
-        self.config["quality"] = validate_policy({})
+        self.config = renderer_config(self.root, series_id="paragraph-fixture",
+                                      paragraph_synthesis=True, max_paragraph_chars=1000)
         self.engine = ParagraphFixtureEngine()
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
         self.messages = []

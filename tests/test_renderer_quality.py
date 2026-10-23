@@ -1,3 +1,5 @@
+"""Quality gate tests accept or reject audio with fake verifiers and never decode real speech."""
+
 from copy import deepcopy
 import json
 import math

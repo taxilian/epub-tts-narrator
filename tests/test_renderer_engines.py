@@ -14,11 +14,7 @@ from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError, create_engine
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.voices import VoiceStore
-
-
-class FakeEntryPoints(list):
-    def select(self, *, name):
-        return [entry for entry in self if entry.name == name]
+from shared_fixtures import FakeEntryPoints, PARENTHESIS_TRIM_CASES
 
 
 @dataclass
@@ -141,13 +137,7 @@ class RendererEngineTests(unittest.TestCase):
         voice["reference_text"] = "(A saved reference)."
         original = deepcopy(voice)
         saved = FakeReference(voice["reference_text"], object())
-        cases = (
-            ("(Lie, ", "Lie,"),
-            ("I thought fiercely). ", "I thought fiercely."),
-            ("(Lie.)", "Lie."),
-            ("He said (quietly) that he agreed.", "He said (quietly) that he agreed."),
-            ("He said (quietly).", "He said (quietly)."),
-        )
+        cases = PARENTHESIS_TRIM_CASES
         for index, (source, target) in enumerate(cases):
             with self.subTest(source=source):
                 expected = f"<whisper>{target}</whisper>"

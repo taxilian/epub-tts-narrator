@@ -1,3 +1,5 @@
+"""Continuation directory tests link series books without modifying earlier outputs."""
+
 from copy import deepcopy
 import json
 import os
