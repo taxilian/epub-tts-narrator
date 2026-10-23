@@ -200,6 +200,18 @@ Plugins without a concurrency contract process one chapter at a time. CPU
 assembly is separate and bounded, so synthesis also continues while an earlier
 chapter is being assembled, compressed, or uploaded.
 
+`render_pool.max_inflight` bounds complete chunk operations, including waiting
+for verification. The default `0` keeps the existing per-chapter window of total
+worker concurrency plus one. An explicit value from 1 to 256 must be at least
+the total worker concurrency and is shared across both chapters. For example,
+eight synthesis slots with `max_inflight = 32` can keep generating while earlier
+takes await recognition or text review. Pending audio is saved on disk; the
+window bounds admitted chunk operations. Additional coordinator threads can
+wait for admission without loading their audio. Increasing the window absorbs
+verification delays but cannot make a persistently
+slower verifier keep up. Scheduling changes preserve accepted audio and cache
+identities. Cancellation stops waiting admissions while active takes finish.
+
 Registered reference bytes and transcripts are reused. Model-specific reference
 encoding reuse depends on the configured inference backend; this registry does
 not implement or modify that backend's KV cache or batching internals.

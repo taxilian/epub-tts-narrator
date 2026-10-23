@@ -33,6 +33,7 @@ max_new_tokens = 2048
 # Keep these worker tables commented until the corresponding servers are running.
 # [render_pool]
 # model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+# max_inflight = 0 # Automatic; explicit 1..256 is shared across chapters and must cover all synthesis slots.
 # [[render_pool.workers]]
 # name = "local"
 # type = "local"

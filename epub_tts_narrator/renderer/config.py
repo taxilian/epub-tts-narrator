@@ -44,6 +44,7 @@ DEFAULTS = {
     "huggingface": {"api_key": ""},
     "render_pool": {
         "workers": [],
+        "max_inflight": 0,
         "model_revision": "b2b5ee998034b2975720906c815e7fb0e9f007bd",
     },
     "server": {
@@ -167,6 +168,9 @@ def validate_chapter_settings(config):
 def validate_distributed_settings(config):
     """Validate file-only worker/server settings without importing model packages."""
     pool = config["render_pool"]
+    max_inflight = pool.get("max_inflight", 0)
+    if type(max_inflight) is not int or not 0 <= max_inflight <= 256:
+        raise ValueError("render_pool.max_inflight must be 0 (automatic) or an integer from 1 through 256")
     selected_model = config["engine"].get("model", DEFAULT_DRAMA3_MODEL)
     if not isinstance(pool["model_revision"], str) or not pool["model_revision"].strip():
         raise ValueError("render_pool.model_revision must be a nonempty string")
@@ -233,8 +237,11 @@ def validate_distributed_settings(config):
             if type(worker["multi_speaker"]) is not bool:
                 raise ValueError(f"{label}.multi_speaker must be boolean")
         normalized.append(worker)
-    if sum(worker["concurrency"] for worker in normalized) > 32:
+    capacity = sum(worker["concurrency"] for worker in normalized)
+    if capacity > 32:
         raise ValueError("Renderer worker concurrency must total at most 32")
+    if max_inflight and max_inflight < capacity:
+        raise ValueError("render_pool.max_inflight must be at least the total worker concurrency")
     if normalized and config["engine"]["type"] != "drama3_mlx":
         raise ValueError("The render pool currently requires engine.type = drama3_mlx")
     if normalized:

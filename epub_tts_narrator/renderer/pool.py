@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
 from queue import Queue
-from threading import Condition, RLock, get_ident
+from threading import BoundedSemaphore, Condition, RLock, get_ident
 from time import monotonic
 
 from .engines import EngineError, create_engine
@@ -175,6 +176,11 @@ class RenderPool:
 
     def __init__(self, config):
         settings = config["render_pool"]
+        max_inflight = settings.get("max_inflight", 0)
+        if type(max_inflight) is not int or not 0 <= max_inflight <= 256:
+            raise EngineError("render_pool.max_inflight must be 0 (automatic) or an integer from 1 through 256")
+        if max_inflight and max_inflight < sum(worker.get("concurrency", 1) for worker in settings["workers"]):
+            raise EngineError("render_pool.max_inflight must be at least the total worker concurrency")
         selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
         self.sampling = pool_sampling(config)
         self.local_lock = RLock()
@@ -190,8 +196,10 @@ class RenderPool:
             for _ in range(worker.settings.get("concurrency", 1)):
                 self._slots.put(worker)
         self.max_parallel = self._slots.qsize()
-        # One verification/normalization job may overlap the occupied TTS slots.
-        self.max_inflight = self.max_parallel + 1
+        # Automatic mode retains the original per-chapter window. An explicit
+        # window is shared by every chapter using this pool, including review.
+        self.max_inflight = max_inflight or self.max_parallel + 1
+        self._admission = BoundedSemaphore(max_inflight) if max_inflight else None
         self._identity = {
             "engine": "fish_tts_pool", "model": selected.repo, "contract_version": 1,
             "model_revision": settings.get("model_revision", selected.revision),
@@ -229,6 +237,35 @@ class RenderPool:
         if isinstance(verifier, _SerializedVerifier) and verifier._lock is self.local_lock:
             return verifier
         return _SerializedVerifier(verifier, self.local_lock, self._local_runtime, self._review_runtime)
+
+    @contextmanager
+    def admit_chunk(self):
+        """Bound whole chunk transactions before take locks or inference slots.
+
+        Retries and recovery parts use the parent's admission. Acquiring again
+        inside synthesis could deadlock a full window of retrying chunks.
+        """
+        from .interrupts import stop_if_requested
+
+        def check():
+            stop_if_requested()
+            if self._closed:
+                raise EngineError("The render pool is closed")
+
+        if self._admission is None:
+            check()
+            yield
+            return
+        acquired = False
+        try:
+            while not acquired:
+                check()
+                acquired = self._admission.acquire(timeout=0.1)
+            check()
+            yield
+        finally:
+            if acquired:
+                self._admission.release()
 
     def _execute(self, method, *args, **kwargs):
         from .interrupts import stop_if_requested
