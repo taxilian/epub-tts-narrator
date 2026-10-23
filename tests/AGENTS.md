@@ -2,8 +2,11 @@
 Offline, deterministic regression suite for the analyzer and renderer.
 Tests protect failure, resume, recovery, validation, and boundary behavior.
 
+Keep this file current: when suite conventions, helpers, or the run environment change, update it in the same commit.
+
 # LAYOUT
-Flat directory: 207 `test_*.py` files plus shared `audition_fixtures.py`.
+Flat directory: 207 `test_*.py` files plus two shared helper modules.
+`audition_fixtures.py` holds bundle/script helpers; `shared_fixtures.py` holds cross-cutting helpers (Terminal, snapshot, pcm_hash, make_epub, timed_transcript, FakeEntryPoints, PARENTHESIS_TRIM_CASES, renderer_config). Neither starts with `test_`, so discovery ignores them; add new shared helpers there, not inline copies.
 `fixtures/` contains five JSON contracts: attribution semantics and speech rewrite policies v1 through v4.
 `test_<module>.py` usually maps to `epub_tts_narrator/<module>.py`.
 Renderer coverage uses `test_renderer_<module>.py`, with behavior files for cross module flows.
@@ -52,7 +55,7 @@ Diagnostics redaction is covered by the `DO NOT ECHO` fixtures in `test_cast_evi
 The suite needs the optional extras installed: verification tests use `metaphone`, plus `packaging` and `soundfile`; server tests use the chapter-server stack. On a bare interpreter ~1000 tests error instead of skipping. Setup:
 ```sh
 python3.11 -m venv .venv
-.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile
+.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile httpx
 ```
 Full suite: `.venv/bin/python -m unittest discover -s tests -q`
 Single file: `.venv/bin/python -m unittest discover -s tests -p "test_epub.py" -q`

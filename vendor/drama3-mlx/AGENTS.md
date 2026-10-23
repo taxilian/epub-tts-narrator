@@ -4,6 +4,8 @@ VENDORED third-party unofficial MLX port of Fish Audio Drama 3 TTS.
 Upstream: https://github.com/Sogni-AI/drama3-mlx @ 3b76bf8, v0.1.1.
 Provides the local Mac synthesis engine used by the renderer's default drama3_mlx engine.
 
+Keep this file current: if the vendored snapshot or the local pyproject diff changes, update it in the same commit.
+
 # HARD RULES
 
 1. NEVER edit vendored runtime files: .py files, LICENSE, NOTICE, or README.

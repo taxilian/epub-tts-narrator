@@ -1,8 +1,12 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-10-22
-**Commit:** 8085ac9
+**Generated:** 2026-10-23
+**Commit:** 55adf6f
 **Branch:** main
+
+## MAINTENANCE
+
+These AGENTS.md files are load-bearing documentation for agentic work — treat them as part of the code. When you change structure, entry points, conventions, commands, or hotspot responsibilities, update the affected AGENTS.md in the same commit. When you read one and find it wrong, fix it rather than working around it. Subdirectory files (renderer/, tests/, vendor/drama3-mlx/) own their domain's details; this root file owns the map. Keep each file telegraphic and free of duplicated content from its parent.
 
 ## OVERVIEW
 
@@ -14,7 +18,8 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 epub-tts-narrator/
 ├── epub_tts_narrator/        # analyzer package: 30 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 73 flat modules, own CLI + AGENTS.md
-├── tests/                    # 208 flat unittest files + fixtures/; own AGENTS.md
+├── tests/                    # 208 flat unittest files + fixtures/ + shared helpers
+│                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
 │   └── legacy_series/        # frozen historical utilities; its README.md is authoritative
@@ -22,6 +27,7 @@ epub-tts-narrator/
 ├── examples/                 # hand-authored tracked fixtures (last-lantern, identity-consensus)
 ├── models/, dist-runs/       # gitignored: local weights, render output/cache
 ├── FORMAT.md                 # bundle/script JSON contract (normative)
+├── ANALYSIS.md               # analyzer manual (stages, consensus passes, corrections, cost controls)
 ├── RENDERER.md               # renderer manual (config, casting, locks, caching)
 └── REMOTE_RENDERING.md       # remote/distributed rendering manual
 ```
@@ -41,7 +47,7 @@ epub-tts-narrator/
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |
 | Deployment | `deploy/runpod/README.md`, `renderer/runpod.py` | Pinned inference contract; do not improvise versions |
 | Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one) | Standalone; live-model runs need `--config` |
-| Commands/config reference | `README.md`, `RENDERER.md`, `REMOTE_RENDERING.md` | Docs are the automation surface — there is no CI |
+| Commands/config reference | `README.md`, `ANALYSIS.md`, `RENDERER.md`, `REMOTE_RENDERING.md` | Docs are the automation surface — there is no CI |
 
 ## CODE MAP
 
@@ -90,6 +96,9 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 ```bash
 # Setup: analyzer (any Python ≥3.11, zero deps)
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[chapter-server]"
+
+# Setup: test environment (analyzer extras + renderer verification stack)
+.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile
 
 # Setup: renderer (Python 3.12 via uv, Apple Silicon MLX stack + vendored drama3)
 uv venv --python 3.12 .venv-renderer
