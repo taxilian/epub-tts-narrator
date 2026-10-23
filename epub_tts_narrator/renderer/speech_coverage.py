@@ -19,7 +19,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 6
+SPEECH_COVERAGE_VERSION = 7
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -62,6 +62,36 @@ def stretched_word_equivalent(expected, actual):
     return (len(left) == len(right)
             and any(run[0].isalpha() and len(run) >= 3 for run in left)
             and all(a[0] == b[0] and len(b) <= len(a) for a, b in zip(left, right)))
+
+
+def _near_phonetic_word(left, right, left_keys, right_keys):
+    """Admit a small within-word sound change for review, never acceptance.
+
+    Metaphone keys are rough sound encodings, not evidence that speech is
+    correct. Permit one insertion, deletion, or substitution within complete
+    keys only when at least three encoded sounds remain and the edit accounts
+    for at most a quarter of the longer key. Whole-word alignment still has
+    no insertion/deletion edges. Grammar words, quantities, and negations do
+    not gain this tolerance, and the sound judge must approve the candidate.
+    """
+    if any(len(word.replace("'", "")) < 4 or word in _FUNCTION_WORDS
+           or word.replace("'", "") in _PROTECTED or "n't" in word
+           for word in (left, right)):
+        return False
+    for first in left_keys:
+        for second in right_keys:
+            if min(len(first), len(second)) < 3 or max(len(first), len(second)) < 4:
+                continue
+            if len(first) == len(second):
+                if sum(a != b for a, b in zip(first, second)) == 1:
+                    return True
+            else:
+                shorter, longer = sorted((first, second), key=len)
+                if len(longer) == len(shorter) + 1 and any(
+                        longer[:index] + longer[index + 1:] == shorter
+                        for index in range(len(longer))):
+                    return True
+    return False
 
 
 def speech_coverage(expected_text, transcript):
@@ -198,7 +228,7 @@ def speech_coverage(expected_text, transcript):
             return "accent_spelling"
         return _SPELLING_VARIANTS.get(frozenset(folded))
 
-    def bounded_pronunciation(left, right, left_keys, right_keys):
+    def bounded_pronunciation(left, right, left_keys, right_keys, i, j):
         # All rules cover a whole token. They confer eligibility for the model
         # to judge the sound, never permission to remove a neighboring word.
         if all(re.fullmatch(r"h?m{2,}", word) for word in (left, right)):
@@ -219,6 +249,11 @@ def speech_coverage(expected_text, transcript):
         if one_spelling_letter(left, right) and any(
                 one_repeated_consonant(a, b) for a in left_keys for b in right_keys):
             return "repeated_phonetic_consonant"
+        if (not any(source[span[0]:span[1]].isupper()
+                    for source, span in ((expected_source, expected_spans[i]),
+                                         (actual_source, actual_spans[j])))
+                and _near_phonetic_word(left, right, left_keys, right_keys)):
+            return "near_phonetic_word"
         return None
 
     def terminal_s_variation(left, right, i, j):
@@ -307,7 +342,7 @@ def speech_coverage(expected_text, transcript):
             left_keys, right_keys = group_keys("expected", i, left_size), group_keys("actual", j, right_size)
             common = sorted(set(left_keys).intersection(right_keys))
             candidate = ((terminal_s_variation(left[0], right[0], i, j)
-                          or bounded_pronunciation(left[0], right[0], left_keys, right_keys))
+                          or bounded_pronunciation(left[0], right[0], left_keys, right_keys, i, j))
                          if not multi and not common else None)
             if not common and candidate is None:
                 continue

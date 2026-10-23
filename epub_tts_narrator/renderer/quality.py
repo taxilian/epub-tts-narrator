@@ -104,7 +104,9 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
         identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
     judge_identity = getattr(verifier, "reference_judge_identity", None)
     if judge_identity is not None:
+        from .speech_coverage import SPEECH_COVERAGE_VERSION
         identity["text_judge"] = judge_identity
+        identity["speech_coverage_version"] = SPEECH_COVERAGE_VERSION
     return digest(identity)
 
 

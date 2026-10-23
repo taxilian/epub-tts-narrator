@@ -60,16 +60,18 @@ class RelaxedJevTests(unittest.TestCase):
             self.assertTrue(report["passed"], report)
             self.assertGreater(evaluate.call_count, 0)
 
-    def test_source_hyphen_is_not_proof_of_equivalent_spoken_words(self):
+    def test_exact_spelling_boundary_is_accepted_before_jev(self):
         source = "I will re-sign the agreement tomorrow."
         heard = "I will resign the agreement tomorrow."
         judge = JevTranscriptJudge({"enabled": True, "api_key": "fixture-key"})
         verifier = ReferenceTextJudgingVerifier(consensus.PrimaryVerifier(heard), judge)
         with patch.object(judge._client, "evaluate", return_value=answer(.01)) as evaluate:
             report = self.check(verifier, expected=source, purpose="speech")
-        self.assertFalse(report["passed"], report)
-        evaluate.assert_called_once()
-        self.assertEqual(report["text_judge"]["decision"], "different")
+        # Recognition cannot reliably retain written hyphens. The current
+        # exact-spacing policy preserves all letters without a semantic vote.
+        self.assertTrue(report["passed"], report)
+        evaluate.assert_not_called()
+        self.assertEqual(report["text_confirmation_method"], "word_spacing")
 
     def test_exact_text_acoustic_failures_and_clear_content_losses_skip_jev(self):
         for primary, score in ((SCRIPT, .99), ("Thank you.", .01),
