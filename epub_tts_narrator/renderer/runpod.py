@@ -167,6 +167,10 @@ class Deployment:
                 # Keep diagnostics bounded even for a verbose package installer.
                 if len(output) > 4 * 1024 * 1024:
                     del output[:-2 * 1024 * 1024]
+                # Preserve protocol markers for launch(), without exposing
+                # its repetitive internal process probes as progress output.
+                if line.rstrip(b"\r\n") in {b"EPUB_TTS_WORKER_STATUS=RUNNING", b"EPUB_TTS_WORKER_STATUS=EXITED"}:
+                    continue
                 text = safe_error_text(line.decode(errors="replace"), self.secrets).rstrip()
                 if text:
                     self.notify(text)
@@ -626,12 +630,15 @@ if pidfile.exists():
         self.notify("Loading Drama 3 and waiting for the authenticated chapter service…")
         from .chapter_client import ChapterClient, ChapterClientError
         client = ChapterClient({"url": self.url, "api_key": self.state["api_key"], "timeout_seconds": 15})
-        deadline = time.monotonic() + self.cfg["startup_timeout_seconds"]
+        started = time.monotonic()
+        deadline = started + self.cfg["startup_timeout_seconds"]
+        next_update = started + 30
         while time.monotonic() < deadline:
             try:
                 capabilities = client.request("GET", "v1/capabilities")
                 if capabilities.get("maintenance", False) is not prepare:
                     raise RuntimeError("Chapter service started in the wrong maintenance mode")
+                self.notify(f"Chapter service ready ({max(0, time.monotonic() - started):.0f}s startup).")
                 return
             except ChapterClientError:
                 # A dead supervisor cannot recover merely by waiting for the
@@ -653,6 +660,10 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
                 if b"EPUB_TTS_WORKER_STATUS=EXITED" in probe.splitlines():
                     self.ssh(f"tail -n 60 {log}")
                     raise RuntimeError("Chapter worker exited during startup; see diagnostics above")
+                now = time.monotonic()
+                if now >= next_update:
+                    self.notify(f"Still waiting for Drama 3 and the chapter service ({max(0, now - started):.0f}s elapsed)…")
+                    next_update = now + 30
                 time.sleep(5)
         self.ssh(f"tail -n 60 {log}")
         raise RuntimeError("Chapter service failed to start before startup_timeout_seconds")

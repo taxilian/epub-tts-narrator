@@ -3,7 +3,7 @@
 import argparse
 from contextlib import redirect_stdout
 from copy import deepcopy
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import shlex
@@ -822,6 +822,72 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(client.return_value.request.call_count, 1)
         self.assertIn("tail -n 60", deployment.ssh.call_args.args[0])
         self.sleep.assert_not_called()
+
+    def test_command_output_hides_only_exact_probe_lines_and_keeps_capture_and_redaction(self):
+        deployment = self.deployment()
+        output = (b"EPUB_TTS_WORKER_STATUS=RUNNING\n"
+                  b"EPUB_TTS_WORKER_STATUS=EXITED\r\n"
+                  b"Warning mentions EPUB_TTS_WORKER_STATUS=EXITED; retain this diagnostic.\n"
+                  b"Failure detail with fixture-provider-secret\n")
+        process = Mock(stdout=BytesIO(output), returncode=0)
+        process.poll.return_value = 0
+        with patch("epub_tts_narrator.renderer.runpod.subprocess.Popen", return_value=process):
+            self.assertEqual(deployment._run(["fixture-command"]), output)
+        displayed = [call.args[0] for call in self.notify.call_args_list]
+        self.assertEqual(len(displayed), 2)
+        self.assertIn("Warning mentions EPUB_TTS_WORKER_STATUS=EXITED", displayed[0])
+        self.assertIn("Failure detail", displayed[1])
+        self.assertNotIn("fixture-provider-secret", displayed[1])
+        self.assertTrue(process.stdout.closed)
+
+    def test_launch_waiting_updates_are_throttled_and_ready_reports_elapsed(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        clock = [0.0]
+        requests = [0]
+
+        def request(*args):
+            clock[0] += 10
+            requests[0] += 1
+            if requests[0] <= 5:
+                raise ChapterClientError("loading")
+            return {"maintenance": False}
+
+        def ssh(command, **kwargs):
+            if command.startswith("python3 -c "):
+                clock[0] += 2
+                return b"EPUB_TTS_WORKER_STATUS=RUNNING\n"
+            return b""
+
+        deployment.ssh = Mock(side_effect=ssh)
+        self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        with (patch("epub_tts_narrator.renderer.runpod.time.monotonic", side_effect=lambda: clock[0]),
+              patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client):
+            client.return_value.request.side_effect = request
+            deployment.launch()
+        messages = [call.args[0] for call in self.notify.call_args_list]
+        self.assertEqual([message for message in messages if message.startswith("Still waiting")], [
+            "Still waiting for Drama 3 and the chapter service (46s elapsed)…",
+            "Still waiting for Drama 3 and the chapter service (80s elapsed)…",
+        ])
+        self.assertEqual(messages[-1], "Chapter service ready (95s startup).")
+        self.assertEqual(requests[0], 6)
+
+    def test_launch_timeout_still_prints_diagnostic_tail(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+
+        deployment = self.deployment()
+        deployment.cfg["startup_timeout_seconds"] = 1
+        deployment.ssh = Mock(return_value=b"EPUB_TTS_WORKER_STATUS=RUNNING\n")
+        with (patch("epub_tts_narrator.renderer.runpod.time.monotonic", side_effect=[0, 0, 2, 2]),
+              patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client):
+            client.return_value.request.side_effect = ChapterClientError("loading")
+            with self.assertRaisesRegex(RuntimeError, "failed to start before"):
+                deployment.launch()
+        self.assertIn("tail -n 60", deployment.ssh.call_args.args[0])
+        self.assertFalse(any(call.args[0].startswith("Chapter service ready") for call in self.notify.call_args_list))
 
     def test_prepared_launch_uses_maintenance_and_encode_launch_consumes_jobs(self):
         for prepare in (True, False):
