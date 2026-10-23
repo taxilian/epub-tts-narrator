@@ -320,8 +320,11 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         if action == "unavailable":
             record["report"]["resolution_pending"] = True
             write_json(directory / f"attempt-{record['attempt']:03d}.json", record)
+            description = ("Speech recovery exhausted the model output budget."
+                           if result["audit"].get("error_code") == "output_truncated"
+                           else "Speech recovery model is unavailable.")
             raise VerificationUnavailable(
-                "Speech recovery model is unavailable. The candidate and recurrence counts "
+                description + " The candidate and recurrence counts "
                 f"are saved; rerun to resume without new synthesis. Inspect {directory}"
                 + ("\n" + result["audit"]["error"] if result["audit"].get("error") else ""))
         notify("  Speech recovery: " + action + " — " + _diagnostic_text(result.get("reason", ""), 240))

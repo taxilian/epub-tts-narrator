@@ -64,6 +64,10 @@ class ProviderError(Exception):
         self.rate_limits = dict(rate_limits or {})
 
 
+class OutputTruncatedError(ProviderError):
+    """The provider exhausted its output budget, not a transport outage."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward credentials (or book text) to a redirect destination.
@@ -264,7 +268,7 @@ class OpenAICompatibleClient:
         choice = choices[0]
         reason = choice.get("finish_reason")
         if reason == "length":
-            raise ProviderError("The model output was truncated. Increase the output token limit or reduce the input.")
+            raise OutputTruncatedError("The model output was truncated. Increase the output token limit or reduce the input.")
         if reason == "content_filter":
             raise ProviderError("The model output was blocked by the provider's content filter.")
         if reason != "stop":

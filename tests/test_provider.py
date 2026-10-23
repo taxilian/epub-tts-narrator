@@ -17,6 +17,7 @@ from epub_tts_narrator.provider import (
     MAX_RESPONSE_BYTES,
     MAX_ERROR_BYTES,
     OpenAICompatibleClient,
+    OutputTruncatedError,
     ProviderError,
     _NoRedirect,
 )
@@ -444,7 +445,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_length_reason_rejects_even_syntactically_complete_json(self):
         self.respond(completion('{"characters": []}', finish_reason="length"))
-        with self.assertRaisesRegex(ProviderError, "truncated"):
+        with self.assertRaisesRegex(OutputTruncatedError, "truncated"):
             OpenAICompatibleClient("model").complete("Analyze", {})
 
     def test_refusal_is_not_accepted_even_with_valid_json(self):

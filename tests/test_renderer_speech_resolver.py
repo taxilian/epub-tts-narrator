@@ -170,7 +170,7 @@ class SpeechResolverTests(unittest.TestCase):
         self.assertIsNone(validate_resolution(saved["audit"], saved["expected_text"], failures, saved["audit"]["identity"]))
 
     def test_rare_name_outside_local_coverage_gets_three_independent_sound_votes(self):
-        expected, actual = "Xzqra waited outside.", "Zekra waited outside."
+        expected, actual = "Xzqra waited outside.", "Zaroola waited outside."
         self.assertFalse(speech_coverage(expected, actual)["passed"])
         audit, proposal, client, _, _ = self.resolve(expected, actual)
         self.assertEqual(audit["decision"], "resolved")
@@ -182,7 +182,7 @@ class SpeechResolverTests(unittest.TestCase):
         self.assertEqual(set(client.calls[1][1]), {"pairs"})
         self.assertNotIn("proposal", client.calls[1][1])
         self.assertEqual(proposal["validated_pairs"][0]["expected_word"], "Xzqra")
-        self.assertEqual(proposal["validated_pairs"][0]["recognized_word"], "Zekra")
+        self.assertEqual(proposal["validated_pairs"][0]["recognized_word"], "Zaroola")
 
     def test_known_one_to_many_sound_coverage_can_be_reviewed(self):
         audit, proposal, _, _, _ = self.resolve("We saw Vandire waiting.", "We saw Van Dyer waiting.")

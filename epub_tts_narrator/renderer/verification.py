@@ -91,12 +91,11 @@ def create_speech_resolver(settings, provider_settings):
     if (settings.get("recurring_resolution", "analysis") == "off"
             or not provider_settings or not provider_settings.get("model")):
         return None
-    from epub_tts_narrator.provider import OpenAICompatibleClient
+    from .recovery_client import RecoveryModelClient
     from .speech_resolver import SpeechResolver
     options = dict(provider_settings)
-    options["max_output_tokens"] = min(options.get("max_output_tokens") or 2048, 2048)
     options["max_retries"] = min(options.get("max_retries", 0), 2)
-    return SpeechResolver(OpenAICompatibleClient(**options), secrets=(options.get("api_key"),))
+    return SpeechResolver(RecoveryModelClient(options), secrets=(options.get("api_key"),))
 
 
 def create_phonetic_reviewer(settings, provider_settings):
@@ -104,14 +103,11 @@ def create_phonetic_reviewer(settings, provider_settings):
     if (settings.get("phonetic_fallback", "analysis") == "off"
             or not provider_settings or not provider_settings.get("model")):
         return None
-    from epub_tts_narrator.provider import OpenAICompatibleClient
+    from .recovery_client import RecoveryModelClient
     from .phonetic_review import PronunciationReviewer
     options = dict(provider_settings)
-    # A handful of word-pair decisions needs a bounded response, not the book
-    # analyzer's potentially very large output budget.
-    options["max_output_tokens"] = min(options.get("max_output_tokens") or 2048, 2048)
     options["max_retries"] = min(options.get("max_retries", 0), 2)
-    return PronunciationReviewer(OpenAICompatibleClient(**options))
+    return PronunciationReviewer(RecoveryModelClient(options))
 
 
 def create_verifier(settings, jev_settings=None, provider_settings=None):

@@ -56,8 +56,8 @@ class RecurringResolverFactoryTests(unittest.TestCase):
         with patch("epub_tts_narrator.provider.OpenAICompatibleClient") as client:
             client.return_value.identity = {"model": "fixture-model"}
             resolver = create_speech_resolver(self.settings, provider)
-        client.assert_called_once_with(**{**provider, "max_output_tokens": 2048, "max_retries": 2})
-        self.assertIs(resolver.client, client.return_value)
+        client.assert_called_once_with(**{**provider, "max_retries": 2})
+        self.assertEqual(resolver.client.identity["output_budget_retry"]["budgets"], [8192, 32000])
         self.assertEqual(resolver.secrets, (provider["api_key"],))
         client.return_value.complete.assert_not_called()
         self.assertEqual(provider, before)
