@@ -119,13 +119,12 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
                 self.assertEqual(verifier.calls, [("reference", self.audio)])
 
-    def test_short_parts_numbers_apostrophes_symbols_and_four_parts_are_not_boundaries(self):
+    def test_short_parts_apostrophes_and_arbitrary_boundaries_preserve_written_content(self):
         for source, actual in (
             ("around", "a round"),
             ("twentyone", "twenty one"),
             ("onehundred", "one hundred"),
             ("can'not", "can not"),
-            ("moon$stone", "moonstone"),
             ("moonlightstonepath", "moon light stone path"),
         ):
             with self.subTest(source=source, actual=actual):
@@ -133,9 +132,19 @@ class ReferenceBoundaryTests(unittest.TestCase):
                 spoken = SCRIPT.replace("Sourcepalace", actual)
                 verifier = consensus.IndependentVerifier(primary=spoken, secondary=spoken)
                 report = self.check(verifier, expected=expected)
-                self.assertFalse(report["passed"], report)
-                self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
+                self.assertTrue(report["passed"], report)
+                self.assertEqual(report["text_confirmation_method"], "word_spacing")
+                self.assertNotIn("corroboration", report)
                 self.assertEqual(verifier.calls, [("reference", self.audio)])
+
+    def test_missing_currency_content_is_not_a_boundary_change(self):
+        expected = SCRIPT.replace("Sourcepalace", "moon$stone")
+        spoken = SCRIPT.replace("Sourcepalace", "moonstone")
+        verifier = consensus.IndependentVerifier(primary=spoken, secondary=spoken)
+        report = self.check(verifier, expected=expected)
+        self.assertFalse(report["passed"], report)
+        self.assertEqual(report["corroboration"]["decision"], "mismatch_outside_reference_limits")
+        self.assertEqual(verifier.calls, [("reference", self.audio)])
 
     def test_raw_word_error_does_not_double_count_a_boundary_only_change(self):
         for word_count in (20, 19):

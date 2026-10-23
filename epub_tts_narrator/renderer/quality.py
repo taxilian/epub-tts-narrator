@@ -31,7 +31,7 @@ QUALITY_DEFAULTS = {
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
 }
-QUALITY_VERSION = 17
+QUALITY_VERSION = 18
 REFERENCE_VARIATION_VERSION = 6
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -255,83 +255,42 @@ _NUMBER_COMPONENTS = frozenset(_SMALL + _TENS + [
 
 
 def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | None:
-    """Explain complete transcripts differing only in bounded word spacing.
+    """Prove complete written-content equality, ignoring case and word boundaries.
 
-    Join/split one alphabetic word and two or three adjacent pieces of at least
-    two letters. Pieces may be separated by whitespace or a single compound
-    hyphen. ASR-added hyphens do not establish a pronunciation difference.
-    Apostrophes, numbers and changes to any letters still need ordinary
-    verification. No insertion, deletion or
-    substitution edge exists; even one other discrepancy rejects this shortcut.
+    Lexical normalization removes punctuation except apostrophes and meaningful
+    numeric syntax. Remove apostrophes too, but retain numeric values and signs.
+    Every remaining character must match in order across the whole transcript;
+    the alignment describes boundaries, never guesses missing speech.
     """
-    def tokens(text):
-        text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("‘", "'")
-        words, spans = [], []
-        for match in _lexeme_matches(text):
-            normalized = normalize_words(match.group())
-            words.extend(normalized)
-            spans.extend([(match.start(), match.end(), match.group())] * len(normalized))
-        return text, words, spans
-
-    expected_source, expected, expected_spans = tokens(expected_text)
-    actual_source, actual, actual_spans = tokens(actual_text)
+    expected, actual = normalize_words(expected_text), normalize_words(actual_text)
     if len(expected) > 2000 or len(actual) > 4000:
         raise ValueError("text exceeds per-chunk verification token limit")
-    if not expected or expected == actual or "".join(expected) != "".join(actual):
+    left = [word.replace("'", "") for word in expected]
+    right = [word.replace("'", "") for word in actual]
+    if not expected or expected == actual or "".join(left) != "".join(right):
         return None
-
-    def pieces(source, words, spans, start, size):
-        end = start + size
-        if end > len(words):
-            return None
-        selected = words[start:end]
-        if any(not word.isalpha() or len(word) < 2 or word in _NUMBER_COMPONENTS
-               for word in selected):
-            return None
-        if any(not span[2].isalpha() for span in spans[start:end]):
-            return None
-        # Do not apply an alphabetic compound rule to a fragment embedded in
-        # an alphanumeric identifier such as A34-sun-flower-8r9.
-        neighbors = []
-        if start:
-            neighbors.append((spans[start - 1][2], source[spans[start - 1][1]:spans[start][0]]))
-        if end < len(spans):
-            neighbors.append((spans[end][2], source[spans[end - 1][1]:spans[end][0]]))
-        if any(not word.isalpha() and re.fullmatch(r"[-‐‑]", separator)
-               for word, separator in neighbors):
-            return None
-        if any(not re.fullmatch(r"(?:\s+|\s*[-‐‑]\s*)",
-                                source[spans[index - 1][1]:spans[index][0]])
-               for index in range(start + 1, end)):
-            return None
-        return "".join(selected)
-
     i = j = 0
     changes = []
     while i < len(expected) and j < len(actual):
         if expected[i] == actual[j]:
             i, j = i + 1, j + 1
             continue
-        left = pieces(expected_source, expected, expected_spans, i, 1)
-        right = pieces(actual_source, actual, actual_spans, j, 1)
-        match = None
-        for size in (2, 3):
-            if left is not None and left == pieces(actual_source, actual, actual_spans, j, size):
-                match = (i + 1, j + size, "split")
-                break
-            if right is not None and right == pieces(expected_source, expected, expected_spans, i, size):
-                match = (i + size, j + 1, "join")
-                break
-        if match is None:
-            return None
-        end_i, end_j, operation = match
+        end_i, end_j = i + 1, j + 1
+        left_size, right_size = len(left[i]), len(right[j])
+        while left_size != right_size:
+            if left_size < right_size:
+                left_size += len(left[end_i])
+                end_i += 1
+            else:
+                right_size += len(right[end_j])
+                end_j += 1
+        operation = ("join" if end_i - i > end_j - j else
+                     "split" if end_i - i < end_j - j else "punctuation_or_boundaries")
         changes.append({"operation": operation, "expected_start": i, "expected_end": end_i,
                         "actual_start": j, "actual_end": end_j,
                         "expected": expected[i:end_i], "actual": actual[j:end_j]})
         i, j = end_i, end_j
-    if i != len(expected) or j != len(actual):
-        return None
-    return {"method": "word_spacing_v2", "boundary_changes": len(changes), "alignment": changes}
+    return {"method": "written_content_v1", "boundary_changes": len(changes), "alignment": changes}
 
 
 def compare_reference_words(expected_text: str, actual_text: str, *,

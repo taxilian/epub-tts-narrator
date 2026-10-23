@@ -19,7 +19,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 7
+SPEECH_COVERAGE_VERSION = 8
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -127,12 +127,12 @@ def speech_coverage(expected_text, transcript):
         return dict(result, reason="comparison_limit")
     if expected == actual:
         return dict(result, passed=True, reason="exact_spoken_content")
-    if Counter(expected) == Counter(actual):
-        return dict(result, reason="reordered_spoken_content")
     spacing = word_spacing_equivalence(expected_text, transcript)
     if spacing is not None:
         return dict(result, passed=True, reason="exact_spelling_boundaries",
                     alignment=spacing["alignment"])
+    if Counter(expected) == Counter(actual):
+        return dict(result, reason="reordered_spoken_content")
 
     complete = phonetic_equivalence(expected_text, transcript)
     if complete is not None:

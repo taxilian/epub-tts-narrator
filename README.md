@@ -75,7 +75,7 @@ The output directory is the renderer bundle: `manifest.json`, `cast.json`, `sour
 
 ## Verification
 
-Generated speech is checked before it ships: complete word coverage, exact-spacing and double-metaphone sound-alike equivalence, optional JEV judgment for remaining disputes, and acoustic checks (silence, clipping). Reference voices and book speech share the same acceptance gates. Failures block publication rather than shipping bad audio. Details and tuning: [RENDERER.md](RENDERER.md).
+Generated speech is checked before it ships: complete written-content equality ignoring case, spacing, and punctuation; double-metaphone sound-alike equivalence; optional JEV judgment for remaining disputes; and acoustic checks (silence, clipping). Numeric values, signs, and currency content retain their lexical safeguards. Reference voices and book speech share the same acceptance gates. Failures block publication rather than shipping bad audio. Details and tuning: [RENDERER.md](RENDERER.md).
 
 ## Status
 
