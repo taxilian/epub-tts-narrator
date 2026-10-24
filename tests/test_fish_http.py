@@ -15,7 +15,7 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import wave
 
@@ -119,6 +119,30 @@ class SpeechTargetTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("msgpack"), "requires msgpack")
 class FishHTTPErrorBodyTests(unittest.TestCase):
+    def test_connection_error_reports_the_redacted_destination_and_original_errno(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.wav"
+            reference.write_bytes(wav_bytes())
+            voice = {"kind": "reference", "reference_audio": str(reference), "reference_text": "Hello."}
+            for secret_path in (False, True):
+                with self.subTest(secret_path=secret_path):
+                    path = "/DO-NOT-ECHO/v1/tts" if secret_path else "/v1/tts"
+                    url = "http://172.19.32.6:8080" + path
+                    client = FishHTTPEngine({"name": "second-mac", "url": url, "api_key": "DO-NOT-ECHO"})
+                    opener = Mock()
+                    opener.open.side_effect = URLError(OSError(65, "No route to host DO-NOT-ECHO"))
+                    with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
+                        with self.assertRaises(FishHTTPError) as raised:
+                            client.synthesize("Hello.", voice, root / "take.wav", seed=1)
+                    message = str(raised.exception)
+                    self.assertIn("172.19.32.6:8080", message)
+                    self.assertIn("No route to host", message)
+                    self.assertIn("65", message)
+                    self.assertNotIn("DO-NOT-ECHO", message)
+                    if not secret_path:
+                        self.assertIn(url, message)
+
     def test_broken_error_body_preserves_status_detail_and_retryability(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

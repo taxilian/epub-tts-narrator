@@ -425,14 +425,14 @@ class FishHTTPEngine:
             finally:
                 exc.close()
             raise FishHTTPError(
-                redact(f"Fish HTTP {exc.code} ({self.name}): {detail or exc.reason}", self.api_key),
+                redact(f"Fish HTTP {exc.code} ({self.name}; endpoint={self.url}): {detail or exc.reason}", self.api_key),
                 retryable=exc.code in {408, 425, 429} or exc.code >= 500,
                 status=exc.code,
             ) from exc
         except (URLError, TimeoutError, socket.timeout, http.client.HTTPException) as exc:
-            raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}): {exc}", self.api_key)) from exc
+            raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
         except OSError as exc:
-            raise FishHTTPError(redact(f"Could not receive Fish HTTP audio ({self.name}): {exc}", self.api_key)) from exc
+            raise FishHTTPError(redact(f"Could not receive Fish HTTP audio ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
         finally:
             if staged is not None:
                 staged.unlink(missing_ok=True)
