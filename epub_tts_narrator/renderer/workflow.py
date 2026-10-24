@@ -380,6 +380,13 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     # A resumed run can resolve an existing recurring failure before spending
     # another TTS attempt. Recheck the candidate under today's acoustic policy.
     if resolution_session is not None and resolution_session.records:
+        from .retained_candidates import recheck_retained_candidates
+
+        retained = recheck_retained_candidates(resolution_session, verifier, config, notify=notify)
+        if retained is not None:
+            write_json(accepted_path, retained)
+            notify("  Retained speech passed fresh verification and review; reusing its unchanged audio.")
+            return finish(directory / retained["audio_file"], retained)
         latest = resolution_session.records[max(resolution_session.records)]
         name = latest.get("audio_file")
         if name == f"attempt-{latest['attempt']:03d}.wav" and (directory / name).exists():
