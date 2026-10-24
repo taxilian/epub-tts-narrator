@@ -15,7 +15,7 @@ import re
 
 from .common import digest
 from .address_speech import address_spans, address_spelling_equivalent
-from .letter_names import make_letter_name_matcher
+from .letter_names import letter_name_rewrite_equivalent, make_letter_name_matcher
 from .phonetic_match import _FUNCTION_WORDS, _PROTECTED
 from .phonetic_review import _original_words
 from .quality import _lexeme_matches, compare_words, normalize_words
@@ -461,6 +461,9 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
                         if row["start"] == edit["start"] and row["end"] == edit["end"]), None)
         stutter = _stutter_span(edit["source"], edit["replacement"])
         fragment = _stretched_fragment(edit["source"], edit["replacement"])
+        letter_name = (isinstance(edit["replacement"], str)
+                       and len(edit["replacement"]) <= _LIMITS["max_span_chars"]
+                       and letter_name_rewrite_equivalent(edit["source"], edit["replacement"]))
         if address is not None:
             if (len(edit["source"]) > _LIMITS["max_address_chars"]
                     or not isinstance(edit["replacement"], str)
@@ -472,7 +475,8 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
         elif edit["start"] not in boundaries_start or edit["end"] not in boundaries_end:
             return reject("A rewrite edit has invalid offsets: copy complete words or one complete source_addresses entry.")
         elif (any(edit["start"] < row["end"] and row["start"] < edit["end"] for row in addresses)
-                or (not stutter and not fragment and not _stretched_span(edit["source"], edit["replacement"])
+                or (not stutter and not fragment and not letter_name
+                    and not _stretched_span(edit["source"], edit["replacement"])
                     and (not _safe_span(edit["source"]) or not _safe_span(edit["replacement"])))):
             return reject("A rewrite must use one to three plain pronunciation words or one complete source_addresses "
                           "entry; it cannot change numbers, negation, function words, initialisms, or include instructions or markup.")
@@ -485,7 +489,7 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
                 and not stutter and not _stretched_span(edit["source"], edit["replacement"])):
             return reject("A rewrite overlaps retained words and could conceal an added or missing word.")
         span_coverage = speech_coverage(edit["source"], edit["replacement"]) if address is None else None
-        if address is None and not stutter and not fragment and ((len(before) != len(after) and not span_coverage["passed"])
+        if address is None and not stutter and not fragment and not letter_name and ((len(before) != len(after) and not span_coverage["passed"])
                 or (not span_coverage["passed"]
                     and _accept_pairs(edit["source"], edit["replacement"]) is None)):
             return reject("The pronunciation rewrite failed complete word coverage for the edited span.")

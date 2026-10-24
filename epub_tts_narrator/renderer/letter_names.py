@@ -33,6 +33,19 @@ _NAME_TO_LETTER = {
     }.items()
     for name in names
 }
+_REWRITE_NAME_TO_LETTER = {
+    re.sub(r"([a-z])\1+", r"\1", name): letter for name, letter in _NAME_TO_LETTER.items()
+}
+
+
+def letter_name_rewrite_equivalent(source, replacement):
+    """Recognize one exact letter-name respelling for reviewed synthesis only."""
+    if (not isinstance(source, str) or not _SINGLE_LETTER.fullmatch(source)
+            or not isinstance(replacement, str)):
+        return False
+    name = re.sub(r"([a-z])\1+", r"\1", replacement.casefold())
+    letter = "W" if name in {"double you", "double u"} else _REWRITE_NAME_TO_LETTER.get(name)
+    return letter == source.upper()
 
 
 def make_letter_name_matcher(expected_source, expected_words, expected_spans,
