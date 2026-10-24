@@ -290,11 +290,15 @@ def _prosody_span(source, replacement):
 
 
 def _stretched_fragment(source, replacement):
-    """Rewrite-only shortening of a consonant run; never direct audio acceptance."""
-    return (isinstance(source, str) and isinstance(replacement, str)
-            and 3 <= len(source) <= _LIMITS["max_span_chars"] and source.isascii()
-            and not source.isupper() and re.fullmatch(r"[bcdfghjklmnpqrstvwxz]", replacement) is not None
-            and source.casefold() == replacement * len(source))
+    """Review-only respelling of stretched consonants, retaining every distinct sound."""
+    if (not isinstance(source, str) or not isinstance(replacement, str)
+            or not 3 <= len(source) <= _LIMITS["max_span_chars"]
+            or not 1 <= len(replacement) < len(source) or source.isupper()
+            or re.fullmatch(r"[bcdfghjklmnpqrstvwxz]+", source.casefold()) is None
+            or re.fullmatch(r"[bcdfghjklmnpqrstvwxz]+", replacement) is None
+            or re.search(r"([a-z])\1{2,}", source.casefold()) is None):
+        return False
+    return re.sub(r"(.)\1+", r"\1", source.casefold()) == re.sub(r"(.)\1+", r"\1", replacement)
 
 
 def _stretched_span(source, replacement):

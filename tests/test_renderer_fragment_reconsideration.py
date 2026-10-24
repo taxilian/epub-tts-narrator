@@ -59,6 +59,30 @@ class SoundClient:
 
 
 class FragmentReconsiderationTests(unittest.TestCase):
+    def test_multi_consonant_stretch_shortening_reaches_three_reviews_without_new_planner(self):
+        source = "Keep the ssssshh—the ssssh."
+        proposal = {"action": "rewrite", "edits": [
+            {"start": source.rindex(word), "end": source.rindex(word) + len(word),
+             "source": word, "replacement": "shh"}
+            for word in ("ssssshh", "ssssh")],
+            "reason": "Shorten each expressive consonant fragment while retaining its sounds."}
+        previous = [{"attempt": 3, "proposal": proposal, "decision": "blocked",
+                     "error_code": "invalid_proposal", "validation_error": "Old fragment guard.",
+                     "sound_reviews": []}]
+        failed = [{**failures()[0], "tts_text": source}]
+        client = SoundClient()
+        resolver = SpeechResolver(client)
+
+        audit = resolver.reconsider(source, failed, can_split=False, previous_decisions=previous)
+
+        self.assertIsNotNone(audit)
+        resolved = validate_resolution(audit, source, failed, resolver.identity,
+                                       can_split=False, previous_decisions=previous)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["tts_text"], "Keep the shh—the shh.")
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(audit["reviews"]), 3)
+
     def test_two_span_fragment_rewrite_reaches_all_sound_reviews(self):
         client = SoundClient(planner=True)
         resolver = SpeechResolver(client)
@@ -73,7 +97,8 @@ class FragmentReconsiderationTests(unittest.TestCase):
         self.assertFalse(stretched_word_equivalent("ssssss", "s"))
         self.assertFalse(speech_coverage("ssssss", "s")["passed"])
         for source, target in (("SSSSSS", "s"), ("aaaaaa", "a"), ("yyy", "y"),
-                               ("ssshhh", "s"), ("ssssss", "S"), ("ss", "s")):
+                               ("ssshhh", "s"), ("ssssss", "S"), ("ss", "s"),
+                               ("ssshhh", "hs"), ("SSSSHH", "shh"), ("ssshhh", "sh no")):
             with self.subTest(source=source, target=target):
                 self.assertFalse(policies._stretched_fragment(source, target))
         self.assertTrue(policies._stretched_fragment("ssssss", "s"))
