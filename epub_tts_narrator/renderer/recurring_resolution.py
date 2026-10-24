@@ -98,7 +98,9 @@ class RecurringResolution:
             self.binding['can_plain_delivery'] = True
         # The immediately preceding policy differs only in which failures may
         # motivate a new rewrite. Its already-reviewed repairs remain usable.
-        self.previous_identity = {key: value for key, value in self.identity.items()
+        self.compatible_identity = getattr(resolver, 'previous_identity', None)
+        predecessor = self.compatible_identity or self.identity
+        self.previous_identity = {key: value for key, value in predecessor.items()
                                   if key != 'policy_sha256'}
         self.previous_identity['version'] = 1
         self.previous_identity['policy_sha256'] = digest(self.previous_identity)
@@ -134,6 +136,7 @@ class RecurringResolution:
                 self.state = dict(body, binding=self.binding, handled={})
             elif body.get('binding') in (dict(self.binding, version=1),
                                          dict(self.binding, version=2),
+                                         dict(self.binding, resolver=self.compatible_identity),
                                          dict(self.binding, version=2,
                                               resolver=self.previous_identity)):
                 # Source-span signatures or the recurrence trigger policy
@@ -260,8 +263,8 @@ class RecurringResolution:
 
     def _audit_identity(self, audit):
         """Replay only the current or exact preceding provider-bound policy."""
-        if audit.get('identity') == self.previous_identity:
-            return self.previous_identity
+        if audit.get('identity') in (self.previous_identity, self.compatible_identity):
+            return audit['identity']
         return self.identity
 
     def note_failed_split(self, report):

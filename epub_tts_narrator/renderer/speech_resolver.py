@@ -27,6 +27,7 @@ from .verification_prompts import (_ADDRESS_PROMPT_SHA256, _ADDRESS_SOUND_SHA256
                                    _FEEDBACK_SOUND_SHA256, _LEGACY_LIMITS, _LEGACY_PROMPT_SHA256,
                                    _LEGACY_SOUND_SHA256, _STUTTER_PROMPT_SHA256, _STUTTER_SOUND_SHA256,
                                    _TEXT_GATE_PROMPT_SHA256, _TEXT_GATE_SOUND_SHA256, PROMPT, SOUND_PROMPT)
+from .verification_prompts import _PRE_PROSODY_PROMPT_SHA256, _PRE_PROSODY_SOUND_SHA256
 
 _ADDRESS_LIMITS = {"max_failures": 30, "max_text_chars": 20000, "max_payload_chars": 200000,
                    "max_pairs": 4, "max_span_words": 3, "max_span_chars": 120,
@@ -43,11 +44,13 @@ _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _SPELLING = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*(?:[ \-‐‑][A-Za-z]+(?:['’][A-Za-z]+)*)*\Z")
 
 
-def _identity(provider):
+def _identity(provider, *, prosody=True, coverage_version=None):
     identity = {"name": "recurring_speech_resolver", "version": 2,
-                "provider": deepcopy(provider), "planner_prompt_sha256": digest(PROMPT),
-                "sound_prompt_sha256": digest(SOUND_PROMPT),
-                "coverage_version": SPEECH_COVERAGE_VERSION, "limits": deepcopy(_LIMITS)}
+                "provider": deepcopy(provider),
+                "planner_prompt_sha256": digest(PROMPT) if prosody else _PRE_PROSODY_PROMPT_SHA256,
+                "sound_prompt_sha256": digest(SOUND_PROMPT) if prosody else _PRE_PROSODY_SOUND_SHA256,
+                "coverage_version": SPEECH_COVERAGE_VERSION if coverage_version is None else coverage_version,
+                "limits": deepcopy(_LIMITS)}
     identity["policy_sha256"] = digest(identity)
     return identity
 
@@ -58,6 +61,15 @@ def _valid_identity(identity):
                 and identity == _identity(identity["provider"]))
     except (ValueError, TypeError, OverflowError, RecursionError):
         return False
+
+
+def _pre_prosody_identity(identity):
+    if (not isinstance(identity, dict) or not isinstance(identity.get("provider"), dict)
+            or type(identity.get("coverage_version")) is not int
+            or identity["coverage_version"] not in {7, 8, 9}):
+        return False
+    return identity == _identity(identity["provider"], prosody=False,
+                                  coverage_version=identity["coverage_version"])
 
 
 def _legacy_rewrite_identity(identity):
@@ -262,6 +274,21 @@ def _safe_span(value):
     return True
 
 
+def _prosody_span(source, replacement):
+    if (not isinstance(source, str) or not isinstance(replacement, str)
+            or max(len(source), len(replacement)) > _LIMITS["max_span_chars"]):
+        return False
+    words = normalize_words(source)
+    if not 1 <= len(words) <= _LIMITS["max_span_words"] or words != normalize_words(replacement):
+        return False
+    punctuation = ".,;:!?…—–-‐‑"
+    if any(not char.isalpha() and not char.isspace() and char not in punctuation + "'’‘"
+           for char in source + replacement):
+        return False
+    return ([char for char in source if char in punctuation]
+            != [char for char in replacement if char in punctuation])
+
+
 def _stretched_fragment(source, replacement):
     """Rewrite-only shortening of a consonant run; never direct audio acceptance."""
     return (isinstance(source, str) and isinstance(replacement, str)
@@ -416,7 +443,7 @@ def _accept_pairs(expected_text, transcript, *, validation_errors=None):
     return pairs
 
 
-def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False):
+def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False, punctuation_rewrite=True):
     def reject(reason):
         if validation_errors is not None:
             validation_errors.append(reason)
@@ -461,6 +488,7 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
                         if row["start"] == edit["start"] and row["end"] == edit["end"]), None)
         stutter = _stutter_span(edit["source"], edit["replacement"])
         fragment = _stretched_fragment(edit["source"], edit["replacement"])
+        prosody = punctuation_rewrite and _prosody_span(edit["source"], edit["replacement"])
         letter_name = (isinstance(edit["replacement"], str)
                        and len(edit["replacement"]) <= _LIMITS["max_span_chars"]
                        and letter_name_rewrite_equivalent(edit["source"], edit["replacement"]))
@@ -475,18 +503,18 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
         elif edit["start"] not in boundaries_start or edit["end"] not in boundaries_end:
             return reject("A rewrite edit has invalid offsets: copy complete words or one complete source_addresses entry.")
         elif (any(edit["start"] < row["end"] and row["start"] < edit["end"] for row in addresses)
-                or (not stutter and not fragment and not letter_name
+                or (not stutter and not fragment and not letter_name and not prosody
                     and not _stretched_span(edit["source"], edit["replacement"])
                     and (not _safe_span(edit["source"]) or not _safe_span(edit["replacement"])))):
             return reject("A rewrite must use one to three plain pronunciation words or one complete source_addresses "
                           "entry; it cannot change numbers, negation, function words, initialisms, or include instructions or markup.")
-        if normalize_words(edit["source"]) == normalize_words(edit["replacement"]):
+        if not prosody and normalize_words(edit["source"]) == normalize_words(edit["replacement"]):
             return reject("The proposed rewrite does not change the normalized TTS wording.")
         # Do not let a multiword spelling consume a retained neighboring word;
         # that would disguise a deletion or insertion as a name respelling.
         before, after = normalize_words(edit["source"]), normalize_words(edit["replacement"])
         if (address is None and set(before) & set(after)
-                and not stutter and not _stretched_span(edit["source"], edit["replacement"])):
+                and not stutter and not prosody and not _stretched_span(edit["source"], edit["replacement"])):
             return reject("A rewrite overlaps retained words and could conceal an added or missing word.")
         span_coverage = speech_coverage(edit["source"], edit["replacement"]) if address is None else None
         if address is None and not stutter and not fragment and not letter_name and ((len(before) != len(after) and not span_coverage["passed"])
@@ -509,7 +537,7 @@ def _proposal(proposal, payload, *, validation_errors=None, legacy_rewrite=False
     return dict(result, tts_text=tts_text, validated_pairs=pairs)
 
 
-def _reconsiderable_candidate(payload):
+def _reconsiderable_candidate(payload, *, punctuation_rewrite=True):
     previous = payload.get("previous_decisions", [])
     for row in reversed(previous):
         raw = row.get("proposal")
@@ -522,7 +550,7 @@ def _reconsiderable_candidate(payload):
                     or other.get("error_code") == "sound_review_rejected" and other.get("sound_reviews"))
                for other in previous):
             continue
-        proposal = _proposal(raw, payload)
+        proposal = _proposal(raw, payload, punctuation_rewrite=punctuation_rewrite)
         if proposal is not None:
             return row, proposal
     return None
@@ -555,6 +583,11 @@ class SpeechResolver:
     @property
     def identity(self):
         return deepcopy(self._identity)
+
+    @property
+    def previous_identity(self):
+        return _identity(self._identity["provider"], prosody=False,
+                         coverage_version=self._identity["coverage_version"])
 
     def resolve(self, expected_text, failures, *, can_rewrite=True, can_split=True,
                 previous_decisions=None, can_plain_delivery=False):
@@ -638,7 +671,8 @@ def validate_resolution(audit, expected_text, failures, identity, *, can_rewrite
         feedback = _feedback_rewrite_identity(identity)
         stutter = _stutter_rewrite_identity(identity)
         clean_text = _clean_text_rewrite_identity(identity)
-        historical = legacy or address or feedback or stutter or clean_text
+        pre_prosody = _pre_prosody_identity(identity)
+        historical = legacy or address or feedback or stutter or clean_text or pre_prosody
         # Historical rewrite markers do not know the caller's current engine
         # capabilities. Fresh decisions must pass an explicit boolean; omission
         # only replays the capability bound into an existing audit's payload.
@@ -652,32 +686,36 @@ def validate_resolution(audit, expected_text, failures, identity, *, can_rewrite
             previous_decisions = payload.get("previous_decisions") if isinstance(payload, dict) else None
         planner_hash = (_LEGACY_PROMPT_SHA256 if legacy else _ADDRESS_PROMPT_SHA256 if address
                         else _FEEDBACK_PROMPT_SHA256 if feedback else _STUTTER_PROMPT_SHA256 if stutter
-                        else _TEXT_GATE_PROMPT_SHA256 if clean_text else digest(PROMPT))
+                        else _TEXT_GATE_PROMPT_SHA256 if clean_text else
+                        _PRE_PROSODY_PROMPT_SHA256 if pre_prosody else digest(PROMPT))
         sound_hash = (_LEGACY_SOUND_SHA256 if legacy else _ADDRESS_SOUND_SHA256 if address
                       else _FEEDBACK_SOUND_SHA256 if feedback else _STUTTER_SOUND_SHA256 if stutter
-                      else _TEXT_GATE_SOUND_SHA256 if clean_text else digest(SOUND_PROMPT))
+                      else _TEXT_GATE_SOUND_SHA256 if clean_text else
+                      _PRE_PROSODY_SOUND_SHA256 if pre_prosody else digest(SOUND_PROMPT))
         if (not (_valid_identity(identity) or historical) or not isinstance(audit, dict)
                 or set(audit) - {"reconsidered"} != {"identity", "prompt", "payload", "proposal", "reviews", "decision"}
                 or audit["identity"] != identity
                 or digest(audit["prompt"]) != planner_hash
                 or audit["decision"] != "resolved"
-                or (historical and not clean_text and (can_plain_delivery or not isinstance(audit["proposal"], dict)
+                or (historical and not clean_text and not pre_prosody and (can_plain_delivery or not isinstance(audit["proposal"], dict)
                                 or audit["proposal"].get("action") != "rewrite"))
                 or audit["payload"] != _payload(expected_text, failures, can_rewrite, can_split,
                                                 legacy_rewrite=legacy, address_rewrite=address,
                                                 previous_decisions=previous_decisions,
                                                 can_plain_delivery=can_plain_delivery,
-                                                acoustic_rewrite=not historical)):
+                                                acoustic_rewrite=not historical or pre_prosody)):
             return None
         if "reconsidered" in audit:
-            candidate = _reconsiderable_candidate(audit["payload"]) if not historical else None
+            candidate = (_reconsiderable_candidate(audit["payload"], punctuation_rewrite=not pre_prosody)
+                         if not historical or pre_prosody else None)
             if (candidate is None or not isinstance(audit["reconsidered"], dict)
                     or type(audit["reconsidered"].get("attempt")) is not int
                     or audit["reconsidered"] != {
                     "attempt": candidate[0]["attempt"], "error_code": "invalid_proposal"}
                     or audit["proposal"] != candidate[0]["proposal"]):
                 return None
-        proposal = _proposal(audit["proposal"], audit["payload"], legacy_rewrite=legacy)
+        proposal = _proposal(audit["proposal"], audit["payload"], legacy_rewrite=legacy,
+                             punctuation_rewrite=not historical)
         if proposal is None or not isinstance(audit["reviews"], list):
             return None
         pairs, reviews = proposal["validated_pairs"], audit["reviews"]

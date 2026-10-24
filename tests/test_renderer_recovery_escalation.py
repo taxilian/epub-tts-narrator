@@ -18,6 +18,7 @@ from epub_tts_narrator.renderer.recurring_resolution import (
 )
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver, _payload, _proposal, validate_resolution
 from epub_tts_narrator.renderer.verification_prompts import PROMPT, SOUND_PROMPT
+from epub_tts_narrator.renderer.verification_prompts import _PRE_PROSODY_PROMPT
 
 
 TEXT = "Insang waited beside the old gate."
@@ -225,7 +226,7 @@ class EscalationTests(unittest.TestCase):
 
     def test_pre_acoustic_policy_rewrite_audits_still_validate(self):
         client = EscalationClient()
-        identity = SpeechResolver(client).identity
+        identity = SpeechResolver(client).previous_identity
         legacy = {key: value for key, value in identity.items() if key != "policy_sha256"}
         legacy["version"] = 1
         legacy["policy_sha256"] = digest(legacy)
@@ -240,7 +241,7 @@ class EscalationTests(unittest.TestCase):
                                             "reason": "Plausible pronunciation spelling."}
                                            for pair in proposal["validated_pairs"]]}}
                    for number in (1, 2, 3)]
-        audit = {"identity": legacy, "prompt": PROMPT, "payload": payload,
+        audit = {"identity": legacy, "prompt": _PRE_PROSODY_PROMPT, "payload": payload,
                  "proposal": rewrite(), "reviews": reviews, "decision": "resolved"}
         validated = validate_resolution(audit, TEXT, failures, legacy,
                                         can_rewrite=True, can_split=False)
@@ -278,13 +279,14 @@ class EscalationTests(unittest.TestCase):
                 self.consider(session, first)
                 saved = read_json(session.path)
                 body = {key: value for key, value in saved.items() if key != "record_sha256"}
-                previous_identity = {key: value for key, value in resolver.identity.items()
+                previous_identity = {key: value for key, value in resolver.previous_identity.items()
                                      if key != "policy_sha256"}
                 previous_identity["version"] = 1
                 previous_identity["policy_sha256"] = digest(previous_identity)
                 body["binding"].update(version=2, resolver=previous_identity)
                 for row in body["history"]:
                     row["audit"]["identity"] = previous_identity
+                    row["audit"]["prompt"] = _PRE_PROSODY_PROMPT
                     row.pop("applied", None)
                 write_json(session.path, {**body, "record_sha256": digest(body)})
 
