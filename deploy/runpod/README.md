@@ -54,6 +54,13 @@ without waiting for the full readiness timeout.
 .venv-renderer/bin/audiobook-render runpod stop
 ```
 
+Encode first compares the deployed revision with this checkout's committed
+HEAD. If they differ, it deploys the new code, runs the full install and the
+smoke check, and continues into rendering **without stopping the Pod in
+between** — no separate `update` run is needed. `--no-update` skips the check
+and encodes with the deployed code as-is; a worker that never passed its smoke
+check still refuses to encode.
+
 `--config FILE` selects the normal configuration; `--override-config FILE`
 selects a different deployment override. Bootstrap and Update default to
 `--source github`, which checks out the configured public repository/ref.

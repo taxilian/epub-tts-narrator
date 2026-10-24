@@ -22,6 +22,11 @@ from .runpod_api import RunpodAPI, RunpodAmbiguousOutcome, RunpodAPIError
 from .diagnostics import configured_secrets, safe_error_text
 
 
+def _local_head():
+    root = Path(__file__).resolve().parents[2]
+    return subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+
+
 def add_parser(commands):
     group = commands.add_parser("runpod", help="Bootstrap, update, and encode with a stop-by-default Runpod worker")
     actions = group.add_subparsers(dest="runpod_action", required=True)
@@ -43,6 +48,8 @@ def add_parser(commands):
             command.add_argument("--work-dir", type=Path)
             command.add_argument("-o", "--output", type=Path)
             command.add_argument("--epub", type=Path)
+            command.add_argument("--no-update", action="store_true",
+                                 help="Encode with the deployed code as-is; by default a stale worker is updated first without stopping")
 
 
 def private_json(path, value):
@@ -553,7 +560,7 @@ class Deployment:
             raise ValueError("Remote checkout has tracked changes; refusing to overwrite them")
         if source == "local":
             root = Path(__file__).resolve().parents[2]
-            revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            revision = _local_head()
             with tempfile.TemporaryDirectory(dir=self.directory) as temp:
                 bundle = Path(temp) / "source.bundle"
                 self._run(["git", "-C", str(root), "bundle", "create", str(bundle), "HEAD"])
@@ -737,8 +744,10 @@ def run_command(args):
             return 0
         if args.runpod_action != "bootstrap" and not deployment.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
-        if args.runpod_action == "encode" and not deployment.state.get("bootstrapped"):
-            raise ValueError("Worker has not passed its smoke test; run runpod bootstrap or update first")
+        if args.runpod_action == "encode" and not deployment.state.get("revision"):
+            raise ValueError("Worker has no deployed code; run runpod bootstrap first")
+        if args.runpod_action == "encode" and args.no_update and not deployment.state.get("bootstrapped"):
+            raise ValueError("Worker has not passed its smoke test; run runpod update first")
         # Fail configuration checks before allocating or starting paid compute.
         build_remote_config(settings["renderer_config"], settings["override_raw"],
                             deployment.pod_id or "preflight", deployment.state["api_key"],
@@ -754,12 +763,24 @@ def run_command(args):
                 deployment.provision()
             deployment.start()
             deployment.stop_service()
+            updated = False
             if args.runpod_action in {"bootstrap", "update"}:
                 deployment.deploy_code(args.source)
+                updated = True
+            elif args.runpod_action == "encode" and not args.no_update:
+                head = _local_head()
+                if deployment.state.get("revision") != head:
+                    deployment.notify(f"Deployed code is not the committed HEAD ({head[:12]}); updating the worker first…")
+                    deployment.deploy_code("local")
+                    updated = True
             deployment.configure()
-            deployment.install(full=args.runpod_action != "encode")
-            deployment.launch(prepare=args.runpod_action != "encode")
+            deployment.install(full=args.runpod_action != "encode" or updated)
+            deployment.launch(prepare=args.runpod_action != "encode" or updated)
             if args.runpod_action == "encode":
+                if updated:
+                    deployment.smoke()
+                    deployment.stop_service()
+                    deployment.launch(prepare=False)
                 deployment.encode(args)
             else:
                 deployment.smoke()

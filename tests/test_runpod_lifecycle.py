@@ -62,13 +62,15 @@ class RunpodLifecycleTests(unittest.TestCase):
     def fake_deployment(self):
         result = Mock()
         result.pod_id = "pod_fixture"
-        result.state = {"bootstrapped": True, "api_key": "fixture-worker-secret", "volume_id": "volume_fixture"}
+        result.state = {"bootstrapped": True, "api_key": "fixture-worker-secret", "volume_id": "volume_fixture",
+                        "revision": "fixture-revision"}
         result.secrets = {"fixture-provider-secret", "fixture-worker-secret", "fixture-ceph-secret"}
         return result
 
-    def run_fake(self, fake, args):
+    def run_fake(self, fake, args, head="fixture-revision"):
         with patch("epub_tts_narrator.renderer.runpod_config.load_settings", return_value=self.settings), \
                 patch("epub_tts_narrator.renderer.runpod.Deployment", return_value=fake), \
+                patch("epub_tts_narrator.renderer.runpod._local_head", return_value=head), \
                 patch("epub_tts_narrator.renderer.runpod.signal.signal"), \
                 redirect_stdout(StringIO()):
             return run_command(args)
@@ -90,6 +92,59 @@ class RunpodLifecycleTests(unittest.TestCase):
                 else:
                     fake.smoke.assert_called_once()
                     fake.deploy_code.assert_called_once_with("github")
+
+    def test_encode_skips_the_update_when_the_worker_matches_head(self):
+        fake = self.fake_deployment()
+        self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
+        fake.deploy_code.assert_not_called()
+        fake.smoke.assert_not_called()
+        fake.install.assert_called_once_with(full=False)
+        fake.launch.assert_called_once_with(prepare=False)
+        self.assertEqual(fake.stop_service.call_count, 1)
+        fake.encode.assert_called_once()
+        fake.stop.assert_called_once()
+
+    def test_encode_updates_a_stale_worker_and_keeps_it_running(self):
+        fake = self.fake_deployment()
+        fake.state["revision"] = "stale-revision"
+        self.assertEqual(self.run_fake(fake, self.args("encode", "book"), head="current-head"), 0)
+        fake.deploy_code.assert_called_once_with("local")
+        fake.install.assert_called_once_with(full=True)
+        fake.smoke.assert_called_once()
+        self.assertEqual([call.kwargs for call in fake.launch.call_args_list],
+                         [{"prepare": True}, {"prepare": False}])
+        self.assertEqual(fake.stop_service.call_count, 2)
+        fake.encode.assert_called_once()
+        fake.stop.assert_called_once()
+        order = [name for name, _, _ in fake.mock_calls if name in
+                 {"deploy_code", "install", "smoke", "encode", "stop"}]
+        self.assertEqual(order, ["deploy_code", "install", "smoke", "encode", "stop"])
+
+    def test_encode_no_update_uses_the_deployed_code_as_is(self):
+        fake = self.fake_deployment()
+        fake.state["revision"] = "stale-revision"
+        args = self.args("encode", "book", "--no-update")
+        self.assertEqual(self.run_fake(fake, args, head="current-head"), 0)
+        fake.deploy_code.assert_not_called()
+        fake.smoke.assert_not_called()
+        fake.install.assert_called_once_with(full=False)
+        fake.encode.assert_called_once()
+
+    def test_encode_no_update_still_requires_a_smoke_tested_worker(self):
+        fake = self.fake_deployment()
+        fake.state["bootstrapped"] = False
+        args = self.args("encode", "book", "--no-update")
+        with self.assertRaisesRegex(ValueError, "has not passed its smoke test"):
+            self.run_fake(fake, args)
+        fake.start.assert_not_called()
+
+    def test_encode_without_deployed_code_requires_bootstrap(self):
+        fake = self.fake_deployment()
+        del fake.state["revision"]
+        fake.state["bootstrapped"] = False
+        with self.assertRaisesRegex(ValueError, "no deployed code"):
+            self.run_fake(fake, self.args("encode", "book"))
+        fake.start.assert_not_called()
 
     def test_errors_in_each_phase_still_stop_existing_or_created_pod(self):
         for action in ("bootstrap", "update", "encode"):
@@ -187,7 +242,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         from epub_tts_narrator.renderer.chapter_client import ChapterClientError
 
         deployment = self.deployment()
-        deployment.state.update(pod_id="pod_fixture", bootstrapped=True)
+        deployment.state.update(pod_id="pod_fixture", bootstrapped=True, revision="fixture-revision")
         deployment.start = Mock()
         deployment.stop = Mock()
         bundle, config, plan, store = self.transport_preflight_fixture()
