@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 38 flat modules, stdlib-only
+├── epub_tts_narrator/        # analyzer package: 41 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 80 flat modules, own CLI + AGENTS.md
-├── tests/                    # 233 flat unittest files + fixtures/ + shared helpers
+├── tests/                    # 235 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -36,10 +36,12 @@ epub-tts-narrator/
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add/change analysis behavior | `epub_tts_narrator/pipeline.py` (1359 ln) | `analyze` entry; segmentation, cast/evidence checks, LLM alignment |
+| Add/change analysis behavior | `epub_tts_narrator/pipeline.py` (1323 ln) | `analyze` entry; segmentation, cast/evidence checks, LLM alignment |
 | EPUB ingestion | `epub_tts_narrator/epub.py` | `extract_epub` (45 callers); spine order, safety limits |
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
+| Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |
+| Voice profile/prompt refresh | `epub_tts_narrator/voice_prompt_refresh.py` | Casting-description refresh; sends a complete `known_cast` snapshot |
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
 | Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2059 ln) | Resumable, checkpointed, quality-gated |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
@@ -73,7 +75,7 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 - **No formatter/linter/type-checker configured.** Long lines (up to ~700 chars) are intentional — mostly descriptive validation error messages. Do not "fix" them or add black/ruff config.
 - **Partial PEP 604 typing** (`str | Path | None`) where present; parameters often duck-typed. Validation is runtime `ValueError` with field-identifying messages, not static types.
 - **Credentials live in gitignored TOML, never env vars.** `epub-tts-narrator.example.toml` is the tracked template; real config (`epub-tts-narrator.toml`) is gitignored.
-- **Flat modules everywhere.** Package at repo root (no src/), 27+71 modules in two flat namespaces. `renderer/__init__.py` exports nothing — import submodules directly.
+- **Flat modules everywhere.** Package at repo root (no src/), with flat analyzer and renderer namespaces. `renderer/__init__.py` exports nothing — import submodules directly.
 - **Legacy CLI alias `epub-audiobook`** maps to the same entry point as `epub-tts-narrator`; keep it.
 - **Exit codes:** 0 ok, 1 error, 2 ok-with-unassigned-speakers, 130 interrupted. `analyze` resumes by rerun (request cache), no resume flags.
 
@@ -132,6 +134,6 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - Renderer subsystems: see `epub_tts_narrator/renderer/AGENTS.md`, `tests/AGENTS.md`, `vendor/drama3-mlx/AGENTS.md`.
 - `speech_scan_recovery.py` subdivides output-truncated spelling scans at whole-segment boundaries (two levels); separate cache hints select children, never accepted edits. Jury requests do not split.
 - `speech_prompts.py` owns compact v2 spelling requests; `speech_prompts_v1.py` owns the frozen v1 prompts, kept byte-exact for validated cache lookup and completed-stage fingerprints. Exact context reconstruction and all three blind reviews remain required.
-- LLM prompts live in per-domain modules: `prompts.py` (shared contracts, discovery/reconciliation guidance), `identity_prompts.py`, `attribution_review_prompts.py`, `speaker_completion_prompts.py`, `audition_prompts.py`, `voice_refresh_prompts.py`, `jev_prompts.py`, and `renderer/verification_prompts.py`. Prompt bytes are cache/policy identity; changes must be intentional.
+- LLM prompts live in per-domain modules: `prompts.py` (shared contracts, discovery/reconciliation guidance), `identity_prompts.py`, `attribution_review_prompts.py`, `speaker_completion_prompts.py`, `audition_prompts.py`, `voice_refresh_prompts.py`, `voice_ensemble_prompts.py`, `jev_prompts.py`, and `renderer/verification_prompts.py`. Prompt bytes are cache/policy identity; changes must be intentional.
 - `speech_word_review.py` separates ordered word coverage from spelling heuristics. Unfamiliar aligned pairs require explicit contextual jury evidence; only proposal/provenance metadata changes, never the six-field applied edit schema.
 - `speech_traits.py` validates optional voice-profile `speechTraits`; analysis proposes mood-independent, explicit-accent performance traits separately from creation descriptions. Renderer binding/composition lives in `renderer/speech_traits.py`; absent fields retain legacy conditioning.

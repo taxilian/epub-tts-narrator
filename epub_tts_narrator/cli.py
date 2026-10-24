@@ -530,10 +530,15 @@ def main(argv=None):
                                   "series_identity_scan_requests_minimum": series_scans,
                                   "attribution_review": attribution_review,
                                   "attribution_review_scan_requests": review_scans,
+                                  "voice_ensemble_requests": 1,
                                   "speech_spelling_scan_requests_minimum": 1 if source["blocks"] else 0,
-                                  "baseline_model_requests": base_requests + identity_scans + series_scans + review_scans + bool(source["blocks"]),
+                                  "baseline_model_requests": (base_requests + identity_scans + series_scans
+                                                              + review_scans + 1 + bool(source["blocks"])),
                                   "note": ("Before cache reuse and bounded validation repairs; character count is not a token estimate. "
                                            + f"Baseline includes {reconciliation_rounds} cumulative cast reconciliation round(s). "
+                                           + "Baseline includes one whole-cast voice design request after the cast is final; "
+                                             "it is skipped when discovery yields fewer than two distinct voices or only "
+                                             "established series profiles. "
                                            + ("Baseline includes identity scans. Identity case count is unknown before analysis: "
                                               "allow three verdict requests per case, including series matches, "
                                               "plus one preparation request per proposed split."

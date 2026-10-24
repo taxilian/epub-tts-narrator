@@ -51,7 +51,7 @@ class IdentityPipelineTests(unittest.TestCase):
         client = JuryClient()
         document = self.run_analysis(client)
         modes = [payload.get("mode", "attribute") for _, payload in client.calls]
-        self.assertEqual(modes, ["discover", "reconcile", "identity_scan", "attribute"])
+        self.assertEqual(modes, ["discover", "reconcile", "identity_scan", "voice_ensemble", "attribute"])
         self.assertTrue(document["provenance"]["identity_consensus_enabled"])
         self.assertIn("identity_consensus", document["provenance"])
         self.assertEqual(validate_document(document), [])

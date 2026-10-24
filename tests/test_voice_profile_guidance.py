@@ -43,8 +43,9 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                 modes = [payload.get("mode") for _, payload in client.calls]
                 self.assertEqual(modes.count("discover"), 1)
                 self.assertEqual(modes.count("reconcile"), 2)
+                self.assertEqual(modes.count("voice_ensemble"), 1)
                 for system, payload in client.calls:
-                    if payload.get("mode") in {"discover", "reconcile"}:
+                    if payload.get("mode") in {"discover", "reconcile", "voice_ensemble"}:
                         self.assertEqual(system.count(VOICE_PROFILE_GUIDANCE), 1)
                         self.assertEqual(system.count(VOICE_PROFILE_RECONCILIATION), 1)
                     else:

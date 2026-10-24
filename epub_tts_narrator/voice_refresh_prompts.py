@@ -30,6 +30,13 @@ casting guidance when the current prompt leaves vocal presentation unspecified.
 If proposing presentation from the author's name, say in reason that it is a
 tentative name-based casting inference. Preserve a deliberately chosen existing
 presentation and do not claim to reproduce the author's actual voice.
+known_cast supplies every current voice profile as one consistent snapshot for
+cast-wide comparison; the same snapshot reaches every refreshed voice. When
+contrast_findings name this voice, they are advisory text analysis of declared
+profile records, not measurements of synthesized audio: keep traits supported
+by source evidence unchanged, never invent traits merely to resolve a finding,
+and prefer concrete audible casting distinctions only where evidence and
+deliberate choices allow.
 For this refresh task, return exactly
 {"description":"complete voice-creation direction","reason":"brief summary of the refinement"}.
 Do not return voice IDs, traits, evidence, cast changes, or other fields. Existing

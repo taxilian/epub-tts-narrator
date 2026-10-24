@@ -48,7 +48,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
         client = FakeClient()
         implicit = self.run_analysis(client)
         self.assertEqual([p.get("mode", "attribute") for _, p in client.calls],
-                         ["discover", "reconcile", "attribute"])
+                         ["discover", "reconcile", "voice_ensemble", "attribute"])
         self.assertEqual(implicit["provenance"]["cast_reconciliation_rounds"], 1)
         replay = FakeClient()
         self.assertEqual(self.run_analysis(replay, cast_reconciliation_rounds=1), implicit)
@@ -72,7 +72,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
                                            cast_review_notes="Check overlooked distinct speakers.",
                                            cast_reconciliation_rounds=2)
                 self.assertEqual([p.get("mode", "attribute") for _, p in second.calls],
-                                 ["reconcile", "attribute"])
+                                 ["reconcile", "voice_ensemble", "attribute"])
                 later_system, later = second.calls[0]
                 first_system, first_payload = next((s, p) for s, p in first.calls if p.get("mode") == "reconcile")
                 self.assertEqual(later["known_cast"], baseline["cast"])
@@ -169,7 +169,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
                    side_effect=lambda source, cast, *args, **kwargs: (cast, [], {"cases": []})):
             result = self.run_analysis(resumed, cast_reconciliation_rounds=3, identity_consensus=True)
         self.assertEqual([p.get("mode", "attribute") for _, p in resumed.calls],
-                         ["reconcile", "reconcile", "attribute"])
+                         ["reconcile", "reconcile", "voice_ensemble", "attribute"])
         self.assertEqual({c["name"] for c in result["cast"]["characters"]},
                          {"Mara", "Jules", "Quinn", "Rowan"})
         self.assertEqual(validate_document(result), [])

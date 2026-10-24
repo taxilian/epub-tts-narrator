@@ -158,7 +158,7 @@ class RepeatedRunTests(unittest.TestCase):
         client = StutterClient()
         with tempfile.TemporaryDirectory() as directory:
             document = analyze(source, client, directory, repair_attempts=0, identity_consensus=False)
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls), 4)
         self.assertEqual(validate_document(document), [])
         restored = [item for item in document["segments"] if "source_restoration" in item]
         self.assertEqual(len(restored), 1)

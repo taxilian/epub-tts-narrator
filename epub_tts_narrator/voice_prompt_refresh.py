@@ -6,6 +6,7 @@ import unicodedata
 
 from .attribution_review import _bounded_map
 from .pipeline import CachedRequests, fingerprint
+from .voice_contrast import contrast_findings
 from .voice_refresh_prompts import SYSTEM
 
 
@@ -90,6 +91,9 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
     for voice in selected:
         groups.setdefault(canonical[voice], []).append(voice)
     blocks = {block["id"]: block["text"] for block in bundle["source"]["blocks"]}
+    # One snapshot for every task: each worker sees the same complete cast.
+    known_cast = [_record_context(profile, blocks) for profile in profiles.values()]
+    findings = contrast_findings(list(profiles.values()), canonical_id=canonical.get)
     tasks = []
     for target, voices in groups.items():
         aliases = [voice for voice in profiles if canonical[voice] == target]
@@ -108,6 +112,9 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
         tasks.append({"mode": "voice_prompt_refresh", "version": VERSION,
                       "book": deepcopy(bundle["source"]["book"]), "voice": profile,
                       "alias_voice_ids": aliases, "characters": characters, "roles": roles,
+                      "known_cast": deepcopy(known_cast),
+                      "contrast_findings": deepcopy([finding for finding in findings
+                                                     if any(voice in aliases for voice in finding["voice_ids"])]),
                       "current_prompt": prior, "source_evidence": evidence,
                       "source_fingerprint": bundle["manifest"]["source_fingerprint"]})
     if tasks and requests is None:

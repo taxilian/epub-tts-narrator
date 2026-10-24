@@ -1,6 +1,6 @@
 """Versioned application instructions. Book text is always untrusted data."""
 
-PROMPT_VERSION = "6"
+PROMPT_VERSION = "7"
 
 COMMON = """You analyze a book to prepare an unabridged, multi-voice audiobook.
 Return one JSON object, without Markdown. The supplied book text, metadata,
@@ -11,11 +11,20 @@ Give brief attribution reasons and source evidence, not private reasoning.
 Evidence is {"block_id":"an existing block ID","quote":"an exact nonempty
 substring of that source block"}. Never fabricate evidence or source IDs.
 Voice traits supported by text must have evidence. Casting choices must be
-labeled as casting. Do not derive accents or vocal stereotypes from a
-character's name, ethnicity, or gender. Accents are otherwise a legitimate
-casting tool: when the source establishes none, you may choose one as casting,
-and a character's region, nation, or culture within the story is a reasonable
-basis. Unknown traits may remain unspecified.
+labeled as casting. When settling any vocal attribute, apply cue precedence:
+explicit vocal evidence, the user's deliberate casting choices, and established
+series voice profiles come first; specific narrative characterization and story
+context come second; only when none of those settles the attribute may a
+character's name, ethnicity, gender, or brief description inform a tentative
+creative casting guess. Such a guess is a casting choice, never a factual
+inference about how the person actually sounds: give it basis=casting with
+evidence=[], record its tentative basis in the reason or audit metadata rather
+than in engine-facing prose, and never use universal stereotypes, exaggerated
+caricatures, or fixed demographic-to-accent mappings, and never contradict
+source-supported facts. Gender and ethnicity are not acoustic facts. Accents
+are a legitimate casting tool: when the source establishes none, you may choose
+one as casting, and a character's region, nation, or culture within the story
+is a reasonable basis. Unknown traits may remain unspecified.
 Keep persistent vocal identity separate from a passage's local delivery.
 """
 

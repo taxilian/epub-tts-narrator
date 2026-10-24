@@ -569,11 +569,14 @@ class SeriesTests(unittest.TestCase):
         source = fixture()["source"]
         output = analyze(source, client, self.root / "cache", series_registry=registry, identity_consensus=False)
         self.assertEqual(output["cast"]["characters"][0]["id"], prior_id)
-        self.assertEqual(len(client.calls), 3)
-        self.assertTrue(all("series_cast" in payload for _, payload in client.calls if "mode" in payload))
+        self.assertEqual(len(client.calls), 4)
+        # The ensemble pass sees inherited profiles inside the resolved cast,
+        # so only discovery and reconciliation receive raw series context.
+        self.assertTrue(all("series_cast" in payload for _, payload in client.calls
+                            if payload.get("mode") in {"discover", "reconcile"}))
         cached = analyze(source, client, self.root / "cache", series_registry=registry, identity_consensus=False)
         self.assertEqual(output, cached)
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls), 4)
         default_client = FakeClient()
         default = analyze(source, default_client, self.root / "plain-cache", identity_consensus=False)
         self.assertNotIn("series", default["provenance"])

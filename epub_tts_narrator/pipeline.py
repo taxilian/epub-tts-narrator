@@ -1109,6 +1109,11 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         cast, additions, series_provenance = reconcile_series_cast(
             source, cast, series_registry, confirmed_identity_matches=identity_provenance)
         add_series_issues(issues, additions, series_provenance)
+    # One whole-cast design pass on the fully resolved cast: identity splits and
+    # inherited voice ownership are final here, attribution has not started, so
+    # every downstream stage fingerprints one coherent cast.
+    from .voice_ensemble import design_ensemble
+    cast, ensemble_provenance = design_ensemble(source, cast, requests, policy=policy, progress=progress)
     segments = []
     attribution_subdivisions = [None] * len(batches)
 
@@ -1212,6 +1217,7 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         document["provenance"]["identity_consensus"] = identity_provenance
     if series_provenance is not None:
         document["provenance"]["series"] = series_provenance
+    document["provenance"]["voice_ensemble"] = ensemble_provenance
     if any(attribution_subdivisions):
         document["provenance"]["attribution_subdivisions"] = [
             row for row in attribution_subdivisions if row is not None

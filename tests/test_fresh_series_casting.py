@@ -105,7 +105,7 @@ class FreshSeriesCastingTests(unittest.TestCase):
             self.assertEqual(validate_document(first), [])
             self.assertTrue(first["readiness"]["ready"])
             self.assertEqual([call[1].get("mode", "attribute") for call in first_client.calls],
-                             ["discover", "reconcile", "attribute"])
+                             ["discover", "reconcile", "voice_ensemble", "attribute"])
             save_registry(registry_path, registry, first)
             registry = load_registry(registry_path)
             self.assertEqual(len(registry["books"]), 1)

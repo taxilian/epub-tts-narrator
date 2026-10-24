@@ -47,6 +47,14 @@ Each review has three distinct reviewer slots, so an identical cached response c
 
 When `identity_consensus = false`, the additional scans and verdicts are skipped. Discovery merges can then be applied with advisory uncertainty flags, as in earlier analyses. Older saved analyses and offline `series-import` results need not contain consensus provenance; importing an existing analysis does not run a new model audit. Export preserves advisory notes without requiring approval. `--allow-review` is a compatibility option; valid, fully assigned speech is ready even when notes remain.
 
+## Whole-cast ensemble provenance
+
+After identity consensus and any series canonicalization, and before attribution, `analyze` runs one whole-cast voice design request over the fully resolved cast. `provenance.voice_ensemble` records `version`, `contrast_version`, `status` (`applied`, `unchanged`, or `skipped` with a `reason`), `source_fingerprint`, `cast_fingerprint_before`, `cast_fingerprint_after`, `guidance_fingerprint`, `request_characters`, `updated` — a map from changed voice ID to the brief reason plus description and speechTraits fingerprints — and `contrast_findings_before` plus `contrast_findings_after`, the same audit computed before the pass and recomputed on the final cast so an already-resolved collision is not reported as unresolved. Upserts are complete (`description`, `traits`, `speechTraits` exactly) and may change only local voices; IDs, voice order, character and role ownership, series-inherited profiles, stored profile metadata beyond those fields, and `basis=text` traits (echoed with their evidence) are preserved or the response is rejected, and no new `basis=text` trait may be claimed. The full rebuilt cast is validated before the success cache entry is written, and cached replays revalidate it. The request carries the complete cast — records, traits, and role mappings are never dropped to fit, and each record carries its bounded exact evidence. When the request would exceed `analysis.max_request_chars`, analysis fails before any model call.
+
+Voice-trait evidence is sent in full, rather than bounded, because accepted upserts must echo established text-supported traits exactly. Character evidence uses bounded exact source quotations. Skipped passes retain the same provenance fields, with unchanged cast fingerprints, `request_characters: 0`, and `updated: {}`.
+
+`contrast_findings` come from a deterministic comparison of recognized trait dimensions between distinct canonical voices. A finding has `kind` (`identical_known_profile` or `insufficient_known_contrast`), `voice_ids`, `matching_dimensions`, and `differing_dimensions`. Missing or unrecognized dimensions are unknown, never differences. Findings are advisory text analysis of profile records — not measurements of synthesized audio — and do not block rendering or require recasting.
+
 ## Segments
 
 ```json

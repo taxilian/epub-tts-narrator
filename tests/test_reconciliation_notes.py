@@ -51,7 +51,8 @@ class ReconciliationNotesTests(unittest.TestCase):
                 actual = self.run_analysis(resumed, cache, whole_book_discovery=whole_book,
                     cast_reconciliation_rounds=3, cast_review_notes="Global source observation.",
                     cast_reconciliation_notes=notes)
-                self.assertEqual([p.get("mode", "attribute") for _, p in resumed.calls], ["reconcile", "attribute"])
+                self.assertEqual([p.get("mode", "attribute") for _, p in resumed.calls],
+                                 ["reconcile", "voice_ensemble", "attribute"])
                 system, payload = resumed.calls[0]
                 self.assertEqual(payload["known_cast"], accepted["cast"])
                 self.assertEqual(payload["available_ids"]["characters"][0], "char_0004_001")

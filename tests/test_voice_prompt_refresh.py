@@ -79,6 +79,32 @@ class VoicePromptRefreshTests(unittest.TestCase):
         self.assertEqual(result["cast_fingerprint"], fingerprint(data["cast"]))
         self.assertEqual(result["guidance_fingerprint"], fingerprint(SYSTEM))
 
+    def test_refresh_payloads_carry_one_known_cast_snapshot_and_contrast_findings(self):
+        data, requests = bundle(), Requests()
+        result = refresh_voice_descriptions(data, requests, voice_ids=["v1", "vn"])
+        self.assertEqual(set(result["prompts"]), {"v1", "vn"})
+        calls = {payload["voice"]["id"]: payload for _, payload in requests.calls}
+        snapshots = {fingerprint(payload["known_cast"]) for payload in calls.values()}
+        self.assertEqual(len(snapshots), 1)
+        snapshot = calls["v1"]["known_cast"]
+        self.assertEqual({item["id"] for item in snapshot}, {"v1", "vn"})
+        self.assertEqual({item["description"] for item in snapshot},
+                         {voice["description"] for voice in data["cast"]["voices"]})
+        for voice_id, payload in calls.items():
+            finding = next(finding for finding in payload["contrast_findings"] if voice_id in finding["voice_ids"])
+            self.assertEqual(finding["kind"], "insufficient_known_contrast")
+            self.assertEqual(finding["voice_ids"], ["v1", "vn"])
+
+    def test_canonical_targets_receive_findings_for_their_local_aliases(self):
+        data, requests = bundle(), Requests()
+        refresh_voice_descriptions(data, requests,
+                                   canonical_id=lambda value: "prior-narrator" if value == "vn" else value)
+        calls = {payload["voice"]["id"]: payload for _, payload in requests.calls}
+        self.assertEqual(set(calls), {"prior-narrator", "v1"})
+        for payload in calls.values():
+            self.assertEqual(len(payload["contrast_findings"]), 1)
+            self.assertEqual(set(payload["contrast_findings"][0]["voice_ids"]), {"v1", "vn"})
+
     def test_all_shared_aliases_provide_context_with_one_request(self):
         data, requests = bundle(), Requests()
         result = refresh_voice_descriptions(data, requests, canonical_id=lambda value: "v1",

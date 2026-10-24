@@ -35,6 +35,8 @@ class FakeClient:
                                   for row in payload["target_segments"]]}
         if payload.get("mode") == "audition_script":
             return script_response()
+        if payload.get("mode") == "voice_ensemble":
+            return {"voices": [], "reasons": {}}
         if payload.get("mode") == "discover":
             return self.discover(payload)
         if payload.get("mode") == "reconcile":
@@ -193,7 +195,7 @@ class PipelineTests(unittest.TestCase):
         original = deepcopy(self.source)
         document = self.run_analysis(client, progress=progress.append)
         self.assertEqual([payload.get("mode", "attribute") for _, payload in client.calls],
-                         ["discover", "reconcile", "attribute"])
+                         ["discover", "reconcile", "voice_ensemble", "attribute"])
         self.assertEqual(validate_document(document), [])
         self.assertTrue(document["readiness"]["ready"])
         self.assertEqual(len(document["cast"]["characters"]), 1)
@@ -206,7 +208,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.source, original)
         self.assertTrue(any("Reconciling" in message for message in progress))
         self.assertEqual(len(client.calls[1][1]["scene_summaries"]), 1)
-        final_cast_sent = client.calls[2][1]["final_cast"]
+        final_cast_sent = client.calls[3][1]["final_cast"]
         self.assertEqual(final_cast_sent, document["cast"])
 
     def test_mixed_narration_and_dialogue_preserve_every_character(self):
@@ -227,12 +229,12 @@ class PipelineTests(unittest.TestCase):
     def test_rerun_uses_only_validated_cache_and_makes_zero_calls(self):
         first_client = FakeClient()
         original = self.run_analysis(first_client)
-        self.assertEqual(len(first_client.calls), 3)
+        self.assertEqual(len(first_client.calls), 4)
         second_client = FakeClient()
         repeated = self.run_analysis(second_client)
         self.assertEqual(second_client.calls, [])
         self.assertEqual(repeated, original)
-        self.assertEqual(len(list(self.cache.glob("*.json"))), 3)
+        self.assertEqual(len(list(self.cache.glob("*.json"))), 4)
 
     def test_invalid_cached_attribution_is_recomputed(self):
         original = self.run_analysis()
@@ -255,7 +257,7 @@ class PipelineTests(unittest.TestCase):
         client = FakeClient()
         client.identity = dict(client.identity, model="another-fixture-model")
         self.run_analysis(client)
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls), 4)
 
     def test_changed_model_text_is_retried_once_then_rejected_and_not_cached(self):
         client = FakeClient(invalid_text=True)
@@ -269,7 +271,7 @@ class PipelineTests(unittest.TestCase):
                          "Rewritten source text.")
         self.assertEqual(attribute_calls[0]["target_units"], attribute_calls[1]["target_units"])
         cached = [json.loads(path.read_text()) for path in self.cache.glob("*.json")]
-        self.assertEqual(len(cached), 2)
+        self.assertEqual(len(cached), 3)
         self.assertTrue(all("units" not in response for response in cached))
         failures = sorted((self.cache / "failed").glob("*.json"))
         self.assertEqual(len(failures), 2)
@@ -685,7 +687,7 @@ class PipelineTests(unittest.TestCase):
         document = self.run_analysis(client, chunk_chars=256)
         batches = make_units(self.source, chunk_chars=256)
         self.assertGreater(len(batches), 3)
-        self.assertEqual(len(client.calls), 2 * len(batches) + 1)
+        self.assertEqual(len(client.calls), 2 * len(batches) + 2)
         self.assertEqual(len(document["provenance"]["scene_summaries"]), len(batches))
         self.assertTrue(readiness(document)["ready"])
         self.assertTrue(any(payload["context_units"] for _, payload in client.calls if "target_units" in payload))
@@ -827,7 +829,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(policy, before)
                 self.assertEqual(document["provenance"]["performance_policy"], policy)
                 self.assertEqual({payload.get("mode", "attribute") for _, payload in client.calls},
-                                 {"discover", "reconcile", "attribute"})
+                                 {"discover", "reconcile", "voice_ensemble", "attribute"})
                 self.assertTrue(all(payload["performance_policy"] == policy for _, payload in client.calls))
                 replay = FakeClient()
                 self.assertEqual(self.run_analysis(replay, chunk_chars=256, whole_book_discovery=whole_book, policy=policy),
@@ -897,7 +899,7 @@ class PipelineTests(unittest.TestCase):
                        for _, payload in client.calls if "mode" not in payload}
         for index, batch in enumerate(batches):
             self.assertEqual(attribution[batch[0]["unit_id"]]["scene_summary"], summaries[index])
-        self.assertEqual(len(client.calls), len(batches) * 2 + 1)
+        self.assertEqual(len(client.calls), len(batches) * 2 + 2)
         self.assertTrue(readiness(document)["ready"])
 
     def test_concurrent_invalid_text_is_rejected_without_caching_bad_attribution(self):
@@ -906,7 +908,7 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Text changed"):
             self.run_analysis(client, chunk_chars=256, whole_book_discovery=True, attribution_workers=2)
         cached = [json.loads(path.read_text()) for path in self.cache.glob("*.json")]
-        self.assertEqual(len(cached), 2)
+        self.assertEqual(len(cached), 3)
         self.assertTrue(all("units" not in response for response in cached))
 
     def test_analysis_options_reject_invalid_types_and_worker_limits_before_requests(self):
@@ -1093,7 +1095,9 @@ class PipelineTests(unittest.TestCase):
         ])
         client = FakeClient()
         self.run_analysis(client, chunk_chars=4096, whole_book_discovery=True)
-        self.assertTrue(all("zero-based, end-exclusive character offsets" in system for system, _ in client.calls))
+        unit_stages = [system for system, payload in client.calls if "target_units" in payload]
+        self.assertTrue(unit_stages)
+        self.assertTrue(all("zero-based, end-exclusive character offsets" in system for system in unit_stages))
         attribution = [payload for _, payload in client.calls if "mode" not in payload]
         self.assertEqual(len(attribution), 2)
         before = attribution[1]["context_units"][0]
