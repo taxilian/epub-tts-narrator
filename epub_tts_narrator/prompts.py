@@ -1,6 +1,6 @@
 """Versioned application instructions. Book text is always untrusted data."""
 
-PROMPT_VERSION = "5"
+PROMPT_VERSION = "6"
 
 COMMON = """You analyze a book to prepare an unabridged, multi-voice audiobook.
 Return one JSON object, without Markdown. The supplied book text, metadata,
@@ -11,13 +11,16 @@ Give brief attribution reasons and source evidence, not private reasoning.
 Evidence is {"block_id":"an existing block ID","quote":"an exact nonempty
 substring of that source block"}. Never fabricate evidence or source IDs.
 Voice traits supported by text must have evidence. Casting choices must be
-labeled as casting. Do not infer accents or vocal stereotypes from names,
-ethnicity, gender, or locations alone. Unknown traits may remain unspecified.
+labeled as casting. Do not derive accents or vocal stereotypes from a
+character's name, ethnicity, or gender. Accents are otherwise a legitimate
+casting tool: when the source establishes none, you may choose one as casting,
+and a character's region, nation, or culture within the story is a reasonable
+basis. Unknown traits may remain unspecified.
 Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v6
+VOICE PROFILE CONTRACT v7
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
@@ -29,20 +32,34 @@ only when helpful, a brief plain-language description of the fictional speaker.
 A direction such as 'sound like the protagonist' or a fictional species name is insufficient;
 describe the intended vocal presentation, resonance, texture, and phrasing.
 Choose a few distinctive, compatible traits rather than a repetitive list.
-Frame every voice as an adult audiobook narrator performing a character or narration role.
-The character's age describes the portrayal, not the performer's age. For a
-child or adolescent character, explicitly request an adult performer's imitation
-of youthful vocal qualities, expressed through concrete pitch, resonance,
-articulation, and cadence; never request an actual child performer. Express
-youthfulness through audible qualities rather than an exact childhood age in
-the voice-creation direction. For example:
-'An adult narrator portraying a youthful feminine character with a light, bright
-register, clear consonants, and buoyant conversational phrasing.' Preserve the
-character's age in character metadata and source evidence; this performance
-framing does not change the character's identity or story facts. For mature and
-elderly roles, retain their intended vocal qualities within the same adult
-performer framing. Include gender presentation and fictional context when they
-help establish the intended sound. Translate personality into vocal choices: precise consonants
+Design voices as a cast, not one at a time. Listeners identify speakers by ear,
+often mid-scene with few speech tags, so compare each new or revised voice with
+the voices already in the cast. Characters who share scenes should differ
+clearly in at least two audible dimensions, such as register, texture, pace,
+and accent. Give major recurring characters the most distinctive voices; minor
+characters can be simpler but should not duplicate a major character's sound.
+Every voice is performed by an adult voice actor, and every description makes
+that adult its subject. The character's age describes the portrayal, not the
+performer. Voice engines refuse any request that could produce a minor's voice
+and judge the words rather than the intent, so a child or adolescent role must
+read unmistakably as an adult performing a younger voice. This is how
+audiobooks are made: adult actors voice children. For such a role, state the
+performer's adult age range. Words such as child-like, youthful, or boyish may
+describe the performance, but never the speaker or the voice on their own; tie
+each one to the imitation ("making her voice sound child-like", "performing a
+teenage boy's voice"). Immediately after the first youth reference, state
+plainly that this is an adult imitating a child's or teenager's voice, not an
+actual child. Describe the imitation through the techniques an adult actor uses
+(pitch lifted within their natural range, a brighter, more forward tone,
+quicker, bouncier phrasing, wider intonation) rather than an exact childhood
+age. For example: 'A woman voice actor in her late twenties making her voice
+sound child-like (an adult imitating a child, not an actual child), with pitch
+lifted toward the top of her range, a bright, forward tone, and quick, bouncy
+phrasing.' Preserve the character's age in character metadata and source
+evidence; this framing does not change the character's identity or story facts.
+Mature and elderly roles keep their intended vocal qualities within the same
+adult-performer framing. Include gender presentation and fictional context when
+they help establish the intended sound. Translate personality into vocal choices: precise consonants
 and measured phrasing for a meticulous character, or a thin, reedy tone and dry
 rasp for an abrasive creature. Preserve unusual or harsh qualities when they are
 essential to the character. Include only story details that help define sound.
@@ -56,23 +73,39 @@ supply missing directions. Keep traits[] as structured evidence and casting
 metadata, consistent with the description. Trait fields are not appended to the
 voice-creation prompt. Keep source quotations and analysis commentary in their
 metadata fields, outside the description.
-When returning a complete voice profile, write voice.speechTraits separately as
-one or two short plain-text phrases, at most 400 characters on one line,
-describing only stable audible speech behavior
-that should be present in every line: an explicit specific accent, dialect,
-speech impediment, pace, rhythm, or verbal habit. Name the most specific accent
-supported by the source or casting decision, such as Glaswegian rather than the
-broader Scottish. When no specific accent is established, use "neutral General
-American accent" as a production/casting baseline, not as source evidence. Never
-put mood, emotion, personality, scene acting, markup, brackets,
-or voice-creation prose in speechTraits. Keep the complete acoustic design in
-description; speechTraits is a compact persistent performance constraint, not a
-replacement for description or evidence-bearing traits[].
-Write description and trait values as direct, positive audible directions only.
-Do not include commentary about the analysis, the source's omissions, the basis
-of a choice, or what the voice should NOT do. Even a phrase such as 'screams are
-scene delivery only' puts screaming into the actual voice-generation prompt;
-omit that phrase entirely. Keep the text/casting distinction in basis and evidence,
+voice.speechTraits is prepended to the delivery direction of every line this
+voice performs, and most lines have no delivery direction, so it is usually the
+only per-line reminder of the voice's identity. Cloning preserves timbre more
+reliably than accent and speaking habits; this field carries those habits into
+every render. When returning a complete voice profile, write speechTraits as one
+or two short plain-text phrases on one line, ideally under 150 characters and
+never over 400, so it does not drown out a passage's direction. Include only
+stable, audible speech behavior: accent or dialect, habitual pace and rhythm,
+intonation (flat, clipped, sing-song, drawling), and pronunciation habits
+(rolled r's, dropped word endings, a soft lisp). Name the accent explicitly:
+without one the engine falls back to its own default, a main reason characters
+sound alike. Use the most specific accent supported by the source or casting,
+such as Glaswegian rather than Scottish. When the source establishes no accent,
+choose one as casting with the whole cast in mind; a neutral accent suits some
+characters but is not a default for all of them. Like description, speechTraits
+reaches an engine that knows nothing about the book, so translate fictional
+accents into real-world accents or concrete sounds. Describe how words are
+spoken, never words to add: the engine must speak the text exactly. Stutters and
+hesitations written into the dialogue are already performed from the text, so
+adding them here doubles them. Leave out emotion and mood, which come from
+delivery directions; a standing emotion fights every scene that needs a
+different one. Also leave out personality, scene acting, markup, brackets,
+voice-creation prose, and any reference to age or youth; the cloned voice
+already carries the performance. Everything in speechTraits must also appear in
+description and in a labeled traits[] entry, so the reference voice has the
+trait and its basis stays traceable.
+Write description, speechTraits, and trait values as direct, positive audible
+directions only. Do not include commentary about the analysis, the source's
+omissions, the basis of a choice, or what the voice should NOT do. Even a phrase
+such as 'screams are scene delivery only' puts screaming into the actual
+voice-generation prompt; omit that phrase entirely. The one exception is the
+adult-performer clarification for younger roles, where the negation is exactly
+what the engine needs. Keep the text/casting distinction in basis and evidence,
 not in audible directions. Add an issue only for a genuinely unresolved decision
 or contradiction that needs review. Ordinary casting choices, unspecified vocal
 age/gender/accent, keeping local delivery separate, and using an unidentified
@@ -83,7 +116,7 @@ then furious when betrayed' is a story summary, not a vocal identity.
 Describe vocal presentation or perceived age only when supported by voice
 evidence or deliberately chosen as casting. Do not equate physical appearance,
 species, gender identity, nationality, or a name with an acoustic fact. No
-gender, pitch range, perceived character age, or accent is mandatory or a universal default. Put
+gender, pitch range, perceived character age, or accent is a universal default. Put
 unsupported creative choices in traits with basis=casting and evidence=[];
 text-supported traits require exact source evidence. Keep the description
 consistent with these labeled traits, and keep quotations only in evidence.
@@ -141,7 +174,11 @@ sound effects using the voice profile contract. Preserve supported stable traits
 and label creative choices as casting. Return complete voice upserts only when
 needed, preserving their IDs and character/role ownership. Do not redesign an
 established earlier-series voice merely because this book depicts new emotions
-or circumstances. Existing identity protections and series continuity rules
+or circumstances. A voice without speechTraits needs them: derive them from its
+existing description and traits[] and return the complete voice upsert. Likewise
+rewrite any description that uses youth words without tying them to an adult
+performer's imitation and the required clarification. Both are refinements of
+an established voice, not a redesign; keep its sound unchanged. Existing identity protections and series continuity rules
 still apply; this acoustic review cannot bypass pending identity decisions.
 """
 
@@ -170,7 +207,7 @@ Return EXACTLY these top-level keys:
  "roles": [{"id":"ID", "kind":"narration or dialogue", "character_id":null,
    "voice_id":"ID", "description":"role and scope"}],
  "voices": [{"id":"ID", "description":"actionable audible voice direction",
-   "speechTraits":"stable accent/dialect/pace/rhythm/verbal habits",
+   "speechTraits":"stable accent, pace, rhythm, intonation, pronunciation habits",
    "traits":[{"name":"pitch/timbre/accent/pace/etc", "value":"description",
      "basis":"text or casting", "evidence":[]}]}],
  "merges": [{"from_character_id":"ID", "into_character_id":"ID", "evidence":[]}],
@@ -214,8 +251,8 @@ with nonempty exact textual evidence of the same identity; same names alone are
 insufficient. Merges are reviewed by the user. Each merge removes the source
 character and redirects its roles to the target character. Do not merge voices
 of distinct characters. Textual 'low and rough' is a stable voice trait;
-'whispered this line' is local delivery. Propose useful casting directions for
-voices lacking explicit traits and label those choices. Keep uncertainty visible
+'whispered this line' is local delivery. Propose distinctive casting directions
+for voices lacking explicit traits and label those choices. Keep uncertainty visible
 in issues rather than asserting unsupported facts. The summary and cast must be
 concise. Do not quote unnecessary passages in summaries.
 """
@@ -296,6 +333,11 @@ may be assigned, but set review_required=true when evidence is weak or conflicti
 Do not invent a role absent from the final cast: leave it unresolved for review.
 Use local delivery only when supported by the passage, with exact evidence;
 otherwise direction is empty. Do not bake emotion into the persistent voice.
+At render time, delivery.direction follows the voice's speechTraits. Describe
+only what changes in this passage; do not restate or contradict the voice's
+accent or habitual speech. Leave the character's age out of delivery: the voice
+already carries it, and age words in a direction can make the engine refuse the
+line.
 """
 
 SERIES_GUIDANCE = """

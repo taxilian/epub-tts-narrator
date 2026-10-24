@@ -41,15 +41,19 @@ infer accents or stereotypes from names, ethnicity, gender or locations alone. N
 normalized words for local effects ('Lengthen where'); explicitly mark line-wide
 accents. Directions apply to the whole passage, combined with existing delivery:
 keep all distinct cues together under 1200 characters, reusing identical line-wide
-cues. Each edit spans at most eight source/replacement words and 160 characters
-per side. Separate distant edits. Punctuation changes cannot remove words.
+cues. An edit may keep the original spelling unchanged when its purpose is to
+add a delivery direction alone. Each edit spans at most eight source/replacement
+words and 160 characters per side. Separate distant edits. Punctuation changes
+cannot remove words.
 """
 
 SCAN = _RULES + """
 Inspect every target segment using context and assigned role. Return exactly
 {"segments":[{"segment_id":"provided ID","edits":[{"start":0,"end":4,
-"original":"wull","replacement":"well","direction":"Use a regional drawl.",
-"reason":"Same spoken word."}]}]}.
+ "original":"wull","replacement":"well","direction":"Use a regional drawl.",
+ "reason":"Same spoken word."}]}]} and no other top-level fields. Each segment
+entry contains only segment_id and edits; direction and reason appear only
+inside an edit, never on the segment entry.
 Return every target once, in order; edits=[] explicitly means no changes.
 Offsets are zero-based Unicode code points relative to that target's ORIGINAL text,
 end exclusive; original must equal text[start:end] exactly, including repeated
@@ -62,7 +66,9 @@ Independently judge every proposal against its COMPLETE source segment and
 context, using private_lens as an additional check. Proposals are fallible;
 you have no peer votes. Approve when the proposal says the words the author
 meant, the way the author meant them to sound, with source-backed delivery.
-Reject changed meaning/grammar, missing or added words, or unsupported style.
+An edit that keeps the original spelling is legitimate when it adds delivery
+direction alone. Reject changed meaning/grammar, missing or added words, or
+unsupported style.
 Use uncertain when context cannot settle it.
 Return exactly {"votes":[{"edit_id":"provided ID",
 "verdict":"approve|reject|uncertain","reason":"brief source-grounded reason"}]}.
@@ -73,8 +79,10 @@ CONTEXTUAL_REVIEW = _RULES + """
 Independently judge each proposal against its COMPLETE source segment, context,
 and private_lens. Proposals are fallible; you have no peer votes. Approve when
 the proposal says the words the author meant, the way the author meant them to
-sound, with source-backed delivery; reject paraphrase, changed meaning/grammar,
-missing or added words, and unsupported reinterpretation.
+sound, with source-backed delivery; an edit that keeps the original spelling is
+legitimate when it adds delivery direction alone; reject paraphrase,
+changed meaning/grammar, missing or added words, and unsupported
+reinterpretation.
 Return {"votes":[{"edit_id":"provided ID","verdict":"approve|reject|uncertain",
 "reason":"brief source-grounded reason","word_verdicts":[
 {"word_id":"provided word_id","verdict":"approve|reject|uncertain"}]}]}.

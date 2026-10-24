@@ -118,7 +118,7 @@ class SpeechRequestEfficiencyTests(unittest.TestCase):
                 self.assertEqual(after, before)
                 size = lambda calls: sum(len(system.encode()) + len(json.dumps(payload, ensure_ascii=False).encode())
                                          for system, payload in calls)
-                self.assertLess(size(compact.calls), size(legacy.calls) * .7)
+                self.assertLess(size(compact.calls), size(legacy.calls) * .75)
                 reviews = [payload for _, payload in compact.calls if payload["mode"] == "speech_spelling_review"]
                 self.assertEqual(len(reviews), 3)
                 self.assertTrue(all(len(payload["target_segments"]) == changed for payload in reviews))

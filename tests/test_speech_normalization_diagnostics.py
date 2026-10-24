@@ -89,7 +89,7 @@ class SpeechNormalizationDiagnosticTests(unittest.TestCase):
 
     def test_noop_edit_explains_that_it_must_be_omitted(self):
         row = document("wull")["segments"][0]
-        change = edit(row["text"], "wull", "wull")
+        change = edit(row["text"], "wull", "wull", direction="")
         message = self.diagnosis({"segments": [{"segment_id": row["id"], "edits": [change]}]}, [row])
         self.assertIn("segments[0].edits[0]", message)
         self.assertIn("original", message)

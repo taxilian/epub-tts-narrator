@@ -283,6 +283,61 @@ class SpeechNormalizationTests(unittest.TestCase):
         self.assertEqual(source, before)
         self.assertTrue(normalization_pending(source))
 
+    def test_fused_multiword_token_expands_to_spoken_words_with_word_review(self):
+        source = document("The activation just takes too—omygoshimdistractedagain!")
+        before = deepcopy(source)
+
+        class FusedRequests(Requests):
+            def run(self, system, payload, validate, *, cancelled=None):
+                if payload["mode"] != "speech_spelling_review":
+                    return super().run(system, payload, validate, cancelled=cancelled)
+                with self.lock:
+                    self.calls.append((system, deepcopy(payload)))
+                response = {"votes": []}
+                for row in payload["proposals"]:
+                    vote = {"edit_id": row["edit_id"], "verdict": "approve",
+                            "reason": "The fused token reads as those words."}
+                    if "word_preservation" in row:
+                        vote["word_verdicts"] = [{"word_id": pair["word_id"], "verdict": "approve"}
+                                                 for pair in row["word_preservation"]["pairs"]]
+                    response["votes"].append(vote)
+                return validate(response)
+
+        requests = FusedRequests({"omygoshimdistractedagain": "oh my gosh I'm distracted again"})
+        result = normalize_document_speech(source, requests)
+        row = result["segments"][0]
+        self.assertEqual(row["spoken_text"], "The activation just takes too—oh my gosh I'm distracted again!")
+        self.assertEqual(source, before)
+        record = row["speech_normalization"]["edits"][0]
+        self.assertEqual(record["original"], "omygoshimdistractedagain")
+        self.assertEqual(record["replacement"], "oh my gosh I'm distracted again")
+        reviews = [payload for _, payload in requests.calls if payload["mode"] == "speech_spelling_review"]
+        self.assertEqual(len(reviews), 3)
+        self.assertTrue(all("word_preservation" in payload["proposals"][0] for payload in reviews))
+
+    def test_direction_only_edit_keeps_spelling_and_records_delivery(self):
+        source = document("Yes-yes!")
+        result = normalize_document_speech(source, Requests({"Yes-yes!": "Yes-yes!"}))
+        row = result["segments"][0]
+        self.assertEqual(row["spoken_text"], "Yes-yes!")
+        record = row["speech_normalization"]["edits"][0]
+        self.assertEqual(record["original"], record["replacement"])
+        self.assertTrue(record["direction"].strip())
+
+    def test_noop_edit_without_direction_is_rejected(self):
+        source = document("Yes-yes!")
+        row = source["segments"][0]
+        noop = edit(row["text"], "Yes-yes!", "Yes-yes!", direction="")
+        with self.assertRaisesRegex(ValueError, "add a delivery direction"):
+            _validate_scan({"segments": [{"segment_id": row["id"], "edits": [noop]}]}, [row], [])
+
+    def test_implausible_fused_expansion_is_rejected_locally(self):
+        source = document("supercalifragilisticexpialidocious")
+        row = source["segments"][0]
+        bad = edit(row["text"], "supercalifragilisticexpialidocious", "a random bunch of words")
+        with self.assertRaisesRegex(ValueError, "word coverage"):
+            _validate_scan({"segments": [{"segment_id": row["id"], "edits": [bad]}]}, [row], [])
+
 
 if __name__ == "__main__":
     unittest.main()

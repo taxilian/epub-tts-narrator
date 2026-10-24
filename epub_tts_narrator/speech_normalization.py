@@ -226,9 +226,10 @@ def _guard_edit(edit, row, names):
         raise ValueError(f"edit.original={_shown(candidate['original'])} does not match "
                          f"text[{start}:{end}]={_shown(row['text'][start:end])}. "
                          "Copy original exactly and use offsets relative to this segment, not the source block.")
-    if candidate["original"] == candidate["replacement"]:
+    if candidate["original"] == candidate["replacement"] and not candidate["direction"].strip():
         raise ValueError(f"edit.original and edit.replacement are identical ({_shown(candidate['original'])}); "
-                         "a spelling edit must change its source spelling. Omit this edit; use edits=[] if no spelling changes are needed.")
+                         "a spelling edit must change its source spelling or add a delivery direction. "
+                         "Omit this edit; use edits=[] if no changes are needed.")
     case_only = (isinstance(candidate, dict) and isinstance(candidate.get("original"), str)
                  and isinstance(candidate.get("replacement"), str)
                  and candidate["original"] != candidate["replacement"]

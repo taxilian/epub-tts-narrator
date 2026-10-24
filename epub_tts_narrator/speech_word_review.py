@@ -1,9 +1,25 @@
 """Ordered word coverage and explicit contextual evidence for unfamiliar spellings."""
 
+import difflib
 from functools import lru_cache
 import json
+import re
 
 from .speech_normalization import _WORDS, _fold, _word_forms_accounted_for
+
+
+def _fused_token(word):
+    """A long single token that may fuse several ordinary spoken words."""
+    return len(re.sub(r"[^A-Za-z]", "", word)) >= 12
+
+
+def _fused_plausible(source, words):
+    """Letters of the fused token and the expansion substantially correspond."""
+    letters = lambda value: _fold(re.sub(r"[^A-Za-z']+", "", value).casefold().replace("'", ""))
+    before, after = letters(source), letters("".join(words))
+    if not before or not after:
+        return False
+    return difflib.SequenceMatcher(None, before, after).ratio() >= 0.6
 
 
 def word_alignment(before, after):
@@ -21,7 +37,10 @@ def word_alignment(before, after):
         if i == len(original) or j == len(replacement):
             return (0, ()) if i == len(original) and j == len(replacement) else None
         best = None
-        for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
+        sizes = [(1, 1), (1, 2), (2, 1), (1, 3), (3, 1)]
+        if i < len(original) and _fused_token(original[i]) and j + 1 < len(replacement):
+            sizes += [(1, size) for size in range(4, 9) if j + size <= len(replacement)]
+        for left_size, right_size in sizes:
             left, right = original[i:i + left_size], replacement[j:j + right_size]
             if len(left) != left_size or len(right) != right_size:
                 continue
@@ -29,7 +48,9 @@ def word_alignment(before, after):
             if not known and not (left_size == right_size == 1
                                   and all(word.replace("’", "'").replace("'", "").isalpha()
                                           for word in (left[0], right[0]))
-                                  and _fold(left[0]) not in anchors and _fold(right[0]) not in anchors):
+                                  and _fold(left[0]) not in anchors and _fold(right[0]) not in anchors) \
+                    and not (left_size == 1 and right_size > 1
+                             and _fused_token(left[0]) and _fused_plausible(left[0], right)):
                 continue
             rest = aligned(i + left_size, j + right_size)
             if rest is not None:

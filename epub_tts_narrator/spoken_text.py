@@ -52,8 +52,8 @@ def validate_normalization(row):
         _plain(edit["replacement"], "Speech replacement")
         _plain(edit["direction"], "Speech delivery direction", maximum=240)
         _plain(edit["reason"], "Speech normalization reason", maximum=1000)
-        if edit["replacement"] == edit["original"]:
-            raise ValueError("A speech normalization edit must change its source spelling")
+        if edit["replacement"] == edit["original"] and not edit["direction"].strip():
+            raise ValueError("A speech normalization edit must change its source spelling or add a delivery direction")
         cursor = b
 
 
