@@ -111,6 +111,10 @@ class SpeechRequestEfficiencyTests(unittest.TestCase):
                     before = normalize_document_speech(source, legacy, workers=1)
                 compact = Requests({"wull": "well"})
                 after = normalize_document_speech(source, compact, workers=1)
+                # The stage marker's input fingerprint records the guidance that
+                # produced it, so prompt generations legitimately differ here.
+                for result in (after, before):
+                    result["provenance"]["speech_normalization"].pop("input_fingerprint")
                 self.assertEqual(after, before)
                 size = lambda calls: sum(len(system.encode()) + len(json.dumps(payload, ensure_ascii=False).encode())
                                          for system, payload in calls)

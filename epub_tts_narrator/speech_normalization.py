@@ -25,6 +25,12 @@ _NEGATIONS = frozenset(("no", "not", "never", "neither", "nor", "nothing", "nobo
 _NUMBERS = frozenset(("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "hundred", "thousand", "million", "billion"))
 
 
+def _live_guidance():
+    """Current wire prompts; a guidance change must re-prepare completed books."""
+    from .speech_prompts import CONTEXTUAL_REVIEW, SCAN, REVIEW
+    return [SCAN, REVIEW, CONTEXTUAL_REVIEW]
+
+
 def _stage_fingerprint(document):
     roles = {row["id"]: row for row in document["cast"]["roles"]}
     def role_context(identifier):
@@ -41,7 +47,7 @@ def _stage_fingerprint(document):
                       "simultaneous_roles": [role_context(item["role_id"])
                                              for item in row.get("simultaneous_speakers", [])]}
                      for row in document["segments"]],
-        "guidance": fingerprint([SCAN, REVIEW, _LENSES]),
+        "guidance": fingerprint([SCAN, REVIEW, _LENSES, *_live_guidance()]),
     })
 
 
