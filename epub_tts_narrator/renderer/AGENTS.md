@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 75 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 79 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -77,6 +77,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `diagnostics.py` owns fatal frame formatting and payload-free SDK/HTTP error details; managed Runpod failures skip optional stop delays.
 - `speech_resolver.py` reconsiders newly valid, previously blocked rewrites through fresh sound reviews with an origin-bound `reconsidered` audit. `recurring_resolution.py` resumes that candidate without new failed takes or pending-history growth; consonant-fragment shortening is rewrite-only, never direct audio acceptance.
 - `speech_recovery.py` tries em-dash boundaries only when sentence/newline splitting has no valid plan, preserving existing plan identities. `workflow.verified_take` routes planner stop to executable untried splitting only with enough shared starts for all parts; reports distinguish planner stop from runtime split, and failed-join recovery keeps splitting disabled.
+- `fragment_recovery.py` gives a failed bound single-speech recovery part one extra fragmentation level for a short final em-dash tail. `fragment_provenance.py` validates exact pieces, the inherited parent plain-delivery audit, and final join identity; a rejected join is not repeated. Depth and shared episode/sibling reserves remain bounded.
 - All speech joins embed child acceptance evidence independently of plain-delivery eligibility. `recovery_provenance.py` reconstructs older missing evidence read-only from hash-bound child records and audio for `SpeechCache.identity`; normal generation-identity validation still proves voice, words, and delivery.
 - `quality.word_spacing_equivalence` proves whole-transcript canonical written equality before fuzzy checks: ignore case, arbitrary word boundaries, and apostrophes after lexical/number normalization. No minimum piece length or maximum join size; preserve numeric syntax, signs, currency content, character order, and acoustic gates. `speech_coverage` uses the same comparator, not a separate boundary whitelist.
 - `speech_coverage` can nominate one-to-one non-numeric protected homophones using matching nonempty full codes, including short codes, for contextual review only. Direct phonetic acceptance is unchanged; numeric protection, initialisms, complete ordered coverage, and review-vote requirements remain intact.

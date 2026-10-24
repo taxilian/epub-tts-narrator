@@ -17,8 +17,8 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 ```
 epub-tts-narrator/
 ├── epub_tts_narrator/        # analyzer package: 37 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 75 flat modules, own CLI + AGENTS.md
-├── tests/                    # 221 flat unittest files + fixtures/ + shared helpers
+│   └── renderer/             # renderer subpackage: 79 flat modules, own CLI + AGENTS.md
+├── tests/                    # 230 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -41,7 +41,7 @@ epub-tts-narrator/
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
-| Render orchestration | `epub_tts_narrator/renderer/workflow.py` (1826 ln) | Resumable, checkpointed, quality-gated |
+| Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2059 ln) | Resumable, checkpointed, quality-gated |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
 | Casting workflow | `epub_tts_narrator/renderer/casting.py` | `CastingSession` god-class (~37 methods, 20+ callers) |
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |

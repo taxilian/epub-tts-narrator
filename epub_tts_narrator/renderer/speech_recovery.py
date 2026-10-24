@@ -241,14 +241,14 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
             def generate_part(output, child_seed, piece=part["text"]):
                 return synthesize_part(piece, output, child_seed)
             notify(f"  Recovery part {number}/{len(request['recovery']['parts'])}: checking saved audio.")
-            wav, record = verified_take(part["text"], generate_part, child_directory,
-                                        child_request, verifier, config, notify=notify,
-                                        purpose="speech", retry_budget=retry_budget,
-                                        generate_repaired=synthesize_part,
-                                        generate_plain=(synthesize_plain if "synthesis_request" in child_request
-                                                        else None),
-                                        resolution_episode=resolution_episode,
-                                        episode_reserve=len(request["recovery"]["parts"]) - number)
+            from .fragment_recovery import fragment_part_take
+            wav, record = fragment_part_take(
+                part["text"], generate_part, child_directory, child_request, verifier, config,
+                notify=notify, retry_budget=retry_budget, synthesize_part=synthesize_part,
+                generate_plain=(synthesize_plain if "synthesis_request" in child_request else None),
+                resolution_episode=resolution_episode,
+                episode_reserve=len(request["recovery"]["parts"]) - number,
+                allow_fragments=parent_request["kind"] == "speech")
             verified.append((wav, record))
             audit.append({**part, "request_hash": record["request_hash"],
                           "audio_sha256": record["audio_sha256"],

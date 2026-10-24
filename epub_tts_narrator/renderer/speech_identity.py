@@ -459,6 +459,10 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
         return _recovered_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and "delivery_recovery" in engine_metadata:
         return _plain_delivery_generation_identity(request, voices_by_asset, engine_metadata)
+    if isinstance(engine_metadata, Mapping) and "fragment_recovery" in engine_metadata:
+        from .fragment_provenance import fragment_generation_identity
+
+        return fragment_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and "speech_resolution" in engine_metadata:
         return _resolved_generation_identity(request, voices_by_asset, engine_metadata)
     engine = request.get("engine")

@@ -183,7 +183,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                   purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
                   fallback_parts=0, episode_reserve=0, generate_plain=None,
-                  allow_split=True, failed_split_report=None):
+                  allow_split=True, failed_split_report=None, allow_resolution=True):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -197,7 +197,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
     resolver = getattr(verifier, "speech_resolver", None)
-    adaptive = (resolver is not None and purpose == "speech" and "recovery" not in request
+    adaptive = (allow_resolution and resolver is not None and purpose == "speech"
+                and "recovery" not in request
                 and request.get("kind") in {"speech", "speech_recovery_part", "paragraph_speech"})
     if adaptive and retry_budget is None:
         retry_budget = SpeechRetryBudget(retry_paragraphs=True)
