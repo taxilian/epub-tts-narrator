@@ -281,7 +281,7 @@ class RendererCLITests(unittest.TestCase):
     def test_pause_normalization_settings_have_defaults_and_strict_types(self):
         settings = load_config(self.config)["render"]
         self.assertIs(settings["normalize_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (220, 100))
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (260, 120))
         before = self.config.read_text()
         invalid = {
             "paragraph_synthesis": ("1", '"true"'),

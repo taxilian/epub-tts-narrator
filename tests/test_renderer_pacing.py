@@ -45,7 +45,7 @@ class PacingTests(unittest.TestCase):
             ], self.root / f"chapter{index}.wav", sample_rate=RATE)
             output = samples(result["wav_path"])
             active = [i for i, value in enumerate(output) if value]
-            self.assertEqual(active[1000] - active[999] - 1, 2200)
+            self.assertEqual(active[1000] - active[999] - 1, 2600)
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual(result["segments"][0]["source_audio_start_frame"], head - 400)
             self.assertEqual(result["segments"][0]["source_audio_end_frame"], head + 1600)
@@ -70,8 +70,8 @@ class PacingTests(unittest.TestCase):
 
     def test_boundary_kinds_and_controls_do_not_stack(self):
         source = wav(self.root / "source.wav", [0] * 1000 + [1000] * 1000 + [0] * 1000)
-        for text, changes, gap in (("First,", {}, 1000), ("First.", {}, 2200),
-                                  ("First.", {"break_after": "paragraph"}, 2500)):
+        for text, changes, gap in (("First,", {}, 1200), ("First.", {}, 2600),
+                                  ("First.", {"break_after": "paragraph"}, 4000)):
             target = self.root / f"gap{gap}.wav"
             result = compose_chapter([
                 clip(source, text=text, break_after=changes.get("break_after", "none")),
@@ -84,14 +84,14 @@ class PacingTests(unittest.TestCase):
             clip(source, identifier="second", performance={"kind": "bracketed", "enter": True}),
         ], self.root / "controls.wav", sample_rate=RATE)
         active = [i for i, value in enumerate(samples(result["wav_path"])) if value]
-        self.assertEqual(active[1000] - active[999] - 1, 5000)
+        self.assertEqual(active[1000] - active[999] - 1, 6000)
 
     def test_disabled_policy_keeps_legacy_padding_and_all_silent_is_untouched(self):
         source = wav(self.root / "source.wav", [0] * 1000 + [1000] * 1000 + [0] * 1000)
         result = compose_chapter([clip(source)], self.root / "legacy.wav",
                                  sample_rate=RATE, normalize_pauses=False)
         self.assertEqual(samples(result["wav_path"])[:3000], samples(source))
-        self.assertEqual(result["frames"], 5500)
+        self.assertEqual(result["frames"], 7000)
         quiet = wav(self.root / "silent.wav", [0] * 1000)
         self.assertEqual(audio_edges(quiet)["end"], 1000)
 

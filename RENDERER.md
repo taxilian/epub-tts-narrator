@@ -102,10 +102,10 @@ max_attempts = 3
 seed = 1729
 sample_rate = 44100
 normalize_pauses = true
-sentence_pause_ms = 220
-clause_pause_ms = 100
-paragraph_pause_ms = 250
-blank_pause_ms = 500
+sentence_pause_ms = 260
+clause_pause_ms = 120
+paragraph_pause_ms = 400
+blank_pause_ms = 600
 bracket_pause_ms = 120
 allow_review = false
 ffmpeg = "ffmpeg"
@@ -699,10 +699,10 @@ All pauses added during assembly are controlled in the global config's existing 
 
 | Setting | Default | Where it applies |
 | --- | ---: | --- |
-| `sentence_pause_ms` | 220 | After `.`, `!`, `?`, or an ellipsis at an audio clip boundary |
-| `clause_pause_ms` | 100 | After a comma, semicolon, colon, or dash at an audio clip boundary |
-| `paragraph_pause_ms` | 250 | At a source paragraph boundary, including the chapter's final paragraph |
-| `blank_pause_ms` | 500 | Before a paragraph marked as following a blank line |
+| `sentence_pause_ms` | 260 | After `.`, `!`, `?`, or an ellipsis at an audio clip boundary |
+| `clause_pause_ms` | 120 | After a comma, semicolon, colon, or dash at an audio clip boundary |
+| `paragraph_pause_ms` | 400 | At a source paragraph boundary, including the chapter's final paragraph |
+| `blank_pause_ms` | 600 | Before a paragraph marked as following a blank line |
 | `bracket_pause_ms` | 120 | On entering or leaving bracketed text |
 
 Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. The settings are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. For example, a sentence ending a paragraph uses the larger of the sentence and paragraph settings. Zero disables a particular added pause; another applicable cue or protected audio may still leave a gap. Protected audio is never removed just to meet a target.

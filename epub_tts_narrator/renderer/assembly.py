@@ -167,10 +167,10 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
 
 
 def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
-                    sample_rate: int = 44100, paragraph_pause_ms: float = 250,
-                    blank_pause_ms: float = 500, bracket_pause_ms: float = 120,
-                    normalize_pauses: bool = True, sentence_pause_ms: float = 220,
-                    clause_pause_ms: float = 100) -> dict:
+                    sample_rate: int = 44100, paragraph_pause_ms: float = 400,
+                    blank_pause_ms: float = 600, bracket_pause_ms: float = 120,
+                    normalize_pauses: bool = True, sentence_pause_ms: float = 260,
+                    clause_pause_ms: float = 120) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for

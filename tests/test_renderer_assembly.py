@@ -59,7 +59,7 @@ class ChapterCompositionTests(unittest.TestCase):
             clip(self.wav, text="Hello world.", start=0, end=6),
             clip(self.wav, text="Hello world.", start=6, end=12),
         ], self.root / "chapter.wav")
-        self.assertEqual(result["frames"], 4410 * 2 + 11025)
+        self.assertEqual(result["frames"], 4410 * 2 + 17640)
         self.assertEqual([(row["chapter_start_frame"], row["chapter_end_frame"])
                           for row in result["segments"]], [(0, 4410), (4410, 8820)])
         self.assertEqual(result["segments"][1]["spoken_text"], "world.")
@@ -70,8 +70,8 @@ class ChapterCompositionTests(unittest.TestCase):
             clip(self.wav),
             clip(self.wav, identifier="b2:0:6", break_before="blank_paragraph"),
         ], self.root / "chapter.wav")
-        self.assertEqual(result["segments"][1]["chapter_start_frame"], 4410 + 22050)
-        self.assertEqual(result["frames"], 4410 * 2 + 22050 + 11025)
+        self.assertEqual(result["segments"][1]["chapter_start_frame"], 4410 + 26460)
+        self.assertEqual(result["frames"], 4410 * 2 + 26460 + 17640)
 
     def test_empty_and_no_speech_controls_do_not_manufacture_audio(self):
         empty = compose_chapter([], self.root / "empty.wav")
@@ -120,8 +120,8 @@ class ChapterCompositionTests(unittest.TestCase):
             clip(self.wav, performance=performance, break_before="blank_paragraph"),
             clip(self.wav, identifier="b2", break_after="none"),
         ], self.root / "bracket.wav")
-        self.assertEqual(result["segments"][0]["chapter_start_frame"], 22050)
-        self.assertEqual(result["segments"][1]["chapter_start_frame"], 22050 + 4410 + 11025)
+        self.assertEqual(result["segments"][0]["chapter_start_frame"], 26460)
+        self.assertEqual(result["segments"][1]["chapter_start_frame"], 26460 + 4410 + 17640)
 
     def test_invalid_offsets_rates_and_overwrites_fail(self):
         item = clip(self.wav)
@@ -220,10 +220,10 @@ class EncodingIntegrationTests(unittest.TestCase):
             "id": "a" * 64, "title": "Book = #;\\ é", "authors": ["Author 🚀"]},
             cover_path=cover, source_fingerprint="b" * 64)
         sync = json.loads((output / "sync.json").read_text())
-        self.assertEqual(manifest["frames"], 44100)
+        self.assertEqual(manifest["frames"], 57330)
         self.assertEqual(sync["sample_rate"], 44100)
-        self.assertEqual(sync["segments"][1]["book_start_frame"], 22050)
-        self.assertEqual(sync["segments"][1]["book_end_frame"], 33075)
+        self.assertEqual(sync["segments"][1]["book_start_frame"], 28665)
+        self.assertEqual(sync["segments"][1]["book_end_frame"], 39690)
         self.assertTrue(manifest["chapters"][1]["skipped"])
         self.assertIsNone(manifest["chapters"][1]["path"])
         self.assertFalse((output / "chapters/chapter-0002.m4a").exists())
@@ -244,7 +244,7 @@ class EncodingIntegrationTests(unittest.TestCase):
         book = probe_audio(output / "book.m4b")
         self.assertEqual(chapter["streams"][0]["codec_name"], "mp3")
         self.assertEqual(book["streams"][0]["codec_name"], "aac")
-        self.assertEqual(manifest["frames"], 44100)
+        self.assertEqual(manifest["frames"], 57330)
 
     def test_normalization_resamples_stereo_and_rejects_overwrite(self):
         stereo = make_wav(self.root / "stereo.wav", frames=2400, rate=24000, channels=2)

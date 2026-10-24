@@ -20,7 +20,7 @@ class ChapterSettingsTests(unittest.TestCase):
         settings = chapter_cache.chapter_settings({})
         self.assertEqual(settings["version"], 2)
         self.assertIs(settings["normalize_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (220, 100))
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (260, 120))
         for key, values in {
             "normalize_pauses": (1, "true", None),
             "sentence_pause_ms": (-1, 5001, True, 220.0, float("nan")),
@@ -93,7 +93,7 @@ class ChapterCheckpointTests(unittest.TestCase):
     def test_ready_chapter_preserves_frames_source_and_reuses_verified_encodings(self):
         original = file_hash(self.source)
         first = self.prepare()
-        self.assertEqual(first["frames"], 44100 * 4 + 11025)
+        self.assertEqual(first["frames"], 44100 * 4 + 17640)
         self.assertEqual(first["segments"][0]["chapter_end_frame"], 44100 * 4)
         self.assertEqual(first["number"], 7)
         self.assertEqual(first["normalization"]["status"], "normalized")
@@ -114,7 +114,7 @@ class ChapterCheckpointTests(unittest.TestCase):
 
     def test_changed_pause_voice_policy_or_clip_invalidates_checkpoint(self):
         first = self.prepare()
-        self.settings["paragraph_pause_ms"] = 400
+        self.settings["paragraph_pause_ms"] = 550
         pause = self.prepare()
         self.assertNotEqual(first["cache_key"], pause["cache_key"])
         self.assertEqual(pause["frames"] - first["frames"], 6615)
@@ -211,6 +211,7 @@ class ChapterCheckpointTests(unittest.TestCase):
 
     def test_short_and_empty_chapters_record_explicit_loudness_skips(self):
         make_wav(self.source, frames=2205)
+        self.settings["paragraph_pause_ms"] = 250  # Keep the fixture below the loudness measurement window.
         ready = self.prepare()
         self.assertEqual(ready["normalization"]["status"], "skipped")
         self.assertEqual(ready["normalization"]["reason"], "too_short_for_integrated_loudness")
