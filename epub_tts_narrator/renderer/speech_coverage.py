@@ -14,12 +14,12 @@ import unicodedata
 
 from .letter_names import make_letter_name_matcher
 from .phonetic_match import (
-    _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _FUNCTION_WORDS, _PROTECTED,
+    _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _FUNCTION_WORDS, _PROTECTED, _PROTECTED_NUMERIC,
     _load_double_metaphone, phonetic_equivalence,
 )
 
 
-SPEECH_COVERAGE_VERSION = 8
+SPEECH_COVERAGE_VERSION = 9
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -335,6 +335,28 @@ def speech_coverage(expected_text, transcript):
             left = span_words("expected", i, left_size)
             right = span_words("actual", j, right_size)
             if left is None or right is None:
+                if left_size != 1 or right_size != 1:
+                    continue
+                pair = (expected[i], actual[j])
+                if (not any(word in _PROTECTED for word in pair)
+                        or any(not _ALPHABETIC_WORD.fullmatch(word)
+                               or len(word.replace("'", "")) < 2
+                               or word in _PROTECTED_NUMERIC or "n't" in word for word in pair)
+                        or any(not _ALPHABETIC_WORD.fullmatch(span[2])
+                               or source[span[0]:span[1]].isupper()
+                               for source, span in ((expected_source, expected_spans[i]),
+                                                    (actual_source, actual_spans[j])))):
+                    continue
+                left_keys = tuple(key for key in metaphone(pair[0].replace("'", "")) if key)
+                right_keys = tuple(key for key in metaphone(pair[1].replace("'", "")) if key)
+                if set(left_keys).intersection(right_keys):
+                    # Short full codes may nominate a protected homophone, but
+                    # never establish approval or consume an absent word.
+                    yield i + 1, j + 1, {"operation": "pronunciation_candidate",
+                        "rule": "protected_homophone", "expected_start": i, "expected_end": i + 1,
+                        "actual_start": j, "actual_end": j + 1,
+                        "expected": [pair[0]], "actual": [pair[1]],
+                        "expected_keys": list(left_keys), "actual_keys": list(right_keys)}
                 continue
             multi = left_size != right_size
             if multi and set(left).intersection(right):

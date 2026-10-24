@@ -122,13 +122,22 @@ class SubstitutionPairsTests(unittest.TestCase):
             with self.subTest(expected=expected, heard=heard):
                 self.assertIsNone(substitution_pairs(expected, heard))
 
-    def test_numbers_and_negations_never_reach_phonetic_review(self):
+    def test_numbers_and_nonhomophone_negation_changes_never_reach_phonetic_review(self):
         for left, right in (("fifteen", "fifty"), ("15", "50"), ("first", "third"),
                             ("minus", "plus"), ("not", "now"), ("can't", "can"),
-                            ("never", "ever"), ("no", "know"), ("won't", "want")):
+                            ("never", "ever"), ("won't", "want")):
             with self.subTest(left=left, right=right):
                 self.assertIsNone(substitution_pairs("They said " + left + " before leaving the room.",
                                                      "They said " + right + " before leaving the room."))
+
+    def test_negation_homophone_spelling_is_a_review_candidate_not_a_direct_match(self):
+        pairs = substitution_pairs("They said no before leaving the room.",
+                                   "They said know before leaving the room.")
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]["expected_word"], "no")
+        self.assertEqual(pairs[0]["recognized_word"], "know")
+        self.assertEqual(pairs[0]["coverage_operation"], "pronunciation_candidate")
+        self.assertEqual(pairs[0]["coverage_rule"], "protected_homophone")
 
     def test_fraction_and_pair_bounds_do_not_approve_similar_strings(self):
         self.assertIsNone(substitution_pairs("Jasper wore blue clothes today.", "Jasmine wore red clothes today."))

@@ -21,7 +21,7 @@ from .letter_names import make_letter_name_matcher
 PHONETIC_MATCH_VERSION = 4
 _MAX_ALIGNMENT_STATES = 20_000
 _ALPHABETIC_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*\Z")
-_PROTECTED = frozenset("""
+_PROTECTED_NUMERIC = frozenset("""
 zero one two three four five six seven eight nine ten eleven twelve thirteen
 fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty
 sixty seventy eighty ninety hundred thousand million billion trillion quadrillion
@@ -30,6 +30,8 @@ thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth
 twentieth thirtieth fortieth fiftieth sixtieth seventieth eightieth ninetieth
 hundredth thousandth millionth billionth trillionth zeroth once twice thrice
 half halves quarter quarters dozen dozens minus plus percent percentage
+""".split())
+_PROTECTED = _PROTECTED_NUMERIC | frozenset("""
 no not never neither nor none nobody nothing nowhere cannot cant dont doesnt
 didnt wont wouldnt shouldnt couldnt isnt arent wasnt werent hasnt havent hadnt
 mustnt neednt shant aint without
