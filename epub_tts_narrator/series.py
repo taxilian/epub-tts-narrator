@@ -13,6 +13,7 @@ import uuid
 
 from .contracts import validate_document
 from .narration_identity import author_name_key, author_narrator_name
+from .speech_traits import validate_speech_traits
 
 
 def _hash(value):
@@ -87,6 +88,8 @@ def validate_registry(registry):
         for voice in cast["voices"]:
             if not isinstance(voice.get("description"), str) or not isinstance(voice.get("traits"), list):
                 raise ValueError("Invalid series voice")
+            if "speechTraits" in voice:
+                validate_speech_traits(voice["speechTraits"])
             for trait in voice["traits"]:
                 if (not isinstance(trait, dict) or not isinstance(trait.get("name"), str)
                         or not isinstance(trait.get("value"), str) or trait.get("basis") not in {"text", "casting"}
@@ -155,6 +158,17 @@ def _author_narration_history(books, *, exclude_source=None):
 def series_context(registry, source):
     books, characters, voices, narrators = _history(registry, source)
     resolved = _resolved_review_origins(registry)
+    voice_context = []
+    for identity, record in voices.items():
+        stored = record["voice"]
+        voice = {"id": identity, "description": stored["description"],
+                 "traits": [{"name": trait["name"], "value": trait["value"],
+                             "basis_in_prior_book": trait["basis"]}
+                            for trait in stored["traits"]],
+                 "source_fingerprint": record["source_fingerprint"]}
+        if "speechTraits" in stored:
+            voice["speechTraits"] = stored["speechTraits"]
+        voice_context.append(voice)
     return {"series_id": registry["series_id"],
             "prior_books": [{"source_fingerprint": book["source_fingerprint"], "book": book["book"],
                              "readiness": book.get("readiness"),
@@ -163,10 +177,7 @@ def series_context(registry, source):
                             for book in books],
             "characters": [{key: character[key] for key in ("id", "name", "aliases", "description", "voice_id")}
                            for character in characters.values()],
-            "voices": [{"id": identity, "description": record["voice"]["description"],
-                        "traits": [{"name": trait["name"], "value": trait["value"], "basis_in_prior_book": trait["basis"]}
-                                   for trait in record["voice"]["traits"]],
-                        "source_fingerprint": record["source_fingerprint"]} for identity, record in voices.items()],
+            "voices": voice_context,
             "narrator_voices": [{"character_id": identity, "voice_ids": sorted(values)} for identity, values in narrators.items()],
             "author_narrator_voices": [{key: deepcopy(record[key]) for key in
                                         ("author_name", "voice_ids", "role_ids", "source_fingerprint", "book")}

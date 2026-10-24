@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 import re
 
+from .speech_traits import validate_speech_traits
+
 
 FORMAT = "epub-audiobook-analysis"
 VERSION = 1
@@ -194,6 +196,11 @@ class _Validator:
         for i, voice in enumerate(voices):
             path = f"cast.voices[{i}]"
             self.string(voice.get("description"), f"{path}.description")
+            if "speechTraits" in voice:
+                try:
+                    validate_speech_traits(voice["speechTraits"])
+                except ValueError as error:
+                    self.error(f"{path}.speechTraits", str(error).removeprefix("speechTraits "))
             traits = self.array(voice.get("traits"), f"{path}.traits")
             for j, value in enumerate(traits):
                 trait_path = f"{path}.traits[{j}]"

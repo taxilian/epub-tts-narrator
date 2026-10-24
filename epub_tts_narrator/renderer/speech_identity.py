@@ -207,15 +207,12 @@ def _voice(asset, voices_by_asset):
     return deepcopy(dict(voice))
 
 
-def _direction(chunk):
+def _direction(chunk, voice_id):
     segment = chunk.get("segment")
     if not isinstance(segment, Mapping):
         raise ValueError("Speech request is missing its segment")
-    delivery = segment.get("delivery", {})
-    if not isinstance(delivery, Mapping) or not isinstance(delivery.get("direction", ""), str):
-        raise ValueError("Speech delivery must contain a direction string")
-    from ..spoken_text import effective_delivery
-    return effective_delivery(segment)
+    from .speech_traits import performance_direction
+    return performance_direction(chunk, voice_id)
 
 
 def _check_recorded_text(metadata, expected):
@@ -251,7 +248,7 @@ def paragraph_rewrite_turn(request, voices_by_asset):
         if not isinstance(turn, Mapping) or not isinstance(turn.get("segment"), Mapping):
             return None
         asset = assets.get(turn["segment"].get("voice_id"))
-        direction = _direction(turn)
+        direction = _direction(turn, turn["segment"].get("voice_id"))
         bindings.append((asset, direction))
         prepared.append({"text": _text(turn.get("spoken_text"), "text"),
                          "voice": _voice(asset, voices_by_asset), "direction": direction})
@@ -425,11 +422,20 @@ def _plain_delivery_generation_identity(request, voices_by_asset, metadata):
     actual_request.pop("synthesis_identity", None)
     actual_metadata = dict(metadata)
     actual_metadata.pop("delivery_recovery")
+    chunk = actual_request["chunk"]
+    performer = actual_request.get("performer")
+    voice_id = (performer.get("voice_id") if isinstance(performer, Mapping)
+                else chunk.get("segment", {}).get("voice_id"))
+    expected_direction = _direction(chunk, voice_id)
+    _, expected_delivery = _directed_text(
+        _text(trim_speech_text(_text(chunk.get("spoken_text"), "text")), "text"),
+        expected_direction,
+    )
     if (not isinstance(actual_metadata.get("synthesis_text"), str)
             or not actual_metadata["synthesis_text"].strip()
-            or actual_metadata.get("direction", "") != ""
-            or actual_metadata.get("direction_applied", False) is not False
-            or actual_metadata.get("applied_control") is not None):
+            or actual_metadata.get("direction", "") != expected_delivery["direction"]
+            or actual_metadata.get("direction_applied", False) != expected_delivery["direction_applied"]
+            or actual_metadata.get("applied_control") != expected_delivery["applied_control"]):
         raise ValueError("Recorded delivery does not confirm the audited plain performance")
     generation_identity(actual_request, voices_by_asset, engine_metadata=actual_metadata)
     return generation_identity(request, voices_by_asset)
@@ -473,7 +479,10 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     if request["kind"] == "speech":
         voice = _voice(request.get("voice_asset_hash"), voices_by_asset)
         text = _text(trim_speech_text(_text(chunk.get("spoken_text"), "text")), "text")
-        direction = _direction(chunk)
+        performer = request.get("performer")
+        voice_id = (performer.get("voice_id") if isinstance(performer, Mapping)
+                    else chunk.get("segment", {}).get("voice_id"))
+        direction = _direction(chunk, voice_id)
         if known:
             directed, delivery = _directed_text(text, direction)
             result.update(text=directed, voice=voice_conditioning_identity(voice))
@@ -502,7 +511,7 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
             raise ValueError("Paragraph contains an invalid turn")
         voice = _voice(assets.get(turn["segment"].get("voice_id")), voices_by_asset)
         turns.append({"text": _text(turn.get("spoken_text"), "text"),
-                      "direction": _direction(turn), "voice": voice})
+                      "direction": _direction(turn, turn["segment"].get("voice_id")), "voice": voice})
     if known:
         # Use the rendering formatter itself: edge whitespace can affect joins,
         # and request-local speaker numbering depends on first-use voice order.

@@ -102,10 +102,10 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                          {"resonance", "articulation", "pace"})
         self.assertTrue(all(trait["basis"] == "casting" and not trait["evidence"]
                             for trait in narrator["traits"]))
-        # An unidentified narrator gets no universal age, gender, accent, or
-        # register assignment; those can be proposed with the source context.
         self.assertFalse(any(word in narrator["description"].casefold()
-                             for word in ("male", "female", "young", "elderly", "accent", "baritone")))
+                              for word in ("male", "female", "young", "elderly", "accent", "baritone")))
+        self.assertEqual(narrator["speechTraits"],
+                         "neutral General American accent; steady conversational pace")
         self.assertIsNone(cast["roles"][0]["character_id"])
 
 

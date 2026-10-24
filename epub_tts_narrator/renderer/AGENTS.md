@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 79 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 80 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -66,7 +66,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 ## NOTES
 
 - `common.py` has only 51 lines but 33 internal consumers; treat changes as high blast radius.
-- `workflow.py` is 1,826 lines and the largest maintenance risk; keep changes local.
+- `workflow.py` is about 2,060 lines and the largest maintenance risk; keep changes local.
 - `workflow.render()` restores completed chapters when the context hash matches.
 - It writes `status.json` and `plan.json` under `work_dir`, with directory locks from `run_locks.acquire_directory_lock`.
 - See `ENGINE_NOTES.md` for engine-specific details.
@@ -84,3 +84,4 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `letter_names.letter_name_rewrite_equivalent` proves single-letter English name respellings, including repeated-letter name variants, for `speech_resolver` rewrite eligibility only. Keep all sound votes and final verification; do not broaden direct letter matching or authorize changed/missing letters. Existing blocked-proposal reconsideration applies.
 - `speech_resolver._prosody_span` permits bounded punctuation-only synthesis repairs with exact normalized word-list equality and all sound reviews. `verification_prompts._PRE_PROSODY_PROMPT` freezes the predecessor bytes; `RecurringResolution` retains its reviewed spelling/delivery history across the upgrade. Historical policies cannot authorize the new repair.
 - `retained_candidates.py` nominates complete older candidates only after a saved stop and an ineligible latest transcript. Require fresh ASR, unchanged request/WAV hashes, and normal sound votes; bound scans/reviews and retain negative audits. Do not preempt an untried approved spelling or delivery repair.
+- `speech_traits.py` binds current cast speech traits to performance plans and composes them before passage directions. Keep traits in cache/checkpoint identities and recovery, including plain delivery; never mutate voice-reference assets or add traits to voice-creation prompts. Profiles omitting the field keep legacy behavior.

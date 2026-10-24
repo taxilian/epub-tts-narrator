@@ -119,7 +119,22 @@ def _leaf(chunk, bindings):
         raise ValueError("Chapter performers need nonempty role and voice IDs")
     if not chunk["silent_control"] and (not speakers or any(s["voice_id"] not in bindings for s in speakers)):
         raise ValueError("Every spoken passage needs a registered voice")
-    effective_delivery(row)
+    traits_by_voice = chunk.get("speech_traits")
+    if traits_by_voice is not None:
+        speaker_ids = {speaker["voice_id"] for speaker in speakers}
+        if (not isinstance(traits_by_voice, dict) or not traits_by_voice
+                or any(not isinstance(voice_id, str) or voice_id not in speaker_ids
+                       for voice_id in traits_by_voice)):
+            raise ValueError("Speech traits must map passage voice IDs to stable traits")
+        from ..speech_traits import validate_speech_traits
+        for traits in traits_by_voice.values():
+            validate_speech_traits(traits)
+    if speakers:
+        from .speech_traits import performance_direction
+        for speaker in speakers:
+            performance_direction(chunk, speaker["voice_id"])
+    else:
+        effective_delivery(row)
     if not isinstance(row.get("performance", {}), dict):
         raise ValueError("Invalid passage performance")
 
@@ -127,7 +142,7 @@ def _leaf(chunk, bindings):
 def _chunk_shape(chunk, identifiers, *, paragraph=False):
     required = {"chunk_id", "segment", "spoken_text", "spoken_start", "spoken_end",
                 "source_ranges", "silent_control"}
-    allowed = required | ({"paragraph_turns"} if paragraph else set())
+    allowed = required | {"speech_traits"} | ({"paragraph_turns"} if paragraph else set())
     if (not isinstance(chunk, dict) or set(chunk) - allowed or required - set(chunk)
             or not isinstance(chunk.get("chunk_id"), str)
             or not re.fullmatch(r"[0-9a-f]{32,64}", chunk["chunk_id"])

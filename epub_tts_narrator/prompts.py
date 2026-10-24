@@ -17,7 +17,7 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v5
+VOICE PROFILE CONTRACT v6
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
@@ -56,6 +56,18 @@ supply missing directions. Keep traits[] as structured evidence and casting
 metadata, consistent with the description. Trait fields are not appended to the
 voice-creation prompt. Keep source quotations and analysis commentary in their
 metadata fields, outside the description.
+When returning a complete voice profile, write voice.speechTraits separately as
+one or two short plain-text phrases, at most 400 characters on one line,
+describing only stable audible speech behavior
+that should be present in every line: an explicit specific accent, dialect,
+speech impediment, pace, rhythm, or verbal habit. Name the most specific accent
+supported by the source or casting decision, such as Glaswegian rather than the
+broader Scottish. When no specific accent is established, use "neutral General
+American accent" as a production/casting baseline, not as source evidence. Never
+put mood, emotion, personality, scene acting, markup, brackets,
+or voice-creation prose in speechTraits. Keep the complete acoustic design in
+description; speechTraits is a compact persistent performance constraint, not a
+replacement for description or evidence-bearing traits[].
 Write description and trait values as direct, positive audible directions only.
 Do not include commentary about the analysis, the source's omissions, the basis
 of a choice, or what the voice should NOT do. Even a phrase such as 'screams are
@@ -158,6 +170,7 @@ Return EXACTLY these top-level keys:
  "roles": [{"id":"ID", "kind":"narration or dialogue", "character_id":null,
    "voice_id":"ID", "description":"role and scope"}],
  "voices": [{"id":"ID", "description":"actionable audible voice direction",
+   "speechTraits":"stable accent/dialect/pace/rhythm/verbal habits",
    "traits":[{"name":"pitch/timbre/accent/pace/etc", "value":"description",
      "basis":"text or casting", "evidence":[]}]}],
  "merges": [{"from_character_id":"ID", "into_character_id":"ID", "evidence":[]}],

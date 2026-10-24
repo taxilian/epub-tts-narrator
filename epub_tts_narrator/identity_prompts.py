@@ -104,7 +104,8 @@ Use the case, original_cast, source_units, and available_ids. Return exactly:
 {"characters":[{"id":"ID","name":"name","aliases":["alias"],
 "description":"identity description","evidence":[{"block_id":"ID","quote":"exact text"}],"voice_id":"ID"}],
 "roles":[{"id":"ID","kind":"dialogue|narration","character_id":"ID","voice_id":"ID","description":"role scope"}],
-"voices":[{"id":"ID","description":"audible voice direction","traits":[
+"voices":[{"id":"ID","description":"audible voice direction",
+"speechTraits":"stable accent/dialect/pace/rhythm/verbal habits","traits":[
 {"name":"pitch/timbre/etc","value":"description","basis":"casting|text","evidence":[]}]}],
 "merges":[],"issues":[{"kind":"identity|casting","target":"affected ID","reason":"unresolved decision"}],
 "summary":"brief explanation, at most 2400 characters"}.

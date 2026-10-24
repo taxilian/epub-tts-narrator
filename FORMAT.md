@@ -27,11 +27,15 @@ An `Evidence` record is `{block_id, quote}`. The quote must be a nonempty exact 
 | --- | --- |
 | Character | `id`, `name`, `aliases` (strings), `description`, `evidence` (Evidence[]), `voice_id` |
 | Role | `id`, `kind` (`narration` or `dialogue`), `character_id` (string or null), `voice_id`, `description` |
-| Voice | `id`, `description`, `traits` (Trait[]) |
+| Voice | `id`, `description`, `traits` (Trait[]); optional `speechTraits` (string) |
 | Trait | `name`, `value`, `basis` (`text` or `casting`), `evidence` (Evidence[]) |
 | Issue | `id`, `kind`, `target`, `reason`, `resolved` (boolean) |
 
 Text-supported traits need at least one evidence quotation. Casting traits are proposals. `Voice.description` is a proposed synthesis/casting direction, not an independent claim that all its qualities appear verbatim in the book. Distinct characters must have distinct voice IDs. A dialogue role attached to a character uses that character's voice; a narrator role attached to a character may share it or select a separate profile. An external narrator has `character_id: null`.
+
+`Voice.speechTraits` is a persistent passage-performance instruction, separate from the description used to create a reference voice. New analysis requests one or two short phrases describing only mood-independent audible behavior: a specifically named accent or dialect, speech impediments, habitual pace and rhythm, or verbal habits. Always name the accent explicitly, using neutral General American as a production baseline when no more specific accent is established; this casting choice is not a claim of source evidence. Avoid personality, emotions, and scene-dependent delivery. For example: `"Light Glaswegian Scottish accent; clipped consonants and brisk, even phrasing."`
+
+When present, `speechTraits` must be nonempty single-line plain text of at most 400 characters, without square/angle control markup or control characters. Older profiles may omit it and retain their previous behavior. The renderer combines these stable traits with each passage's delivery instruction as nonspoken engine conditioning, never as spoken source text or as an addition to the reference-voice creation prompt. Changing traits changes the required performance, not the saved reference recording. Traits follow the logical cast voice ID: aliases select shared reference audio without substituting another character's speech traits.
 
 ## Identity consensus provenance
 

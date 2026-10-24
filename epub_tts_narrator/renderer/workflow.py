@@ -13,7 +13,6 @@ from threading import Lock
 from time import monotonic
 import unicodedata
 
-from ..spoken_text import effective_delivery
 from .assembly import extract_cover, normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
@@ -987,6 +986,8 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                 plan, requests, completed=completed_chunks(work, plan["chapters"]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
+    from .speech_traits import bind_plan_speech_traits
+    plan = bind_plan_speech_traits(plan, bundle["cast"])
     if (not (multi_speaker or single_speaker_paragraph)
             or not config["render"].get("paragraph_synthesis", True)):
         return plan
@@ -1655,8 +1656,9 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
+        from .speech_traits import performance_direction
         turns = [{"text": turn["spoken_text"], "voice": voices[turn["segment"]["voice_id"]],
-                  "direction": effective_delivery(turn["segment"])}
+                  "direction": performance_direction(turn, turn["segment"]["voice_id"])}
                  for turn in chunk["paragraph_turns"]]
         from .speech_identity import paragraph_rewrite_turn
         repaired_turn = paragraph_rewrite_turn(
@@ -1684,7 +1686,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance
 
-    direction = effective_delivery(chunk["segment"])
+    from .speech_traits import performance_direction
     # Formatting at the edges is not speech. Keep the original chunk for
     # verification, request/cache identity, and source synchronization.
     synthesis_text = trim_speech_text(chunk["spoken_text"])
@@ -1692,6 +1694,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     lanes = []
     for lane_number, speaker in enumerate(speakers, 1):
         voice = voices[speaker["voice_id"]]
+        direction = performance_direction(chunk, speaker["voice_id"])
         request = _speech_request(chunk, voice, engine_identity, config,
                                   performer=speaker if len(speakers) > 1 else None)
         lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
@@ -1705,9 +1708,14 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             metadata = engine.synthesize(prepared, v, path, seed=seed, direction=direction)
             return {"synthesis_text": prepared, **metadata}
 
-        def synthesize_plain(text, path, seed, v=voice):
+        def synthesize_plain(text, path, seed, v=voice, voice_id=speaker["voice_id"]):
             prepared = trim_speech_text(text)
-            metadata = engine.synthesize(prepared, v, path, seed=seed, direction="")
+            plain_direction = deepcopy(chunk)
+            plain_direction["segment"]["delivery"]["direction"] = ""
+            metadata = engine.synthesize(
+                prepared, v, path, seed=seed,
+                direction=performance_direction(plain_direction, voice_id),
+            )
             return {"synthesis_text": prepared, **metadata}
 
         wav, accepted = take(chunk["spoken_text"], generate, request,

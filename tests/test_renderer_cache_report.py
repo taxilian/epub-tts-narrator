@@ -83,6 +83,26 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertFalse((Path(self.config["render"]["work_dir"]) / "speech-cache").exists())
 
+    def test_current_speech_traits_match_verified_audio_in_read_only_report(self):
+        from epub_tts_narrator.renderer.engines import _directed_text
+        from epub_tts_narrator.renderer.speech_text import trim_speech_text
+
+        traits = "Neutral General American accent; clipped phrasing"
+        profile = next(voice for voice in self.bundle["cast"]["voices"]
+                       if voice["id"] == self.voice_id)
+        profile["speechTraits"] = traits
+        request = deepcopy(self.request)
+        request["chunk"]["speech_traits"] = {self.voice_id: traits}
+        text, delivery = _directed_text(trim_speech_text(request["chunk"]["spoken_text"]), traits)
+        self.save(request, metadata={"synthesis_text": text, **delivery})
+        before = self.snapshot()
+
+        report = self.report()
+
+        self.assertEqual(report["summary"]["hits"], 1)
+        self.assertEqual(report["summary"]["misses"], 0)
+        self.assertEqual(self.snapshot(), before)
+
     def test_changed_weights_explain_miss_without_exposing_raw_engine_metadata(self):
         _, record = self.save()
         current = dict(self.engine, checkpoint_files_sha256={"weights": "changed"},
