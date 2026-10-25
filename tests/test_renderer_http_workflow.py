@@ -50,7 +50,7 @@ class HTTPWorkflowTests(unittest.TestCase):
             config["verification"]["model"] = str(root / "unused-asr")
             config["voices"].update(directory=str(root / "voices"), series_id="http-fixture")
             config["render"].update(work_dir=str(root / "work"), output_dir=str(root / "audio"),
-                                    ffmpeg=FFMPEG, ffprobe=FFPROBE)
+                                    ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False)
             config["quality"] = validate_policy({})
             fixtures, servers = {}, []
             server_messages, client_messages = [], []
