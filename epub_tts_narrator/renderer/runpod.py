@@ -31,7 +31,7 @@ def _local_head():
 def add_parser(commands):
     group = commands.add_parser("runpod", help="Bootstrap, update, and encode with a stop-by-default Runpod worker")
     actions = group.add_subparsers(dest="runpod_action", required=True)
-    for action in ("bootstrap", "update", "encode", "status", "stop"):
+    for action in ("bootstrap", "update", "encode", "status", "stop", "progress"):
         command = actions.add_parser(action)
         command.add_argument("--config", type=Path, help="Normal local TOML configuration")
         command.add_argument("--override-config", type=Path, help="Remote overrides (default: runpod.local.toml beside local config)")
@@ -51,6 +51,14 @@ def add_parser(commands):
             command.add_argument("--epub", type=Path)
             command.add_argument("--no-update", action="store_true",
                                  help="Encode with the deployed code as-is; by default a stale worker is updated first without stopping")
+        if action == "progress":
+            command.add_argument("--job", help="Show only this chapter job ID")
+            command.add_argument("--watch", action="store_true", help="Follow progress until Ctrl-C without resuming jobs")
+            command.add_argument("--poll-seconds", type=float, default=2.0,
+                                 help="Seconds between refreshes while watching (default: 2)")
+            command.add_argument("--limit", type=int, default=100,
+                                 help="Maximum number of queued jobs to show (default: 100)")
+            command.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
 
 def private_json(path, value):
@@ -129,6 +137,8 @@ class Deployment:
             if self.state.get("pod_id") and self.state["pod_id"] != self.cfg["pod_id"]:
                 raise ValueError("Configured pod_id differs from saved deployment; use a separate state_dir")
             self.state["pod_id"] = self.cfg["pod_id"]
+        if self.cfg.get("volume_id") and self.state.get("volume_id") and self.state["volume_id"] != self.cfg["volume_id"]:
+            raise ValueError("Configured volume_id differs from saved deployment; use a separate state_dir")
         if not self.state.get("deployment_id"):
             self.state["deployment_id"] = uuid.uuid4().hex[:12]
         if not self.state.get("api_key"):
@@ -220,6 +230,14 @@ class Deployment:
         """Read live price/stock and fix the concrete GPU before creating either paid resource."""
         if not self.cfg["image"]:
             raise ValueError("Set runpod.image to a verified Runpod SSH image in the override file")
+        centers = self.api.datacenters().get("dataCenters", [])
+        supported = sorted(center["id"] for center in centers if isinstance(center, dict)
+                           and isinstance(center.get("id"), str)
+                           and "STANDARD" in (center.get("networkVolumeTypes") or []))
+        if self.cfg["data_center_id"] not in supported:
+            raise ValueError(f"runpod.data_center_id {self.cfg['data_center_id']} does not support standard network "
+                             "volumes. Select a supported datacenter: " + ", ".join(supported) +
+                             ". No resources were created.")
         rows = self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud="SECURE", count=1,
                                      minCudaVersion="13.0" if self.cfg["tts_backend"] == "sglang" else "12.9").get("gpus", [])
         gpu_id, price = select_gpu(rows, fallback_id=self.cfg["gpu_type_id"], prefer_h100=self.cfg["prefer_h100"],
@@ -233,12 +251,19 @@ class Deployment:
         return price
 
     def provision(self):
+        pod_confirmed_missing = False
         if self.pod_id and not self.state.get("pod_creation_pending"):
             try:
                 self.api.get_pod(self.pod_id)
             except RunpodAPIError as exc:
                 if not _resource_missing(exc):
+                    # 401/403/5xx and transport failures never prove absence;
+                    # no resource is created or replaced on an uncertain API.
                     raise
+                if self.cfg.get("pod_id"):
+                    raise ValueError(
+                        f"The configured worker {self.pod_id} does not exist in Runpod; "
+                        "correct or remove runpod.pod_id in the configuration.") from None
                 # The saved worker was deleted (for example in the Runpod
                 # console). Persistent storage survives, so provision a new
                 # worker from the saved volume instead of failing on it.
@@ -246,8 +271,7 @@ class Deployment:
                 self.state.pop("pod_id", None)
                 self.state.pop("last_status", None)
                 self.save()
-            else:
-                return
+                pod_confirmed_missing = True
         name = self.cfg["name"] + "-" + self.state["deployment_id"]
         # Reconcile a previous uncertain creation before making any mutation.
         if self.state.get("pod_creation_pending"):
@@ -271,7 +295,8 @@ class Deployment:
             self.state.pop("pod_creation_pending", None)
             self.state.pop("pod_creation_spec", None)
             self.save()
-        price = self.quote()
+        # A healthy worker is still only usable with its persistent volume;
+        # verify both resources before deciding that nothing needs creating.
         volume_id = self.state.get("volume_id") or self.cfg.get("volume_id")
         if volume_id:
             try:
@@ -279,21 +304,37 @@ class Deployment:
             except RunpodAPIError as exc:
                 if not _resource_missing(exc):
                     raise
-                if self.state.get("volume_id") != volume_id:
+                if self.cfg.get("volume_id"):
                     raise ValueError(
                         f"The configured persistent volume {volume_id} does not exist in Runpod; "
                         "correct or remove runpod.volume_id in the configuration.") from None
+                if self.cfg.get("pod_id"):
+                    raise ValueError("The configured runpod.pod_id mounts a deleted volume; remove that pin "
+                                     "to allow a new managed worker and volume to be bootstrapped.") from None
                 # The saved volume was deleted together with its pod; its data
                 # cannot be recovered, so provision a new empty volume.
                 self.notify(f"Saved persistent volume {volume_id} no longer exists in Runpod; creating a new one.")
                 self.state.pop("volume_id", None)
                 self.save()
                 volume_id = None
+                if self.pod_id and not pod_confirmed_missing:
+                    # The surviving worker still mounts the deleted volume and
+                    # cannot run on it. Stop it for good before any paid
+                    # replacement is created; never start a Pod on dead storage.
+                    self._stop_pod(self.pod_id)
+                    self.state.pop("pod_id", None)
+                    self.state.pop("last_status", None)
+                    self.save()
             else:
                 if volume.get("dataCenterId") != self.cfg["data_center_id"]:
                     raise ValueError("Persistent volume must be in the selected GPU datacenter")
                 self.state["volume_id"] = volume_id
                 self.save()
+                if self.pod_id:
+                    return
+        # Read the live price and fix the GPU before creating either paid
+        # resource; an unavailable or over-budget catalog must create nothing.
+        price = self.quote()
         if not volume_id:
             if self.state.get("volume_creation_pending"):
                 matches = [v for v in self.api.list_volumes() if v.get("name") == name]
@@ -856,7 +897,11 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         from .chapter_client import validate_remote_plan
         if args.chapter_format not in (None, "m4a"):
             raise ValueError("Runpod chapter rendering produces M4A; use --chapter-format m4a")
-        config = build_client_config(self.settings["renderer_config"], self.url, self.state["api_key"],
+        # Before provisioning there is no worker URL, and a saved pod_id may be
+        # stale. The preflight never contacts this URL; encode() re-prepares
+        # with the real worker's URL before submitting anything.
+        url = self.url if self.pod_id else f"https://pending-{self.cfg['service_port']}.proxy.runpod.net"
+        config = build_client_config(self.settings["renderer_config"], url, self.state["api_key"],
                                      override_raw=self.settings["override_raw"])
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output, work_dir=args.work_dir, epub=args.epub)
@@ -877,6 +922,11 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
 def run_command(args):
     from .runpod_config import load_settings, build_remote_config
     settings = load_settings(args.config, args.override_config)
+    if args.runpod_action == "progress":
+        # Read-only observation: no deployment lock, no deployment state, and
+        # no resource or paid-compute work of any kind.
+        from .runpod_progress import run_progress
+        return run_progress(settings, args)
     directory = Path(settings["deployment"]["state_dir"])
     with deployment_lock(directory):
         deployment = Deployment(settings)
@@ -900,30 +950,50 @@ def run_command(args):
         if args.runpod_action == "stop":
             deployment.stop()
             return 0
-        if args.runpod_action != "bootstrap" and not deployment.pod_id:
+        if args.runpod_action not in {"bootstrap", "encode"} and not deployment.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
-        if args.runpod_action == "encode" and not deployment.state.get("revision"):
-            raise ValueError("Worker has no deployed code; run runpod bootstrap first")
-        if args.runpod_action == "encode" and args.no_update and not deployment.state.get("bootstrapped"):
-            raise ValueError("Worker has not passed its smoke test; run runpod update first")
         # Fail configuration checks before allocating or starting paid compute.
         build_remote_config(settings["renderer_config"], settings["override_raw"],
                             deployment.pod_id or "preflight", deployment.state["api_key"],
                             deployment=settings["deployment"])
         if args.runpod_action == "encode":
+            # The complete local preflight runs before provisioning or starting
+            # any paid resource, so preflight failures create and start nothing.
+            # A deleted or never-created deployment has no worker URL yet;
+            # encode() re-prepares with the real worker's URL before submitting.
             deployment.prepare_encode(args)
         previous = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         interrupted = False
         operation_error = None
         try:
-            if args.runpod_action == "bootstrap":
+            forced_bootstrap = False
+            if args.runpod_action in {"bootstrap", "encode"}:
+                saved_resources = (deployment.state.get("pod_id"), deployment.state.get("volume_id"))
                 deployment.provision()
+                if args.runpod_action == "encode" and (
+                        deployment.state.get("volume_id") != saved_resources[1]
+                        or not deployment.state.get("revision")
+                        or not deployment.state.get("bootstrapped")):
+                    # The saved revision and smoke flags describe storage that
+                    # was deleted or never existed. Reset them instead of
+                    # silently reusing stale deployment metadata, and give the
+                    # book a fully installed, smoke-checked worker.
+                    forced_bootstrap = True
+                    deployment.state.pop("revision", None)
+                    deployment.state.pop("bootstrapped", None)
+                    deployment.save()
+                    if args.no_update:
+                        deployment.notify("--no-update ignored: this deployment was deleted or never bootstrapped; "
+                                          "installing code, models, and the smoke check before encoding.")
             deployment.start()
             deployment.stop_service()
             updated = False
             if args.runpod_action in {"bootstrap", "update"}:
                 deployment.deploy_code(args.source)
+                updated = True
+            elif forced_bootstrap:
+                deployment.deploy_code("local")
                 updated = True
             elif args.runpod_action == "encode" and not args.no_update:
                 head = _local_head()

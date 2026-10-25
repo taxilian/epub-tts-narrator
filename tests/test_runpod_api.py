@@ -201,6 +201,21 @@ class RunpodAPITests(unittest.TestCase):
         self.assertNotIn("secret", str(caught.exception))
         self.assertEqual(self.opener.open.call_count, 1)
 
+    def test_server_error_exposes_bounded_redacted_json_diagnosis(self):
+        detail = 'Data center "US-NC-2" does not support network volumes.'
+        body = json.dumps({"error": detail + " fixture-explicit-key private-password", "status": 500,
+                           "password": "private-password", "request": {"api_key": "fixture-explicit-key"}}).encode()
+        self.opener.open.side_effect = HTTPError("https://private.invalid", 500, "ignored", {}, BytesIO(body))
+        with self.assertRaises(RunpodAmbiguousOutcome) as caught:
+            self.api.create_volume({"name": "fixture"})
+        message = str(caught.exception)
+        self.assertIn("does not support network volumes", message)
+        self.assertIn("US-NC-2", message)
+        self.assertNotIn("fixture-explicit-key", message)
+        self.assertNotIn("private-password", message)
+        self.assertNotIn('"request"', message)
+        self.assertEqual(self.opener.open.call_count, 1)
+
     def test_authorization_or_validation_rejection_is_definite(self):
         for status in (400, 401, 403, 404, 409, 422, 429):
             with self.subTest(status=status):

@@ -3,8 +3,8 @@
 Pod creation, configuration, lifecycle actions, and the GPU/data-center catalog
 use v2, including detailed placement reads for replacement checks. Routine Pod
 reads and volume management retain v1. Hosts are fixed, redirects
-and ambient HTTP proxies are disabled, and provider error bodies are never
-exposed. A failed mutation is never retried here: callers must reconcile
+and ambient HTTP proxies are disabled. Server failures include bounded JSON
+diagnoses with credentials removed. A failed mutation is never retried here: callers must reconcile
 uncertain outcomes before creating another paid resource.
 """
 
@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 from .common import USER_AGENT, RejectRedirects
+from .diagnostics import configured_secrets, safe_error_text
 
 
 _V1 = "https://rest.runpod.io/v1"
@@ -187,7 +188,8 @@ class RunpodAPI:
                 with self._opener.open(request, timeout=self.timeout) as response:
                     status = response.status
                     if not 200 <= status < 300:
-                        raise self._http_error(status, mutation, context=context)
+                        raise self._http_error(status, mutation, context=context,
+                                               error_body=response.read(_MAX_ERROR_BYTES + 1))
                     content = response.read(_MAX_RESPONSE_BYTES + 1)
                 if len(content) > _MAX_RESPONSE_BYTES:
                     raise self._invalid_response(mutation, context)
@@ -240,12 +242,31 @@ class RunpodAPI:
                 "have succeeded; rerun this command to reconcile the saved state before anything is retried.")
         return RunpodAPIError("Runpod returned an unreadable or unexpected response")
 
-    @staticmethod
-    def _http_error(status, mutation, *, error_body=b"", context=""):
+    def _server_diagnosis(self, error_body):
+        if len(error_body) > _MAX_ERROR_BYTES:
+            return " Provider response exceeded the diagnostic size limit."
+        try:
+            problem = json.loads(error_body)
+        except (ValueError, UnicodeError, RecursionError):
+            return ""
+        if not isinstance(problem, dict):
+            return ""
+        fields = {key: value for key, value in problem.items()
+                  if key in {"error", "message", "detail", "title", "status", "code"}
+                  and isinstance(value, (str, int, float, bool))}
+        if not fields:
+            return ""
+        secrets = configured_secrets(problem) | {self._api_key}
+        detail = safe_error_text(json.dumps(fields, ensure_ascii=False), secrets)
+        detail = re.sub(r"(?i)bearer\s+[^\s\"<>]+", "Bearer [REDACTED]", detail)
+        return " Provider response: " + detail[:2000] + (" [truncated]" if len(detail) > 2000 else "")
+
+    def _http_error(self, status, mutation, *, error_body=b"", context=""):
+        diagnosis = self._server_diagnosis(error_body) if status >= 500 else ""
         if mutation and (status >= 500 or status == 408 or 300 <= status < 400):
             return RunpodAmbiguousOutcome(
                 f"Runpod did not confirm {context} (HTTP {status}). It may have succeeded; rerun "
-                "this command to reconcile the saved state before anything is retried.", status=status)
+                "this command to reconcile the saved state before anything is retried." + diagnosis, status=status)
         if status == 400 and mutation and len(error_body) <= _MAX_ERROR_BYTES:
             try:
                 problem = json.loads(error_body)
@@ -264,5 +285,5 @@ class RunpodAPI:
             409: "reported a resource conflict", 422: "rejected the request settings",
             429: "rate limited the request",
         }.get(status, "rejected the request")
-        return RunpodAPIError(f"Runpod {detail} (HTTP {status})", status=status,
+        return RunpodAPIError(f"Runpod {detail} (HTTP {status})" + diagnosis, status=status,
                               retryable=not mutation and status in _TRANSIENT_STATUSES)

@@ -24,7 +24,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
 6. Assembly/publication: `assembly.py`, `publication.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.
-7. Runpod deployment: `runpod.py`, `runpod_api.py`, `runpod_gpu.py`, `runpod_config.py`.
+7. Runpod deployment: `runpod.py`, `runpod_api.py`, `runpod_gpu.py`, `runpod_config.py`, `runpod_progress.py`.
 
 ## WHERE TO LOOK
 
@@ -73,6 +73,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - See root `RENDERER.md` for renderer configuration and operation.
 - See root `REMOTE_RENDERING.md` for distributed rendering contracts.
 - Chapter execution requires an ephemeral connected-client session; restart and passive progress never grant ownership. Disconnect drains accepted work to a safe boundary, then pauses the job without deleting cache or history.
+- `runpod progress` observes without the deployment lock or any allocation/session mutation. `runpod_api.py` reports bounded credential-redacted JSON server diagnoses; allocation requires a standard-volume-capable datacenter as well as GPU stock.
 - `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.
 - Local `workflow.render()` overlaps one chapter assembly with the next chapter's synthesis; drain assembly before releasing locks. Chunk/recovery algorithms remain shared with chapter jobs.
 - `diagnostics.py` owns fatal frame formatting and payload-free SDK/HTTP error details; managed Runpod failures skip optional stop delays.

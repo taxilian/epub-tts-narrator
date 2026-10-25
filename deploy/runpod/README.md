@@ -30,6 +30,12 @@ checked when creating compute. The selected region must also support network
 volumes. The example's 150 GB volume costs storage fees even while stopped;
 the hourly ceiling covers compute and does not cap storage charges.
 
+The selected datacenter must support **standard network volumes**, not just
+the requested GPU. The live catalog is checked before allocation; a GPU-only
+location such as US-NC-2 is rejected locally with supported alternatives.
+Provider 5xx errors include bounded, credential-redacted JSON error details
+so a storage-placement rejection is visible instead of a blind retry message.
+
 ### GPU selection
 
 By default (`prefer_h100 = true`) a new Pod prefers any available NVIDIA H100
@@ -70,12 +76,55 @@ without waiting for the full readiness timeout.
 .venv-renderer/bin/audiobook-render runpod stop
 ```
 
+To inspect chapter progress while Encode is attached, use a second terminal:
+
+```sh
+.venv-renderer/bin/audiobook-render runpod progress --watch
+# Or inspect one saved chapter without resuming it:
+.venv-renderer/bin/audiobook-render runpod progress --job JOB_ID --json
+```
+
+Progress is read-only and works while Encode holds the deployment lock. It
+shows chapter counts, connected/paused state, and the latest completed-block
+counts when available. It never starts a Pod, creates a session, renews an
+execution lease, or resumes a job. Stop watching with Ctrl-C. After updating
+the worker, only jobs explicitly owned by a live rendering client can run;
+closing that client pauses unfinished work after in-flight cache writes drain.
+
 Encode first compares the deployed revision with this checkout's committed
 HEAD. If they differ, it deploys the new code, runs the full install and the
 smoke check, and continues into rendering **without stopping the Pod in
 between** — no separate `update` run is needed. `--no-update` skips the check
-and encodes with the deployed code as-is; a worker that never passed its smoke
-check still refuses to encode.
+and encodes with the deployed code as-is; a worker that was deleted or never
+passed its smoke check is fully bootstrapped first (see below).
+
+### Deleted worker or volume recovery
+
+If the Pod or network volume was deleted in the Runpod console, the next
+managed `encode` recovers by itself. It first validates the local book and
+configuration — a preflight failure creates and starts nothing — and then
+verifies both saved resources before any paid mutation. A deleted managed Pod
+is recreated beside the retained volume; a deleted volume is replaced with a
+new empty one, and a surviving Pod that mounted it is stopped and confirmed
+stopped before any replacement is created, so nothing ever boots on dead
+storage. Local caches, Ceph objects, lease and lock files are never touched.
+
+Storage replacement invalidates the saved deployed revision and smoke flag:
+encode redeploys this checkout, runs the full install, downloads models, and
+passes the smoke check before submitting the book. `--no-update` never skips
+this mandatory bootstrap; it is ignored with a notice when the deployment was
+deleted or never bootstrapped. A healthy deployment keeps the fast path:
+runtime install only, no smoke check, no redeploy.
+
+An explicit `runpod.pod_id` or `runpod.volume_id` is a pin: a pin the provider
+confirms missing is a configuration error, never a silent recreation. Managed
+saved IDs are recreated instead. Unconfirmed API answers (401/403/5xx, lost
+responses) never prove absence and never trigger replacement; a pod creation
+whose response was lost is reconciled by its unique saved name on the next run
+instead of duplicated. After the worker is replaced, chapter jobs saved by an
+older server are resubmitted under the live client session the first time the
+new server confirms the old job is gone (HTTP 404); previous receipts and
+partial downloads are archived only after the replacement is acknowledged.
 
 `--config FILE` selects the normal configuration; `--override-config FILE`
 selects a different deployment override. Bootstrap and Update default to

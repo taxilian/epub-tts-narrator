@@ -38,6 +38,9 @@ class RunpodLifecycleTests(unittest.TestCase):
             "override_raw": {},
         }
         self.api = Mock()
+        self.api.datacenters.return_value = {"dataCenters": [
+            {"id": "US-FIXTURE-1", "networkVolumeTypes": ["STANDARD"]},
+            {"id": "US-CO-1", "networkVolumeTypes": ["STANDARD"]}]}
         self.api.catalog_gpus.return_value = {"gpus": [{
             "id": self.settings["deployment"]["gpu_type_id"], "name": "Fixture GPU",
             "availability": "HIGH", "price": {"secure": 2.0},
@@ -137,28 +140,38 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.install.assert_called_once_with(full=False)
         fake.encode.assert_called_once()
 
-    def test_encode_no_update_still_requires_a_smoke_tested_worker(self):
+    def test_encode_no_update_recovers_an_unsmoked_worker_with_full_bootstrap(self):
         fake = self.fake_deployment()
         fake.state["bootstrapped"] = False
         args = self.args("encode", "book", "--no-update")
-        with self.assertRaisesRegex(ValueError, "has not passed its smoke test"):
-            self.run_fake(fake, args)
-        fake.start.assert_not_called()
+        self.assertEqual(self.run_fake(fake, args), 0)
+        fake.provision.assert_called_once()
+        fake.deploy_code.assert_called_once_with("local")
+        fake.install.assert_called_once_with(full=True)
+        fake.smoke.assert_called_once()
+        fake.encode.assert_called_once()
+        fake.stop.assert_called_once()
+        notices = " ".join(call.args[0] for call in fake.notify.call_args_list)
+        self.assertIn("--no-update ignored", notices)
 
-    def test_encode_without_deployed_code_requires_bootstrap(self):
+    def test_encode_without_deployed_code_fully_bootstraps_the_worker(self):
         fake = self.fake_deployment()
         del fake.state["revision"]
         fake.state["bootstrapped"] = False
-        with self.assertRaisesRegex(ValueError, "no deployed code"):
-            self.run_fake(fake, self.args("encode", "book"))
-        fake.start.assert_not_called()
+        self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
+        fake.provision.assert_called_once()
+        fake.deploy_code.assert_called_once_with("local")
+        fake.install.assert_called_once_with(full=True)
+        fake.smoke.assert_called_once()
+        fake.encode.assert_called_once()
+        fake.stop.assert_called_once()
 
     def test_errors_in_each_phase_still_stop_existing_or_created_pod(self):
         for action in ("bootstrap", "update", "encode"):
             phases = ["start", "stop_service", "configure", "install", "launch", "encode" if action == "encode" else "smoke"]
-            if action != "encode":
-                phases.append("deploy_code")
             if action == "bootstrap":
+                phases.append("deploy_code")
+            if action in {"bootstrap", "encode"}:
                 phases.append("provision")
             for phase in phases:
                 with self.subTest(action=action, phase=phase):
@@ -675,6 +688,15 @@ class RunpodLifecycleTests(unittest.TestCase):
                     deployment.provision()
                 self.api.create_volume.assert_not_called()
                 self.api.create_pod.assert_not_called()
+
+    def test_gpu_datacenter_without_network_storage_is_rejected_before_allocating(self):
+        self.api.datacenters.return_value = {"dataCenters": [
+            {"id": "US-FIXTURE-1", "networkVolumeTypes": []},
+            {"id": "US-SUPPORTED-1", "networkVolumeTypes": ["STANDARD"]}]}
+        with self.assertRaisesRegex(ValueError, "US-SUPPORTED-1"):
+            self.deployment().provision()
+        self.api.create_volume.assert_not_called()
+        self.api.create_pod.assert_not_called()
 
     def test_ambiguous_create_recovers_exactly_one_named_pod(self):
         deployment = self.deployment()
