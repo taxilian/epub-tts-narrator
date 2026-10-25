@@ -852,6 +852,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(self.api.create_volume.call_count, 2)  # the first raised ambiguous; this retry created
         notices = " ".join(call.args[0] for call in self.notify.call_args_list)
         self.assertIn("made nothing", notices)
+        self.assertIn("runpod.data_center_id", notices)
 
     def test_unconfirmed_volume_creation_with_duplicate_names_refuses_to_create(self):
         deployment = self.deployment()

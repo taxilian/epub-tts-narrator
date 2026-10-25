@@ -107,7 +107,7 @@ class RunpodAPI:
         pod_id = _resource_id(pod_id)
         result = self._request("GET", f"/pods/{pod_id}", v2=True, expected=dict)
         if result.get("id") != pod_id:
-            raise self._invalid_response(False)
+            raise self._invalid_response(False, f"GET /pods/{pod_id}")
         return result
 
     def create_pod(self, spec):
@@ -136,7 +136,7 @@ class RunpodAPI:
         # v2 start/stop return the updated Pod. An empty response or another
         # resource's response cannot confirm this action; observe before retry.
         if result["id"] != pod_id:
-            raise self._invalid_response(True)
+            raise self._invalid_response(True, f"POST /pods/{pod_id}/action")
         return result
 
     def list_volumes(self):
@@ -180,31 +180,32 @@ class RunpodAPI:
             if encoded:
                 url += "?" + encoded
         request = Request(url, data=body, headers=headers, method=method)
+        context = f"{method} {path}"
         attempts = 1 if mutation else 3
         for attempt in range(attempts):
             try:
                 with self._opener.open(request, timeout=self.timeout) as response:
                     status = response.status
                     if not 200 <= status < 300:
-                        raise self._http_error(status, mutation)
+                        raise self._http_error(status, mutation, context=context)
                     content = response.read(_MAX_RESPONSE_BYTES + 1)
                 if len(content) > _MAX_RESPONSE_BYTES:
-                    raise self._invalid_response(mutation)
+                    raise self._invalid_response(mutation, context)
                 if not content.strip() and allow_empty:
                     return None
                 try:
                     result = json.loads(content)
                 except (ValueError, UnicodeError):
-                    raise self._invalid_response(mutation) from None
+                    raise self._invalid_response(mutation, context) from None
                 if (not isinstance(result, (dict, list))
                         or (expected is not None and not isinstance(result, expected))
                         or (isinstance(result, list) and any(not isinstance(row, dict) for row in result))):
-                    raise self._invalid_response(mutation)
+                    raise self._invalid_response(mutation, context)
                 if require_id:
                     try:
                         _resource_id(result.get("id"))
                     except ValueError:
-                        raise self._invalid_response(mutation) from None
+                        raise self._invalid_response(mutation, context) from None
                 return result
             except HTTPError as exc:
                 status = exc.code
@@ -214,11 +215,12 @@ class RunpodAPI:
                     error_body = b""
                 finally:
                     exc.close()
-                failure = self._http_error(status, mutation, error_body=error_body)
+                failure = self._http_error(status, mutation, error_body=error_body, context=context)
             except (URLError, OSError, HTTPException):
                 if mutation:
                     failure = RunpodAmbiguousOutcome(
-                        "Runpod did not confirm the request. It may have succeeded; check saved resources before retrying.")
+                        f"Runpod did not confirm {context}. It may have succeeded; rerun this "
+                        "command to reconcile the saved state before anything is retried.")
                 else:
                     failure = RunpodAPIError("Unable to reach the Runpod API after a bounded request", retryable=True)
             except RunpodAPIError as exc:
@@ -231,19 +233,19 @@ class RunpodAPI:
             raise failure from None
 
     @staticmethod
-    def _invalid_response(mutation):
+    def _invalid_response(mutation, context=""):
         if mutation:
             return RunpodAmbiguousOutcome(
-                "Runpod returned an unreadable or incomplete success response. The request may have succeeded; "
-                "check saved resources before retrying.")
+                f"Runpod returned an unreadable or incomplete response to {context}. The request may "
+                "have succeeded; rerun this command to reconcile the saved state before anything is retried.")
         return RunpodAPIError("Runpod returned an unreadable or unexpected response")
 
     @staticmethod
-    def _http_error(status, mutation, *, error_body=b""):
+    def _http_error(status, mutation, *, error_body=b"", context=""):
         if mutation and (status >= 500 or status == 408 or 300 <= status < 400):
             return RunpodAmbiguousOutcome(
-                f"Runpod did not confirm the request (HTTP {status}). It may have succeeded; "
-                "check saved resources before retrying.", status=status)
+                f"Runpod did not confirm {context} (HTTP {status}). It may have succeeded; rerun "
+                "this command to reconcile the saved state before anything is retried.", status=status)
         if status == 400 and mutation and len(error_body) <= _MAX_ERROR_BYTES:
             try:
                 problem = json.loads(error_body)

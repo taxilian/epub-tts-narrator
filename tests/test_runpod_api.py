@@ -186,6 +186,7 @@ class RunpodAPITests(unittest.TestCase):
                     method(argument)
                 self.assertTrue(caught.exception.ambiguous)
                 self.assertFalse(caught.exception.retryable)
+                self.assertIn("rerun this command to reconcile", str(caught.exception))
                 self.assertNotIn("secret-value", str(caught.exception))
                 self.assertEqual(self.opener.open.call_count, 1)
         self.sleep.assert_not_called()
@@ -193,8 +194,10 @@ class RunpodAPITests(unittest.TestCase):
     def test_server_error_on_create_is_ambiguous_and_not_retried(self):
         self.opener.open.side_effect = HTTPError("https://private.invalid", 502, "fixture-secret", {}, BytesIO(b"secret-body"))
         with self.assertRaises(RunpodAmbiguousOutcome) as caught:
-            self.api.create_pod({"name": "fixture"})
+            self.api.create_volume({"name": "fixture"})
         self.assertEqual(caught.exception.status, 502)
+        self.assertIn("POST /networkvolumes", str(caught.exception))
+        self.assertIn("rerun this command to reconcile", str(caught.exception))
         self.assertNotIn("secret", str(caught.exception))
         self.assertEqual(self.opener.open.call_count, 1)
 

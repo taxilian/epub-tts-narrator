@@ -16,6 +16,7 @@ from .bundle import load_bundle, make_plan
 from .config import load_config, select_voice_designer
 from .book_context import resolve_book_config, voice_store
 from .diagnostics import configured_secrets, format_fatal
+from .runpod_api import RunpodAmbiguousOutcome
 
 
 def parser():
@@ -442,6 +443,11 @@ def main(argv=None):
         print("Renderer stopped: " + format_fatal(exc, secrets), file=sys.stderr)
         print("Validated text-model responses remain cached. Rerun the same command to retry incomplete requests.",
               file=sys.stderr)
+        return 2
+    except RunpodAmbiguousOutcome as exc:
+        # The saved state carries the recovery procedure; a frame dump only
+        # makes a rerun-and-reconcile instruction look like a crash.
+        print("Renderer stopped: " + str(exc), file=sys.stderr)
         return 2
     except (ValueError, RuntimeError, OSError, KeyError) as exc:
         secrets = configured_secrets(config) if isinstance(config, dict) else ()

@@ -266,6 +266,8 @@ class Deployment:
             # The inventory shows the unconfirmed creation made nothing, so a
             # retry cannot duplicate it.
             self.notify("The unconfirmed worker creation made nothing; creating a new worker.")
+            self.notify("Repeated unconfirmed creations mean Runpod's service is failing; check the "
+                        "Runpod console or try a different runpod.data_center_id.")
             self.state.pop("pod_creation_pending", None)
             self.state.pop("pod_creation_spec", None)
             self.save()
@@ -304,6 +306,8 @@ class Deployment:
                     # The inventory shows the unconfirmed creation made nothing,
                     # so a retry cannot duplicate it.
                     self.notify("The unconfirmed volume creation made nothing; creating a new volume.")
+                    self.notify("Repeated unconfirmed creations mean Runpod's service is failing; check the "
+                                "Runpod console or try a different runpod.data_center_id.")
                     self.state.pop("volume_creation_pending", None)
                     self.save()
             if not self.state.get("volume_creation_pending"):
