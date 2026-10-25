@@ -439,7 +439,8 @@ def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, i
                            include_masters=include_masters, session=watchdog)
             except ChapterClientError:
                 status = observe()
-                if status is None or status.get("state") not in {"failed", "cancelled"}:
+                paused = status is not None and status.get("paused") is True
+                if status is not None and status.get("state") not in {"failed", "cancelled"} and not paused:
                     raise
             else:
                 return saved, {"id": saved["id"], "state": "completed"}
@@ -722,6 +723,9 @@ def _wait_jobs(client, jobs, notify, *, include_masters=True, session=None):
                 status = response.get("job") or client.request("GET", f"v1/jobs/{job_id}")
                 if status.get("id") != job_id:
                     raise ChapterClientError("Chapter service returned another job's status")
+                if status.get("paused") is True:
+                    raise ChapterClientError("The remote chapter is paused because its rendering client disconnected; "
+                                             "rerun the same command to explicitly reconnect and resume it")
                 state = status.get("state")
                 record["state"] = state
                 _save_job(folder, record)
@@ -944,8 +948,8 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         if capabilities.get("protocol") != PROTOCOL:
             raise ChapterClientError("Chapter service uses an incompatible protocol")
         if capabilities.get("client_sessions") != 1:
-            raise ChapterClientError("The chapter service grants work only to client sessions it does not "
-                                     "support; update the worker to the matching renderer before rendering")
+            raise ChapterClientError("The chapter service does not support connected client sessions; "
+                                     "update the worker to the matching renderer before rendering")
         from .paragraphs import paragraph_supported
         if any(not paragraph_supported(capabilities, chunk)
                for chapter, *_ in unfinished for chunk in chapter["chunks"]):

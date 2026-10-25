@@ -157,6 +157,17 @@ class DownloadTests(unittest.TestCase):
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
 class ChapterOrchestrationTests(unittest.TestCase):
+    def test_observing_another_clients_paused_job_does_not_wait_forever(self):
+        client = Mock()
+        client.settings = {"poll_seconds": 0}
+        identifier = "a" * 64
+        client.request.side_effect = [
+            {"events": [], "job": {"id": identifier, "state": "queued", "paused": True}},
+            AssertionError("Observer kept waiting after the owner disconnected")]
+        client.websocket.return_value = None
+        with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ChapterClientError, "paused"):
+            _wait_jobs(client, {identifier: (Path(folder), {"last_event": 0})}, lambda message: None)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

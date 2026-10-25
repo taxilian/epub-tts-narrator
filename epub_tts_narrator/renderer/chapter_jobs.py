@@ -579,8 +579,10 @@ class ChapterJobs:
             except RenderPaused:
                 # A lost owner pauses losslessly: budget, accepted cache, and
                 # history stay intact; the job is never marked failed.
-                self._pause(job_id)
-                self._done()
+                try:
+                    self._pause(job_id)
+                finally:
+                    self._done()
             except BaseException as exc:
                 # Model adapters execute on this worker thread. A raised
                 # KeyboardInterrupt/SystemExit must not strand a durable job
