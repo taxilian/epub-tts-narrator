@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 90 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 96 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -10,7 +10,7 @@ Keep this file current: when modules, entry points, or conventions change, updat
 ## ENTRY
 
 `audiobook-render` maps to `renderer/cli.py:main`; `python -m epub_tts_narrator.renderer` also works.
-Subcommands: `plan`, `cache-report`, `render`, `assemble`, `cleanup`, `voices`, `create-voices`, `import-voice`.
+Subcommands: `plan`, `cache-report`, `render`, `assemble`, `refresh-metadata`, `cleanup`, `voices`, `create-voices`, `import-voice`.
 More commands: `cast`, `voice-aliases`, `doctor`, `serve`, `serve-chapters`, `runpod`.
 `serve` exposes a Fish-compatible `/v1/tts` service through `server.py`.
 `serve-chapters` runs the resumable job server in `chapter_server.py`.
@@ -23,7 +23,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_sessions.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
-6. Assembly/publication: `assembly.py`, `publication.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.
+6. Assembly/publication: `assembly.py`, `publication.py`, `book_artwork.py`, `book_metadata.py`, `refresh_metadata.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.
 7. Runpod deployment: `runpod.py`, `runpod_api.py`, `runpod_gpu.py`, `runpod_config.py`, `runpod_progress.py`.
 
 ## WHERE TO LOOK
@@ -92,3 +92,5 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `clip_repair_*` permit broad clip-local synthesis text, delivery, trait, and split plans after two parallel blind approvals. `clip_recovery.py` routes repeated/terminal failures without changing canonical source or voice identity; existing budgets still apply.
 - `exhaustion_candidates.py` nominates physically usable, bound full-span takes; lexical/syllable differences are chooser evidence, not vetoes. `exhaustion_selection.py` honors the decisive LLM choice with `llm_exhaustion_selection`, retaining original failed reports and hash-bound audits through cache and assembly. Never re-veto the choice with ordinary lexical guards.
 - `gemini_voice_design.py` treats an HTTP-answered creation failure as knowable: reconcile by exact-name listing, adopt a voice created despite the error, or confirm nothing was created and allow retry. Only transport failures leave a pending state; the first empty listing keeps it repairable, and a repeated empty listing after a recorded failed cleanup becomes a `confirmed_absent` record instead of blocking forever.
+- `book_artwork.py` reads checksum-matched EPUB metadata and prepares square blurred-letterbox art without cropping the foreground. `book_metadata.py` enforces required cover preflight and standard M4B tags in both local and remote publication. Artwork policy belongs in publication identity, never speech caches.
+- `refresh_metadata.py` updates intact published books through atomic publication, preserving encoded audio packets and all source timing. It needs no synthesis/verifier model, voice selection, or render cache. `source-epub.json` is a local location hint owned by `source_epub.py`, outside source fingerprints.

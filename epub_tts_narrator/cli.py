@@ -16,6 +16,7 @@ from . import __version__
 from .config import load_config, resolve_config_path
 from .contracts import readiness, review_items, validate_document
 from .epub import extract_epub
+from .source_epub import SOURCE_EPUB_HINT, copy_source_epub_hint, remember_source_epub
 from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerprint,
                        make_units, seed_cast, write_json)
 from .attribution_review import audit_attribution, count_review_batches
@@ -159,7 +160,9 @@ def script_partitions(document):
     return result
 
 
-def export_bundle(document, output, *, allow_review=False):
+def export_bundle(document, output, *, allow_review=False, source_epub=None, source_epub_from=None):
+    if source_epub is not None and source_epub_from is not None:
+        raise ValueError("Specify an original EPUB or a source hint directory, not both")
     state = readiness(document)
     if state["errors"]:
         raise ValueError("Invalid analysis: " + "; ".join(state["errors"][:12]))
@@ -212,12 +215,19 @@ def export_bundle(document, output, *, allow_review=False):
             "provenance": document["provenance"],
         }
         write_json(staging / "manifest.json", manifest)
+        hint_names = []
+        if source_epub is not None:
+            remember_source_epub(staging, source_epub, document["source"]["book"]["id"])
+            hint_names.append(SOURCE_EPUB_HINT)
+        elif source_epub_from is not None and copy_source_epub_hint(
+                source_epub_from, staging, document["source"]["book"]["id"]):
+            hint_names.append(SOURCE_EPUB_HINT)
         # Reserve the destination exclusively. POSIX rename() can replace a
         # concurrently created empty directory, so it is not a no-clobber commit.
         # Publish the manifest last: consumers must require it before reading.
         output.mkdir()
         (output / "scripts").mkdir()
-        for name in (*names, "manifest.json"):
+        for name in (*names, *hint_names, "manifest.json"):
             os.link(staging / name, output / name)
     finally:
         if staging.exists():
@@ -334,6 +344,8 @@ def main(argv=None):
                                  if args.input.suffix.lower() == ".epub" else False)
             if fingerprint(source) != fingerprint(original["source"]):
                 raise ValueError("Input source does not match the existing book directory. Choose another output directory; the saved book was not changed")
+            if args.input.suffix.lower() == ".epub":
+                remember_source_epub(directory, args.input, original["source"]["book"]["id"])
 
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
@@ -346,7 +358,7 @@ def main(argv=None):
                 and not audition_preparation_pending(revised)):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
-            print("Saved analysis is complete; no model calls or file changes are needed.")
+            print("Saved analysis is complete; no model calls or analysis changes are needed.")
             return _speaker_completion_status(original)
 
         directories = related_directories([directory])
@@ -624,7 +636,8 @@ def main(argv=None):
                 progress=lambda message: print(message, file=sys.stderr))
             if directory_mode:
                 state = publish_directory(document, registry, args.output, export_bundle,
-                                          continue_from=args.continue_from)
+                                          continue_from=args.continue_from,
+                                          source_epub=args.input if args.input.suffix.lower() == ".epub" else None)
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
@@ -689,7 +702,8 @@ def main(argv=None):
             write_json(args.output, result, overwrite=args.force)
             print(f"Saved corrections to {args.output}; {readiness(result)['review_count']} review items remain")
         elif args.command == "export":
-            state = export_bundle(document, args.output, allow_review=args.allow_review)
+            state = export_bundle(document, args.output, allow_review=args.allow_review,
+                                  source_epub_from=args.input.parent if args.input.name == "analysis.json" else None)
             print(f"Exported bundle to {args.output}; {state['review_count']} advisory notes.")
             return _speaker_completion_status(document)
         return 0

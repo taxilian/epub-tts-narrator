@@ -44,6 +44,7 @@ completion, error, or interruption.
 
 Operational notes specific to chapter rendering:
 
+- Final M4B publication adds square EPUB cover art and book tags on the client. New analyses remember the EPUB path; use `--epub PATH` for older bundles or moved originals. The required cover is checked before scheduling full-book work. `audiobook-render refresh-metadata BOOK --epub PATH` repairs a finished local output without starting the Pod or regenerating audio.
 - Chapter numbers refer to the analysis manifest and can include a cover, title
   page, or other front matter before the first story chapter. Keep the same
   work directory when resuming.

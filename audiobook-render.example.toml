@@ -140,6 +140,9 @@ sample_true_peak_db = -1.5
 # Defaults: <book-directory>/render-work and <book-directory>/audiobook.
 # Override per run with --work-dir and -o/--output.
 chapter_format = "m4a" # or "mp3"; final book is AAC in an .m4b container
+# New analyses remember their EPUB. Older bundles need --epub PATH.
+# Missing/invalid artwork stops publication by default.
+require_cover = true
 aac_bitrate = "128k"
 mp3_bitrate = "128k"
 # Match completed chapters' loudness while preserving their speech dynamics.

@@ -557,8 +557,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
     chapter_dir = target / "chapters"
     chapter_dir.mkdir()
     cover = Path(cover_path).resolve() if cover_path is not None else None
-    title = str(book.get("title", "Audiobook"))
-    authors = "; ".join(book.get("authors", []))
+    from .book_metadata import metadata_arguments, check_book_tags
     base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
     for chapter, record in audio_chapters:
         output = target / record["path"]
@@ -594,8 +593,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
             for chapter, _ in audio_chapters), encoding="utf-8")
         metadata = scratch / "book.ffmetadata"
         metadata.write_text(
-            f";FFMETADATA1\ntitle={_metadata(title)}\nartist={_metadata(authors)}\n"
-            "genre=Audiobook\n" + "".join(
+            ";FFMETADATA1\n" + "".join(
                 f"[CHAPTER]\nTIMEBASE=1/{sample_rate}\n"
                 f"START={record['start_frame']}\nEND={record['end_frame']}\n"
                 f"title={_metadata(record['title'])}\n" for _, record in audio_chapters),
@@ -608,11 +606,13 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                     "-c:a", "aac", "-b:a", aac_bitrate]
         if cover is not None:
             command += ["-map", "2:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+        command += metadata_arguments(book)
         command += ["-movflags", "+faststart", "-f", "ipod", str(target / "book.m4b")]
         _run(command)
     inspection = _check_encoded(target / "book.m4b", cursor, sample_rate,
                                 chapters=[record for _, record in audio_chapters],
                                 cover=cover is not None, ffprobe=ffprobe)
+    check_book_tags(inspection, book)
     sync = {
         "format": "audiobook-renderer-sync", "version": 1, "book_id": book.get("id"),
         "source_fingerprint": source_fingerprint, "sample_rate": sample_rate,

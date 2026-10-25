@@ -167,6 +167,7 @@ class RendererCLITests(unittest.TestCase):
         verifier.close.assert_called_once()
 
     def test_assemble_does_not_create_any_model(self):
+        self.config.write_text(self.config.read_text() + '[render]\nrequire_cover=false\n')
         with (patch("epub_tts_narrator.renderer.engines.create_engine") as engine,
               patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier,
               patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble):
@@ -179,6 +180,7 @@ class RendererCLITests(unittest.TestCase):
         verifier.assert_not_called()
 
     def test_review_notes_need_no_override_and_missing_speech_still_blocks(self):
+        self.config.write_text(self.config.read_text() + '[render]\nrequire_cover=false\n')
         document = valid_document()
         document["segments"][1]["attribution"]["review_required"] = True
         flagged = self.root / "flagged"
@@ -201,13 +203,14 @@ class RendererCLITests(unittest.TestCase):
 
     def test_omitted_review_flag_preserves_global_setting(self):
         with self.config.open("a") as stream:
-            stream.write('[render]\nallow_review=true\n')
+            stream.write('[render]\nallow_review=true\nrequire_cover=false\n')
         with patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble:
             status, _, error = self.run_cli("assemble", self.bundle, "--config", self.config)
         self.assertEqual(status, 0, error)
         self.assertIs(assemble.call_args.args[1]["render"]["allow_review"], True)
 
     def test_failed_render_closes_verifier_and_engine_even_if_cleanup_fails(self):
+        self.config.write_text(self.config.read_text() + '[render]\nrequire_cover=false\n')
         engine, verifier = Mock(), Mock()
         verifier.close.side_effect = RuntimeError("cleanup fixture")
         with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),

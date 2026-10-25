@@ -137,8 +137,9 @@ def publication_key(bundle, config, plan, voices, chapters, acceptance, engine, 
     """Include all package inputs, but not transient paths to cached audio."""
     path_fields = {"wav_path", "encoded_path", "cache_directory"}
     render = config["render"]
+    from .book_metadata import PUBLICATION_ASSET_VERSION
     return digest({
-        "version": 1, "bundle_hash": bundle["bundle_hash"],
+        "version": PUBLICATION_ASSET_VERSION, "bundle_hash": bundle["bundle_hash"],
         "source_fingerprint": plan["source_fingerprint"], "partial_book": plan["partial_book"],
         "chapters": [{k: v for k, v in chapter.items() if k not in path_fields} for chapter in chapters],
         "voice_assets": {key: value["asset_hash"] for key, value in voices.items()},
@@ -146,6 +147,7 @@ def publication_key(bundle, config, plan, voices, chapters, acceptance, engine, 
         "quality": config["quality"], "review_items": plan["review_items"],
         "allow_review": render["allow_review"],
         "cover_epub": file_hash(render["epub"]) if render["epub"] else None,
+        "require_cover": render.get("require_cover", True),
         "encoding": {key: render.get(key) for key in
                      ("chapter_format", "aac_bitrate", "mp3_bitrate", "ffmpeg", "ffprobe")},
     })

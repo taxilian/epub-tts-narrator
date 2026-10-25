@@ -1119,7 +1119,8 @@ def assemble_remote(bundle, config, *, notify=print):
 
 
 def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
-    from .assembly import extract_cover, package_audio
+    from .assembly import package_audio
+    from .book_metadata import publication_assets
     from .workflow import _publish
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1167,14 +1168,15 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
             composed.update(number=chapter["number"], title=chapter["title"], script_path=chapter["script_path"],
                             total_chapters=len(bundle["chapters"]))
             chapters.append(composed)
-        cover = None
-        if config["render"]["epub"]:
-            cover = extract_cover(config["render"]["epub"], stage / "artwork", expected_book_id=bundle["source"]["book"]["id"])
-        audio = package_audio(chapters, stage, book=bundle["source"]["book"], cover_path=cover,
+        book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
+        audio = package_audio(chapters, stage, book=book, cover_path=cover,
                               chapter_format=config["render"]["chapter_format"],
                               aac_bitrate=config["render"]["aac_bitrate"], mp3_bitrate=config["render"]["mp3_bitrate"],
                               ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
                               source_fingerprint=plan["source_fingerprint"], notify=notify)
+        if artwork is not None:
+            audio["audiobook"]["artwork"] = artwork
+            write_json(stage / "audio-manifest.json", audio)
         write_json(stage / "source.json", bundle["source"])
         write_json(stage / "cast.json", bundle["cast"])
         write_json(stage / "verification.json", acceptance)

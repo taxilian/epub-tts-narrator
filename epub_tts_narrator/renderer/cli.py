@@ -22,13 +22,13 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
         command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
         command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
-        command.add_argument("--epub", type=Path, help="Original EPUB for audiobook cover extraction")
+        command.add_argument("--epub", type=Path, help="Original EPUB for cover and metadata (default: source saved by analyze)")
         if name in {"plan", "cache-report", "render", "assemble"}:
             command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
             command.add_argument("--allow-review", action="store_true", default=None,
@@ -233,8 +233,12 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        config = (load_config(config_path, require_verifier=False) if args.command in {"serve", "cache-report"}
-                  else load_config(config_path))
+        if args.command == "refresh-metadata":
+            config = load_config(config_path, require_verifier=False, require_engine=False)
+        elif args.command in {"serve", "cache-report"}:
+            config = load_config(config_path, require_verifier=False)
+        else:
+            config = load_config(config_path)
         if args.command == "serve":
             from .config import validate_distributed_settings
             from .server_config import ensure_server_api_key
@@ -265,6 +269,10 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command == "refresh-metadata":
+            from .refresh_metadata import refresh_metadata
+            refresh_metadata(bundle, config)
+            return 0
         if args.command == "cleanup":
             from .workflow import cleanup_render_work
             result = cleanup_render_work(bundle, config, dry_run=args.dry_run,
@@ -286,6 +294,9 @@ def main(argv=None):
             config["render"]["allow_review"] = args.allow_review
         if getattr(args, "chapter_format", None) is not None:
             config["render"]["chapter_format"] = args.chapter_format
+        if args.command in {"render", "assemble"} and not getattr(args, "chapters_only", False):
+            from .book_metadata import check_publication_source
+            check_publication_source(bundle, config)
         if args.command == "voice-aliases":
             from .book_aliases import edit_book_aliases
             result = edit_book_aliases(bundle, config, assignments=args.alias_assignments,

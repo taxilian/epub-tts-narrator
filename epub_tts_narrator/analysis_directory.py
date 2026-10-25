@@ -269,7 +269,7 @@ def _rollback(output, owned_directories, expected_files):
             pass
 
 
-def publish_directory(document, registry, output, exporter, *, continue_from=None):
+def publish_directory(document, registry, output, exporter, *, continue_from=None, source_epub=None):
     """Commit an analysis, cumulative cast, and chapter bundle without clobbering."""
     output = validate_output(output)
     continuation = None
@@ -303,7 +303,12 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
         manifest["continuation"] = continuation
         write_json(bundle / "manifest.json", manifest, overwrite=True)
         _, _, bundle_names = _completed_directory(bundle)
-        names = ["analysis.json", "series-cast.json", *bundle_names, "manifest.json"]
+        hint_names = []
+        if source_epub is not None:
+            from .source_epub import SOURCE_EPUB_HINT, remember_source_epub
+            remember_source_epub(bundle, source_epub, document["source"]["book"]["id"])
+            hint_names.append(SOURCE_EPUB_HINT)
+        names = ["analysis.json", "series-cast.json", *bundle_names, *hint_names, "manifest.json"]
         expected_files = {output / name: _identity(bundle / name) for name in names}
         output.mkdir()
         owned_directories[output] = _identity(output)

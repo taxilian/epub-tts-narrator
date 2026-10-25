@@ -44,6 +44,11 @@ def resolve_book_config(bundle, config, *, output=None, work_dir=None, epub=None
     for key, value in (("output_dir", output), ("work_dir", work_dir), ("epub", epub)):
         if value is not None:
             result["render"][key] = str(Path(value).expanduser().resolve())
+    if result["render"].get("epub") is None:
+        from epub_tts_narrator.source_epub import source_epub_hint
+        hinted = source_epub_hint(directory, bundle["source"]["book"]["id"])
+        if hinted is not None:
+            result["render"]["epub"] = str(hinted)
     validate_book_paths(bundle, result)
     return result
 
@@ -62,6 +67,7 @@ def validate_book_paths(bundle, config):
     protected = [directory / name for name in
                  ("manifest.json", "analysis.json", "series-cast.json", "source.json", "audition-scripts.json", ".audition-scripts.lock",
                   "cast.json", "review.json", "scripts", "voice-aliases.json", ".voice-aliases.lock",
+                  "source-epub.json",
                   ".audio-render.lock", ".analysis-update.lock")]
     if not config.get("_book_local_voices"):
         # Existing shared-store workflows retain their original input isolation.

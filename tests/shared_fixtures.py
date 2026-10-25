@@ -77,6 +77,8 @@ PARENTHESIS_TRIM_CASES = (
 def renderer_config(root=None, *, series_id=None, checkpoint="unused-tts", asr_model="unused-asr",
                     max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, **render):
     config = deepcopy(DEFAULTS)
+    # Synthetic renderer fixtures have no publication EPUB/artwork.
+    render.setdefault("require_cover", False)
     if root is not None:
         config["engine"]["checkpoint"] = str(root / checkpoint)
         config["verification"]["model"] = str(root / asr_model)

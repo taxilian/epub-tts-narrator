@@ -14,7 +14,7 @@ from threading import Lock
 from time import monotonic
 import unicodedata
 
-from .assembly import extract_cover, normalize_clip, package_audio
+from .assembly import normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .chapter_records import signed_record
@@ -1120,14 +1120,16 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
     output = Path(config["render"]["output_dir"])
     if not chapters_only:
         from .publication import published_book, check_selection
+        from .book_metadata import check_publication_source
         try:
+            check_publication_source(bundle, config)
             previous = published_book(output, bundle["source"]["book"]["id"])
             check_selection(previous, (c["id"] for c in plan["chapters"]), partial=plan["partial_book"])
         except ValueError as exc:
             raise RenderBlocked(str(exc)) from exc
         config["_publication_expected"] = digest(previous) if previous is not None else None
     epub = config["render"]["epub"]
-    if epub and file_hash(epub) != bundle["source"]["book"]["id"]:
+    if epub and not chapters_only and file_hash(epub) != bundle["source"]["book"]["id"]:
         raise RenderBlocked("Configured EPUB does not match the analyzed book")
     return config, plan, voice_store(bundle, config)
 
@@ -1467,21 +1469,18 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        cover = None
-        if config["render"]["epub"]:
-            cover = extract_cover(config["render"]["epub"], stage / "artwork",
-                                  expected_book_id=bundle["source"]["book"]["id"])
-            if cover is None:
-                notify("The supplied EPUB has no supported JPEG/PNG cover; assembling without artwork.")
-        else:
-            notify("No EPUB supplied: assembling without cover artwork (use --epub to include it).")
+        from .book_metadata import publication_assets
+        book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
         audio = package_audio(
-            rendered, stage, book=bundle["source"]["book"], cover_path=cover,
+            rendered, stage, book=book, cover_path=cover,
             chapter_format=config["render"]["chapter_format"],
             aac_bitrate=config["render"].get("aac_bitrate", "128k"),
             mp3_bitrate=config["render"].get("mp3_bitrate", "128k"),
             ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
             source_fingerprint=bundle["manifest"]["source_fingerprint"], notify=notify)
+        if artwork is not None:
+            audio["audiobook"]["artwork"] = artwork
+            write_json(stage / "audio-manifest.json", audio)
         write_json(stage / "source.json", bundle["source"])
         write_json(stage / "cast.json", bundle["cast"])
         write_json(stage / "verification.json", acceptance)

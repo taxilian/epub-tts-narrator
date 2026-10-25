@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 46 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 90 flat modules, own CLI + AGENTS.md
-├── tests/                    # 247 flat unittest files + fixtures/ + shared helpers
+├── epub_tts_narrator/        # analyzer package: 47 flat modules, stdlib-only
+│   └── renderer/             # renderer subpackage: 96 flat modules, own CLI + AGENTS.md
+├── tests/                    # 257 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -38,6 +38,7 @@ epub-tts-narrator/
 |------|----------|-------|
 | Add/change analysis behavior | `epub_tts_narrator/pipeline.py` (1323 ln) | `analyze` entry; segmentation, cast/evidence checks, LLM alignment |
 | EPUB ingestion | `epub_tts_narrator/epub.py` | `extract_epub` (45 callers); spine order, safety limits |
+| Original EPUB location | `epub_tts_narrator/source_epub.py` | Book-bound local `source-epub.json`; separate from source fingerprints; final publication rechecks EPUB bytes |
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
 | Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |

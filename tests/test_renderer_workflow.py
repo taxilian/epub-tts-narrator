@@ -113,6 +113,14 @@ class RendererWorkflowTests(unittest.TestCase):
         return render(bundle or self.bundle, config or self.config, self.engine,
                       self.verifier, notify=lambda _: None)
 
+    def test_chapters_only_does_not_require_an_available_original_epub(self):
+        from epub_tts_narrator.renderer.workflow import _preflight
+        self.config["render"].update(require_cover=True, epub=str(self.root / "moved-original.epub"))
+        _preflight(self.bundle, self.config, chapters_only=True)
+        self.assertFalse(self.engine.speech_calls)
+        with self.assertRaisesRegex(ValueError, "no longer available"):
+            _preflight(self.bundle, self.config, chapters_only=False)
+
     def test_accepted_take_resumes_without_generation_or_reverification(self):
         wav, first = self.take()
         calls = len(self.verifier.calls)

@@ -34,6 +34,7 @@ RENDER_CONTRACT = {
     "sample_rate": {"default": 44100, "kind": "int", "range": (44100, 44100),
                     "chapter": True, "remote_safe": True},
     "allow_review": {"default": False, "kind": "bool"},
+    "require_cover": {"default": True, "kind": "bool"},
     "paragraph_synthesis": {"default": True, "kind": "bool", "remote_safe": True},
     "paragraph_pause_ms": {"default": 400, "kind": "int", "range": (0, 5000),
                            "chapter": True, "checked": True, "remote_safe": True},
@@ -329,7 +330,7 @@ def validate_distributed_settings(config):
         raise ValueError("server.request_timeout_seconds must be from 1 through 3600")
 
 
-def load_config(path=None, *, require_verifier=True):
+def load_config(path=None, *, require_verifier=True, require_engine=True):
     from .quality import QUALITY_DEFAULTS, validate_policy
     from epub_tts_narrator.config import (
         DEFAULTS as ANALYZER_DEFAULTS, resolve_config_path, validate_huggingface_settings,
@@ -508,7 +509,7 @@ def load_config(path=None, *, require_verifier=True):
             raise ValueError(f"casting.{key} must be a finite number from {low} to {high}")
     workers = result["render_pool"]["workers"]
     needs_local_engine = not remote_chapters and (not workers or any(worker["type"] == "local" for worker in workers))
-    if (result["engine"]["type"] == "drama3_mlx" and needs_local_engine
+    if (require_engine and result["engine"]["type"] == "drama3_mlx" and needs_local_engine
             and not result["engine"]["checkpoint"]):
         raise ValueError("engine.checkpoint is required for Drama 3")
     for section, key in (

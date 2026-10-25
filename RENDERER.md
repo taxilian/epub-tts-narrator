@@ -930,14 +930,27 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 | `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio using original manifest numbers, including when a subset is selected; empty entries are marked skipped. |
 | `book.m4b` | AAC audiobook with chapter titles and timing. |
 | `chapter-links/chapter-01.m4a` etc. | Convenience symlinks to each finished chapter's audio inside `chapters/`; renderer-owned and ignored during replacement validation. Entries are always symlinks. |
-| `artwork/cover.jpg` or `.png` | Original declared EPUB cover, when available. |
+| `artwork/cover.jpg` | Square 1600×1600 cover embedded in the M4B. |
+| `artwork/original-cover.jpg` or `.png` | Original declared EPUB cover, retained byte-for-byte. |
 | `sync.json` | Exact PCM frame ranges linking audio chunks to source text. |
 | `source.json`, `cast.json` | Portable canonical text and voice assignments. |
 | `verification.json` | Accepted chunk reports, transcripts, and hashes. |
 | `audio-manifest.json` | Audio inventory, durations, chapter ranges, and checksums. |
 | `render.json` | Completion marker, provenance, engine/verifier identities, voice hashes, and file checksums. |
 
-The EPUB's byte hash must match the analyzed book before its cover is extracted. Declared JPEG and PNG covers are copied without changing the artwork and embedded in the M4B. Missing or unsupported cover formats produce no artwork; an unsafe or mismatched EPUB stops the run.
+New EPUB analyses retain a local `source-epub.json` location hint, bound to the analyzed book's SHA-256. Rendering uses that original automatically. The hint is separate from analysis fingerprints and voice/audio cache identities. For an older analysis or a moved original, pass `--epub PATH`; the EPUB's byte hash must match the analyzed book. Local and remote chapter rendering use the same final publication path for artwork and tags.
+
+The full declared JPEG/PNG cover is scaled proportionally into a 1600×1600 square, over a blurred, darkened background derived from the same image. The sharp foreground is never cropped or stretched. The original image is retained, and the square JPEG is embedded as attached cover art. Required artwork is checked before synthesis. Missing or unsupported artwork stops full-book publication by default; `--chapters-only` can still generate speech. Set `render.require_cover = false` only when deliberately publishing without artwork. Unsafe, corrupt, or mismatched EPUB inputs still stop the run.
+
+The EPUB supplies title, author/album artist, album title, publication date, description, rights, language, and series grouping when present. The container is marked as an audiobook. Additional EPUB metadata, including publisher, identifiers, subjects, contributors, and series position, is retained in `audio-manifest.json`; player support for these extra fields varies. FFprobe checks the standard embedded tags and cover before publication.
+
+To add or refresh artwork and metadata on a completed book without generating speech or re-encoding audio:
+
+```sh
+audiobook-render refresh-metadata path/to/book-directory --epub path/to/original.epub
+```
+
+This command needs only FFmpeg/FFprobe and the existing finished output; it does not need models or render caches. It stream-copies the M4B's encoded audio, preserves chapter files and synchronization ranges, verifies that the encoded audio packets are identical, and updates all affected checksums. The previous book remains intact until the replacement passes verification. The original EPUB location is saved for future commands.
 
 Chapters and the final M4B are encoded independently from the same assembled lossless PCM. The final book is never built by re-encoding the lossy chapter files. FFprobe checks the resulting duration, chapter tags, and embedded cover. Completed chapter PCM, encoded chapter copies, accepted chunk PCM, and failed attempts remain in the work cache for recovery; the published audiobook does not duplicate the PCM files.
 

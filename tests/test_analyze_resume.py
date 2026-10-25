@@ -250,7 +250,7 @@ class AnalyzeResumeTests(unittest.TestCase):
                 self.assertTrue(any(row["attribution"]["basis"] == "user" for row in result["segments"]))
                 self.assertIn("Speaker number(s)", error)
 
-    def test_advisory_notes_alone_need_no_model_or_file_rewrite(self):
+    def test_advisory_notes_alone_need_no_model_or_analysis_rewrite(self):
         epub, path, _ = self.seed(missing=False, advisory=True)
         self.assertTrue(json.loads((path / "review.json").read_text()))
         before = snapshot(path)
@@ -258,8 +258,12 @@ class AnalyzeResumeTests(unittest.TestCase):
             status, output, error, provider = self.run_cli(*args)
             self.assertEqual(status, 0, error)
             provider.assert_not_called()
-            self.assertIn("no model calls or file changes", output)
-            self.assertEqual(snapshot(path), before)
+            self.assertIn("no model calls or analysis changes", output)
+            after = snapshot(path)
+            hint = after.pop("source-epub.json", None)
+            self.assertEqual(after, before)
+            if args[0] == epub:
+                self.assertEqual(json.loads(hint)["path"], str(epub.resolve()))
 
     def test_completed_legacy_book_gets_spelling_scan_once_without_reanalysis_or_new_voices(self):
         _, path, original = self.seed(missing=False, normalized=False)
@@ -279,7 +283,7 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, output, error, provider = self.run_cli(path)
         self.assertEqual(status, 0, error)
         provider.assert_not_called()
-        self.assertIn("no model calls or file changes", output)
+        self.assertIn("no model calls or analysis changes", output)
         self.assertEqual(snapshot(path), before)
 
     def test_spelling_timeout_preserves_completed_legacy_book_and_can_resume(self):
