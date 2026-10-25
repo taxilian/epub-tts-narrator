@@ -31,6 +31,7 @@ from .drama3_design import (
 )
 from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS, get_drama3_model
 from .speech_text import speech_text_parts, trim_speech_text
+from .performance_compiler import compile_performance, trim_performance
 
 
 DRAMA3_RUNTIME_VERSION = "0.1.1+epub.1"
@@ -60,7 +61,7 @@ class TTSEngine(Protocol):
 
     def synthesize(
         self, text: str, voice: dict[str, Any], output_path: Path, *,
-        seed: int, direction: str = "",
+        seed: int, direction: str = "", performance=None, traits: str = "",
     ) -> dict[str, Any]: ...
 
 
@@ -128,6 +129,27 @@ def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
         "direction_applied": control is not None,
         "applied_control": control,
         "direction_note": "",
+    }
+
+
+def prepare_synthesis(text, direction="", *, performance=None, traits=""):
+    """Compile the same exact audible inputs for rendering and cache identity."""
+    text = _text(text, "text")
+    if performance is None:
+        if traits:
+            raise EngineError("Separate habitual traits require a structured performance record")
+        prepared = _text(trim_speech_text(text), "text")
+        directed, metadata = _directed_text(prepared, direction)
+        return prepared, directed, metadata
+    try:
+        prepared, record = trim_performance(text, performance)
+        compiled = compile_performance(prepared, record, traits=traits, direction=direction)
+    except ValueError as exc:
+        raise EngineError(str(exc)) from exc
+    return prepared, compiled["text"], {
+        "direction": compiled["direction"], "direction_applied": bool(direction or traits or record["controls"]),
+        "applied_control": "structured_performance", "direction_note": "",
+        "expressive_performance": compiled,
     }
 
 
@@ -271,6 +293,7 @@ class Drama3MLXEngine:
             "reference_voice": True,
             "preset_voice": False,
             "delivery_control": True,
+            "structured_performance": True,
             "multi_speaker": True,
             "unconditioned_voice_creation": False,
         }
@@ -410,11 +433,10 @@ class Drama3MLXEngine:
 
     def _generate(
         self, text: str, output_path: Path, *, seed: int,
-        references: list[Any], direction: str = "",
+        references: list[Any], direction: str = "", performance=None, traits: str = "",
     ) -> dict[str, Any]:
-        text = _text(trim_speech_text(_text(text, "text")), "text")
         _seed(seed)
-        engine_text, delivery = _directed_text(text, direction)
+        _, engine_text, delivery = prepare_synthesis(text, direction, performance=performance, traits=traits)
         return {
             **self._generate_audio(engine_text, output_path, seed=seed, references=references),
             **delivery,
@@ -531,13 +553,14 @@ class Drama3MLXEngine:
 
     def synthesize(
         self, text: str, voice: dict[str, Any], output_path: Path, *,
-        seed: int, direction: str = "",
+        seed: int, direction: str = "", performance=None, traits: str = "",
     ) -> dict[str, Any]:
-        text = _text(trim_speech_text(_text(text, "text")), "text")
+        # Validate the full request before encoding a voice/loading a model.
+        prepare_synthesis(text, direction, performance=performance, traits=traits)
         _seed(seed)
         return self._generate(
             text, output_path, seed=seed, references=[self._reference(voice)],
-            direction=direction,
+            direction=direction, performance=performance, traits=traits,
         )
 
     def synthesize_dialogue(
@@ -605,7 +628,8 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
         source_text = _text(turn.get("text"), label)
         text, leading, trailing = speech_text_parts(source_text)
         text = _text(text, label)
-        _, delivery = _directed_text(text, turn.get("direction", ""))
+        _, directed, delivery = prepare_synthesis(source_text, turn.get("direction", ""),
+            performance=turn.get("performance"), traits=turn.get("traits", ""))
         voice = turn["voice"]
         if voice.get("kind") != "reference":
             raise EngineError("Drama 3 dialogue requires saved reference voices")
@@ -640,6 +664,8 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
         # boundaries removed by edge trimming, while actual adjoining fragments
         # ("look" + "ed") remain one word.
         if (rendered_turns
+                and "expressive_performance" not in delivery
+                and "expressive_performance" not in rendered_turns[-1]
                 and rendered_turns[-1]["speaker_id"] == speaker_id
                 and rendered_turns[-1]["applied_control"] == delivery["applied_control"]
                 and (delivery["applied_control"] != "style_prefix"
@@ -652,13 +678,16 @@ def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, An
             previous["trailing_boundary"] = trailing
         else:
             rendered_turns.append({"speaker_id": speaker_id, "text": text,
-                                   "trailing_boundary": trailing, **delivery})
+                                   "trailing_boundary": trailing, "compiled_text": directed, **delivery})
     lines = []
     for turn in rendered_turns:
         # Adjacent literal fragments must not form a control tag when
         # concatenated, even if neither fragment contained a full tag.
         text = _text(turn["text"], "dialogue rendered turn text")
-        directed, _ = _directed_text(text, turn["direction"])
+        if "expressive_performance" in turn:
+            directed = turn["compiled_text"]
+        else:
+            directed, _ = _directed_text(text, turn["direction"])
         lines.append(f"<|speaker:{turn['speaker_id']}|> {directed}")
     return "\n".join(lines), voices, {
         "speaker_mapping": speaker_mapping,

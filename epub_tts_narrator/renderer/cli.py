@@ -22,17 +22,33 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
-        command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
-        command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
-        command.add_argument("--epub", type=Path, help="Original EPUB for cover and metadata (default: source saved by analyze)")
+        if name in {"prepare-performance", "compare-performance"}:
+            command.set_defaults(work_dir=None, output=None, epub=None)
+            command.add_argument("--plan-file", type=Path, help="Performance-plan JSON (default: BOOK/performance-plan.json for preparation; COMPARISON/performance-plan.json for comparison)")
+        else:
+            command.add_argument("--work-dir", type=Path, help="Book-specific cache directory (default: BOOK/render-work)")
+            command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
+            command.add_argument("--epub", type=Path, help="Original EPUB for cover and metadata (default: source saved by analyze)")
+        if name == "prepare-performance":
+            command.add_argument("--chapters", required=True, help="Explicit manifest chapter numbers to plan, e.g. 1 or 1-3")
+        if name == "compare-performance":
+            command.add_argument("--chapter", type=int, required=True, help="One manifest chapter number to compare")
+            command.add_argument("--directory", type=Path, required=True, help="Separate comparison directory, outside the original book and render caches")
+            command.add_argument("--prepare-only", action="store_true", help="Freeze source/voices and prepare expressive controls without loading synthesis or ASR models")
+            command.add_argument("--local", action="store_true", help="Use the configured local engine and ASR; ignore remote chapter and render-pool workers for this comparison")
         if name in {"plan", "cache-report", "render", "assemble"}:
             command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
             command.add_argument("--allow-review", action="store_true", default=None,
                                  help="Compatibility option; review notes are advisory and need no override")
+        if name in {"plan", "render", "assemble"}:
+            command.add_argument("--performance-plan", type=Path,
+                                 help="Prepared scoped performance JSON; implies expressive mode")
+            command.add_argument("--performance-mode", choices=("legacy", "expressive"),
+                                 help="Performance conditioning (default: configured mode, normally legacy)")
         if name in {"render", "assemble"}:
             command.add_argument("--chapter-format", choices=("m4a", "mp3"),
                                  help="Individual chapter format (default: configured format, normally m4a)")
@@ -233,12 +249,15 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command == "refresh-metadata":
+        if args.command in {"refresh-metadata", "prepare-performance"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
         else:
             config = load_config(config_path)
+        if args.command == "compare-performance" and args.local:
+            config["render_pool"]["workers"] = []
+            config["remote_chapters"]["url"] = ""
         if args.command == "serve":
             from .config import validate_distributed_settings
             from .server_config import ensure_server_api_key
@@ -269,6 +288,57 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command in {"prepare-performance", "compare-performance"}:
+            from epub_tts_narrator.config import load_config as load_analysis_config
+            from epub_tts_narrator.performance_planning import load_prepared_performance, prepare_performance
+            if args.command == "prepare-performance":
+                selected = chapter_numbers(args.chapters, len(bundle["chapters"]))
+                destination = args.plan_file or Path(bundle["directory"]) / "performance-plan.json"
+                prepare_performance(bundle, load_analysis_config(config_path), destination, chapters=selected)
+                print(f"Prepared expressive performance plan: {destination}")
+                return 0
+            if config.get("remote_chapters", {}).get("url"):
+                raise ValueError("compare-performance uses the configured local/render-pool engine; remote chapter services do not yet transport expressive plans")
+            from .performance_comparison import compare_chapter, prepare_comparison
+            prepared = prepare_comparison(bundle, config, args.chapter, args.directory)
+            destination = prepared["directory"] / "performance-plan.json"
+            if args.plan_file is not None:
+                performance = load_prepared_performance(prepared["bundle"], args.plan_file, chapters=[args.chapter])
+                # A user-supplied plan is a read-only input; the comparison owns
+                # its own copy when rendering starts.
+            else:
+                from .common import read_json, regular_file
+                saved_plan = (read_json(regular_file(destination))
+                              if destination.exists() or destination.is_symlink() else None)
+                if not isinstance(saved_plan, dict) or saved_plan.get("status") != "complete":
+                    prepare_performance(prepared["bundle"], load_analysis_config(config_path), destination, chapters=[args.chapter])
+                performance = load_prepared_performance(prepared["bundle"], destination, chapters=[args.chapter])
+            if args.prepare_only:
+                print(f"Comparison source and voices frozen: {prepared['directory']}")
+                print(f"Expressive performance plan ready: {args.plan_file or destination}")
+                return 0
+            from .engines import create_engine
+            from .model_setup import ModelSetup
+            from .pool import create_render_components
+            from .verification import create_verifier
+            from .interrupts import RenderInterrupts, stop_if_requested
+            setup = ModelSetup(config)
+            workers = config.get("render_pool", {}).get("workers", [])
+            if not workers or any(worker["type"] == "local" for worker in workers):
+                setup.ensure("engine")
+            setup.ensure("verification")
+            if workers:
+                engine, verifier = create_render_components(config, verifier_factory=create_verifier)
+            else:
+                engine = create_engine(config["engine"])
+                verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
+            interrupts = RenderInterrupts()
+            interrupts.__enter__()
+            result = compare_chapter(bundle, config, engine, verifier, chapter_number=args.chapter,
+                                     directory=args.directory, performance_plan=performance)
+            stop_if_requested()
+            print(f"Open chapter comparison: {result['html']}")
+            return 0
         if args.command == "refresh-metadata":
             from .refresh_metadata import refresh_metadata
             refresh_metadata(bundle, config)
@@ -294,6 +364,13 @@ def main(argv=None):
             config["render"]["allow_review"] = args.allow_review
         if getattr(args, "chapter_format", None) is not None:
             config["render"]["chapter_format"] = args.chapter_format
+        if getattr(args, "performance_plan", None) is not None:
+            config["render"].update(performance_plan=str(args.performance_plan.expanduser().resolve()),
+                                   performance_mode="expressive")
+        if getattr(args, "performance_mode", None) is not None:
+            if args.performance_plan is not None and args.performance_mode == "legacy":
+                raise ValueError("--performance-plan requires expressive mode; omit it to use legacy conditioning")
+            config["render"]["performance_mode"] = args.performance_mode
         if args.command in {"render", "assemble"} and not getattr(args, "chapters_only", False):
             from .book_metadata import check_publication_source
             check_publication_source(bundle, config)

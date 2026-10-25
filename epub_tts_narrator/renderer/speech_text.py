@@ -6,8 +6,8 @@ _PAREN_EDGES = _EDGE_QUOTES | frozenset("()")
 _SENTENCE_ENDS = frozenset(".,;:!?…")
 
 
-def speech_text_parts(value: str) -> tuple[str, str, str]:
-    """Prepare a target and retain its removed leading/trailing boundaries.
+def speech_text_indices(value: str) -> list[int]:
+    """Identify the exact retained code points of the prepared synthesis target.
 
     Source segmentation can leave an opening parenthesis on one speaker's
     fragment and its closing mark on another. Strip those edge marks, including
@@ -42,7 +42,12 @@ def speech_text_parts(value: str) -> tuple[str, str, str]:
         start += 1
     while end > start and (value[indices[end - 1]].isspace() or value[indices[end - 1]] in _EDGE_QUOTES):
         end -= 1
-    kept = indices[start:end]
+    return indices[start:end]
+
+
+def speech_text_parts(value: str) -> tuple[str, str, str]:
+    """Prepare a target and retain its removed leading/trailing boundaries."""
+    kept = speech_text_indices(value)
     if not kept:
         return "", value, ""
     return "".join(value[index] for index in kept), value[:kept[0]], value[kept[-1] + 1:]

@@ -139,6 +139,9 @@ sample_true_peak_db = -1.5
 [render]
 # Defaults: <book-directory>/render-work and <book-directory>/audiobook.
 # Override per run with --work-dir and -o/--output.
+performance_mode = "legacy" # opt-in "expressive" uses BOOK/performance-plan.json
+# Prepare controls with prepare-performance, or use compare-performance for A/B listening.
+# A book-specific plan can be supplied with --performance-plan PATH; no global path is needed.
 chapter_format = "m4a" # or "mp3"; final book is AAC in an .m4b container
 # New analyses remember their EPUB. Older bundles need --epub PATH.
 # Missing/invalid artwork stops publication by default.

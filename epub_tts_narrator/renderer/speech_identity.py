@@ -11,7 +11,8 @@ from copy import deepcopy
 from collections.abc import Mapping
 import re
 
-from .engines import _directed_text, _text, format_dialogue
+from .engines import _directed_text, _text, format_dialogue, prepare_synthesis
+from .performance_compiler import performance_kwargs
 from .speech_text import trim_speech_text
 
 
@@ -211,6 +212,11 @@ def _direction(chunk, voice_id):
     segment = chunk.get("segment")
     if not isinstance(segment, Mapping):
         raise ValueError("Speech request is missing its segment")
+    if "expressive_performance" in chunk:
+        direction = chunk.get("expressive_direction", "")
+        if not isinstance(direction, str):
+            raise ValueError("Expressive passage direction must be text")
+        return direction
     from .speech_traits import performance_direction
     return performance_direction(chunk, voice_id)
 
@@ -242,6 +248,10 @@ def paragraph_rewrite_turn(request, voices_by_asset):
     chunk, assets = request.get("chunk", {}), request.get("voice_assets", {})
     turns = chunk.get("paragraph_turns")
     if not isinstance(turns, list) or len(turns) < 2 or not isinstance(assets, Mapping):
+        return None
+    if any(isinstance(turn, Mapping) and "expressive_performance" in turn for turn in turns):
+        # Legacy rewrite callbacks cannot rebind scoped controls after changing
+        # the words. The outer fallback can still retry intact original turns.
         return None
     prepared, bindings = [], []
     for turn in turns:
@@ -496,9 +506,17 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
         voice_id = (performer.get("voice_id") if isinstance(performer, Mapping)
                     else chunk.get("segment", {}).get("voice_id"))
         direction = _direction(chunk, voice_id)
+        expressive = performance_kwargs(chunk, voice_id)
         if known:
-            directed, delivery = _directed_text(text, direction)
+            text, directed, delivery = prepare_synthesis(chunk.get("spoken_text"), direction, **expressive)
             result.update(text=directed, voice=voice_conditioning_identity(voice))
+            if expressive:
+                # The request and engine metadata retain the full compiler
+                # audit. Cache identity follows actual conditioning: adding a
+                # plan that compiles to identical text must reuse accepted audio.
+                if (engine_metadata is not None
+                        and engine_metadata.get("expressive_performance") != delivery["expressive_performance"]):
+                    raise ValueError("Recorded expressive performance differs from the prepared speech input")
             # Local workflow records the trimmed target before controls; HTTP
             # records the final directed text. Both describe this exact input.
             _check_recorded_text(engine_metadata, (text, directed))
@@ -511,6 +529,8 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
                     and engine_metadata["applied_control"] != delivery["applied_control"]):
                 raise ValueError("Recorded delivery differs from the prepared speech input")
         else:
+            if expressive:
+                raise ValueError("Generation identity has no structured-performance compiler for this engine")
             result.update(text=text, direction=direction, voice=voice)
             _check_recorded_text(engine_metadata, (text,))
         return result
@@ -524,17 +544,24 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
             raise ValueError("Paragraph contains an invalid turn")
         voice = _voice(assets.get(turn["segment"].get("voice_id")), voices_by_asset)
         turns.append({"text": _text(turn.get("spoken_text"), "text"),
-                      "direction": _direction(turn, turn["segment"].get("voice_id")), "voice": voice})
+                      "direction": _direction(turn, turn["segment"].get("voice_id")), "voice": voice,
+                      **performance_kwargs(turn, turn["segment"].get("voice_id"))})
     if known:
         # Use the rendering formatter itself: edge whitespace can affect joins,
         # and request-local speaker numbering depends on first-use voice order.
         text, ordered_voices, formatted = format_dialogue(turns)
         result.update(text=text, references=[voice_conditioning_identity(v) for v in ordered_voices])
+        if any("performance" in turn for turn in turns):
+            if (engine_metadata is not None
+                    and engine_metadata.get("turn_directions") != formatted["turn_directions"]):
+                raise ValueError("Recorded dialogue expressive controls differ from the prepared input")
         _check_recorded_text(engine_metadata, (text,))
         for field in ("speaker_count", "rendered_turn_count"):
             if (engine_metadata is not None and field in engine_metadata
                     and engine_metadata[field] != formatted[field]):
                 raise ValueError("Recorded dialogue grouping differs from the prepared speech input")
     else:
+        if any("performance" in turn for turn in turns):
+            raise ValueError("Generation identity has no structured-performance compiler for this engine")
         result["turns"] = turns
     return result

@@ -23,8 +23,8 @@ from .drama3_models import (
     MLX_AUDIO_DRAMA3_REQUIREMENT, get_drama3_model, supports_mlx_audio_drama3,
 )
 from .engines import (
-    EngineError, _checkpoint_fingerprints, _directed_text, _seed, _text,
-    format_dialogue,
+    EngineError, _checkpoint_fingerprints, _seed, _text,
+    format_dialogue, prepare_synthesis,
 )
 from .fish_http import read_reference, trim_wire_text
 from .speech_text import trim_speech_text
@@ -82,6 +82,7 @@ class MLXAudioDrama3Engine:
             "voice_design": False, "reference_voice": True,
             "preset_voice": False, "delivery_control": True,
             "multi_speaker": True, "unconditioned_voice_creation": False,
+            "structured_performance": True,
         }
 
     @property
@@ -175,11 +176,10 @@ class MLXAudioDrama3Engine:
 
     def synthesize(
         self, text: str, voice: dict[str, Any], output_path: Path, *,
-        seed: int, direction: str = "",
+        seed: int, direction: str = "", performance=None, traits: str = "",
     ) -> dict[str, Any]:
         _seed(seed)
-        text = _text(trim_speech_text(_text(text, "text")), "text")
-        engine_text, delivery = _directed_text(text, direction)
+        _, engine_text, delivery = prepare_synthesis(text, direction, performance=performance, traits=traits)
         return {
             **self._generate_audio(engine_text, [voice], [None], output_path, seed=seed),
             **delivery,

@@ -90,7 +90,7 @@ def _validate_purpose(purpose: str) -> str:
 
 
 def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
-                   purpose: str = "speech") -> str:
+                   purpose: str = "speech", performance=None) -> str:
     """Bind cached verification to its purpose, settings and expected words."""
     if not isinstance(expected_text, str):
         raise ValueError("expected_text must be a string")
@@ -103,6 +103,11 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
     }
     if purpose == "reference":
         identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
+    if performance is not None:
+        from ..performance_plan import validate_performance
+        from .performance_audio import PERFORMANCE_AUDIO_VERSION
+        identity["performance"] = validate_performance(performance, expected_text)
+        identity["performance_audio_version"] = PERFORMANCE_AUDIO_VERSION
     judge_identity = getattr(verifier, "reference_judge_identity", None)
     if judge_identity is not None:
         from .speech_coverage import SPEECH_COVERAGE_VERSION
@@ -346,7 +351,7 @@ def compare_reference_words(expected_text: str, actual_text: str, *,
     }
 
 
-def _audio_metrics(path: Path, policy: dict) -> dict:
+def _audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
     with wave.open(str(path), "rb") as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (
             1, 2, _SAMPLE_RATE, "NONE"
@@ -382,7 +387,7 @@ def _audio_metrics(path: Path, policy: dict) -> dict:
         for is_quiet, count in quiet[voiced_windows[0]:voiced_windows[-1] + 1]:
             current = current + count if is_quiet else 0
             longest = max(longest, current)
-    return {
+    result = {
         "duration_seconds": duration,
         "frames": frame_count,
         "sample_rate": _SAMPLE_RATE,
@@ -392,6 +397,20 @@ def _audio_metrics(path: Path, policy: dict) -> dict:
         "longest_internal_silence_seconds": longest / _SAMPLE_RATE,
         "clipped_fraction": sum(abs(value) >= 32760 for value in samples) / len(samples) if samples else 0.0,
     }
+    if include_silences:
+        intervals, offset, start = [], 0, None
+        for is_quiet, count in quiet:
+            if is_quiet and start is None:
+                start = offset
+            elif not is_quiet and start is not None:
+                intervals.append({"start": start / _SAMPLE_RATE, "end": offset / _SAMPLE_RATE,
+                                  "internal": start > 0})
+                start = None
+            offset += count
+        if start is not None:
+            intervals.append({"start": start / _SAMPLE_RATE, "end": offset / _SAMPLE_RATE, "internal": False})
+        result["silence_intervals"] = intervals
+    return result
 
 
 class _AlignmentError(ValueError):
@@ -922,7 +941,7 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
 
 
 def validate_audio(path, expected_text: str, verifier, policy: dict | None = None, *,
-                   purpose: str = "speech") -> dict:
+                   purpose: str = "speech", performance=None) -> dict:
     """Check normalized PCM audio and an independently decoded transcript.
 
     Invalid policy/input text is a programming/configuration error. Bad audio,
@@ -938,13 +957,19 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     settings = validate_policy(policy)
     if not isinstance(expected_text, str):
         raise ValueError("expected_text must be a string")
+    planned_pauses = False
+    if performance is not None:
+        from ..performance_plan import validate_performance
+        performance = validate_performance(performance, expected_text)
+        planned_pauses = any(control["kind"] == "pause" for control in performance["controls"])
     report = {"passed": False, "purpose": purpose, "expected_text": expected_text,
               "reasons": [], "transcript": None, "metrics": {}, "words": []}
     if not normalize_words(expected_text):
         report["reasons"].append("empty_expected_text")
         return report
     try:
-        report["metrics"] = _audio_metrics(Path(path), settings)
+        report["metrics"] = (_audio_metrics(Path(path), settings, include_silences=True)
+                             if planned_pauses else _audio_metrics(Path(path), settings))
     except (OSError, EOFError, ValueError, wave.Error) as exc:
         report["reasons"].append(f"invalid_audio: {exc}")
         return report
@@ -959,9 +984,9 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         reasons.append("silent_audio")
     elif metrics["rms_dbfs"] < settings["min_rms_dbfs"]:
         reasons.append("audio_too_quiet")
-    if metrics["silence_fraction"] > settings["max_silence_fraction"]:
+    if not planned_pauses and metrics["silence_fraction"] > settings["max_silence_fraction"]:
         reasons.append("excessive_silence")
-    if metrics["longest_internal_silence_seconds"] > settings["max_internal_silence_seconds"]:
+    if not planned_pauses and metrics["longest_internal_silence_seconds"] > settings["max_internal_silence_seconds"]:
         reasons.append("internal_silence_stall")
     if metrics["clipped_fraction"] > settings["max_clipped_fraction"]:
         reasons.append("excessive_clipping")
@@ -994,6 +1019,16 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         # A verifier failure is never substituted with expected text.
         reasons.append(f"verification_failed: {type(exc).__name__}: {exc}")
         return report
+    if planned_pauses:
+        from .performance_audio import planned_pause_adjustment
+        adjustment = planned_pause_adjustment(performance, expected_text, words, metrics)
+        report["performance_audio"] = adjustment
+        if adjustment["silence_fraction"] > settings["max_silence_fraction"]:
+            reasons.append("excessive_silence")
+        if adjustment["longest_internal_silence_seconds"] > settings["max_internal_silence_seconds"]:
+            reasons.append("internal_silence_stall")
+        if reasons:
+            return report
     if purpose == "reference":
         report["reference_comparison"] = compare_reference_words(expected_text, transcript)
     spacing = word_spacing_equivalence(expected_text, transcript) if metrics["wer"] != 0 else None

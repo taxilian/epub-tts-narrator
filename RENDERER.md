@@ -320,6 +320,56 @@ Changing worker addresses, credentials, order, or concurrency retains compatible
 
 Validation includes two real HTTP requests to the local Drama 3 model using the existing demonstration voices: a 2.60-second single-voice passage and a 4.04-second two-character passage. Both passed strict Whisper text and acoustic checks, and the original reference checksums were unchanged. The report is `output/distributed-render-pilot-paoj0g29/report.json`. Automated tests additionally exercise two HTTP workers through chapter/M4B assembly and offline resume. The real-model pilot used loopback on one Mac; a second machine and hosted Fish service have not yet been exercised.
 
+## Compare legacy and expressive chapter generation
+
+Expressive generation is opt-in. Existing render commands retain their legacy conditioning and cache identities. To compare a chapter, keep the same saved voices and global config and choose a separate output directory:
+
+```sh
+audiobook-render compare-performance book.audiobook \
+  --chapter 4 --directory comparisons/book-chapter-1 --local
+```
+
+Chapter numbers refer to the exported manifest, including front matter. Run `audiobook-render plan book.audiobook` to see the numbered titles. For the current Soulship book 4 export, manifest chapter **4** is the story's **Chapter 1**; manifest chapter 1 is its cover. A chapter containing no spoken text cannot be compared.
+
+The command freezes the validated source, cast, selected voice references, effective aliases, sampling settings, and base seed before planning or synthesis. It follows inherited voice selections while taking the snapshot, then copies only the selected immutable references. Missing voices stop the comparison before model loading; this command never casts or regenerates voices. Original books, voice stores, and render caches are read-only inputs. The comparison directory must be outside those locations.
+
+The analysis model proposes source-supported delivery spans, then a separate review can remove weak suggestions. Every control is tied to exact spoken text; the analyzer's canonical text and attribution remain unchanged. Existing spelling-normalization directions are scoped to their corresponding replacements by the expressive renderer. Hand-authored plans can also request validated CMU Arpabet pronunciation, inline vocalizations, and pauses. Automatic planning is deliberately conservative: it does not invent laughs, breaths, pronunciation, or other events merely because a nearby sentence mentions them.
+
+One engine and verifier instance renders both halves with the normal audio and speech checks. `--local` ignores remote chapter and render-pool workers for this invocation, without editing the config. Without it, configured local/render-pool engines are used; remote chapter servers do not yet transport expressive plans. Each participating adapter must advertise structured-performance support. Model downloads, if required, follow the normal setup behavior.
+
+Results are saved as:
+
+```text
+comparisons/book-chapter-1/
+  comparison.json          # input/voice hashes, runtime identity, durable status, statistics
+  performance-plan.json    # reviewed exact-text-bound controls
+  index.html               # local players, changed-control links, elapsed time and duration
+  snapshot/                # frozen bundle and selected reference voices
+  legacy/work/             # independent resumable speech and chapter caches
+  legacy/output/           # chapter.m4a (or configured MP3) and sync.json
+  expressive/work/
+  expressive/output/
+```
+
+Open `index.html` to listen side by side. Links beside changed controls start the containing passage in each version; grouped passages share paragraph-level timing rather than fabricated word alignment. Each half has independently measured source synchronization. Chapters use the same configured loudness and encoding settings. The same **base** seed is retained, but individual take seeds also depend on request identity, so different controls do not share identical sampling noise. Timing includes verification, retries, and assembly; a resumed experiment may reuse caches and is not a clean throughput benchmark.
+
+Rerun the identical command to resume. Completed halves and accepted clips remain reusable. A changed source, voice selection, config, or performance plan requires a new comparison directory, so old and new inputs cannot silently mix. Audio in an existing original publication is not imported as a baseline without a matching experiment binding.
+
+To prepare the snapshot and reviewed plan before any audio generation, add `--prepare-only`. To reuse a separately prepared one-chapter plan, pass `--plan-file PATH`; that input remains unchanged. Performance planning alone does not require selected voices or TTS/ASR models:
+
+```sh
+audiobook-render prepare-performance book.audiobook \
+  --chapters 4 --plan-file comparisons/chapter-1-performance.json
+```
+
+To use an approved plan for an ordinary render, pass `--performance-plan PATH` to `plan`, `render`, or `assemble`; it implies expressive mode. `--performance-mode legacy` explicitly restores the old conditioning. If you eventually select `performance_mode = "expressive"` in the global `[render]` config, the plan defaults to each book's `performance-plan.json`; a per-book filename is not needed in the global config. Prepare all chapters you intend to render. The default remains `legacy` while evaluating the comparison.
+
+Both commands read analysis-provider and renderer settings from the same global TOML file; use `--config /path/to/epub-tts-narrator.toml` from another directory. Plans, request caches, and audio are resumable local artifacts and contain book text; keep them out of Git. Transcript verification does not certify accent, identity, emphasis, or emotion, so use the comparison to judge the performance by listening. Native pause duration and freeform style resets are approximate; unsupported controls fail explicitly instead of disappearing.
+
+This experimental mode keeps the existing paragraph and speaker boundaries. It supports the documented paired delivery controls, scoped freeform styles, CMU Arpabet, inline vocalizations, and approximate pauses through the Drama 3 adapters. Standalone sound effects, language switching, audio infilling, and history-conditioned continuation are not implemented. Spoken-word checks remain active; an inline laugh or sigh is not yet acoustically certified. Explicit pauses are allowed through silence checks only when their measured position and duration match the requested ASR word boundary.
+
+Whole-take retries and transcript review remain available. Text-only spelling rewrites and sentence-split recovery are disabled for expressive leaf clips because the current recovery contract cannot safely rebind their scoped controls. Failed paragraph groups can still fall back to their original independently bound turns. This limitation is confined to expressive mode; the legacy recovery path is unchanged.
+
 ## Inspect, cast, and render
 
 Check installation and model files:

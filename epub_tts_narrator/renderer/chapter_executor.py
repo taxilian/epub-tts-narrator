@@ -160,6 +160,8 @@ class ChapterExecutor:
         work = Path(work).resolve()
         work.mkdir(parents=True, exist_ok=True)
         chapter = spec["chapter"]
+        from .performance_runtime import require_engine_support
+        require_engine_support({"chapters": [chapter]}, engine)
         used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
                 for speaker in chunk_speakers(chunk)}
         registered = {}

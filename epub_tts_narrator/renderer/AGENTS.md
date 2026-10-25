@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 96 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 100 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -12,6 +12,7 @@ Keep this file current: when modules, entry points, or conventions change, updat
 `audiobook-render` maps to `renderer/cli.py:main`; `python -m epub_tts_narrator.renderer` also works.
 Subcommands: `plan`, `cache-report`, `render`, `assemble`, `refresh-metadata`, `cleanup`, `voices`, `create-voices`, `import-voice`.
 More commands: `cast`, `voice-aliases`, `doctor`, `serve`, `serve-chapters`, `runpod`.
+Performance commands: `prepare-performance`, `compare-performance`; legacy rendering remains the default.
 `serve` exposes a Fish-compatible `/v1/tts` service through `server.py`.
 `serve-chapters` runs the resumable job server in `chapter_server.py`.
 Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publish.
@@ -34,6 +35,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Inspect acceptance or transcript failures | `quality.py`, `verification.py`, `chapter_verification.py` |
 | Resolve recurring speech failures | `speech_resolver.py`, `recurring_resolution.py`, `delivery_recovery.py` |
 | Configure engines or add a plugin | `engines.py`, `ENGINE_NOTES.md` |
+| Compile expressive controls and compare chapters | `performance_compiler.py`, `performance_runtime.py`, `performance_comparison.py`; acoustic pause evidence in `performance_audio.py` |
 | Cast voices and manage aliases | `casting.py`, `voices.py`, `audition.py`, `voice_bindings.py` |
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
@@ -43,6 +45,10 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 ## CONVENTIONS
 
 - Renderer imports are direct submodule imports; `__init__.py` exports nothing.
+- Expressive plans bind approved spoken text, never replace canonical source or voice identity. Compile only validated structured metadata; raw book markup stays untrusted. Keep legacy request/cache identities unchanged when no plan is supplied.
+- `prepare_synthesis` is shared by adapters and speech cache identity; edge trimming projects controls by retained code-point indices. Text-only rewrite/split recovery is disabled for expressive leaves until it can preserve those bindings; fallback to original paragraph turns retains each turn's controls.
+- `compare-performance` freezes selected references and source in its own directory. Its frozen voice store cannot create voices, and `_preflight` must use the supplied store directly rather than derive aliases again. Both modes use one engine instance, independent verified caches, source timing, and a local HTML listening report.
+- Intentional pauses excuse only measured silence at their exact ASR word boundary, within the requested bound. Inline vocal events are excluded from lexical expectations but are not acoustically certified. Neither event metadata nor text review can authorize silent or corrupt audio.
 - Heavy ML and HTTP imports stay inside functions, never at module scope.
 - Use the separate Python 3.12 uv environment and root `renderer.requirements.txt`.
 - FFmpeg and FFprobe are required; paths come from TOML configuration.

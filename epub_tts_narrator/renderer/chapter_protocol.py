@@ -83,6 +83,8 @@ def validate_render_settings(settings):
         elif kind == "bool":
             if type(settings[key]) is not bool:
                 raise ValueError(f"Invalid remote render.{key}")
+        elif kind == "enum" and settings[key] not in spec["choices"]:
+            raise ValueError(f"Invalid remote render.{key}")
         elif kind == "bitrate" and (not isinstance(settings[key], str)
                                     or not re.fullmatch(r"[1-9][0-9]{0,2}k", settings[key])):
             raise ValueError(f"Invalid remote render.{key}")
@@ -129,20 +131,33 @@ def _leaf(chunk, bindings):
         from ..speech_traits import validate_speech_traits
         for traits in traits_by_voice.values():
             validate_speech_traits(traits)
-    if speakers:
+    if speakers and "expressive_performance" not in chunk:
         from .speech_traits import performance_direction
         for speaker in speakers:
             performance_direction(chunk, speaker["voice_id"])
-    else:
+    elif not speakers:
         effective_delivery(row)
     if not isinstance(row.get("performance", {}), dict):
         raise ValueError("Invalid passage performance")
+    expressive = {"expressive_performance", "expressive_direction", "expressive_traits"}
+    if expressive.intersection(chunk):
+        if not expressive.issubset(chunk):
+            raise ValueError("Expressive passages need a bound plan, direction, and traits")
+        from ..performance_plan import validate_performance, plain_direction
+        validate_performance(chunk["expressive_performance"], chunk["spoken_text"])
+        plain_direction(chunk["expressive_direction"])
+        scene = deepcopy(row)
+        scene.pop("speech_normalization", None)
+        if chunk["expressive_direction"] != effective_delivery(scene):
+            raise ValueError("Expressive scene direction differs from the source segment")
+        if chunk["expressive_traits"] != chunk.get("speech_traits", {}):
+            raise ValueError("Expressive traits differ from the bound voice traits")
 
 
 def _chunk_shape(chunk, identifiers, *, paragraph=False):
     required = {"chunk_id", "segment", "spoken_text", "spoken_start", "spoken_end",
                 "source_ranges", "silent_control"}
-    allowed = required | {"speech_traits"} | ({"paragraph_turns"} if paragraph else set())
+    allowed = required | {"speech_traits", "expressive_performance", "expressive_direction", "expressive_traits"} | ({"paragraph_turns"} if paragraph else set())
     if (not isinstance(chunk, dict) or set(chunk) - allowed or required - set(chunk)
             or not isinstance(chunk.get("chunk_id"), str)
             or not re.fullmatch(r"[0-9a-f]{32,64}", chunk["chunk_id"])

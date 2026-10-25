@@ -236,7 +236,11 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     if not info["frames"]:
                         raise ValueError(f"Verified clip has no audio frames: {source}")
                     # Unison lanes retain their original common origin and timing.
-                    edges = (audio_edges(source, trim="speaker_lanes" not in clip)
+                    from .performance_audio import pause_edges
+                    from .performance_runtime import verification_options
+                    record = verification_options({"chunk": clip}).get("performance")
+                    outer_pauses = pause_edges(record, clip["spoken_text"])
+                    edges = (audio_edges(source, trim="speaker_lanes" not in clip, **outer_pauses)
                              if normalize_pauses else
                              dict(start=0, end=info["frames"], leading=0, trailing=0))
                     silence(max(0, max(pending_pause, pending_punctuation)

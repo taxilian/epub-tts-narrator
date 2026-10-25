@@ -214,6 +214,7 @@ class RenderPool:
                 w.local or w.settings.get("multi_speaker", True)
                 or w.settings.get("protocol") == "fish_sglang_drama3" for w in self._workers),
             "unconditioned_voice_creation": False,
+            "structured_performance": True,
         }
 
     @property
@@ -306,8 +307,9 @@ class RenderPool:
         finally:
             self._slots.put(worker)
 
-    def synthesize(self, text, voice, output_path, *, seed, direction=""):
-        return self._execute("synthesize", text, voice, output_path, seed=seed, direction=direction)
+    def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
+        options = {"performance": performance, "traits": traits} if performance is not None else {}
+        return self._execute("synthesize", text, voice, output_path, seed=seed, direction=direction, **options)
 
     def synthesize_dialogue(self, turns, output_path, *, seed):
         if not self.capabilities["multi_speaker"]:

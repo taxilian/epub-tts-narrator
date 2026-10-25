@@ -78,6 +78,8 @@ audiobook-render assemble book.audiobook    # package the .m4b
 
 `audiobook-render doctor` checks the local setup (models, FFmpeg, verification stack) before a long render.
 
+`audiobook-render compare-performance BOOK --chapter N --directory COMPARISON --local` renders an isolated legacy/expressive chapter comparison using frozen copies of the same selected voices. Open its `index.html` to listen and inspect changed controls. Existing rendering remains unchanged; see [chapter comparison](RENDERER.md#compare-legacy-and-expressive-chapter-generation).
+
 ## What analysis produces
 
 The output directory is the renderer bundle: `manifest.json`, `cast.json`, `source.json`, `review.json`, per-chapter scripts in `scripts/chapter-NNNN.jsonl`, plus the full `analysis.json` and a cumulative `series-cast.json` for continuations. The exact contract is [FORMAT.md](FORMAT.md). Every character, role, voice, and passage attribution carries source evidence; unknown speakers stay explicitly unassigned rather than being guessed.

@@ -21,7 +21,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
-from .engines import EngineError, _directed_text, _plain_direction, _seed, _text, format_dialogue
+from .engines import EngineError, _seed, _text, format_dialogue, prepare_synthesis
+from .performance_compiler import validate_compiled_text
 from .diagnostics import safe_error_text
 from .reference_cache import UNKNOWN_REFERENCE_MARKER, ReferenceCache
 from .speech_text import trim_speech_text
@@ -33,7 +34,7 @@ SGLANG_MAIN_TOP_K = (1 << 31) - 1
 PROTOCOLS = {"fish_inline", "fish_native_drama3", "fish_sglang_drama3"}
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 STYLE_CONTROL = rf"\[[^\[\]<>\r\n]{{1,{MAX_DELIVERY_CHARACTERS}}}\]"
-SUPPORTED_CONTROLS = re.compile(r"</?whisper>|" + STYLE_CONTROL)
+SUPPORTED_CONTROLS = re.compile(r"</?(?:whisper|emphasis|soft|fast|slow|stress|forceful)>|<\|phoneme_(?:start|end)\|>|" + STYLE_CONTROL)
 
 
 class FishHTTPError(EngineError):
@@ -52,39 +53,46 @@ def redact(message: str, key: str) -> str:
 
 
 def validate_wire_text(text: str, speakers: set[int | None]) -> None:
-    """Accept bounded, non-nested style controls emitted by the adapter."""
+    """Accept compiler controls, balanced within each referenced speaker turn."""
     if not isinstance(text, str) or len(text) > 100_000:
         raise EngineError("text must be a string of at most 100000 characters")
     for match in SPEAKER_TAG.finditer(text):
         speaker = int(match.group(1))
         if speaker > 15 or speaker not in speakers:
             raise EngineError(f"Speaker {speaker} has no matching inline reference")
-    stripped = SPEAKER_TAG.sub("", text)
-    for match in re.finditer(STYLE_CONTROL, stripped):
-        if not _plain_direction(match.group()[1:-1]):
-            raise EngineError("Style controls must contain a direction")
-    _text(SUPPORTED_CONTROLS.sub("", stripped), "text")
-    depth = 0
-    for match in re.finditer(r"</?whisper>", text):
-        depth += -1 if match.group() == "</whisper>" else 1
-        if depth not in (0, 1):
-            raise EngineError("whisper controls must be paired and not nested")
-    if depth:
-        raise EngineError("whisper controls must be paired")
+    bodies = []
+    previous = 0
+    for match in SPEAKER_TAG.finditer(text):
+        body = text[previous:match.start()]
+        if previous or body.strip():
+            bodies.append(body)
+        previous = match.end()
+    bodies.append(text[previous:])
+    for body in bodies:
+        try:
+            validate_compiled_text(body)
+        except ValueError as exc:
+            raise EngineError(str(exc)) from exc
+        _text(SUPPORTED_CONTROLS.sub("", body), "text")
 
 
 def trim_wire_text(text: str, speakers: set[int | None]) -> str:
     """Trim validated Fish turn bodies without removing speaker/delivery tags."""
     validate_wire_text(text, speakers)
 
-    def body(value):
+    def body(value, depth=0):
+        if depth > 32:
+            raise EngineError("Fish delivery wrappers are nested too deeply")
         value = trim_speech_text(value)
-        value = re.sub(r"<whisper>(.*?)</whisper>",
-                       lambda match: "<whisper>" + trim_speech_text(match.group(1)) + "</whisper>",
-                       value, flags=re.S)
         prefix = re.match(r"(?:" + STYLE_CONTROL + r"\s*)+", value)
         if prefix:
-            value = prefix.group().rstrip() + " " + trim_speech_text(value[prefix.end():])
+            return prefix.group().rstrip() + " " + body(value[prefix.end():], depth + 1)
+        # Only a whole-turn wrapper encloses removable outer formatting. An
+        # inline scope can contain the sole whitespace between lexical words;
+        # trimming its interior would change remote input relative to local.
+        wrapper = re.fullmatch(r"<(whisper|emphasis|soft|fast|slow|stress|forceful)>(.*)</\1>", value, flags=re.S)
+        if wrapper:
+            return f"<{wrapper.group(1)}>" + body(wrapper.group(2), depth + 1) + f"</{wrapper.group(1)}>"
         return value
 
     parts, previous, tag = [], 0, ""
@@ -249,6 +257,7 @@ class FishHTTPEngine:
     def capabilities(self) -> dict[str, bool]:
         return {"reference_voice": True, "voice_design": False, "preset_voice": False,
                 "delivery_control": True, "multi_speaker": self.multi_speaker,
+                "structured_performance": True,
                 "single_speaker_paragraph": self.multi_speaker or self.protocol == "fish_sglang_drama3",
                 "unconditioned_voice_creation": False}
 
@@ -258,9 +267,8 @@ class FishHTTPEngine:
     def create_voice(self, description, text, output_path, *, seed):
         raise EngineError("Fish HTTP rendering uses saved reference voices; create voices with the cast tool")
 
-    def synthesize(self, text, voice, output_path, *, seed, direction=""):
-        text = _text(trim_speech_text(_text(text, "text")), "text")
-        directed, metadata = _directed_text(text, direction)
+    def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
+        _, directed, metadata = prepare_synthesis(text, direction, performance=performance, traits=traits)
         blob, transcript = read_reference(voice)
         return {**self._request(directed, [{"audio": blob, "text": transcript}], output_path, seed),
                 "synthesis_text": directed,

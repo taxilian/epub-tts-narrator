@@ -36,6 +36,8 @@ RENDER_CONTRACT = {
     "allow_review": {"default": False, "kind": "bool"},
     "require_cover": {"default": True, "kind": "bool"},
     "paragraph_synthesis": {"default": True, "kind": "bool", "remote_safe": True},
+    "performance_mode": {"default": "legacy", "kind": "enum", "choices": ("legacy", "expressive"),
+                         "remote_safe": True},
     "paragraph_pause_ms": {"default": 400, "kind": "int", "range": (0, 5000),
                            "chapter": True, "checked": True, "remote_safe": True},
     "blank_pause_ms": {"default": 600, "kind": "int", "range": (0, 5000),
@@ -137,6 +139,7 @@ DEFAULTS = {
     },
     "render": {
         "work_dir": None, "output_dir": None, "chapter_numbers": [], "epub": None,
+        "performance_plan": None,
         **{key: spec["default"] for key, spec in RENDER_CONTRACT.items()},
     },
     "quality": {},
@@ -453,6 +456,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("render.chapter_numbers must contain distinct positive integers")
     if render["chapter_format"] not in RENDER_CONTRACT["chapter_format"]["choices"]:
         raise ValueError("render.chapter_format must be m4a or mp3")
+    if render["performance_mode"] not in {"legacy", "expressive"}:
+        raise ValueError("render.performance_mode must be legacy or expressive")
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
     verification = result["verification"]
@@ -515,7 +520,7 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     for section, key in (
         ("engine", "checkpoint"), ("verification", "model"), ("verification", "reference_model"),
         ("voice_design", "checkpoint"), ("voices", "directory"),
-        ("render", "work_dir"), ("render", "output_dir"), ("render", "epub"),
+        ("render", "work_dir"), ("render", "output_dir"), ("render", "epub"), ("render", "performance_plan"),
         ("chapter_server", "data_dir"),
     ):
         value = result[section][key]

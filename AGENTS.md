@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 47 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 96 flat modules, own CLI + AGENTS.md
-├── tests/                    # 257 flat unittest files + fixtures/ + shared helpers
+├── epub_tts_narrator/        # analyzer package: 50 flat modules, stdlib-only
+│   └── renderer/             # renderer subpackage: 100 flat modules, own CLI + AGENTS.md
+├── tests/                    # 264 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -40,6 +40,7 @@ epub-tts-narrator/
 | EPUB ingestion | `epub_tts_narrator/epub.py` | `extract_epub` (45 callers); spine order, safety limits |
 | Original EPUB location | `epub_tts_narrator/source_epub.py` | Book-bound local `source-epub.json`; separate from source fingerprints; final publication rechecks EPUB bytes |
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
+| Expressive performance planning | `performance_plan.py`, `performance_planning.py`, `performance_planning_prompts.py` | Optional source/script/cast-bound sidecar; exact spans, independent remove-only review, resumable batches |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
 | Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |
 | Voice profile/prompt refresh | `epub_tts_narrator/voice_prompt_refresh.py` | Casting-description refresh; sends a complete `known_cast` snapshot |

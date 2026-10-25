@@ -204,6 +204,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     directory.mkdir(parents=True, exist_ok=True)
     accepted_path = directory / "accepted.json"
     resolver = getattr(verifier, "speech_resolver", None)
+    from .performance_runtime import is_expressive
+    if request.get("kind") == "speech" and is_expressive(request.get("chunk", {})):
+        # Text-only sentence recovery cannot safely rebind scoped controls.
+        # Paragraph fallback may still use its original, fully bound turns.
+        allow_split = False
     adaptive = (allow_resolution and resolver is not None and purpose == "speech"
                 and "recovery" not in request
                 and request.get("kind") in {"speech", "speech_recovery_part", "paragraph_speech"})
@@ -311,7 +316,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
             if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
                 return finish(wav, accepted)
-    validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose)
+    from .performance_runtime import verification_options
+    performance_options = verification_options(request)
+    validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose, **performance_options)
     attempts = config["render"]["max_attempts"]
     episode_maximum = None
     episode = resolution_episode or request.get("parent_request_hash", request_hash)
@@ -460,7 +467,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             if "direction_repair" in latest.get("engine_metadata", {}):
                 from .direction_repair import confirm_metadata
                 confirm_metadata(request, latest["engine_metadata"])
-            latest["report"] = validate_audio(directory / name, text, verifier, config["quality"], purpose=purpose)
+            latest["report"] = validate_audio(directory / name, text, verifier, config["quality"], purpose=purpose, **performance_options)
             marker = latest.get("engine_metadata", {}).get("speech_resolution")
             if marker is not None:
                 from .recurring_resolution import confirm_rewritten_report
@@ -644,7 +651,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             else:
                 current_attempt = generation_ordinal if fresh_speech else attempt
                 set_phase(notify, f"verifying speech, attempt {current_attempt}/{attempts}")
-            report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
+            report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose, **performance_options)
             if "direction_repair" in metadata:
                 from .direction_repair import confirm_metadata
                 confirm_metadata(request, metadata)
@@ -1071,6 +1078,8 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
     from .speech_traits import bind_plan_speech_traits
     plan = bind_plan_speech_traits(plan, bundle["cast"])
+    from .performance_runtime import bind_traits
+    plan = bind_traits(plan)
     if (not (multi_speaker or single_speaker_paragraph)
             or not config["render"].get("paragraph_synthesis", True)):
         return plan
@@ -1106,7 +1115,7 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
 
 
 def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
-               single_speaker_paragraph=False):
+               single_speaker_paragraph=False, voice_store_override=None):
     from .book_context import resolve_book_config, voice_store
     _check_analysis_update(bundle)
     try:
@@ -1131,7 +1140,7 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
     epub = config["render"]["epub"]
     if epub and not chapters_only and file_hash(epub) != bundle["source"]["book"]["id"]:
         raise RenderBlocked("Configured EPUB does not match the analyzed book")
-    return config, plan, voice_store(bundle, config)
+    return config, plan, (voice_store(bundle, config) if voice_store_override is None else voice_store_override)
 
 
 def _check_analysis_update(bundle):
@@ -1750,8 +1759,11 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     if "paragraph_turns" in chunk:
         request = _paragraph_request(chunk, voices, engine_identity, config)
         from .speech_traits import performance_direction
+        from .performance_runtime import synthesis_direction, is_expressive
+        from .performance_compiler import performance_kwargs
         turns = [{"text": turn["spoken_text"], "voice": voices[turn["segment"]["voice_id"]],
-                  "direction": performance_direction(turn, turn["segment"]["voice_id"])}
+                  "direction": synthesis_direction(turn, turn["segment"]["voice_id"]),
+                  **performance_kwargs(turn, turn["segment"]["voice_id"])}
                  for turn in chunk["paragraph_turns"]]
         from .speech_identity import paragraph_rewrite_turn
         repaired_turn = paragraph_rewrite_turn(
@@ -1778,6 +1790,11 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 metadata = engine.synthesize(prepared, repaired_turn["voice"], path, seed=seed,
                                              direction=repaired_turn["direction"])
                 return {"synthesis_text": prepared, **metadata}
+        if is_expressive(chunk):
+            # A spelling/split repair needs a newly bound scoped plan. Preserve
+            # ordinary retries and complete-take review without silently losing
+            # controls in the legacy text-only recovery callbacks.
+            generate_repaired = synthesize_part = generate_plan_part = None
         notify(f"  Chunk {number}/{total}: checking paragraph cache "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
@@ -1789,20 +1806,26 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         return dict(chunk, wav_path=str(wav)), acceptance
 
     from .speech_traits import performance_direction
+    from .performance_runtime import synthesis_direction, is_expressive
+    from .performance_compiler import performance_kwargs
     # Formatting at the edges is not speech. Keep the original chunk for
     # verification, request/cache identity, and source synchronization.
     synthesis_text = trim_speech_text(chunk["spoken_text"])
+    if is_expressive(chunk):
+        synthesis_text = chunk["spoken_text"]
     speakers = chunk_speakers(chunk)
     lanes = []
     for lane_number, speaker in enumerate(speakers, 1):
         voice = voices[speaker["voice_id"]]
-        direction = performance_direction(chunk, speaker["voice_id"])
+        direction = synthesis_direction(chunk, speaker["voice_id"])
+        expressive_options = performance_kwargs(chunk, speaker["voice_id"])
         request = _speech_request(chunk, voice, engine_identity, config,
                                   performer=speaker if len(speakers) > 1 else None)
         lane_label = f", simultaneous speaker {lane_number}/{len(speakers)}" if len(speakers) > 1 else ""
         notify(f"  Chunk {number}/{total}{lane_label}: checking speech cache ({speaker['voice_id']})")
         def generate(path, seed, v=voice):
-            metadata = engine.synthesize(synthesis_text, v, path, seed=seed, direction=direction)
+            metadata = engine.synthesize(synthesis_text, v, path, seed=seed, direction=direction,
+                                         **expressive_options)
             return {"synthesis_text": synthesis_text, **metadata}
 
         def synthesize_part(text, path, seed, v=voice):
@@ -1833,9 +1856,10 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             metadata = engine.synthesize(prepared, v, path, seed=seed, direction=part_direction(part))
             return {'synthesis_text': prepared, **metadata}
 
-        wav, accepted = take(chunk["spoken_text"], generate, request,
-                             synthesize_part=synthesize_part, generate_plain=synthesize_plain,
-                             generate_direction=synthesize_direction, generate_plan_part=synthesize_plan_part)
+        recovery = {} if is_expressive(chunk) else {
+            "synthesize_part": synthesize_part, "generate_plain": synthesize_plain,
+            "generate_direction": synthesize_direction, "generate_plan_part": synthesize_plan_part}
+        wav, accepted = take(chunk["spoken_text"], generate, request, **recovery)
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:
@@ -2011,7 +2035,8 @@ def _publish_chapter_links(config, rendered, *, notify):
         _publish_chapter_link(config, dict(composed, encoded_path=str(published)), notify=notify)
 
 
-def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
+def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False,
+           voice_store_override=None):
     run_started = monotonic()
     retry_budget = SpeechRetryBudget()
     from .pool import bind_engine_verifier
@@ -2019,7 +2044,10 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
     config, plan, store = _preflight(
         bundle, config, chapters_only=chapters_only,
         multi_speaker=getattr(engine, "capabilities", {}).get("multi_speaker", False),
-        single_speaker_paragraph=getattr(engine, "capabilities", {}).get("single_speaker_paragraph", False))
+        single_speaker_paragraph=getattr(engine, "capabilities", {}).get("single_speaker_paragraph", False),
+        voice_store_override=voice_store_override)
+    from .performance_runtime import require_engine_support
+    require_engine_support(plan, engine)
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
     book_lock = None
