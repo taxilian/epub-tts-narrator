@@ -10,7 +10,7 @@ from epub_tts_narrator.renderer.common import digest, read_json
 from epub_tts_narrator.renderer.engines import format_dialogue
 from epub_tts_narrator.renderer.paragraphs import _group
 from epub_tts_narrator.renderer.speech_identity import generation_identity, paragraph_rewrite_turn
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import _render_chunk
 from shared_fixtures import renderer_config

@@ -187,7 +187,7 @@ def _legacy_accepted_part(directory, request):
 
 def recover_speech(text, synthesize_part, parent_directory, parent_request, verifier, config,
                    *, notify=print, retry_budget=None, resolution_episode=None, voices_by_asset=None,
-                   synthesize_plain=None):
+                   synthesize_plain=None, synthesize_direction=None, synthesize_plan_part=None):
     """Verify split parts with the caller's bounded allowance for this invocation.
 
     The caller selects this strategy only after ordinary speech takes fail.
@@ -222,6 +222,11 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
     from .delivery_recovery import plain_delivery_request
     bind_single_inputs = (parent_request["kind"] == "speech" and callable(synthesize_plain)
                           and plain_delivery_request(parent_request) is not None)
+    if parent_request["kind"] == "speech" and callable(synthesize_direction):
+        from .direction_repair import supported_request
+        bind_single_inputs = bind_single_inputs or supported_request(parent_request) is not None
+    if parent_request['kind'] == 'speech' and callable(synthesize_plan_part):
+        bind_single_inputs = True
 
     def assemble(path, seed):
         verified, audit = [], []
@@ -246,6 +251,8 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 part["text"], generate_part, child_directory, child_request, verifier, config,
                 notify=notify, retry_budget=retry_budget, synthesize_part=synthesize_part,
                 generate_plain=(synthesize_plain if "synthesis_request" in child_request else None),
+                generate_direction=(synthesize_direction if "synthesis_request" in child_request else None),
+                generate_plan_part=(synthesize_plan_part if "synthesis_request" in child_request else None),
                 resolution_episode=resolution_episode,
                 episode_reserve=len(request["recovery"]["parts"]) - number,
                 allow_fragments=parent_request["kind"] == "speech")

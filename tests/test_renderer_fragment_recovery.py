@@ -18,7 +18,7 @@ from epub_tts_narrator.renderer.speech_identity import (
     generation_identity, single_speech_recovery_part,
 )
 from epub_tts_narrator.renderer.speech_recovery import recover_speech, split_recovery_text
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechRetryBudget, SpeechVerificationFailed
 from test_renderer_speech_identity import reference, speech_request

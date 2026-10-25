@@ -84,7 +84,7 @@ The output directory is the renderer bundle: `manifest.json`, `cast.json`, `sour
 
 ## Verification
 
-Generated speech is checked before it ships: complete written-content equality ignoring case, spacing, and punctuation; double-metaphone sound-alike equivalence; optional JEV judgment for remaining disputes; and acoustic checks (silence, clipping). Numeric values, signs, and currency content retain their lexical safeguards. Reference voices and book speech share the same acceptance gates. Failures block publication rather than shipping bad audio. Details and tuning: [RENDERER.md](RENDERER.md).
+Ordinary speech verification checks written-content equality ignoring case, spacing, and punctuation; sound-alike equivalence; optional JEV judgment; and acoustic quality. With analysis-model recovery enabled, broader clip-local repairs can alter phonetic input, delivery, traits, and splitting after two parallel independent approvals. If ordinary recovery is exhausted, an LLM chooses the best physically usable retained full-clip take under an explicit best-effort policy. Its selection is decisive, including when ordinary lexical checks failed; reports preserve the original failure and identify `llm_exhaustion_selection` rather than claim verbatim verification. Corrupt, empty, and effectively silent audio is excluded. Reference creation retains its separate verification requirements. Details and tuning: [RENDERER.md](RENDERER.md).
 
 ## Status
 

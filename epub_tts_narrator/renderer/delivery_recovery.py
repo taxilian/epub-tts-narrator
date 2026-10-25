@@ -21,7 +21,7 @@ _POLICY = {"version": 1, "strategy": "plain_delivery", "decision": "validated_an
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def _speech_request(request):
+def _speech_request(request, *, allow_normalization=False):
     """Return a supported single performance, including a bound recovery child."""
     if not isinstance(request, Mapping):
         return None
@@ -54,7 +54,7 @@ def _speech_request(request):
     # A normalization edit's delivery is coupled to its approved pronunciation.
     # Do not silently drop that style or alter its source-bound edit record.
     normalization = segment.get("speech_normalization")
-    if normalization is not None:
+    if normalization is not None and not allow_normalization:
         if (not isinstance(normalization, Mapping)
                 or normalization.get("version") != 1 or normalization.get("edits") != []):
             return None

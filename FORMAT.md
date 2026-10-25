@@ -267,6 +267,8 @@ Require the manifest, supported version, valid file checksums, valid source cove
 
 ## Text and audio synchronization
 
+The renderer's exhausted speech-recovery path may accept a retained full-span take under `text_confirmation_method: "llm_exhaustion_selection"`. Its report has `passed: true` under the explicitly recorded `acceptance_policy`, not necessarily under ordinary lexical verification. `ordinary_verification_passed` and `original_failed_report` retain that distinction, while generation metadata binds the original request, selected attempt/audio hashes, and chooser audit. Consumers must not label these records as verbatim-transcript matches. Source text, assignments, and synchronization ranges remain unchanged; the actual selected recording supplies the frame timeline.
+
 The pair `source_fingerprint` and segment `id`, together with `block_id`, `start`, and `end`, identifies an exact range in the canonical extracted source. Chapter-file partitioning preserves all those values. This supports attaching audio timing to the same segments later without guessing which text was synthesized.
 
 The audio renderer must add actual clip and assembled-audiobook start/end times. Word timing requires timestamps from the TTS engine or a subsequent alignment pass. It must map any `spoken_text` bracket omissions and later pronunciation transformations back to the source range, and account for inserted pauses, trimming, and mixing when placing timestamps on the final audio timeline. This analyzer does not yet emit audio times or a synchronization sidecar.

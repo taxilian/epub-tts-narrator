@@ -267,6 +267,23 @@ class RecurringResolution:
             return audit['identity']
         return self.identity
 
+    def saved_stop(self):
+        from .speech_resolver import validate_resolution
+        if not self.state['history']:
+            return None
+        row = self.state['history'][-1]
+        audit = row['audit']
+        if audit.get('decision') != 'resolved' or audit.get('proposal', {}).get('action') != 'stop':
+            return None
+        proposal = validate_resolution(
+            audit, self.text, row['failures'], self._audit_identity(audit),
+            can_rewrite=self.can_rewrite,
+            can_split='split' in audit.get('payload', {}).get('permitted_actions', []),
+            previous_decisions=self._saved_feedback(len(self.state['history']) - 1))
+        if proposal is None:
+            raise ValueError('Saved stop decision no longer validates')
+        return {**proposal, 'audit': audit, 'failures': row['failures']}
+
     def note_failed_split(self, report):
         """Give the planner the renderer's actual strategy outcome once.
 

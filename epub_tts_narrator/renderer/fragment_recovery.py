@@ -105,7 +105,8 @@ def fragment_started(directory, child_request, text, config):
 
 def fragment_part_take(text, generate, directory, request, verifier, config, *, notify=print,
                        retry_budget=None, synthesize_part=None, generate_plain=None,
-                       resolution_episode=None, episode_reserve=0, allow_fragments=False):
+                       resolution_episode=None, episode_reserve=0, allow_fragments=False,
+                       generate_direction=None, generate_plan_part=None):
     """Verify one recovery part; engage the bounded cutoff-tail strategy only on a definite tail loss."""
     from .workflow import SpeechVerificationFailed, verified_take
 
@@ -117,12 +118,15 @@ def fragment_part_take(text, generate, directory, request, verifier, config, *, 
         notify("  Resuming the persisted cutoff-tail recovery for this part; "
                "whole-part takes stay retired.")
         return _recover_fragment(text, synthesize_part, generate_plain, directory, request,
-                                 verifier, config, notify=notify, retry_budget=retry_budget,
-                                 resolution_episode=resolution_episode, episode_reserve=episode_reserve)
+                                  verifier, config, notify=notify, retry_budget=retry_budget,
+                                  resolution_episode=resolution_episode, episode_reserve=episode_reserve,
+                                  synthesize_direction=generate_direction, synthesize_plan_part=generate_plan_part)
     try:
         return verified_take(text, generate, directory, request, verifier, config, notify=notify,
                              purpose="speech", retry_budget=retry_budget,
-                             generate_repaired=synthesize_part, generate_plain=generate_plain,
+                              generate_repaired=synthesize_part, generate_plain=generate_plain,
+                              generate_direction=generate_direction,
+                              generate_plan_part=generate_plan_part,
                              resolution_episode=resolution_episode, episode_reserve=episode_reserve,
                              fallback_parts=fallback)
     except SpeechVerificationFailed as exc:
@@ -139,8 +143,9 @@ def fragment_part_take(text, generate, directory, request, verifier, config, *, 
     notify("  The final words were cut off again. Splitting this part once at its final em-dash "
            "tail; every fragment keeps the original source, voice, and full verification.")
     return _recover_fragment(text, synthesize_part, generate_plain, directory, request,
-                             verifier, config, notify=notify, retry_budget=retry_budget,
-                             resolution_episode=resolution_episode, episode_reserve=episode_reserve)
+                              verifier, config, notify=notify, retry_budget=retry_budget,
+                              resolution_episode=resolution_episode, episode_reserve=episode_reserve,
+                              synthesize_direction=generate_direction, synthesize_plan_part=generate_plan_part)
 
 
 def _piece_request(child, fragment_request, piece, *, synthesis=None):
@@ -155,7 +160,7 @@ def _piece_request(child, fragment_request, piece, *, synthesis=None):
 
 def _recover_fragment(text, synthesize_part, synthesize_plain, part_directory, child_request,
                       verifier, config, *, notify=print, retry_budget=None, resolution_episode=None,
-                      episode_reserve=0):
+                      episode_reserve=0, synthesize_direction=None, synthesize_plan_part=None):
     """Verify exact prefix and tail pieces, then the complete joined audio."""
     from .retry_budget import generation_attempts
     from .speech_recovery import _concatenate, _directory
@@ -173,7 +178,18 @@ def _recover_fragment(text, synthesize_part, synthesize_plain, part_directory, c
             write_json(directory / _MARKER, marker)
     except (ValueError, OSError) as exc:
         raise RenderBlocked(f"Could not prepare speech fragment recovery: {exc}") from exc
-    reject_exhausted_join(directory, child_request)
+    try:
+        reject_exhausted_join(directory, child_request)
+    except SpeechVerificationFailed:
+        client = getattr(verifier.speech_resolver, 'clip_recovery_client', None)
+        if client is None:
+            raise
+        from .clip_repair_state import ClipRecoveryUnavailable
+        from .exhaustion_selection import select_retained
+        try:
+            return select_retained(directory, child_request, client)
+        except ClipRecoveryUnavailable as exc:
+            raise VerificationUnavailable(str(exc)) from exc
     delivery, synthesis = inherited_delivery(directory, child_request, verifier, config, synthesize_plain)
     synthesize = synthesize_plain if delivery is not None else synthesize_part
     episode = resolution_episode or child_request.get("parent_request_hash", digest(child_request))
@@ -190,7 +206,9 @@ def _recover_fragment(text, synthesize_part, synthesize_plain, part_directory, c
         wav, record = verified_take(piece["text"], generate_piece, piece_directory, piece_request,
                                     verifier, config, notify=notify, purpose="speech",
                                     retry_budget=retry_budget, generate_repaired=synthesize,
-                                    generate_plain=synthesize_plain,
+                                     generate_plain=synthesize_plain,
+                                     generate_direction=synthesize_direction if delivery is None else None,
+                                     generate_plan_part=synthesize_plan_part,
                                     resolution_episode=episode,
                                     episode_reserve=len(pieces) - number + episode_reserve)
         verified.append((wav, record))

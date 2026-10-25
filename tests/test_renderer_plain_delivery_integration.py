@@ -15,7 +15,7 @@ from epub_tts_narrator.renderer.engines import _directed_text
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.recurring_resolution import RecurringResolution
 from epub_tts_narrator.renderer.speech_identity import generation_identity
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechRetryBudget, SpeechVerificationFailed, _render_chunk
 from test_renderer_recurring_resolution import PlanClient

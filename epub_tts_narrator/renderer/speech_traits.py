@@ -4,8 +4,9 @@ from ..spoken_text import MAX_DELIVERY_CHARACTERS, effective_delivery
 from .bundle import chunk_speakers
 
 
-def performance_direction(chunk, voice_id):
-    scene_direction = effective_delivery(chunk["segment"])
+def performance_direction(chunk, voice_id, *, scene_direction=None):
+    if scene_direction is None:
+        scene_direction = effective_delivery(chunk["segment"])
     traits_by_voice = chunk.get("speech_traits")
     if traits_by_voice is None:
         return scene_direction

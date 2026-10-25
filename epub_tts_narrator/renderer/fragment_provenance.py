@@ -96,5 +96,7 @@ def fragment_generation_identity(request, voices_by_asset, metadata):
                 or (request["engine"].get("engine") in _DRAMA_ENGINES
                     and not isinstance(piece_metadata.get("synthesis_text"), str))):
             raise ValueError("Fragment recovery piece acceptance changed")
+        from .exhaustion_selection import validate_record
+        validate_record(accepted)
         generation_identity(actual, voices_by_asset, engine_metadata=piece_metadata)
     return generation_identity(request, voices_by_asset)

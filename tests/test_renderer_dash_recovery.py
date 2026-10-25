@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.speech_recovery import split_recovery_text
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
 import test_renderer_speech_recovery_integration as fixtures

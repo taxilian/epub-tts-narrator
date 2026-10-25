@@ -7,7 +7,7 @@ import unittest
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechRetryBudget, _render_chunk
 from test_renderer_plain_delivery_integration import DirectedFixtureEngine, DIRECTION

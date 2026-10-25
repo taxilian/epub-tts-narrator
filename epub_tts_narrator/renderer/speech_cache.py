@@ -83,6 +83,8 @@ class SpeechCache:
         if not audio.exists() and not audio.is_symlink():
             return None
         regular_file(audio)
+        from .exhaustion_selection import validate_record
+        validate_record(record)
         return path, audio, record
 
     def _load(self):

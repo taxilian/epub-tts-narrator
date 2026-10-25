@@ -348,6 +348,8 @@ def _recovered_generation_identity(request, voices_by_asset, metadata):
                 or (parent["engine"].get("engine") in _DRAMA_ENGINES
                     and not isinstance(actual_metadata.get("synthesis_text"), str))):
             raise ValueError("Sentence recovery child binding changed")
+        from .exhaustion_selection import validate_record
+        validate_record(accepted)
         generation_identity(actual, voices_by_asset, engine_metadata=actual_metadata)
     return generation_identity(parent, voices_by_asset)
 
@@ -458,6 +460,13 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     chunk = request.get("chunk")
     if not isinstance(chunk, Mapping):
         raise ValueError("Speech request is missing its chunk")
+    if isinstance(engine_metadata, Mapping) and 'exhaustion_selection' in engine_metadata:
+        from .exhaustion_selection import selected_generation_identity
+        return selected_generation_identity(request, voices_by_asset, engine_metadata)
+    if isinstance(engine_metadata, Mapping) and 'clip_repair' in engine_metadata:
+        from .clip_repair_contract import confirm_plan_metadata
+        confirm_plan_metadata(request, engine_metadata)
+        return generation_identity(request, voices_by_asset)
     if (isinstance(engine_metadata, Mapping) and "recovery" in engine_metadata
             and (request["kind"] == "paragraph_speech"
                  or (isinstance(engine_metadata["recovery"], Mapping)
@@ -465,6 +474,10 @@ def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
         return _recovered_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and "delivery_recovery" in engine_metadata:
         return _plain_delivery_generation_identity(request, voices_by_asset, engine_metadata)
+    if isinstance(engine_metadata, Mapping) and "direction_repair" in engine_metadata:
+        from .direction_repair import confirm_metadata
+        confirm_metadata(request, engine_metadata)
+        return generation_identity(request, voices_by_asset)
     if isinstance(engine_metadata, Mapping) and "fragment_recovery" in engine_metadata:
         from .fragment_provenance import fragment_generation_identity
 

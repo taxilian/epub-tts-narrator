@@ -113,10 +113,17 @@ def _request(record, path):
 
 def _normalized(record, directory, plan, *, request_hash, attempt=None):
     number = record.get("attempt")
+    expected_name = f"attempt-{number:03d}.wav" if type(number) is int else None
+    if 'exhaustion_selection' in record.get('engine_metadata', {}):
+        from .exhaustion_selection import validate_record
+        validate_record(record)
+        if not _hash(record.get('audio_sha256')):
+            raise ValueError('Selected audio requires its bound checksum')
+        expected_name = 'selection-' + record['audio_sha256'] + '.wav'
     if (type(number) is not int or number < 1
             or attempt is not None and number != attempt
             or record.get("request_hash") != request_hash
-            or record.get("audio_file") != f"attempt-{number:03d}.wav"
+            or record.get("audio_file") != expected_name
             or not isinstance(record.get("report"), dict)):
         raise ValueError(f"Cleanup found invalid normalized take metadata: {directory}")
     wav = directory / record["audio_file"]

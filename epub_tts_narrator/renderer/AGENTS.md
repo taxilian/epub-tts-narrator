@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 80 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 90 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -85,4 +85,6 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `speech_resolver._prosody_span` permits bounded punctuation-only synthesis repairs with exact normalized word-list equality and all sound reviews. `verification_prompts._PRE_PROSODY_PROMPT` freezes the predecessor bytes; `RecurringResolution` retains its reviewed spelling/delivery history across the upgrade. Historical policies cannot authorize the new repair.
 - `retained_candidates.py` nominates complete older candidates only after a saved stop and an ineligible latest transcript. Require fresh ASR, unchanged request/WAV hashes, and normal sound votes; bound scans/reviews and retain negative audits. Do not preempt an untried approved spelling or delivery repair.
 - `speech_traits.py` binds current cast speech traits to performance plans and composes them before passage directions. Keep traits in cache/checkpoint identities and recovery, including plain delivery; never mutate voice-reference assets or add traits to voice-creation prompts. Profiles omitting the field keep legacy behavior.
+- `clip_repair_*` permit broad clip-local synthesis text, delivery, trait, and split plans after two parallel blind approvals. `clip_recovery.py` routes repeated/terminal failures without changing canonical source or voice identity; existing budgets still apply.
+- `exhaustion_candidates.py` nominates physically usable, bound full-span takes; lexical/syllable differences are chooser evidence, not vetoes. `exhaustion_selection.py` honors the decisive LLM choice with `llm_exhaustion_selection`, retaining original failed reports and hash-bound audits through cache and assembly. Never re-veto the choice with ordinary lexical guards.
 - `gemini_voice_design.py` treats an HTTP-answered creation failure as knowable: reconcile by exact-name listing, adopt a voice created despite the error, or confirm nothing was created and allow retry. Only transport failures leave a pending state; the first empty listing keeps it repairable, and a repeated empty listing after a recorded failed cleanup becomes a `confirmed_absent` record instead of blocking forever.

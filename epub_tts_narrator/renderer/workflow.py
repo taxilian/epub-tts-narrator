@@ -178,11 +178,18 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
         raise RenderBlocked(f"Saved ElevenLabs generation metadata or audio changed; inspect {path}") from None
 
 
-def verified_take(text, generate, directory, request, verifier, config, *, notify=print,
+def verified_take(text, generate, directory, request, verifier, config, *, generate_plan_part=None, **options):
+    from .clip_recovery import run
+    return run(_verified_take, text, generate, directory, request, verifier, config,
+               generate_plan_part=generate_plan_part, **options)
+
+
+def _verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
                   fallback_parts=0, episode_reserve=0, generate_plain=None,
-                  allow_split=True, failed_split_report=None, allow_resolution=True):
+                  allow_split=True, failed_split_report=None, allow_resolution=True,
+                  generate_direction=None, broad_recovery=False):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -209,6 +216,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     set_phase(notify, "checking saved audio")
 
     def finish(wav, record):
+        from .exhaustion_selection import validate_record
+        validate_record(record)
+        if ("direction_repair" in record.get("engine_metadata", {})
+                and 'exhaustion_selection' not in record['engine_metadata']):
+            from .direction_repair import confirm_metadata
+            confirm_metadata(request, record["engine_metadata"])
         # Acceptance remains attached to the normalized bytes. Raw synthesis
         # output is redundant only after acceptance; reference samples stay intact.
         if purpose == "speech" and not config["render"].get("keep_intermediate_audio", False):
@@ -302,6 +315,7 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
     episode_maximum = None
     episode = resolution_episode or request.get("parent_request_hash", request_hash)
     resolution_session, rewrite, delivery = None, None, None
+    direction_session, direction_marker = None, None
     if adaptive:
         from .recurring_resolution import RecurringResolution, accepted_report
         from .speech_recovery import split_recovery_text
@@ -321,16 +335,58 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         delivery_decision = resolution_session.active_delivery()
         if delivery_decision is not None:
             delivery = delivery_marker(request, delivery_decision)
+        repair_factory = getattr(resolver, "direction_repair", None)
+        legacy_direction = not broad_recovery
+        if broad_recovery and (directory / 'direction-repair.json').exists():
+            saved_direction = read_json(regular_file(directory / 'direction-repair.json'))
+            legacy_direction = saved_direction.get('phase') in {'approved', 'generating'}
+        if (generate_direction is not None and callable(repair_factory)
+                and legacy_direction):
+            direction_session = repair_factory(directory, request)
+            if direction_session is not None:
+                direction_session.check_trial()
+                direction_marker = direction_session.active()
+                if direction_marker is not None:
+                    rewrite, delivery = None, None
 
     def resolve_failure(record):
-        nonlocal rewrite, delivery, attempts
+        nonlocal rewrite, delivery, attempts, direction_marker
         if resolution_session is None:
             return None
         stop_if_requested()
+        if direction_session is not None and pending_confirmation(record["report"]):
+            stop_for_confirmation()
+        if direction_session is not None and direction_session.failed(record):
+            raise SpeechVerificationFailed(
+                f"Reviewed direction repair failed its bounded trial. Inspect {directory}",
+                request=request, report=dict(record["report"], resolution_action="stop"))
+        if broad_recovery and direction_session is None:
+            observed = {**resolution_session.records, record['attempt']: record}
+            failed = sum(row.get('audio_file') is not None and row.get('report', {}).get('passed') is False
+                         and bool(row['report'].get('reasons')) for row in observed.values())
+            if failed >= resolution_session.threshold:
+                raise SpeechVerificationFailed(
+                    f"Repeated failures require broad clip-local recovery. Inspect {directory}",
+                    request=request, report=dict(record['report'], resolution_action='broad_repair'))
         result = resolution_session.consider(record, notify=notify)
+        if result is None and (direction_session is not None or broad_recovery):
+            result = resolution_session.saved_stop()
         if result is None:
             return None
         action = result["action"]
+        if action == "stop" and direction_session is not None:
+            from .direction_repair_state import DirectionRepairUnavailable
+            try:
+                direction_marker = direction_session.prepare(result["failures"])
+            except DirectionRepairUnavailable as exc:
+                raise VerificationUnavailable(str(exc)) from exc
+            if direction_marker is not None:
+                rewrite, delivery = None, None
+                if (fallback_parts and retry_budget.started(directory, request_hash) >= attempts
+                        and retry_budget.episode_started(episode) < episode_maximum - fallback_parts):
+                    attempts += 1
+                notify("  Testing an independently reviewed scene-control repair; words and permanent traits unchanged.")
+                return None
         if action == "unavailable":
             record["report"]["resolution_pending"] = True
             write_json(directory / f"attempt-{record['attempt']:03d}.json", record)
@@ -384,10 +440,15 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
 
         retained = recheck_retained_candidates(resolution_session, verifier, config, notify=notify)
         if retained is not None:
+            if "direction_repair" in retained.get("engine_metadata", {}):
+                from .direction_repair import confirm_metadata
+                confirm_metadata(request, retained["engine_metadata"])
             write_json(accepted_path, retained)
             notify("  Retained speech passed fresh verification and review; reusing its unchanged audio.")
             return finish(directory / retained["audio_file"], retained)
-        latest = resolution_session.records[max(resolution_session.records)]
+        eligible = [number for number in resolution_session.records
+                    if direction_session is None or not direction_session.abandoned(number)]
+        latest = resolution_session.records[max(eligible)]
         name = latest.get("audio_file")
         if name == f"attempt-{latest['attempt']:03d}.wav" and (directory / name).exists():
             if file_hash(regular_file(directory / name)) != latest.get("audio_sha256"):
@@ -395,6 +456,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
             # Pending decisions and recurring failures are reconsidered; no saved
             # transcript is substituted for independent recognition here.
             latest = deepcopy(latest)
+            if "direction_repair" in latest.get("engine_metadata", {}):
+                from .direction_repair import confirm_metadata
+                confirm_metadata(request, latest["engine_metadata"])
             latest["report"] = validate_audio(directory / name, text, verifier, config["quality"], purpose=purpose)
             marker = latest.get("engine_metadata", {}).get("speech_resolution")
             if marker is not None:
@@ -421,6 +485,8 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
         saved_attempts = []
         attempt_numbers = range(first_attempt, max(attempts, first_attempt) + 1)
     for attempt in attempt_numbers:
+        if direction_session is not None and direction_session.abandoned(attempt):
+            continue
         prefix = f"attempt-{attempt:03d}"
         raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
         result_path = directory / (prefix + ".json")
@@ -528,7 +594,14 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                     if purpose == "speech":
                         notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
                     with generation_activity(notify):
-                        if delivery is not None:
+                        if direction_marker is not None:
+                            direction_session.begin(attempt)
+                            metadata = generate_direction(
+                                text, direction_marker["proposal"]["replacement_direction"], raw, seed)
+                            metadata = {**metadata, "direction_repair": deepcopy(direction_marker)}
+                            from .direction_repair import confirm_metadata
+                            confirm_metadata(request, metadata)
+                        elif delivery is not None:
                             metadata = generate_plain(rewrite["tts_text"] if rewrite else text, raw, seed)
                             metadata = {**metadata, "delivery_recovery": deepcopy(delivery)}
                             if rewrite is not None:
@@ -571,6 +644,9 @@ def verified_take(text, generate, directory, request, verifier, config, *, notif
                 current_attempt = generation_ordinal if fresh_speech else attempt
                 set_phase(notify, f"verifying speech, attempt {current_attempt}/{attempts}")
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose)
+            if "direction_repair" in metadata:
+                from .direction_repair import confirm_metadata
+                confirm_metadata(request, metadata)
             if metadata.get("speech_resolution") is not None:
                 from .recurring_resolution import confirm_rewritten_report
                 report = confirm_rewritten_report(report, metadata["speech_resolution"])
@@ -1217,6 +1293,8 @@ def _saved_chapter_clips_present(work, record):
                 if not isinstance(cached, dict) or not _has_accepted_verification(cached):
                     present = False
                     continue
+                from .exhaustion_selection import validate_record
+                validate_record(cached)
                 name = cached.get("audio_file") if isinstance(cached, dict) else None
                 if (not isinstance(name, str) or name != Path(name).name or not name.endswith(".wav")
                         or cached.get("request_hash") != key):
@@ -1560,7 +1638,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
 
     def take(text, generate, request, *, synthesize_part=None, generate_repaired=None,
-             generate_plain=None):
+             generate_plain=None, generate_direction=None, generate_plan_part=None):
         set_phase(notify, "checking saved audio")
         identity = speech_cache.identity(request)
         key = digest(identity)
@@ -1600,7 +1678,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             text, synthesize_part, directory, request, verifier, config,
                             notify=notify, retry_budget=retry_budget,
                             resolution_episode=resolution_episode, voices_by_asset=voices_by_asset,
-                            synthesize_plain=generate_plain)
+                            synthesize_plain=generate_plain, synthesize_direction=generate_direction,
+                            synthesize_plan_part=generate_plan_part)
                     except SpeechVerificationFailed as exc:
                         # A failed child still needs its own recovery. Only a
                         # completed join can retire the split strategy; provider
@@ -1619,6 +1698,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             notify=notify, retry_budget=retry_budget, seed_identity=identity,
                             generate_repaired=generate_repaired or synthesize_part,
                             generate_plain=generate_plain, resolution_episode=resolution_episode,
+                            generate_direction=generate_direction,
+                            generate_plan_part=generate_plan_part,
                             allow_split=False, failed_split_report=exc.report)
 
                 if synthesize_part is not None and recovery_available(
@@ -1643,6 +1724,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                seed_identity=identity,
                                                generate_repaired=generate_repaired or synthesize_part,
                                                generate_plain=generate_plain,
+                                               generate_direction=generate_direction,
+                                               generate_plan_part=generate_plan_part,
                                                resolution_episode=resolution_episode,
                                                paragraph_split_available=(paragraph_split_available or
                                                    sentence_parts is not None),
@@ -1673,6 +1756,14 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             request, {voice["asset_hash"]: voice for voice in voices.values()})
         generate_repaired = None
         synthesize_part = None
+        generate_plan_part = None
+        if len(set(request['voice_assets'].values())) == 1:
+            def generate_plan_part(part, path, seed):
+                from .clip_repair_contract import part_direction
+                prepared = trim_speech_text(part['text'])
+                metadata = engine.synthesize(prepared, turns[0]['voice'], path, seed=seed,
+                                             direction=part_direction(part))
+                return {'synthesis_text': prepared, **metadata}
         if repaired_turn is not None:
             def generate_repaired(text, path, seed):
                 from .engines import format_dialogue
@@ -1689,7 +1780,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request,
-            generate_repaired=generate_repaired, synthesize_part=synthesize_part)
+            generate_repaired=generate_repaired, synthesize_part=synthesize_part,
+            generate_plan_part=generate_plan_part)
         acceptance = dict(chunk_id=chunk["chunk_id"], **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance
@@ -1726,8 +1818,22 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             )
             return {"synthesis_text": prepared, **metadata}
 
+        def synthesize_direction(text, replacement, path, seed, v=voice, voice_id=speaker["voice_id"]):
+            prepared = trim_speech_text(text)
+            metadata = engine.synthesize(
+                prepared, v, path, seed=seed,
+                direction=performance_direction(chunk, voice_id, scene_direction=replacement))
+            return {"synthesis_text": prepared, **metadata}
+
+        def synthesize_plan_part(part, path, seed, v=voice):
+            from .clip_repair_contract import part_direction
+            prepared = trim_speech_text(part['text'])
+            metadata = engine.synthesize(prepared, v, path, seed=seed, direction=part_direction(part))
+            return {'synthesis_text': prepared, **metadata}
+
         wav, accepted = take(chunk["spoken_text"], generate, request,
-                             synthesize_part=synthesize_part, generate_plain=synthesize_plain)
+                             synthesize_part=synthesize_part, generate_plain=synthesize_plain,
+                             generate_direction=synthesize_direction, generate_plan_part=synthesize_plan_part)
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:

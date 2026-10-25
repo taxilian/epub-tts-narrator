@@ -591,7 +591,18 @@ class SpeechResolver:
     @property
     def previous_identity(self):
         return _identity(self._identity["provider"], prosody=False,
-                         coverage_version=self._identity["coverage_version"])
+                          coverage_version=self._identity["coverage_version"])
+
+    def direction_repair(self, directory, request):
+        from .direction_repair import supported_request
+        from .direction_repair_state import DirectionRepair
+        if supported_request(request) is None:
+            return None
+        return DirectionRepair(directory, request, self._client)
+
+    @property
+    def clip_recovery_client(self):
+        return self._client
 
     def resolve(self, expected_text, failures, *, can_rewrite=True, can_split=True,
                 previous_decisions=None, can_plain_delivery=False):

@@ -13,7 +13,7 @@ from epub_tts_narrator.provider import (
 )
 from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.recovery_client import RecoveryModelClient
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import VerificationUnavailable
 import test_renderer_recurring_resolution as recurring_fixture

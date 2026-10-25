@@ -8,7 +8,7 @@ from unittest.mock import patch
 import wave
 
 from epub_tts_narrator.renderer.common import file_hash, read_json
-from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import (
     SpeechRetryBudget, SpeechVerificationFailed, VerificationUnavailable, _render_chunk,
