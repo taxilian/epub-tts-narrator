@@ -33,12 +33,13 @@ class ModelSetupIntegrationTests(unittest.TestCase):
         self.config_path.write_text(
             '[engine]\ncheckpoint="./models/drama-3"\n'
             '[verification]\nmodel="./models/whisper-large-v3-turbo"\n'
-            '[voices]\nseries_id="fixture"\n')
+            '[voices]\nseries_id="fixture"\n'
+            '[render]\nrequire_cover=false\n')
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "models" / "drama-3")
         self.config["verification"]["model"] = str(self.root / "models" / "whisper-large-v3-turbo")
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture")
-        self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "audio"))
+        self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "audio"), require_cover=False)
 
     def run_cli(self, command, *args):
         output, error = StringIO(), StringIO()
@@ -84,7 +85,8 @@ class ModelSetupIntegrationTests(unittest.TestCase):
             '[engine]\ncheckpoint="./models/drama-3"\n'
             f'[verification]\nmodel={json.dumps(str(snapshot))}\n'
             '[voices]\nseries_id="fixture"\n'
-            '[huggingface]\napi_key="hf_fixture"\n')
+            '[huggingface]\napi_key="hf_fixture"\n'
+            '[render]\nrequire_cover=false\n')
         before = self.config_path.read_bytes()
         complete(self.root / "models" / "drama-3")
         prompts = StringIO()

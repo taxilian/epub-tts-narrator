@@ -119,7 +119,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="shared-series")
         self.config["render"].update(
             work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE or "ffprobe",
+            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE or "ffprobe", require_cover=False,
         )
         self.config["quality"] = validate_policy({})
         self.transcripts = {}

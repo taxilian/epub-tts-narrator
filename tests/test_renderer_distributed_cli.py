@@ -30,7 +30,7 @@ class DistributedCLITests(unittest.TestCase):
         self.config.write_text(
             ('[engine]\ncheckpoint="./drama-3"\n' if local else "")
             + ('[verification]\nmodel="./whisper"\n' if verifier else "")
-            + workers)
+            + workers + '\n[render]\nrequire_cover=false\n')
 
     def run_cli(self, command, *args):
         argv = [command]

@@ -78,7 +78,7 @@ class DefaultDesignerIntegrationTests(unittest.TestCase):
         self.config["engine"]["checkpoint"] = str(self.root / "drama-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")
         self.config["gemini"]["api_key"] = "test-only-api-key"
-        self.config["render"].update(max_attempts=1, ffmpeg=FFMPEG, ffprobe=FFPROBE or "ffprobe")
+        self.config["render"].update(max_attempts=1, ffmpeg=FFMPEG, ffprobe=FFPROBE or "ffprobe", require_cover=False)
         self.config["quality"] = validate_policy({})
         self.transcripts = {}
         self.engine = LocalDesignerEngine(self.transcripts)

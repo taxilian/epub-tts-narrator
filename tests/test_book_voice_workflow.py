@@ -139,7 +139,10 @@ class BookVoiceWorkflowTests(BookFixture):
         self.assertEqual(self.store(second).load(voice_id)["asset_hash"], replacement["asset_hash"])
         self.assertEqual(self.snapshot(Path(first["directory"])), first_before)
         self.assertEqual(self.snapshot(Path(sibling["directory"])), sibling_before)
-        self.assertFalse((Path(third["directory"]) / "voices").exists())
+        # Opening a casting session may persist aliases and a lock lease. It
+        # must not copy inherited voice assets or establish local selections.
+        local_voice_files = [path for path in (Path(third["directory"]) / "voices").rglob("*") if path.is_file()]
+        self.assertTrue(all(path.name in {"voice-aliases.json", ".lock.lease"} for path in local_voice_files))
 
     def test_import_overrides_only_inherited_voice_and_refuses_local_replacement(self):
         first, second, third, sibling = self.lineage()

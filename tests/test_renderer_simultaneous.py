@@ -191,7 +191,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.config["verification"]["model"] = str(self.root / "unused-asr")
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="unison-fixture")
         self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-                                         max_attempts=2, chapter_numbers=[2])
+                                         max_attempts=2, chapter_numbers=[2], require_cover=False)
         self.config["quality"] = validate_policy({})
         self.engine = LaneEngine()
         self.verifier = LaneVerifier(self.engine)
