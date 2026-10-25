@@ -227,8 +227,11 @@ class CastingGeminiLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(RenderBlocked, "after 1 attempts"):
             self.session(remote).ensure_ready("voice_mara")
 
-        with self.assertRaisesRegex(RenderBlocked, "cleanup is still pending"):
+        with self.assertRaises(RenderBlocked) as blocked:
             self.session(remote).regenerate("voice_mara")
+        self.assertIn("cleanup is still pending", str(blocked.exception))
+        self.assertIn("provider error", str(blocked.exception))
+        self.assertIn("gemini-voice-pending.json", str(blocked.exception))
 
         self.assertEqual(self.events, [("create", "voice_test_1"), ("delete", "voice_test_1"),
                                       ("delete", "voice_test_1")])

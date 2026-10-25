@@ -432,25 +432,29 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(selected["reference_text"], script)
         self.assertEqual(session.rows()[0]["prompt"], prompt)
 
-    def test_restart_missing_voice_preparation_does_not_duplicate_ambiguous_remote_creation(self):
+    def test_restart_missing_voice_preparation_confirms_absence_and_creates_fresh(self):
         pending, calls = self.pending_remote_voice()
-        designer = self.remote_designer([], calls)
+        designer = self.remote_designer([{"id": "voice_restart_fresh"}], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        with self.assertRaisesRegex(ValueError, "cleanup.*pending") as raised:
-            restarted.ensure_ready("voice_mara")
-        self.assertIn(str(pending.parent), str(raised.exception))
-        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices"])
+        selected = restarted.ensure_ready("voice_mara")
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_restart_fresh")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/voices", "/interactions"])
+        cleanup = read_json(pending.parent / "gemini-voice-cleanup.json")
+        self.assertTrue(cleanup["remote_deleted"])
+        self.assertTrue(cleanup["confirmed_absent"])
+        self.assertEqual(cleanup["voice_ids"], [])
         self.assertEqual(list(self.root.rglob("gemini-voice-pending.json")), [pending])
+        self.assertFalse(list(self.root.rglob("gemini-cleanup-pending.json")))
 
     def test_interrupted_create_is_associated_before_any_attempt_record_exists(self):
         pending, calls = self.pending_remote_voice(interrupted=True)
         self.assertTrue((pending.parent / "casting-request.json").is_file())
         self.assertEqual(list(pending.parent.glob("attempt-*.json")), [])
-        designer = self.remote_designer([], calls)
+        designer = self.remote_designer([{"id": "voice_after_interrupt"}], calls)
         restarted = self.session(designer_factory=lambda _: designer)
-        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
-            restarted.ensure_ready("voice_mara")
-        self.assertEqual(len(calls), 1)
+        selected = restarted.ensure_ready("voice_mara")
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_after_interrupt")
+        self.assertEqual(calls[0][0], "/voices")
 
     def test_missing_voice_preparation_cleans_repaired_id_before_new_creation(self):
         pending, calls = self.pending_remote_voice()

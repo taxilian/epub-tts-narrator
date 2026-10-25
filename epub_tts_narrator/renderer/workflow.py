@@ -799,7 +799,11 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
             raise RenderBlocked("Existing voice was created for a different model; use an explicit compatible binding")
         return existing
     if cleanup_pending:
-        raise RenderBlocked("Gemini voice cleanup is still pending; rerun to finish cleanup before creating another reference")
+        raise RenderBlocked(
+            "Gemini voice cleanup is still pending; rerun to finish cleanup before creating another "
+            "reference. The cleanup warning above carries the provider error; fix its cause before "
+            "rerunning. After confirming in Google AI Studio that the pending voice does not exist, "
+            "removing its gemini-voice-pending.json clears the state.")
     regeneration = store.regeneration_status(voice_id)
     if regeneration is not None:
         raise RenderBlocked(

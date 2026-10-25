@@ -664,7 +664,12 @@ class CastingSession:
                 continue
             if (str(retry_path) in self._cleanup_attempted
                     and (retry_path.exists() or (previous_directory / "gemini-voice-cleanup-request.json").exists())):
-                raise RenderBlocked(f"Gemini cleanup is still pending; inspect {previous_directory} before requesting another voice.")
+                raise RenderBlocked(
+                    f"Gemini cleanup is still pending for a previous creation of this voice: "
+                    f"{previous_directory}. This run already retried the remote deletion and failed; "
+                    "the cleanup warning above carries the provider error. Fix its cause and rerun to "
+                    "retry. After confirming in Google AI Studio that the pending voice does not exist, "
+                    "removing that directory's gemini-voice-pending.json clears the state.")
             if not known_id:
                 if callable(getattr(designer, "release_voice", None)):
                     with self._gemini_cleanup_designer(previous) as original_designer:

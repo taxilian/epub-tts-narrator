@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import wave
 
 from epub_tts_narrator.renderer.gemini_voice_design import (
-    GEMINI_DESIGN_MODEL, GeminiVoiceDesigner, GeminiVoiceError,
+    GEMINI_DESIGN_MODEL, GeminiVoiceDesigner, GeminiVoiceError, _fingerprint,
 )
 
 
@@ -227,16 +227,95 @@ class GeminiVoiceCleanupTests(unittest.TestCase):
         self.assertEqual(cleanup["voice_ids"], ["voice_recovered"])
         self.assertEqual(cleanup["request_fingerprint"], pending["request_fingerprint"])
 
-    def test_unresolved_creation_remains_pending_without_claiming_remote_deletion(self):
+    def test_unreconciled_creation_is_confirmed_absent_by_a_repeated_empty_listing(self):
         self.pending_candidate()
+        pending_path = self.directory / "gemini-voice-pending.json"
         http = self.http({"voices": []})
 
-        with self.assertRaises(GeminiVoiceError):
+        with self.assertRaises(GeminiVoiceError) as caught:
             self.designer.release_voice(self.directory)
 
-        self.assertTrue((self.directory / "gemini-voice-pending.json").exists())
+        message = str(caught.exception)
+        self.assertIn("Google AI Studio", message)
+        self.assertIn("remove that file", message)
+        self.assertNotIn(self.key, message)
+        self.assertTrue(pending_path.exists())
         self.assertFalse((self.directory / "gemini-voice-cleanup.json").exists())
         self.assertEqual([request.get_method() for request in http.requests], ["GET"])
+
+        # The caller records the failed attempt; a repeated empty listing is conclusive.
+        (self.directory / "gemini-cleanup-pending.json").write_text(json.dumps(
+            {"format": "audiobook-gemini-cleanup-pending"}))
+        http = self.http({"voices": []})
+        self.assertEqual(self.designer.release_voice(self.directory), [])
+
+        self.assertEqual([request.get_method() for request in http.requests], ["GET"])
+        self.assertTrue(pending_path.exists())
+        cleanup = json.loads((self.directory / "gemini-voice-cleanup.json").read_text())
+        self.assertTrue(cleanup["remote_deleted"])
+        self.assertTrue(cleanup["confirmed_absent"])
+        self.assertEqual(cleanup["voice_ids"], [])
+        self.assertNotIn(self.key, json.dumps(cleanup))
+        http = self.http()
+        self.assertEqual(self.designer.release_voice(self.directory), [])
+        self.assertEqual(http.requests, [])
+
+    def test_answered_creation_failure_proves_nothing_was_created_and_allows_retry(self):
+        http = self.http(_http_error(500, "Voice synthesis service failed to process the request."),
+                         {"voices": []})
+
+        with self.assertRaises(GeminiVoiceError) as caught:
+            self.create()
+
+        message = str(caught.exception)
+        self.assertIn("HTTP 500", message)
+        self.assertIn("nothing was created", message)
+        self.assertIn("reword", message)
+        self.assertNotIn("Check Google AI Studio", message)
+        self.assertNotIn(self.key, message)
+        self.assertFalse((self.directory / "gemini-voice-pending.json").exists())
+        self.assertEqual([request.get_method() for request in http.requests], ["POST", "GET"])
+
+        http = self.http({"id": "voice_retried"}, _audio_response())
+        self.assertEqual(self.create()["remote_voice_id"], "voice_retried")
+        self.assertEqual([request.get_method() for request in http.requests], ["POST", "POST"])
+
+    def test_answered_creation_failure_adopts_voice_created_despite_the_error(self):
+        display_name = "Audiobook voice " + _fingerprint(str(self.directory.resolve()))[:16]
+        http = self.http(_http_error(500),
+                         {"voices": [{"id": "voice_found", "display_name": display_name,
+                                      "model": GEMINI_DESIGN_MODEL, "type": "prompted"}]},
+                         _audio_response())
+
+        result = self.create()
+
+        self.assertEqual(result["remote_voice_id"], "voice_found")
+        self.assertEqual([request.get_method() for request in http.requests], ["POST", "GET", "POST"])
+        self.assertFalse((self.directory / "gemini-voice-pending.json").exists())
+        state = json.loads((self.directory / "gemini-voice.json").read_text())
+        self.assertEqual(state["voice_id"], "voice_found")
+
+    def test_answered_creation_failure_stays_pending_when_listing_is_unreachable(self):
+        http = self.http(_http_error(500), TimeoutError("listing unavailable"))
+
+        with self.assertRaisesRegex(GeminiVoiceError, "Check Google AI Studio"):
+            self.create()
+
+        self.assertTrue((self.directory / "gemini-voice-pending.json").exists())
+        self.assertEqual([request.get_method() for request in http.requests], ["POST", "GET"])
+
+    def test_answered_creation_failure_stays_pending_when_same_name_voices_are_ambiguous(self):
+        display_name = "Audiobook voice " + _fingerprint(str(self.directory.resolve()))[:16]
+        matching = {"display_name": display_name, "model": GEMINI_DESIGN_MODEL, "type": "prompted"}
+        http = self.http(_http_error(500), {"voices": [
+            dict(matching, id="voice_one"), dict(matching, id="voice_two"),
+        ]})
+
+        with self.assertRaisesRegex(GeminiVoiceError, "Check Google AI Studio"):
+            self.create()
+
+        self.assertTrue((self.directory / "gemini-voice-pending.json").exists())
+        self.assertEqual([request.get_method() for request in http.requests], ["POST", "GET"])
 
     def test_pending_reconciliation_accepts_full_model_resource_but_not_similar_model(self):
         pending = self.pending_candidate()

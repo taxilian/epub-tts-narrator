@@ -137,15 +137,19 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         self.assertFalse((pending.parent / "gemini-voice.json").exists())
         self.assertEqual((pending.parent / "casting-request.json").read_bytes(), original_request)
 
-    def test_explicit_regeneration_blocks_unresolved_creation_instead_of_leaking_a_duplicate(self):
+    def test_explicit_regeneration_confirms_absent_creation_and_creates_fresh(self):
         pending = self.pending_creation()
         before = pending.read_bytes()
         original_request = (pending.parent / "casting-request.json").read_bytes()
         session = self.session(self.designer([{"id": "voice_intentional_new"}]))
-        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
-            session.regenerate("voice_mara")
-        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices"])
-        self.assertEqual(self.deleted_voices, [])
+        selected = session.regenerate("voice_mara")
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_intentional_new")
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        cleanup = read_json(pending.parent / "gemini-voice-cleanup.json")
+        self.assertTrue(cleanup["remote_deleted"])
+        self.assertTrue(cleanup["confirmed_absent"])
+        self.assertEqual(cleanup["voice_ids"], [])
+        self.assertEqual(self.deleted_voices, ["voice_intentional_new"])
         self.assertEqual(pending.read_bytes(), before)
         self.assertEqual((pending.parent / "casting-request.json").read_bytes(), original_request)
 
@@ -166,13 +170,17 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
         self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
         self.assertTrue(read_json(pending.parent / "gemini-voice-cleanup.json")["remote_deleted"])
 
-    def test_startup_still_blocks_when_prior_creation_outcome_is_unknown(self):
+    def test_startup_confirms_absent_unknown_creation_before_creating_fresh(self):
         pending = self.pending_creation()
         before = pending.read_bytes()
-        session = self.session(self.designer([]))
-        with self.assertRaisesRegex(ValueError, "cleanup.*pending"):
-            session.ensure_ready("voice_mara")
-        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices"])
+        session = self.session(self.designer([{"id": "voice_startup_fresh"}]))
+        selected = session.ensure_ready("voice_mara")
+        self.assertEqual(selected["creation"]["remote_voice_id"], "voice_startup_fresh")
+        self.assertEqual([endpoint for endpoint, _ in self.calls], ["/voices", "/voices", "/interactions"])
+        cleanup = read_json(pending.parent / "gemini-voice-cleanup.json")
+        self.assertTrue(cleanup["remote_deleted"])
+        self.assertTrue(cleanup["confirmed_absent"])
+        self.assertEqual(self.deleted_voices, ["voice_startup_fresh"])
         self.assertEqual(pending.read_bytes(), before)
 
     def test_transient_synthesis_retry_reuses_remote_id_within_the_same_take(self):

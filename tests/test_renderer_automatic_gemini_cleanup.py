@@ -143,8 +143,11 @@ class AutomaticGeminiCleanupTests(unittest.TestCase):
             self.ensure()
         self.assertNotIn("fixture-gemini-secret", "\n".join(self.messages))
         self.assertEqual(len(list(self.work.rglob("gemini-cleanup-pending.json"))), 1)
-        with self.assertRaisesRegex(workflow.RenderBlocked, "cleanup is still pending"):
+        with self.assertRaises(workflow.RenderBlocked) as blocked:
             self.ensure()
+        self.assertIn("cleanup is still pending", str(blocked.exception))
+        self.assertIn("gemini-voice-pending.json", str(blocked.exception))
+        self.assertIn("Google AI Studio", str(blocked.exception))
         self.assertEqual(self.remote.created, 1)
         self.remote.cleanup_error = None
         self.verifier.wrong = False

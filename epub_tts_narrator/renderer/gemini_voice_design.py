@@ -255,6 +255,13 @@ class GeminiVoiceDesigner:
             seen_tokens.add(token)
         raise GeminiVoiceError("Gemini voice listing exceeded the pagination limit")
 
+    def _find_created_voices(self, display_name, model):
+        """Hosted creations attributable to one exact request, never similar names."""
+        return [voice["id"] for voice in self.list_voices(search=display_name)
+                if voice.get("display_name") == display_name
+                and voice.get("model") in (model, "models/" + model)
+                and voice.get("type") == "prompted"]
+
     def delete_voice(self, voice_id):
         """Delete a stored voice; an already absent voice is a successful cleanup."""
         if not isinstance(voice_id, str) or not _VOICE_ID.fullmatch(voice_id):
@@ -321,12 +328,25 @@ class GeminiVoiceDesigner:
             original_model = state.get("model", self.model)
             if not isinstance(original_model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", original_model):
                 raise GeminiVoiceError(f"Invalid Gemini model in cleanup state: {path}")
-            ids = [voice["id"] for voice in self.list_voices(search=display_name)
-                   if voice.get("display_name") == display_name and voice.get("model") in (original_model, "models/" + original_model)
-                   and voice.get("type") == "prompted"]
+            ids = self._find_created_voices(display_name, original_model)
             if not ids:
-                raise GeminiVoiceError(f"No Gemini voice is visible yet for {display_name!r}; the creation outcome "
-                                       f"is still unknown. Retained {pending_path} for cleanup retry.")
+                # The first empty listing only starts reconciliation: the caller
+                # records a failed cleanup attempt, leaving the pending state
+                # repairable. A repeated empty listing on a later attempt is
+                # conclusive, so confirm absence instead of blocking forever.
+                marker_path = directory / "gemini-cleanup-pending.json"
+                if marker_path.exists() and not marker_path.is_symlink():
+                    _write_state(cleanup_path, {"version": _STATE_VERSION,
+                                 "request_fingerprint": fingerprint, "voice_ids": [],
+                                 "remote_deleted": True, "confirmed_absent": True,
+                                 "display_name": display_name})
+                    return []
+                raise GeminiVoiceError(
+                    f"No Gemini voice named {display_name!r} is visible in this API project, so the "
+                    f"creation outcome is still unknown. Rerun the command: a repeated empty listing "
+                    "confirms the voice was never created and clears this state automatically. To "
+                    "resolve it now, check Google AI Studio: if the voice exists, add its ID as "
+                    f"voice_id in {path}; if it does not exist, remove that file.")
         # Persist discovered IDs BEFORE deletion. If the response or final marker
         # is lost, a retry can confirm absence with DELETE/404 without depending
         # on a list response that can no longer find the removed resource.
@@ -398,6 +418,33 @@ class GeminiVoiceDesigner:
             if exc.definite_rejection:
                 pending_path.unlink()
                 raise GeminiVoiceError(str(exc)) from None
+            if exc.status_code is not None:
+                # An answered request was processed and rejected, unlike a lost
+                # connection, so its outcome is knowable by listing: adopt a
+                # voice created despite the error, or prove nothing was made.
+                try:
+                    found = self._find_created_voices(display_name, self.model)
+                except _RequestFailure:
+                    found = None
+                if found is not None:
+                    if len(found) == 1:
+                        _write_state(state_path, {**pending, "voice_id": found[0],
+                                                  "recovered_after_error": True})
+                        pending_path.unlink()
+                        return found[0]
+                    if not found:
+                        pending_path.unlink()
+                        remedy = (
+                            "Rerun to retry. If the same voice description keeps failing with a 5xx "
+                            "response, the request itself is crashing the Gemini voice service: reword "
+                            "the description (cast --action edit --prompt-file) or choose another "
+                            "gemini.model."
+                            if exc.status_code >= 500 else
+                            "Rerun to retry once the service accepts requests again.")
+                        raise GeminiVoiceError(
+                            str(exc) + f". The service answered, and no voice named {display_name!r} "
+                            "exists in this API project, so nothing was created and no cleanup is "
+                            "pending. " + remedy) from None
             raise GeminiVoiceError(str(exc) + ". " + self._pending_message(pending_path, display_name)) from None
         voice_id = created.get("id")
         if not isinstance(voice_id, str) or not _VOICE_ID.fullmatch(voice_id):
