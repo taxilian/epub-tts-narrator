@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 107 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 109 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -34,6 +34,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | --- | --- |
 | Render chapters and resume work | `workflow.py`, especially `render()` |
 | Run a stage on a bounded resource lane | `render_lanes.py` | Declared worker counts, owner fairness, payload-free stage gauges |
+| Share one fair logical scheduler across chapters | `render_pipeline.py`, `render_pipeline_config.py` | Global logical bound, per-chapter share, validated runtime-only settings |
 | Inspect acceptance or transcript failures | `quality.py`, `verification.py`, `chapter_verification.py` |
 | Resolve recurring speech failures | `speech_resolver.py`, `recurring_resolution.py`, `delivery_recovery.py` |
 | Configure engines or add a plugin | `engines.py`, `ENGINE_NOTES.md` |
@@ -81,6 +82,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `render_metrics.py` owns payload-free bounded stage metrics: closed `STAGES` set, fixed histogram buckets, completed/failed/cancelled outcome counters. Instrument resource entry/exit only; snapshots never carry text, URLs, keys, or user labels, and `gpu_telemetry` is a constant until a collector exists.
 - `common.py` has only 51 lines but 33 internal consumers; treat changes as high blast radius.
 - `render_lanes.py` owns bounded cancellable resource lanes: fixed declared worker pools, per-owner round-robin FIFO, submit-time context copies, stop checks at dequeue, `LaneFull` backpressure, and same-lane submit/close guards. Lanes never execute model work; callables keep delegating to `LocalRuntime`.
+- `render_pipeline.py` owns the shared logical clip scheduler: globally bounded transactions, non-borrowable per-chapter share, per-owner cancel, source-ordered collect; coordinators never run on it. `render_pipeline_config.py` owns validated `render_pool` scheduler controls (default `legacy`, `0` = automatic) and their effective values; they never enter `RENDER_CONTRACT`, `SAFE_RENDER_KEYS`, or any render identity, and pipeline remote projection drops the legacy `4*C` inflight override in favor of automatic admission.
 - `workflow.py` is about 2,060 lines and the largest maintenance risk; keep changes local.
 - `workflow.render()` restores completed chapters when the context hash matches.
 - It writes `status.json` and `plan.json` under `work_dir`, with directory locks from `run_locks.acquire_directory_lock`.

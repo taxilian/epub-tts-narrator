@@ -19,6 +19,7 @@ from epub_tts_narrator.config import resolve_config_path
 from .common import write_private
 from .config import DEFAULTS, load_config
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
+from .render_pipeline_config import SCHEDULERS, project_pipeline_controls
 from .runpod_gpu import DEFAULT_GPU_TYPE_ID
 
 
@@ -261,6 +262,10 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
     config.setdefault("engine", {}).update(
         type="drama3_mlx", model=DEFAULT_DRAMA3_MODEL, checkpoint=settings["model_dir"])
     batched = settings["tts_backend"] == "sglang"
+    local_pool = local_renderer_config.get("render_pool", {}) or {}
+    scheduler = local_pool.get("scheduler", "legacy")
+    if not isinstance(scheduler, str) or scheduler not in SCHEDULERS:
+        raise ValueError("render_pool.scheduler must be legacy or pipeline")
     config["render_pool"] = {
         "model_revision": native.revision,
         "workers": [{"name": "drama3-cuda", "type": "fish_http",
@@ -270,7 +275,11 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
                      "api_key": "", "concurrency": settings["tts_concurrency"] if batched else 1,
                      "multi_speaker": not batched, "timeout_seconds": 600.0}],
     }
-    if batched:
+    if scheduler == "pipeline":
+        # Project the validated scheduler controls and honor automatic
+        # whole-transaction admission (0) instead of the legacy 4*C override.
+        config["render_pool"].update(project_pipeline_controls(local_pool))
+    elif batched:
         # One bound across all chapter coordinators, including verification.
         config["render_pool"]["max_inflight"] = 4 * settings["tts_concurrency"]
     remote_verification = override_raw.get("verification", {})
