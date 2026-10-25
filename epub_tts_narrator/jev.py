@@ -134,12 +134,21 @@ class JevClient:
                 "adapter_version": 1, "timeout_seconds": self.timeout_seconds, "max_retries": self.max_retries}
 
     def _request(self, encoded):
+        from .renderer.render_resource_context import current_resources, run_review_leaf
+        if current_resources() is None:
+            return self._request_attempts(self._opener, encoded)
+        # One fresh transport per lane job: a shared urllib opener is never
+        # used concurrently by review workers. Analyzer and legacy consumers
+        # keep the reusable opener path unchanged.
+        return run_review_leaf(self._request_attempts, build_opener(_NoRedirect()), encoded)
+
+    def _request_attempts(self, opener, encoded):
         for attempt in range(self.max_retries + 1):
             retryable, retry_after, status = False, None, None
             try:
                 request = Request(ENDPOINT, data=encoded, method="POST", headers={
                     "Authorization": "Bearer " + self._api_key, "Content-Type": "application/json", "Accept": "application/json"})
-                with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                with opener.open(request, timeout=self.timeout_seconds) as response:
                     status = response.status
                     if type(status) is not int or not 200 <= status < 300:
                         # Real urllib turns non-2xx responses into HTTPError; this

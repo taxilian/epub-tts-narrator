@@ -352,6 +352,12 @@ def compare_reference_words(expected_text: str, actual_text: str, *,
 
 
 def _audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
+    """Measure acoustic quality; route the DSP leaf to the preparation lane."""
+    from .render_resource_context import run_preparation
+    return run_preparation(_measure_audio_metrics, path, policy, include_silences=include_silences)
+
+
+def _measure_audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
     with wave.open(str(path), "rb") as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (
             1, 2, _SAMPLE_RATE, "NONE"

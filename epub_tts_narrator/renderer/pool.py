@@ -7,7 +7,7 @@ from copy import deepcopy
 from functools import wraps
 from queue import Queue
 from threading import BoundedSemaphore, Condition, RLock, get_ident
-from time import monotonic
+from time import monotonic, sleep
 
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, create_engine
@@ -15,9 +15,13 @@ from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 from .progress import generation_notifier, report_worker_activity
 from .render_metrics import METRICS
+from .render_resource_context import current_owner
 
 
 _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
+
+# Bounded backpressure poll while the synthesis lane's declared backlog is full.
+_LANE_RETRY_SECONDS = 0.005
 
 
 def pool_sampling(config):
@@ -52,11 +56,12 @@ def _text_review_method(name, method):
 class _SerializedVerifier:
     """Keep recognition model-affine while known text reviews use their own lane."""
 
-    def __init__(self, verifier, lock, runtime, review_runtime):
+    def __init__(self, verifier, lock, runtime, review_runtime, resources=None):
         self._verifier = verifier
         self._lock = lock
         self._runtime = runtime
         self._review_runtime = review_runtime
+        self._resources = resources
         self._state = Condition(RLock())
         self._active = 0
         self._closing = self._closed = False
@@ -68,10 +73,24 @@ class _SerializedVerifier:
             self._active += 1
         try:
             if _text_review_method(name, method):
+                if self._resources is not None:
+                    # A parent review routine never executes on the HTTP lane
+                    # it waits on; its leaf requests use the shared review lane.
+                    return self._resources.run_review_parent(
+                        method, *args, owner=current_owner())
                 # Keep the reusable HTTP clients serialized, but do not occupy
                 # the inference thread or its lock during a network request.
                 with METRICS.active("review"):
                     return self._review_runtime.run(method, *args, **kwargs)
+
+            if self._resources is not None:
+                def recognized():
+                    with self._lock:
+                        return method(*args, **kwargs)
+                return self._resources.run_recognition(
+                    lambda: self._runtime.run(recognized,
+                                              initialize_mlx=requires_mlx(self._verifier)),
+                    owner=current_owner())
 
             def run():
                 with self._lock:
@@ -201,6 +220,7 @@ class RenderPool:
         # window is shared by every chapter using this pool, including review.
         self.max_inflight = max_inflight or self.max_parallel + 1
         self._admission = BoundedSemaphore(max_inflight) if max_inflight else None
+        self._resources = self._build_resources(config)
         self._identity = {
             "engine": "fish_tts_pool", "model": selected.repo, "contract_version": 1,
             "model_revision": settings.get("model_revision", selected.revision),
@@ -224,6 +244,26 @@ class RenderPool:
     def identity(self):
         return deepcopy(self._identity)
 
+    def _build_resources(self, config):
+        """Pipeline lanes when configured; None keeps the legacy serial paths."""
+        from .render_pipeline_config import effective_scheduling
+        from .render_resources import RenderResources
+
+        effective = effective_scheduling(config)
+        if effective["scheduler"] != "pipeline":
+            return None
+        return RenderResources(
+            tts_slots=self.max_parallel,
+            synthesis_backlog=effective["synthesis_backlog"],
+            review_concurrency=effective["review_concurrency"],
+            max_inflight=self.max_inflight,
+        )
+
+    @property
+    def resources(self):
+        """The pipeline resource runtime, or None in legacy scheduling mode."""
+        return self._resources
+
     @property
     def voice_design_identity(self):
         worker = next((worker for worker in self._workers if worker.local), None)
@@ -238,7 +278,8 @@ class RenderPool:
     def wrap_verifier(self, verifier):
         if isinstance(verifier, _SerializedVerifier) and verifier._lock is self.local_lock:
             return verifier
-        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime, self._review_runtime)
+        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime,
+                                   self._review_runtime, self._resources)
 
     @contextmanager
     def admit_chunk(self):
@@ -275,6 +316,8 @@ class RenderPool:
         stop_if_requested()
         if self._closed:
             raise EngineError("The render pool is closed")
+        if self._resources is not None:
+            return self._execute_on_lane(method, args, kwargs)
         notify = generation_notifier()
         report_worker_activity(notify, "waiting")
         with METRICS.waiting("synthesis_slot"):
@@ -312,6 +355,66 @@ class RenderPool:
             return run()
         finally:
             self._slots.put(worker)
+
+    def _execute_on_lane(self, method, args, kwargs):
+        """Pipeline mode: one bounded lane job per declared endpoint slot.
+
+        The lane owns the synthesis stage gauges, so the job does not wrap
+        them again. Worker selection stays inside the job: a queued
+        transaction must never hold an endpoint slot while it waits for a
+        lane thread. A full declared synthesis backlog makes the caller wait
+        here instead of hiding an unbounded work queue.
+        """
+        from .interrupts import stop_if_requested
+        from .render_lanes import LaneFull
+
+        notify = generation_notifier()
+        owner = current_owner()
+
+        def run_on_lane():
+            report_worker_activity(notify, "waiting")
+            with METRICS.waiting("synthesis_slot"):
+                worker = self._slots.get()
+            try:
+                name = worker.settings["name"]
+                report_worker_activity(notify, "assigned", name)
+                def run():
+                    # A job may have waited for the endpoint slot or the local
+                    # model thread. Do not start it after cancellation;
+                    # already-running jobs drain.
+                    stop_if_requested()
+                    started = monotonic()
+                    report_worker_activity(notify, "started", name)
+                    try:
+                        engine = worker.engine()
+                        if worker.local and requires_mlx(engine):
+                            self._local_runtime.initialize_mlx()
+                        metadata = getattr(engine, method)(*args, **kwargs)
+                        if not isinstance(metadata, dict):
+                            raise EngineError("TTS worker returned invalid generation metadata")
+                        result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                    except BaseException:
+                        report_worker_activity(notify, "failed", name, monotonic() - started)
+                        raise
+                    report_worker_activity(notify, "completed", name, monotonic() - started)
+                    return result
+                if worker.local:
+                    def local_run():
+                        with self.local_lock:
+                            return run()
+                    return self._local_runtime.run(local_run)
+                return run()
+            finally:
+                self._slots.put(worker)
+
+        while True:
+            try:
+                return self._resources.tts.submit(run_on_lane, owner=owner).result()
+            except LaneFull:
+                stop_if_requested()
+                if self._closed:
+                    raise EngineError("The render pool is closed") from None
+                sleep(_LANE_RETRY_SECONDS)
 
     def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
         options = {"performance": performance, "traits": traits} if performance is not None else {}
@@ -359,6 +462,11 @@ class RenderPool:
             self._local_runtime.run(self._review_runtime.close)
         finally:
             try:
+                if self._resources is not None:
+                    # Drains started-take verification leaves, cancels queued
+                    # synthesis, and joins every lane worker before the
+                    # engines they may still be using are released.
+                    self._resources.close()
                 self._local_runtime.run(close_local)
                 for worker in self._workers:
                     if not worker.local:

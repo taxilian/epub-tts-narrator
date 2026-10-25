@@ -17,8 +17,8 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 ```
 epub-tts-narrator/
 ├── epub_tts_narrator/        # analyzer package: 56 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 109 flat modules, own CLI + AGENTS.md
-├── tests/                    # 280 flat unittest files + fixtures/ + shared helpers
+│   └── renderer/             # renderer subpackage: 111 flat modules, own CLI + AGENTS.md
+├── tests/                    # 283 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -47,7 +47,7 @@ epub-tts-narrator/
 | Voice profile/prompt refresh | `epub_tts_narrator/voice_prompt_refresh.py` | Casting-description refresh; sends a complete `known_cast` snapshot |
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
 | Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2059 ln) | Resumable, checkpointed, quality-gated |
-| Shared render scheduling | `renderer/render_lanes.py`, `renderer/render_pipeline.py` | Bounded stage lanes; fair logical clip scheduler; runtime-only `render_pool` controls in `render_pipeline_config.py` |
+| Shared render scheduling | `renderer/render_lanes.py`, `renderer/render_pipeline.py`, `renderer/render_resources.py`, `renderer/render_resource_context.py` | Bounded stage lanes; fair logical scheduler; runtime-only controls; pipeline leaf routing (`resource_scope`) |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
 | Casting workflow | `epub_tts_narrator/renderer/casting.py` | `CastingSession` god-class (~37 methods, 20+ callers) |
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |

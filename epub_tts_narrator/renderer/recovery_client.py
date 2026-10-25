@@ -38,10 +38,17 @@ class RecoveryModelClient:
 
     def complete(self, system, payload):
         from epub_tts_narrator.provider import OpenAICompatibleClient
+        from .render_resource_context import current_resources, run_review_leaf
 
+        routed = current_resources() is not None
         for index, budget in enumerate(self._budgets):
             client = OpenAICompatibleClient(**{**self._options, "max_output_tokens": budget})
             try:
+                # Each provider-call attempt is one leaf job on the review
+                # lane when a pipeline scope exists; retry budgets, request
+                # bytes, and client identity stay identical to direct calls.
+                if routed:
+                    return run_review_leaf(client.complete, system, deepcopy(payload))
                 return client.complete(system, deepcopy(payload))
             except OutputTruncatedError:
                 if index + 1 == len(self._budgets):
