@@ -245,6 +245,59 @@ class LaneLifecycleTests(LaneTestCase):
         self.assertEqual([thread.name for thread in threading.enumerate()
                           if thread.name.startswith("drain-")], [])
 
+    def test_close_cancel_of_queued_work_resets_the_lane_pending_count(self):
+        lane = ResourceLane(name="pending-reset", workers=1, stage="synthesis",
+                            max_pending=8)
+        self.addCleanup(lane.close)
+        blocker = Blocker()
+        running = lane.submit(blocker)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        queued = [lane.submit(lambda index=index: index) for index in range(3)]
+        closer = threading.Thread(target=lane.close)
+        closer.start()
+        for future in queued:
+            self.assertTrue(wait_until(future.cancelled))
+        blocker.release.set()
+        self.assertEqual(running.result(WORKER_WAIT), "blocked")
+        closer.join(WORKER_WAIT)
+        self.assertFalse(closer.is_alive())
+        # The queue-capacity counter has no public reader yet; probe the
+        # invariant directly (house precedent: pool._slots.qsize()).
+        self.assertEqual(lane._pending, 0)
+        lane.close()  # repeated close must not resurrect the count
+        self.assertEqual(lane._pending, 0)
+        self.assertEqual(snapshot_gauge("synthesis"), (0, 0))
+
+    def test_submitter_cancel_then_close_still_releases_the_queued_metrics_gauge(self):
+        lane = ResourceLane(name="precancel", workers=1, stage="review",
+                            max_pending=8)
+        self.addCleanup(lane.close)
+        blocker = Blocker()
+        running = lane.submit(blocker)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        precancelled = lane.submit(lambda: "first")
+        self.assertTrue(precancelled.cancel())
+        callbacks = []
+        second = lane.submit(lambda: "second")
+        second.add_done_callback(
+            lambda future: callbacks.append((future, future.cancelled())))
+        closer = threading.Thread(target=lane.close)
+        closer.start()
+        self.assertTrue(wait_until(lambda: bool(callbacks)))
+        blocker.release.set()
+        self.assertEqual(running.result(WORKER_WAIT), "blocked")
+        closer.join(WORKER_WAIT)
+        self.assertFalse(closer.is_alive())
+        self.assertTrue(precancelled.cancelled())
+        self.assertTrue(second.cancelled())
+        self.assertEqual(callbacks, [(second, True)])  # exactly once, cancelled
+        self.assertEqual(lane._pending, 0)
+        self.assertEqual(snapshot_gauge("review"), (0, 0))
+        stage_state = render_metrics.METRICS.snapshot()["review"]
+        self.assertEqual(stage_state["outcomes"]["cancelled"], 2)
+        lane.close()
+        self.assertEqual(lane._pending, 0)
+
     def test_close_from_one_of_its_own_workers_is_refused(self):
         lane = self.make_lane(name="self-close", workers=1, stage="review",
                               max_pending=4)

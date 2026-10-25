@@ -132,13 +132,17 @@ class ResourceLane:
                     for job in queue:
                         self._cancel(job)
                 self._owners.clear()
+                # Cancelled queued jobs never reach _take; restore the count.
+                self._pending = 0
             self._cond.notify_all()
         for thread in self._threads:
             thread.join()
 
     def _cancel(self, job):
         # The lane condition is held: one funnel keeps futures and gauges equal.
-        if job.future.cancel():
+        # A submitter may have cancelled the future first; its token must end
+        # exactly once either way, or the queued gauge leaks after close.
+        if job.future.cancel() or job.future.cancelled():
             job.operation.cancel()
 
     def _take(self):
