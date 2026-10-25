@@ -1,8 +1,13 @@
-"""Durable chapter queue and immutable compressed voice registry.
+"""Run-scoped chapter queue and immutable compressed voice registry.
 
 Bounded synthesis coordinators share one warm engine pool. The next chapter can
 use a free GPU while the previous chapter finishes ASR/JEV verification. A
 separate bounded CPU pool assembles and publishes completed chapters.
+
+Queue and event rows belong only to the currently connected render run: a
+restart clears them, a detached or expired owner's rows are pruned, and a
+completed run is removed once its client acknowledges verified delivery.
+Accepted speech caches, registered voices, and artifact files are retained.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from .retry_budget import SpeechRetryBudget
 
 
 _ACTIVE_STATES = ("queued", "generating", "assembling")
+_INFLIGHT_STATES = ("generating", "assembling")
 
 
 class ChapterJobs:
@@ -48,8 +54,8 @@ class ChapterJobs:
         self.identity = deepcopy(executor.identity)
         self.fingerprint = digest(self.identity)
         # Execution is granted only to explicitly connected clients. Sessions
-        # are memory-only: a restart clears every lease, so persisted jobs from
-        # earlier clients stay queued but paused until a client reattaches.
+        # are memory-only: a restart clears every lease and every past run's
+        # rows, so nothing from an earlier client survives a restart.
         self.sessions = sessions if sessions is not None else ClientSessions(
             self.settings.get("session_ttl_seconds", 30))
         self._owners = {}
@@ -158,6 +164,8 @@ class ChapterJobs:
                 "parallel_chapters": self._parallel_chapters,
                 "submission_budget": True,
                 "client_sessions": 1, "session_ttl_seconds": self.sessions.ttl,
+                "ephemeral_runs": 1,
+                "warm_activation": 1,
                 "maintenance": self._maintenance,
                 "voice_format": "flac", "chapter_format": "m4a",
                 "timing_precision": "paragraph_or_chunk"}
@@ -174,9 +182,16 @@ class ChapterJobs:
         revoked = self.sessions.revoke(session_id)
         if revoked:
             with self._condition:
-                for job_id, owner in self._owners.items():
-                    if owner == session_id:
-                        self._epochs[job_id] = self._epochs.get(job_id, 0) + 1
+                with self._connect() as db:
+                    for row in db.execute("SELECT id,state FROM jobs").fetchall():
+                        if self._owners.get(row["id"]) != session_id:
+                            continue
+                        if row["state"] in _INFLIGHT_STATES:
+                            # The in-flight take drains at its next durable
+                            # boundary; _abandon then removes the run.
+                            self._epochs[row["id"]] = self._epochs.get(row["id"], 0) + 1
+                        else:
+                            self._discard_row(db, row["id"])
                 self._condition.notify_all()
         return {"revoked": revoked}
 
@@ -289,6 +304,36 @@ class ChapterJobs:
         if row is None:
             raise KeyError("Unknown chapter job")
         return row
+
+    def _discard_row(self, db, job_id):
+        """Delete one run's queue row and its events; artifact files stay.
+
+        Scheduling metadata is ephemeral: once the owning run is gone, the row
+        must neither linger for observers, hold idle shutdown open, nor be
+        mistaken later for a resumable book.
+        """
+        db.execute("DELETE FROM events WHERE job_id=?", (job_id,))
+        db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        self._owners.pop(job_id, None)
+        self._epochs.pop(job_id, None)
+        self._job_budgets.pop(job_id, None)
+
+    def _prune_abandoned(self):
+        """Remove rows whose client session silently expired.
+
+        Called with the condition held from the dispatch loop. Active takes
+        are skipped: their workers drain through _abandon, which requeues the
+        row if a newer live owner reattached while the take drained.
+        """
+        with self._connect() as db:
+            rows = db.execute("SELECT id,state FROM jobs").fetchall()
+            for row in rows:
+                owner = self._owners.get(row["id"])
+                if owner is not None and self.sessions.live(owner):
+                    continue
+                if row["state"] in _INFLIGHT_STATES:
+                    continue
+                self._discard_row(db, row["id"])
 
     @staticmethod
     def _event(db, job_id, message, **fields):
@@ -406,6 +451,27 @@ class ChapterJobs:
             self._condition.notify_all()
         return self.status(job_id)
 
+    def acknowledge(self, job_id, session):
+        """Retire a completed run after its connected owner confirmed delivery.
+
+        Only the live owner of the job may acknowledge it, and only once the
+        client has validated and durably cached every artifact. Queue and
+        event rows are removed; artifact files and published storage objects
+        remain for the download links the client already holds.
+        """
+        require_session_id(session)
+        with self._condition, self._connect() as db:
+            row = self._row(db, job_id)
+            if row["state"] != "complete":
+                raise ValueError("Only complete chapters can be acknowledged")
+            owner = self._owners.get(job_id)
+            if owner != session or not self.sessions.live(owner):
+                raise RuntimeError("Only the connected client that rendered this chapter can acknowledge it")
+            self._discard_row(db, job_id)
+            self._last_activity = time.monotonic()
+            self._condition.notify_all()
+        return {"acknowledged": True}
+
     def artifact(self, job_id, name):
         if name not in ARTIFACT_NAMES:
             raise KeyError("Unknown artifact")
@@ -433,25 +499,41 @@ class ChapterJobs:
                 lock.close()
                 raise RuntimeError("Another chapter service is using this data directory") from None
             self._file_lock = lock
-            if self._maintenance:
-                # Keep the same exclusive store lease, but do not recover
-                # interrupted states or start any queue/assembly consumers.
-                self._started = True
-                return
             with self._connect() as db:
-                for row in db.execute("SELECT id FROM jobs WHERE state IN ('generating','assembling')").fetchall():
-                    db.execute("UPDATE jobs SET state='queued',updated=? WHERE id=?", (time.time(), row["id"]))
-                    self._event(db, row["id"], "Recovered interrupted chapter; it stays paused until its "
-                                "rendering client reconnects; accepted paragraphs retained", state="queued")
-            workers = self.settings.get("assembly_workers", 2)
-            self._assembly = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chapter-assembly")
-            self._slots = threading.Semaphore(workers + self._parallel_chapters)
+                # A restarted service owns no runs. Persisted queue rows and
+                # their events are past-run scheduling history: rows without a
+                # live connected owner are removed, so no interrupted or queued
+                # book can ever execute on its own after a restart. Accepted
+                # speech, registered voices, artifacts, and exports on disk
+                # are retained.
+                for row in db.execute("SELECT id FROM jobs").fetchall():
+                    owner = self._owners.get(row["id"])
+                    if owner is None or not self.sessions.live(owner):
+                        self._discard_row(db, row["id"])
             self._started = True
-            for index in range(self._parallel_chapters):
-                thread = threading.Thread(target=self._run, name=f"chapter-synthesis-{index + 1}", daemon=False)
-                thread.start()
-                self._threads.append(thread)
-            self._thread = self._threads[0]
+            if not self._maintenance:
+                self._start_consumers()
+
+    def _start_consumers(self):
+        workers = self.settings.get("assembly_workers", 2)
+        self._assembly = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chapter-assembly")
+        self._slots = threading.Semaphore(workers + self._parallel_chapters)
+        for index in range(self._parallel_chapters):
+            thread = threading.Thread(target=self._run, name=f"chapter-synthesis-{index + 1}", daemon=False)
+            thread.start()
+            self._threads.append(thread)
+        self._thread = self._threads[0]
+
+    def activate(self):
+        with self._condition:
+            self._admit()
+            if not self._started:
+                raise RuntimeError("Chapter service has not started")
+            if self._maintenance:
+                self._maintenance = False
+                self._start_consumers()
+                self._last_activity = time.monotonic()
+            return self.capabilities()
 
     def _set_state(self, job_id, state, *, error=None, artifacts=None):
         with self._condition, self._connect() as db:
@@ -499,15 +581,16 @@ class ChapterJobs:
     def _claim_next(self):
         """Claim state and activity under one lock before another worker reads.
 
-        Only a job whose connected owner session is live can be claimed; jobs
-        without one stay durably queued and paused. The whole read-decide-write
-        sequence holds the condition lock, so two workers can never claim the
-        same row.
+        Only a job whose connected owner session is live can be claimed; rows
+        of runs whose session expired are pruned first. The whole
+        read-decide-write sequence holds the condition lock, so two workers
+        can never claim the same row.
         """
         with self._condition:
             while True:
                 if self._stopping:
                     return None
+                self._prune_abandoned()
                 with self._connect() as db:
                     rows = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created,id").fetchall()
                 for row in rows:
@@ -532,15 +615,23 @@ class ChapterJobs:
                     return dict(row), epoch
                 self._condition.wait(timeout=1)
 
-    def _pause(self, job_id):
-        """Return an interrupted generation to the queue without any loss."""
+    def _abandon(self, job_id, epoch):
+        """Retire a run whose owner disconnected, after its take drained.
+
+        The row is removed so no abandoned run can later auto-execute or keep
+        the paid server awake. A newer live owner that explicitly reattached
+        while the take drained keeps its grant: the epoch changed, so the job
+        returns to the queue for that owner instead of being discarded.
+        """
         with self._condition, self._connect() as db:
             row = db.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is not None and row["state"] in {"generating", "assembling"}:
-                db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
-                self._event(db, job_id, "The rendering client paused the chapter at a durable boundary; "
-                            "rerun the same command on a connected client to resume", state="queued")
-                db.commit()
+            if row is not None and row["state"] in _INFLIGHT_STATES:
+                if self._epochs.get(job_id) != epoch:
+                    db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
+                    self._event(db, job_id, "The reattached client's chapter returned to the queue at a "
+                                "durable boundary; accepted paragraphs retained", state="queued")
+                else:
+                    self._discard_row(db, job_id)
             self._condition.notify_all()
 
     def _grant_live(self, job_id, epoch):
@@ -577,10 +668,11 @@ class ChapterJobs:
                 self._set_state(job_id, "assembling")
                 self._assembly.submit(self._finish, job_id, spec, prepared, epoch)
             except RenderPaused:
-                # A lost owner pauses losslessly: budget, accepted cache, and
-                # history stay intact; the job is never marked failed.
+                # A lost owner ends the run: after the take drains at a
+                # durable boundary the abandoned row is removed. Accepted
+                # cache, voices, and artifact files stay intact.
                 try:
-                    self._pause(job_id)
+                    self._abandon(job_id, epoch)
                 finally:
                     self._done()
             except BaseException as exc:
@@ -614,7 +706,7 @@ class ChapterJobs:
                 artifacts.append(item)
             self._set_state(job_id, "complete", artifacts=artifacts)
         except RenderPaused:
-            self._pause(job_id)
+            self._abandon(job_id, epoch)
         except BaseException as exc:
             self._failure(job_id, exc)
         finally:
@@ -622,9 +714,14 @@ class ChapterJobs:
 
     def idle_seconds(self):
         with self._condition, self._connect() as db:
-            rows = db.execute("SELECT id FROM jobs WHERE state IN ('queued','generating','assembling')").fetchall()
+            rows = db.execute("SELECT id FROM jobs").fetchall()
             connected = any(self.sessions.live(self._owners.get(row["id"])) for row in rows)
-            return 0.0 if (connected and not self._maintenance) or self._active else max(0.0, time.monotonic() - self._last_activity)
+            if self._maintenance:
+                connected = self.sessions.any_live()
+            if connected or self._active:
+                self._last_activity = time.monotonic()
+                return 0.0
+            return max(0.0, time.monotonic() - self._last_activity)
 
     def begin_shutdown_if_idle(self, timeout):
         with self._condition:

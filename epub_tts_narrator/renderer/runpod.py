@@ -29,7 +29,7 @@ def _local_head():
 
 
 def add_parser(commands):
-    group = commands.add_parser("runpod", help="Bootstrap, update, and encode with a stop-by-default Runpod worker")
+    group = commands.add_parser("runpod", help="Bootstrap, update, and encode with an idle-shutdown Runpod worker")
     actions = group.add_subparsers(dest="runpod_action", required=True)
     for action in ("bootstrap", "update", "encode", "status", "stop", "progress"):
         command = actions.add_parser(action)
@@ -40,7 +40,7 @@ def add_parser(commands):
                                  help="Deploy GitHub git_ref, or this checkout's committed HEAD")
         if action in {"bootstrap", "update", "encode"}:
             command.add_argument("--stop-delay", type=int, choices=range(0, 301), metavar="SECONDS", default=0,
-                                 help="Wait up to 300 seconds before stopping on completion/error (default: immediately; Ctrl-C stops now)")
+                                 help="Deprecated: shutdown is controlled by runpod.idle_timeout_seconds")
         if action == "encode":
             command.add_argument("bundle", type=Path)
             command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5")
@@ -802,6 +802,43 @@ if pidfile.exists():
         local = self.directory / "remote.toml"
         write_private_toml(local, data)
         self.upload(local, self.cfg["remote_config"])
+        self.state["configuration_stamp"] = self.configuration_stamp()
+        self.save()
+
+    def configuration_stamp(self):
+        stamp = []
+        for key in ("config_path", "overrides_path"):
+            path = self.settings.get(key)
+            if path is None or not Path(path).is_file():
+                stamp.append(None)
+            else:
+                info = Path(path).stat()
+                stamp.append([str(path), info.st_mtime_ns, info.st_size])
+        return stamp
+
+    def activate(self):
+        from .chapter_client import ChapterClient
+        client = ChapterClient({"url": self.url, "api_key": self.state["api_key"], "timeout_seconds": 10})
+        capabilities = client.request("POST", "v1/server/activate", {})
+        if capabilities.get("maintenance") is not False or capabilities.get("ephemeral_runs") != 1:
+            raise RuntimeError("The warm chapter service did not confirm normal connected-client operation")
+
+    def reuse_service(self):
+        if (not self.state.get("bootstrapped") or "configuration_stamp" not in self.state
+                or self.state["configuration_stamp"] != self.configuration_stamp()):
+            return False
+        from .chapter_client import ChapterClient, ChapterClientError
+        client = ChapterClient({"url": self.url, "api_key": self.state["api_key"], "timeout_seconds": 10})
+        try:
+            capabilities = client.request("GET", "v1/capabilities")
+            if capabilities.get("ephemeral_runs") != 1 or capabilities.get("warm_activation") != 1:
+                return False
+            if capabilities.get("maintenance") is True:
+                self.activate()
+        except ChapterClientError:
+            return False
+        self.notify("Reusing the running chapter service and its loaded inference model.")
+        return True
 
     def install(self, *, full):
         self.notify("Installing persistent dependencies…" if full else "Checking the persistent runtime…")
@@ -818,9 +855,9 @@ if pidfile.exists():
                 f"--sglang-source {q(self.cfg['sglang_source'])} {action}")
 
     def launch(self, *, prepare=False):
-        # Bootstrap/Update test the installed engine without resuming durable
-        # chapter jobs. Encode is the only managed operation that runs them.
-        action = "serve-maintenance" if prepare else "serve"
+        # A cold worker must prove run-scoped ownership support in maintenance
+        # before activation; even --no-update cannot resume a legacy queue.
+        action = "serve-maintenance"
         if prepare:
             self.notify("Preparing model downloads on persistent storage (completed downloads are reused)…")
             self.ssh(self.worker_command("prepare"), timeout=3600)
@@ -837,8 +874,12 @@ if pidfile.exists():
         while time.monotonic() < deadline:
             try:
                 capabilities = client.request("GET", "v1/capabilities")
-                if capabilities.get("maintenance", False) is not prepare:
+                if capabilities.get("maintenance") is not True:
                     raise RuntimeError("Chapter service started in the wrong maintenance mode")
+                if capabilities.get("ephemeral_runs") != 1 or capabilities.get("warm_activation") != 1:
+                    raise RuntimeError("The deployed worker lacks run-scoped execution; update it before rendering")
+                if not prepare:
+                    self.activate()
                 self.notify(f"Chapter service ready ({max(0, time.monotonic() - started):.0f}s startup).")
                 return
             except ChapterClientError:
@@ -871,7 +912,21 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
 
     def smoke(self):
         self.notify("Testing GPU synthesis, Whisper transcription, and compressed Ceph publication…")
-        self.ssh(self.worker_command("smoke"), timeout=1200)
+        from .chapter_client import ChapterClient, ChapterClientError, ClientHeartbeat
+        client = ChapterClient({"url": self.url, "api_key": self.state["api_key"], "timeout_seconds": 10})
+        session = secrets.token_hex(32)
+        client.request("POST", "v1/sessions", {"id": session})
+        heartbeat = ClientHeartbeat(client, session, 5)
+        try:
+            heartbeat.start()
+            self.ssh(self.worker_command("smoke"), timeout=1200)
+            heartbeat.check()
+        finally:
+            heartbeat.stop()
+            try:
+                client.request("DELETE", f"v1/sessions/{session}")
+            except ChapterClientError:
+                pass
         self.state["bootstrapped"] = True
         self.save()
 
@@ -966,6 +1021,7 @@ def run_command(args):
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         interrupted = False
         operation_error = None
+        service_ready = False
         try:
             forced_bootstrap = False
             if args.runpod_action in {"bootstrap", "encode"}:
@@ -987,8 +1043,15 @@ def run_command(args):
                         deployment.notify("--no-update ignored: this deployment was deleted or never bootstrapped; "
                                           "installing code, models, and the smoke check before encoding.")
             deployment.start()
-            deployment.stop_service()
             updated = False
+            needs_update = args.runpod_action in {"bootstrap", "update"} or forced_bootstrap
+            if args.runpod_action == "encode" and not args.no_update and not needs_update:
+                needs_update = deployment.state.get("revision") != _local_head()
+            if args.runpod_action == "encode" and not needs_update and deployment.reuse_service() is True:
+                service_ready = True
+                deployment.encode(args)
+                return 0
+            deployment.stop_service()
             if args.runpod_action in {"bootstrap", "update"}:
                 deployment.deploy_code(args.source)
                 updated = True
@@ -1004,14 +1067,17 @@ def run_command(args):
             deployment.configure()
             deployment.install(full=args.runpod_action != "encode" or updated)
             deployment.launch(prepare=args.runpod_action != "encode" or updated)
+            service_ready = args.runpod_action == "encode" and not updated
             if args.runpod_action == "encode":
                 if updated:
                     deployment.smoke()
-                    deployment.stop_service()
-                    deployment.launch(prepare=False)
+                    deployment.activate()
+                    service_ready = True
                 deployment.encode(args)
             else:
                 deployment.smoke()
+                deployment.activate()
+                service_ready = True
             return 0
         except KeyboardInterrupt:
             interrupted = True
@@ -1021,14 +1087,12 @@ def run_command(args):
             raise
         finally:
             try:
-                if deployment.pod_id:
-                    # A failed operation skips the delay; paid time is not spent beside stopped work.
-                    if args.stop_delay and not interrupted and operation_error is None:
-                        print(f"Stopping in {args.stop_delay} seconds; press Ctrl-C to stop now.", flush=True)
-                        try:
-                            time.sleep(args.stop_delay)
-                        except KeyboardInterrupt:
-                            pass
+                if deployment.pod_id and service_ready:
+                    if args.stop_delay:
+                        deployment.notify("--stop-delay is ignored; the server's idle timeout controls shutdown.")
+                    deployment.notify(f"Worker left running; compute stops after {deployment.cfg['idle_timeout_seconds']} "
+                                      "idle seconds. The next book can reuse the loaded service.")
+                elif deployment.pod_id:
                     saved_interrupt = signal.getsignal(signal.SIGINT)
                     signal.signal(signal.SIGINT, signal.SIG_IGN)
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)

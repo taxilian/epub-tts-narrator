@@ -122,9 +122,9 @@ saved IDs are recreated instead. Unconfirmed API answers (401/403/5xx, lost
 responses) never prove absence and never trigger replacement; a pod creation
 whose response was lost is reconciled by its unique saved name on the next run
 instead of duplicated. After the worker is replaced, chapter jobs saved by an
-older server are resubmitted under the live client session the first time the
-new server confirms the old job is gone (HTTP 404); previous receipts and
-partial downloads are archived only after the replacement is acknowledged.
+older server do not carry scheduling permissions or event cursors forward.
+Each invocation submits fresh run-scoped jobs, reusing accepted audio and
+validated local chapter files rather than queue or event history.
 
 `--config FILE` selects the normal configuration; `--override-config FILE`
 selects a different deployment override. Bootstrap and Update default to
@@ -134,19 +134,29 @@ uncommitted files, private configuration and book data are not included. This
 allows testing a committed change before publishing it on GitHub.
 
 Bootstrap and Update use maintenance startup: the chapter API is available for
-checks, but pending books are not resumed, and chapter submissions/retries are
-rejected. Stored jobs, event history, voices and accepted clips remain intact.
-Encode starts normal queue processing. For manual operation, the worker's
+checks, but old run records are discarded and chapter submissions/retries are
+rejected. Voices, accepted clips and finished artifact files remain intact.
+After the smoke check, the API activates normal operation without reloading
+the inference model. Setup heartbeats prevent idle shutdown during that check.
+For manual operation, the worker's
 `serve-maintenance` command (or `serve-chapters --maintenance` on the renderer)
-provides the same protection. This mode is a startup choice, not a global
-configuration setting, and does not change cache identities.
+provides the same protection. Maintenance can be activated through the
+authenticated API; it does not change audio-cache identities.
 
-Each operation stops the Pod on success, failure or interruption. Optionally
-pass `--stop-delay 300` to keep the client attached for a five-minute grace
-period before stopping; Ctrl-C ends the grace period and stops immediately.
-Server idle shutdown is an additional fallback after its configured period
-without queued work, synthesis, assembly or uploads. Leaving SSH or exiting a
-server process alone does **not** stop GPU billing.
+Successful operations leave the service and inference model warm. The server
+stops paid compute after **300 idle seconds**, so another book can use the same
+loaded model within that window. A matching revision and unchanged config
+reuse the ready service without stopping it, installing dependencies or
+launching another model process. Code or configuration changes still require
+an update. `--stop-delay` is deprecated and ignored; it no longer holds the
+client or stops a ready worker. Use `runpod stop` for an explicit immediate stop.
+
+Disconnecting or interrupting a render releases its execution grants; in-flight
+accepted work drains before the idle countdown starts. Connected delivery of
+completed chapters also counts as busy until the files are verified and
+acknowledged. Startup failures before successful setup still stop compute
+immediately, because an idle supervisor is not yet reliable. Persistent storage
+continues to be billed while compute is stopped.
 
 The first live deployment should use one short chapter. The CLI's smoke check
 runs a separate short passage through CUDA synthesis and the configured Whisper device, encodes

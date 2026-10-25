@@ -3,9 +3,11 @@
 The chapter service owns synthesis, speech verification, retries, chapter
 assembly, loudness normalization, and encoding. The client submits several
 chapters, watches progress, and downloads completed chapters. Only an
-explicitly connected client's jobs execute; closing the client pauses its
-unfinished jobs losslessly at durable boundaries instead of cancelling them
-(see [Connected client sessions](#connected-client-sessions)).
+explicitly connected client's jobs execute, and scheduling state belongs only
+to the current render invocation: a disconnect drains the in-flight take at a
+durable boundary and then removes that run's queue rows, a restart clears
+past-run rows, and a completed run is removed once its client acknowledges
+verified delivery (see [Connected client sessions](#connected-client-sessions)).
 
 Local and remote rendering share the clip-generation, verification, and recovery
 pipeline. When a paragraph uses one saved voice and delivery style, recovery can
@@ -46,12 +48,14 @@ Operational notes specific to chapter rendering:
   page, or other front matter before the first story chapter. Keep the same
   work directory when resuming.
 - Bootstrap and update leave the service in maintenance mode: health, voice
-  registry, and job status APIs answer, but existing jobs are left untouched and
+  registry, and job status APIs answer, but existing rows are left untouched and
   new chapter submissions are rejected. Maintenance mode does not change
   renderer or accepted-clip cache identities. Encode starts normal queue
-  processing, including recovery of previously interrupted chapters.
+  processing; a normal start first removes every persisted job and event row
+  that has no live connected owner, so no interrupted or queued book from a
+  past run can ever execute on its own after a restart.
 - Two separate idle timeouts exist: the deployment's
-  `[runpod].idle_timeout_seconds` (default 600) is the managed stop fallback,
+  `[runpod].idle_timeout_seconds` (default 300) controls managed idle shutdown,
   while the chapter service's `[chapter_server].idle_timeout_seconds` governs
   idle shutdown while serving — see "Idle shutdown and independent downloads"
   below.
@@ -104,8 +108,8 @@ chapter copies. When packaging an M4B, `-o` (default `BOOK/audiobook`) receives
 with the analyzed EPUB to include its cover when no EPUB path is configured.
 Original voice samples and inherited book/series selections are untouched.
 
-`--chapters-only` downloads M4A and JSON. FLAC masters remain on the server until
-final book assembly needs them. M4B packaging decodes those lossless masters
+`--chapters-only` skips final book packaging, but downloads M4A, JSON and FLAC
+masters before acknowledging delivery. M4B packaging decodes those lossless masters
 locally into temporary PCM, then encodes the book once; it does not transcode the
 lossy M4A chapters. All network transfers remain compressed. Temporary decoded
 files are removed when packaging finishes or fails.
@@ -175,7 +179,8 @@ secondary recognition remain part of the verification pipeline.
 Keep `chapter_server.data_dir` on persistent storage. It contains:
 
 - An immutable FLAC voice registry, keyed by audio hash and exact transcript.
-- A durable SQLite job queue and replayable progress events.
+- A run-scoped SQLite queue whose rows exist only while their client run is
+  connected or draining; restarts and detaches remove them.
 - Accepted paragraph checkpoints and compressed completed chapter exports.
 
 Run one service process per data directory. A process lease prevents competing
@@ -206,28 +211,44 @@ not implement or modify that backend's KV cache or batching internals.
 
 ## Connected client sessions
 
-The service executes work only for explicitly connected clients; it never
-automatically resumes a queued job on restart, on a stale queue, for an
-observer, or for an unrelated book's connection.
+The service executes work only for explicitly connected clients, and every
+run owns only its own scheduling state; it never automatically resumes a
+queued job on restart, executes for an observer, or lets a past run influence
+a new one.
 
-- Capabilities advertise `client_sessions: 1` and `session_ttl_seconds`
-  (default 30). A client that does not support sessions cannot execute against
-  this server, and this client refuses servers without that capability.
+- Capabilities advertise `client_sessions: 1`, `session_ttl_seconds`
+  (default 30), and `ephemeral_runs: 1`. A client that does not support
+  sessions or run-scoped ephemeral cleanup cannot execute against this
+  server, and this client refuses servers without those capabilities.
 - `POST /v1/sessions` with `{"id": <sha256>}` explicitly opens one ephemeral
   session. Sessions live in memory only: restarting the service clears every
   session and all ownership.
 - `POST /v1/sessions/{id}/heartbeat` renews only an already-live session and
   never recreates an expired or revoked one. `DELETE /v1/sessions/{id}`
-  revokes immediately. Every session endpoint uses the same bearer
-  authentication as the rest of the API.
+  revokes immediately: queued, failed, and completed rows owned by that
+  session are removed at once, and in-flight takes drain at their next
+  durable boundary before their rows are removed. Rows whose session silently
+  expired are pruned the same way by the dispatch loop. Every session
+  endpoint uses the same bearer authentication as the rest of the API.
 - `POST /v1/jobs` and `POST /v1/jobs/{id}/retry` take the session id in their
   `session` payload field, separate from the existing `submission` retry
-  budget. Every execution grant requires a live session; resubmitting the same
-  idempotent chapter explicitly rebinds it to the new connected client. A job
-  owned by another live client returns 409 instead of being stolen.
+  budget. Every execution grant requires a live session. Clients derive the
+  idempotency key from the chapter specification and their own session, so a
+  fresh invocation never collides with a past server job — even on a
+  recreated database with the same deterministic identity — while retries
+  within the run stay idempotent. A job owned by another live client returns
+  409 instead of being stolen; an explicit reattach of a still-draining job
+  keeps the new live owner's grant instead of deleting it.
+- `POST /v1/jobs/{id}/ack` retires a completed run after its connected owner
+  confirmed that every artifact was downloaded, size- and SHA-256-checked,
+  and durably cached. Only the live owner can acknowledge. The queue and
+  event rows are removed; artifact files and published storage objects
+  remain for the download links the client already holds. A lost
+  acknowledgement is safe: the client's validated cache is already
+  authoritative, and the rows are pruned when the session detaches.
 - Reads never grant or renew anything: `GET /v1/jobs/{id}`, the event
   endpoints, the WebSocket, and artifact downloads neither require a session
-  nor extend one.
+  nor extend one, and they never create sessions or change run ownership.
 - `GET /v1/jobs` is a read-only queue list (`limit` 1–256, default 100) with
   `id`, `state`, `paused`, `owner_connected`, `chapter_number`,
   `total_chapters`, `source_fingerprint`, `updated`, and `last_event` per job.
@@ -237,25 +258,43 @@ While a job generates, the server rechecks its owner's session at every safe
 task boundary: before dispatching each chunk, at engine admission, when
 reacquiring a pool slot, and before every new take. If the client disconnects,
 in-flight GPU work, verification, and atomic cache writes finish and save; no
-further GPU starts. The job then returns to the queue paused — never failed or
-cancelled — with its retry budget, accepted cache, and history intact. An
-explicit reconnect (a fresh invocation opening a new session and resubmitting
-the same chapter) resumes that work. A real failure while the client is still
-connected keeps the existing failed behavior. Client heartbeats run on a
-dedicated thread for the whole invocation (submissions, waits, and downloads),
-stop before the client deletes its session, and a heartbeat error surfaces in
-the foreground promptly. Session identifiers are hashes and never appear in
-logs or reports.
+further GPU starts. The abandoned run's row is then removed — never silently
+requeued for later execution — while its accepted speech cache, registered
+voices, and artifact files stay intact. A real failure while the client is
+still connected keeps the existing failed behavior. Client heartbeats run on
+a dedicated thread for the whole invocation (submissions, waits, and
+downloads), stop before the client deletes its session, and a heartbeat error
+surfaces in the foreground promptly. Session identifiers are hashes and never
+appear in logs or reports.
 
 ## Resume and integrity
 
 Submission pins the script, voice hashes, render settings, and renderer
-fingerprint. Retrying a submission returns the same durable job. Reconnecting
-replays numbered events, with HTTP polling available if WebSockets fail. Retrying
-a failed job reuses its accepted paragraphs. An interrupted service recovers
-its in-flight jobs as paused queue entries when restarted against the same
-data directory and compatible renderer configuration; they stay paused, and
-generate nothing, until their client explicitly reconnects and resubmits.
+fingerprint. Within one invocation, retrying a submission returns the same
+job, and retrying a failed job reuses its accepted paragraphs. There is no
+cross-run job history: a rerun opens a new session, submits run-scoped jobs,
+and follows progress from a fresh event cursor, so a past run's cursor or
+receipt can never suppress or replay progress. An interrupted or restarted
+service removes its past-run rows at startup; nothing queued ever executes on
+its own.
+
+Resumability comes from validated outputs, not run history. Each completed
+chapter is downloaded, size- and SHA-256-checked, and recorded in a durable
+cache descriptor (`WORK/remote-chapters/<selection-hash>/cache.json`) that
+binds the exact source/voice/render selection and every artifact hash. The
+descriptor carries no job id, event cursor, queue state, or session — only
+integrity identity and private artifact locations. New runs download lossless
+masters too, so their later assembly does not depend on a live job or an
+unexpired signed link. Reruns reuse verified downloads without contacting
+the service; legacy `job.json` receipts from older clients are consumed only
+to validate and migrate their already-downloaded artifacts into this
+descriptor, never to resume or steer a new run, and unvalidated leftovers are
+cleared before a fresh submission. Existing fully completed local chapters
+are also reused after their existing integrity checks. Moving an unfinished
+local paragraph cache to the server is not currently supported; the client
+blocks that migration instead of silently regenerating those accepted takes.
+Finish that chapter locally first or explicitly choose a new work directory
+for a separate remote run.
 
 Speech retries share one bounded allowance across all chapter jobs of a client
 submission and their retries, matching one local render invocation; a new
@@ -264,17 +303,11 @@ takes after their allowance is spent — like local rendering, a persistently
 failing paragraph is split into its source turns and resubmitted.
 
 Accepted speech has a separate cache from chapter assembly. Changing only
-spacing or bitrate reuses accepted speech on the server. Already downloaded,
-unchanged chapters can be reused without contacting the server. Existing fully
-completed local chapters are also reused after their existing integrity checks.
-Moving an unfinished local paragraph cache to the server is not currently
-supported; the client blocks that migration instead of silently regenerating
-those accepted takes. Finish that chapter locally first or explicitly choose a
-new work directory for a separate remote run.
+spacing or bitrate reuses accepted speech on the server.
 
 Downloads are staged, verified against size and SHA256, and published atomically.
 The lossless master is additionally checked against the server's decoded PCM
-hash before final book assembly. Saved job records preserve expiring download
+hash before final book assembly. Cache descriptors preserve expiring download
 links in private files; credentials are not part of job specifications or hashes.
 
 Assembled chapter WAVs are temporary. Accepted paragraph WAV checkpoints remain
@@ -303,7 +336,7 @@ timeline and exclusive range ends.
 
 ## Idle shutdown and independent downloads
 
-Local development defaults to `idle_action = "none"`. To enable the ten-minute
+Local development defaults to `idle_action = "none"`. To enable the five-minute
 Runpod stop action, configure all of the following on the server:
 
 ```toml
@@ -311,7 +344,7 @@ Runpod stop action, configure all of the following on the server:
 data_dir = "/workspace/chapter-server-data"
 persistent_data = true
 idle_action = "runpod_stop"
-idle_timeout_seconds = 600
+idle_timeout_seconds = 300
 runpod_pod_id = "YOUR-POD-ID"
 runpod_api_key = "YOUR-RUNPOD-KEY"
 
@@ -332,12 +365,17 @@ Use a network volume if results/checkpoints must also survive Pod termination.
 
 Completed artifacts are uploaded to independent object storage before the job
 becomes complete. Signed download URLs keep working after the GPU stops, until
-they expire. To renew expired URLs, restart the service against the persistent
-store and rerun the command. S3 credentials and endpoint configuration are
+they expire. New runs copy the lossless masters locally before ACK, including
+chapter-only renders. A legacy cache missing a master after its URL expires
+requires restoring that file from storage or a fresh render in a new work
+directory; existing verified files remain untouched. S3 credentials and endpoint configuration are
 explicit file settings; shared AWS credential profiles are not used.
 
-The idle timer excludes queued jobs, active synthesis/verification, retries,
-CPU assembly, publication, and incoming uploads. An open WebSocket and status
+The idle timer excludes live-owned queued jobs, active synthesis/verification,
+retries, CPU assembly, publication, incoming uploads and unacknowledged delivery.
+Maintenance setup heartbeats keep smoke checks active. A new book reuses the
+loaded service; the idle countdown starts only after its work is done.
+An open WebSocket and status
 polling do not keep the GPU alive. Admission closes atomically before calling
 Runpod's actual Pod stop API; a failed stop request reopens admission and reports
 the failure. Simply exiting the Python process is not used to stop billing.

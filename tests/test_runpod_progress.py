@@ -58,3 +58,17 @@ class RunpodProgressTests(unittest.TestCase):
             self.assertEqual(run_progress({"deployment": {"state_dir": folder}}, args), 0)
             client.assert_not_called()
             self.assertIn("No deployment state", output.getvalue())
+
+    def test_acknowledged_chapter_disappearing_during_observation_is_not_an_error(self):
+        from epub_tts_narrator.renderer.chapter_client import ChapterClientError
+        from epub_tts_narrator.renderer.runpod_progress import run_progress
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("epub_tts_narrator.renderer.runpod_progress.ChapterClient") as client, \
+                redirect_stdout(StringIO()) as output:
+            (Path(folder) / "state.json").write_text(json.dumps({"pod_id": "pod", "api_key": "private"}))
+            client.return_value.request.side_effect = [
+                {"jobs": [{"id": "a" * 64, "state": "generating", "last_event": 4}]},
+                ChapterClientError("Run acknowledged and removed", status=404)]
+            args = argparse.Namespace(limit=100, poll_seconds=2.0, job=None, watch=False, json=True)
+            self.assertEqual(run_progress({"deployment": {"state_dir": folder, "service_port": 8082}}, args), 0)
+            self.assertEqual(json.loads(output.getvalue()), {"jobs": []})

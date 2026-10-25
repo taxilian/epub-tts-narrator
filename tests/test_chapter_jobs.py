@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
 from epub_tts_narrator.renderer.chapter_protocol import validate_spec
@@ -95,19 +96,25 @@ class ChapterJobsTests(unittest.TestCase):
             time.sleep(.01)
         self.fail("Job did not finish")
 
-    def test_idempotent_submission_survives_restart(self):
+    def test_restart_clears_unowned_rows_and_never_autoexecutes_them(self):
         first = self.submit()
         self.assertEqual(self.submit()["id"], first["id"])
         self.service.close()
         other = ChapterJobs(self.root / "server", Executor())
         self.addCleanup(other.close)
-        spec = specification(other)
-        # The restarted service owns nothing: only this explicit connected
-        # submit reattaches the durable job to a live client.
-        self.assertEqual(other.submit(spec, digest(spec), None, service_session(other))["id"], first["id"])
         other.start()
         self.service = other
-        self.assertEqual(self.terminal(first["id"])["state"], "complete")
+        # Past-run rows are scheduling history: a restart removes them and
+        # they never execute on their own.
+        with self.assertRaises(KeyError):
+            other.status(first["id"])
+        self.assertEqual(other.executor.generated, [])
+        # A fresh run-scoped submission re-renders instead of replaying history.
+        spec = specification(other)
+        created = other.submit(spec, digest({"run": "fresh"}), None, service_session(other))
+        self.assertNotEqual(created["id"], first["id"])
+        self.assertEqual(self.terminal(created["id"])["state"], "complete")
+        self.assertEqual(other.executor.generated, [1])
 
     def test_changed_payload_cannot_reuse_idempotency_key(self):
         spec = specification(self.service)
@@ -153,7 +160,9 @@ class ChapterJobsTests(unittest.TestCase):
         self.submit()
         self.assertFalse(self.service.begin_shutdown_if_idle(600))
         self.service.start()
-        self.terminal(self.submit()["id"])
+        job = self.submit()
+        self.terminal(job["id"])
+        self.service.acknowledge(job["id"], self.session)
         self.service._last_activity -= 1000
         self.assertTrue(self.service.begin_shutdown_if_idle(600))
         with self.assertRaisesRegex(RuntimeError, "draining"):
@@ -161,13 +170,17 @@ class ChapterJobsTests(unittest.TestCase):
         self.service.cancel_shutdown()
         self.assertEqual(self.submit(2)["state"], "queued")
 
-    def test_reading_completed_status_does_not_reset_idle_timer(self):
+    def test_completed_delivery_keeps_the_service_busy_until_acknowledged(self):
         job = self.submit()
         self.service.start()
         self.terminal(job["id"])
         self.service._last_activity -= 1000
         self.service.status(job["id"])
         self.service.events(job["id"], 0)
+        self.assertEqual(self.service.idle_seconds(), 0)
+        self.service.acknowledge(job["id"], self.session)
+        self.service._last_activity -= 1000
+        self.service.list_jobs()
         self.assertGreater(self.service.idle_seconds(), 900)
 
     def test_shutdown_requires_durable_results_and_urls_refresh(self):
@@ -179,6 +192,8 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(first["state"], "complete")
         second = self.service.status(job["id"])
         self.assertNotEqual(first["artifacts"][0]["url"], second["artifacts"][0]["url"])
+        self.assertFalse(self.service.begin_shutdown_if_idle(600))
+        self.service.acknowledge(job["id"], self.session)
         self.service._last_activity -= 1000
         self.assertTrue(self.service.begin_shutdown_if_idle(600))
 
@@ -258,7 +273,7 @@ class ChapterJobsTests(unittest.TestCase):
         self.service._failure(job["id"], ValueError("plain fixture failure"))
         self.assertNotIn(FAILED_PARAGRAPH_FIELD, self.service.status(job["id"])["error"])
 
-    def test_recover_inflight_state_and_single_process_lease(self):
+    def test_interrupted_state_is_cleared_at_start_and_single_process_lease_holds(self):
         job = self.submit()
         self.service._set_state(job["id"], "generating")
         self.service.start()
@@ -266,21 +281,22 @@ class ChapterJobsTests(unittest.TestCase):
         self.addCleanup(other.close)
         with self.assertRaisesRegex(RuntimeError, "Another chapter service"):
             other.start()
-        # The owner from the connected submit is still live, so the recovered
-        # generation resumes for that same client without a new submission.
-        self.assertEqual(self.terminal(job["id"])["state"], "complete")
-        self.assertTrue(any("Recovered" in event["message"] for event in self.service.events(job["id"])))
+        self.service.close()
+        restarted = ChapterJobs(self.root / "server", Executor())
+        self.addCleanup(restarted.close)
+        restarted.start()
+        self.service = restarted
+        # The interrupted generation is past-run history: a restart clears
+        # every session and removes the row instead of recovering it into a
+        # paused queue entry.
+        with self.assertRaises(KeyError):
+            self.service.status(job["id"])
+        self.assertEqual(self.engine.generated, [])
 
-    def test_maintenance_preserves_queued_and_interrupted_jobs_until_normal_restart(self):
+    def test_maintenance_clears_old_run_history_without_deleting_accepted_audio(self):
         jobs = [self.submit(number) for number in range(1, 4)]
         self.service._set_state(jobs[1]["id"], "generating")
         self.service._set_state(jobs[2]["id"], "assembling")
-        def durable(view):
-            # Ownership flags are instance-local scheduling metadata; durable
-            # state and history must survive a restart byte-identically.
-            return ({key: value for key, value in view[0].items()
-                     if key not in ("paused", "owner_connected")}, view[1])
-        before = [durable((self.service.status(job["id"]), self.service.events(job["id"]))) for job in jobs]
         accepted = self.service.root / "render-work" / "accepted.flac"
         accepted.write_bytes(b"accepted take must remain unchanged")
         self.service.close()
@@ -294,11 +310,9 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(engine.generated, [])
         self.assertEqual(maintenance._threads, [])
         self.assertIsNone(maintenance._assembly)
-        self.assertEqual(before, [durable((maintenance.status(job["id"]), maintenance.events(job["id"])))
-                                  for job in jobs])
         for job in jobs:
-            self.assertTrue(maintenance.status(job["id"])["paused"])
-            self.assertFalse(maintenance.status(job["id"])["owner_connected"])
+            with self.assertRaises(KeyError):
+                maintenance.status(job["id"])
         contender = ChapterJobs(self.root / "server", Executor())
         self.addCleanup(contender.close)
         with self.assertRaisesRegex(RuntimeError, "Another chapter service"):
@@ -318,13 +332,9 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(contender.executor.generated, [1, 2, 3])
         self.assertFalse(contender.capabilities()["maintenance"])
 
-    def test_maintenance_rejects_submissions_and_retries_without_changing_history(self):
+    def test_maintenance_rejects_submissions_and_retries_after_discarding_old_run_history(self):
         job = self.submit()
         self.service._set_state(job["id"], "failed", error="retained failure")
-        def durable(view):
-            return ({key: value for key, value in view[0].items()
-                     if key not in ("paused", "owner_connected")}, view[1])
-        before = durable((self.service.status(job["id"]), self.service.events(job["id"])))
         self.service.close()
         maintenance = ChapterJobs(self.root / "server", Executor(), maintenance=True)
         self.addCleanup(maintenance.close)
@@ -335,7 +345,39 @@ class ChapterJobsTests(unittest.TestCase):
                 maintenance.submit(spec, digest(spec), None, service_session(maintenance))
         with self.assertRaisesRegex(RuntimeError, "maintenance mode"):
             maintenance.retry(job["id"], session=service_session(maintenance))
-        self.assertEqual(before, durable((maintenance.status(job["id"]), maintenance.events(job["id"]))))
+        self.assertEqual(maintenance.list_jobs(), [])
+
+    def test_maintenance_can_activate_without_reloading_its_executor(self):
+        engine = Executor()
+        warm = ChapterJobs(self.root / "warm", engine, maintenance=True)
+        self.addCleanup(warm.close)
+        warm.start()
+        self.assertTrue(warm.capabilities()["maintenance"])
+        self.assertFalse(warm.activate()["maintenance"])
+        count = len(warm._threads)
+        warm.activate()
+        self.assertEqual(len(warm._threads), count)
+        self.assertIs(warm.executor, engine)
+        self.assertEqual(engine.generated, [])
+
+    def test_shutdown_begins_only_at_the_five_minute_idle_boundary(self):
+        self.service._last_activity = 100.0
+        with patch("epub_tts_narrator.renderer.chapter_jobs.time.monotonic", return_value=399.0):
+            self.assertFalse(self.service.begin_shutdown_if_idle(300))
+        with patch("epub_tts_narrator.renderer.chapter_jobs.time.monotonic", return_value=400.0):
+            self.assertTrue(self.service.begin_shutdown_if_idle(300))
+
+    def test_idle_window_starts_after_busy_delivery_not_before_it(self):
+        job = self.submit()
+        self.service._set_state(job["id"], "complete")
+        self.service._last_activity = 100.0
+        with patch("epub_tts_narrator.renderer.chapter_jobs.time.monotonic", return_value=399.0):
+            self.assertEqual(self.service.idle_seconds(), 0)
+        self.service.sessions.revoke(self.session)
+        with patch("epub_tts_narrator.renderer.chapter_jobs.time.monotonic", return_value=698.0):
+            self.assertFalse(self.service.begin_shutdown_if_idle(300))
+        with patch("epub_tts_narrator.renderer.chapter_jobs.time.monotonic", return_value=699.0):
+            self.assertTrue(self.service.begin_shutdown_if_idle(300))
 
     def test_maintenance_paused_jobs_do_not_block_idle_shutdown_but_uploads_do(self):
         self.submit()
@@ -352,7 +394,20 @@ class ChapterJobsTests(unittest.TestCase):
             self.assertFalse(maintenance.begin_shutdown_if_idle(600))
         finally:
             maintenance._active = 0
+        maintenance._last_activity -= 1000
         self.assertTrue(maintenance.begin_shutdown_if_idle(600))
+
+    def test_live_setup_heartbeat_prevents_shutdown_during_a_long_smoke_check(self):
+        maintenance = ChapterJobs(self.root / "setup", Executor(), maintenance=True)
+        self.addCleanup(maintenance.close)
+        maintenance.start()
+        session = service_session(maintenance)
+        maintenance._last_activity -= 1000
+        self.assertEqual(maintenance.idle_seconds(), 0)
+        self.assertFalse(maintenance.begin_shutdown_if_idle(300))
+        maintenance.revoke_session(session)
+        maintenance._last_activity -= 301
+        self.assertTrue(maintenance.begin_shutdown_if_idle(300))
 
     def test_server_settings_are_not_client_controlled(self):
         spec = specification(self.service)

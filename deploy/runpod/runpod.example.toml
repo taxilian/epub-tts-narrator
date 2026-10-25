@@ -17,7 +17,7 @@ state_dir = "./dist/runpod"
 startup_timeout_seconds = 900
 # The pinned base image uses 8081 for nginx; keep the chapter service separate.
 service_port = 8082
-idle_timeout_seconds = 600
+idle_timeout_seconds = 300
 github_url = "https://github.com/taxilian/epub-tts-narrator.git"
 git_ref = "main"
 # Opt in after benchmarking your GPU. Both backends load one Drama 3 model.

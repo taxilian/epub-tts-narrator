@@ -71,3 +71,8 @@ class ClientSessions:
         with self._lock:
             deadline = self._deadlines.get(session_id)
             return deadline is not None and deadline > self._clock()
+
+    def any_live(self):
+        with self._lock:
+            now = self._clock()
+            return any(deadline > now for deadline in self._deadlines.values())

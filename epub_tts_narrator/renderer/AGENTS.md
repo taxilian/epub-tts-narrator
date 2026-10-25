@@ -72,7 +72,8 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - See `ENGINE_NOTES.md` for engine-specific details.
 - See root `RENDERER.md` for renderer configuration and operation.
 - See root `REMOTE_RENDERING.md` for distributed rendering contracts.
-- Chapter execution requires an ephemeral connected-client session; restart and passive progress never grant ownership. Disconnect drains accepted work to a safe boundary, then pauses the job without deleting cache or history.
+- Chapter execution requires a connected client. Scheduling and event cursors are current-run only; ACK or disconnect discards run rows after accepted work drains. Persist validated audio/cache manifests, never past-run receipts or scheduling permissions.
+- Managed workers remain warm between books and stop after 300 idle seconds. Reuse a matching ready service without model restart; maintenance smoke checks hold a live setup lease, and activation starts consumers without reloading inference.
 - `runpod progress` observes without the deployment lock or any allocation/session mutation. `runpod_api.py` reports bounded credential-redacted JSON server diagnoses; allocation requires a standard-volume-capable datacenter as well as GPU stock.
 - `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.
 - Local `workflow.render()` overlaps one chapter assembly with the next chapter's synthesis; drain assembly before releasing locks. Chunk/recovery algorithms remain shared with chapter jobs.

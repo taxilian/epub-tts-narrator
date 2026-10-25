@@ -199,8 +199,12 @@ class DeletionRecoveryTests(unittest.TestCase):
              patch("epub_tts_narrator.renderer.chapter_client.render_remote",
                    return_value={"chapters": [{"number": 1, "audio_file": "/unused/chapter.m4a"}]}) as render, \
              redirect_stdout(StringIO()):
-            client.return_value.request.side_effect = (
-                lambda method, path, payload=None, timeout=None: {"maintenance": self.service_mode["prepare"]})
+            def request(method, path, payload=None, timeout=None):
+                if path == "v1/server/activate":
+                    self.service_mode["prepare"] = False
+                    self.phase_calls.append("activate()")
+                return {"maintenance": self.service_mode["prepare"], "ephemeral_runs": 1, "warm_activation": 1}
+            client.return_value.request.side_effect = request
             result = run_command(args)
         return result, render
 
@@ -224,10 +228,10 @@ class DeletionRecoveryTests(unittest.TestCase):
         self.assertEqual(state["revision"], "fixture-head")
         self.assertTrue(state["bootstrapped"])
         for expected in ("deploy_code('local')", "install(full=True)", "smoke()",
-                         "launch(prepare=True)", "launch(prepare=False)", "encode("):
+                         "launch(prepare=True)", "activate()", "encode("):
             self.assertIn(expected, self.actions())
         self.assertEqual([call[1] for call in self.api.created("start_pod")], ["pod_new1"])
-        self.assertEqual(self.api.pods["pod_new1"]["status"], "EXITED")
+        self.assertEqual(self.api.pods["pod_new1"]["status"], "RUNNING")
 
     def test_encode_with_deleted_pod_and_retained_volume_keeps_the_fast_path(self):
         self.retained_volume()
@@ -287,7 +291,7 @@ class DeletionRecoveryTests(unittest.TestCase):
                     self.assertLess(self.api.calls.index(("stop_pod", "pod_old")), first_create)
                 self.assertNotIn(("start_pod", "pod_old"), self.api.calls)
                 self.assertEqual(self.api.pods["pod_old"]["status"], "EXITED")
-                self.assertEqual(self.api.pods["pod_new1"]["status"], "EXITED")
+                self.assertEqual(self.api.pods["pod_new1"]["status"], "RUNNING")
                 self.assertEqual([call[1] for call in self.api.created("start_pod")], ["pod_new1"])
                 state = self.read_state()
                 self.assertNotEqual(state["pod_id"], "pod_old")

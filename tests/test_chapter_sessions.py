@@ -2,8 +2,9 @@
 
 Regression coverage for automatic queue execution: a server restart, a stale
 queue, an observer, or an unrelated book's connection must never generate for
-a client that is not explicitly connected. A lost client pauses losslessly at
-durable task boundaries, and an explicit reconnect resumes accepted work.
+a client that is not explicitly connected. A lost client's in-flight take
+drains at a durable boundary and its run metadata is then removed; accepted
+audio stays on disk, and a rerun is a fresh run of the connected client.
 """
 
 from pathlib import Path
@@ -146,18 +147,21 @@ class ConnectedExecutionTests(unittest.TestCase):
         self.service.sessions.revoke(old_client)
         self.engine.release.clear()
         self.service.start()
-        # The connected new book gets all generation; stale books stay paused.
+        # The connected new book gets all generation; detached runs were
+        # pruned at revoke and can never execute or linger.
         live_job = self.submit(3)
         deadline = time.monotonic() + 3
         while self.engine.generated != [3] and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(self.engine.generated, [3])
-        self.assertTrue(self.service.status(stale_job["id"])["paused"])
-        self.assertFalse(self.service.status(stale_job["id"])["owner_connected"])
+        for stale in (stale_job, other_stale):
+            with self.assertRaises(KeyError):
+                self.service.status(stale["id"])
         self.engine.release.set()
         self.wait_for(live_job["id"], {"complete"})
         self.assertEqual(self.engine.generated, [3])
-        # An explicit connected reattach resumes a stale book losslessly.
+        # An explicit connected resubmission recreates the chapter identity
+        # and executes it as this new client's own run.
         reattached = self.submit(1, service=self.service, session=service_session(self.service))
         self.assertEqual(reattached["id"], stale_job["id"])
         self.wait_for(stale_job["id"], {"complete"})
@@ -173,35 +177,40 @@ class ConnectedExecutionTests(unittest.TestCase):
         self.service.start()
         time.sleep(0.3)
         self.assertEqual(self.engine.generated, [])
-        status = self.service.status(job["id"])
-        self.assertEqual(status["state"], "queued")
-        self.assertTrue(status["paused"])
-        self.assertFalse(status["owner_connected"])
+        # A restart clears every session and removes past-run rows.
+        with self.assertRaises(KeyError):
+            self.service.status(job["id"])
         self.submit(1, service=restarted, session=service_session(restarted))
         self.wait_for(job["id"], {"complete"})
 
-    def test_lost_client_pauses_at_a_boundary_with_budget_and_state_intact(self):
+    def test_lost_client_drains_at_a_boundary_and_its_run_metadata_is_removed(self):
         self.engine.release.clear()
         job = self.submit(1, "d" * 64, session=service_session(self.service))
         self.service.start()
         self.assertTrue(self.engine.entered.wait(3))
         session = self.service._owners[job["id"]]
         self.service.sessions.revoke(session)
-        status = self.wait_for(job["id"], {"queued"})
+        # The in-flight take drains at its durable boundary; the abandoned
+        # run's row is then removed while accepted audio stays on disk.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self.service.status(job["id"])
+            except KeyError:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("The abandoned run's row was not removed")
         self.assertEqual(self.engine.generated, [1])
-        self.assertTrue(status["paused"])
-        self.assertIsNone(status["error"])
-        self.assertIsNotNone(self.service._job_budgets.get(job["id"]))
         self.engine.release.set()
-        # Explicit reconnect of the same client resumes the same job and keeps
-        # spending the same submission budget.
-        resumed = self.submit(1, "d" * 64)
+        # A rerun is a fresh run: its own submission budget and job identity.
+        resumed = self.submit(1, "e" * 64)
         self.assertEqual(resumed["id"], job["id"])
         self.wait_for(job["id"], {"complete"})
-        self.assertIs(self.engine.budgets[0], self.engine.budgets[1])
+        self.assertIsNot(self.engine.budgets[0], self.engine.budgets[1])
         self.assertEqual(self.engine.generated, [1, 1])
 
-    def test_disconnect_before_an_assembly_slot_opens_keeps_the_job_paused(self):
+    def test_disconnect_before_an_assembly_slot_opens_removes_the_run(self):
         gate = threading.Event()
         self.addCleanup(gate.set)
         self.service.start()
@@ -219,9 +228,15 @@ class ConnectedExecutionTests(unittest.TestCase):
         self.wait_for(job["id"], {"assembling"})
         self.service.revoke_session(session)
         gate.set()
-        status = self.wait_for(job["id"], {"queued"})
-        self.assertTrue(status["paused"])
-        self.assertEqual(status["artifacts"], [])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self.service.status(job["id"])
+            except KeyError:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("The abandoned run's row was not removed")
 
     def test_live_owner_conflicts_and_expired_owner_rebinds_safely(self):
         self.engine.release.clear()
@@ -234,9 +249,8 @@ class ConnectedExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Another connected client"):
             self.service.submit(spec, digest(spec), None, rival)
         self.service.sessions.revoke(first)
-        self.wait_for(job["id"], {"queued"})
-        # The old generation has drained; the explicit new client takes over
-        # and a fresh generation runs only after the old task released its slot.
+        # An explicit reattach while the old take is still draining keeps the
+        # new live owner's grant: the drained generation never deletes it.
         rebound = self.service.submit(spec, digest(spec), None, rival)
         self.assertEqual(rebound["id"], job["id"])
         self.engine.release.set()
@@ -244,18 +258,25 @@ class ConnectedExecutionTests(unittest.TestCase):
         self.assertEqual(self.engine.generated, [1, 1])
         self.assertEqual(self.service.status(job["id"])["owner_connected"], True)
 
-    def test_paused_job_does_not_affect_a_sibling_connected_job(self):
+    def test_removed_run_does_not_affect_a_sibling_connected_job(self):
         first = service_session(self.service)
-        paused = self.submit(1, session=first)
+        removed = self.submit(1, session=first)
         self.engine.release.clear()
         self.service.start()
         self.assertTrue(self.engine.entered.wait(3))
         sibling = self.submit(2, session=service_session(self.service))
         self.service.sessions.revoke(first)
-        self.wait_for(paused["id"], {"queued"})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self.service.status(removed["id"])
+            except KeyError:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("The abandoned run's row was not removed")
         self.engine.release.set()
         self.assertEqual(self.wait_for(sibling["id"], {"complete"})["state"], "complete")
-        self.assertTrue(self.service.status(paused["id"])["paused"])
         self.assertEqual(self.engine.generated, [1, 2])
 
     def test_status_and_list_reports_flags_without_leaking_sessions(self):
@@ -268,11 +289,12 @@ class ConnectedExecutionTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in listed], [job["id"]])
         self.assertEqual(set(listed[0]), {"id", "state", "paused", "owner_connected", "chapter_number",
                                           "total_chapters", "source_fingerprint", "updated", "last_event"})
-        self.service.sessions.revoke(session)
-        status = self.service.status(job["id"])
-        self.assertTrue(status["paused"])
-        self.assertFalse(status["owner_connected"])
-        for view in (status, listed, self.service.events(job["id"], 0)):
+        self.service.revoke_session(session)
+        # A detached run's row is pruned; nothing paused lingers for observers.
+        with self.assertRaises(KeyError):
+            self.service.status(job["id"])
+        self.assertEqual(self.service.list_jobs(), [])
+        for view in (self.service.list_jobs(),):
             self.assertNotIn(session, repr(view))
 
     def test_list_jobs_orders_active_first_and_validates_limit(self):

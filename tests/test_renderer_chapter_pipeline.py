@@ -256,21 +256,21 @@ class ChapterPipelineTests(unittest.TestCase):
             self.assertEqual(backend.maximum, 2)
             service.sessions.revoke(session)
             # In-flight GPU work is never killed: both takes finish, verify,
-            # and save before the lossless pause.
+            # and save before the run is abandoned.
             release.set()
             until = time.monotonic() + 8
-            status = service.status(job["id"])
             while time.monotonic() < until:
-                status = service.status(job["id"])
-                if status["state"] == "queued" and status["paused"]:
+                try:
+                    service.status(job["id"])
+                except KeyError:
                     break
                 time.sleep(0.02)
-            self.assertTrue(status["paused"])
-            self.assertIsNone(status["error"])
+            else:
+                self.fail("The abandoned run's row was not removed")
             self.assertEqual(len(backend.speech_calls), 2)
             self.assertEqual(len(list((self.root / "server" / "render-work" / "clips").glob("*/accepted.json"))), 2)
-            # The explicit reconnect resumes on the cached takes: no further
-            # engine dispatch, same job, same budget, verified acceptance.
+            # The explicit resubmission reuses the cached takes: no further
+            # engine dispatch, same job identity, verified acceptance.
             resumed = service.submit(spec, digest(spec), None, service_session(service))
             self.assertEqual(resumed["id"], job["id"])
             until = time.monotonic() + 8
@@ -301,14 +301,14 @@ class ChapterPipelineTests(unittest.TestCase):
             service.sessions.revoke(session)
             release.set()
             until = time.monotonic() + 8
-            status = service.status(job["id"])
             while time.monotonic() < until:
-                status = service.status(job["id"])
-                if status["state"] == "queued" and status["paused"]:
+                try:
+                    service.status(job["id"])
+                except KeyError:
                     break
                 time.sleep(0.02)
-            self.assertTrue(status["paused"])
-            self.assertIsNone(status["error"])
+            else:
+                self.fail("The abandoned run's row was not removed")
             # The queued chunk checked its stop condition at the slot boundary
             # instead of starting a new generation for a departed client.
             self.assertEqual(len(backend.speech_calls), 1)

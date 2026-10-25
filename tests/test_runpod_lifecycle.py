@@ -72,6 +72,7 @@ class RunpodLifecycleTests(unittest.TestCase):
     def fake_deployment(self):
         result = Mock()
         result.pod_id = "pod_fixture"
+        result.cfg = self.settings["deployment"]
         result.state = {"bootstrapped": True, "api_key": "fixture-worker-secret", "volume_id": "volume_fixture",
                         "revision": "fixture-revision"}
         result.secrets = {"fixture-provider-secret", "fixture-worker-secret", "fixture-ceph-secret"}
@@ -85,13 +86,54 @@ class RunpodLifecycleTests(unittest.TestCase):
                 redirect_stdout(StringIO()):
             return run_command(args)
 
-    def test_every_operation_stops_on_success(self):
+    def test_encode_reuses_a_ready_service_without_restart_or_dependency_work(self):
+        fake = self.fake_deployment()
+        fake.reuse_service.return_value = True
+        self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
+        fake.encode.assert_called_once()
+        fake.stop.assert_not_called()
+        fake.stop_service.assert_not_called()
+        fake.configure.assert_not_called()
+        fake.install.assert_not_called()
+        fake.launch.assert_not_called()
+
+    def test_newly_started_service_is_left_warm_after_a_successful_encode(self):
+        fake = self.fake_deployment()
+        fake.reuse_service.return_value = False
+        self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
+        fake.launch.assert_called_once()
+        fake.stop.assert_not_called()
+
+    def test_service_reuse_checks_capabilities_without_restarting_the_model(self):
+        deployment = self.deployment()
+        deployment.state.update(pod_id="pod_fixture", bootstrapped=True,
+                                configuration_stamp=deployment.configuration_stamp())
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            factory.return_value.request.return_value = {
+                "maintenance": False, "ephemeral_runs": 1, "warm_activation": 1}
+            self.assertTrue(deployment.reuse_service())
+            factory.return_value.request.assert_called_once_with("GET", "v1/capabilities")
+        self.api.start_pod.assert_not_called()
+        self.api.stop_pod.assert_not_called()
+
+    def test_changed_config_invalidates_warm_reuse_without_hashing_credentials(self):
+        config = self.directory / "runtime.toml"
+        config.write_text("[runpod]\n")
+        self.settings["config_path"] = config
+        deployment = self.deployment()
+        deployment.state.update(bootstrapped=True, configuration_stamp=deployment.configuration_stamp())
+        config.write_text("[runpod]\nidle_timeout_seconds = 300\n")
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            self.assertFalse(deployment.reuse_service())
+            factory.assert_not_called()
+
+    def test_every_successful_operation_leaves_the_service_warm(self):
         for action in ("bootstrap", "update", "encode"):
             with self.subTest(action=action):
                 fake = self.fake_deployment()
                 args = self.args(action, *(["book"] if action == "encode" else []))
                 self.assertEqual(self.run_fake(fake, args), 0)
-                fake.stop.assert_called_once()
+                fake.stop.assert_not_called()
                 fake.start.assert_called_once()
                 fake.configure.assert_called_once()
                 fake.install.assert_called_once_with(full=action != "encode")
@@ -112,7 +154,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.launch.assert_called_once_with(prepare=False)
         self.assertEqual(fake.stop_service.call_count, 1)
         fake.encode.assert_called_once()
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
 
     def test_encode_updates_a_stale_worker_and_keeps_it_running(self):
         fake = self.fake_deployment()
@@ -121,14 +163,14 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.deploy_code.assert_called_once_with("local")
         fake.install.assert_called_once_with(full=True)
         fake.smoke.assert_called_once()
-        self.assertEqual([call.kwargs for call in fake.launch.call_args_list],
-                         [{"prepare": True}, {"prepare": False}])
-        self.assertEqual(fake.stop_service.call_count, 2)
+        self.assertEqual([call.kwargs for call in fake.launch.call_args_list], [{"prepare": True}])
+        fake.activate.assert_called_once()
+        self.assertEqual(fake.stop_service.call_count, 1)
         fake.encode.assert_called_once()
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
         order = [name for name, _, _ in fake.mock_calls if name in
                  {"deploy_code", "install", "smoke", "encode", "stop"}]
-        self.assertEqual(order, ["deploy_code", "install", "smoke", "encode", "stop"])
+        self.assertEqual(order, ["deploy_code", "install", "smoke", "encode"])
 
     def test_encode_no_update_uses_the_deployed_code_as_is(self):
         fake = self.fake_deployment()
@@ -150,7 +192,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.install.assert_called_once_with(full=True)
         fake.smoke.assert_called_once()
         fake.encode.assert_called_once()
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
         notices = " ".join(call.args[0] for call in fake.notify.call_args_list)
         self.assertIn("--no-update ignored", notices)
 
@@ -164,9 +206,9 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.install.assert_called_once_with(full=True)
         fake.smoke.assert_called_once()
         fake.encode.assert_called_once()
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
 
-    def test_errors_in_each_phase_still_stop_existing_or_created_pod(self):
+    def test_errors_stop_compute_only_before_the_idle_supervisor_is_ready(self):
         for action in ("bootstrap", "update", "encode"):
             phases = ["start", "stop_service", "configure", "install", "launch", "encode" if action == "encode" else "smoke"]
             if action == "bootstrap":
@@ -180,25 +222,29 @@ class RunpodLifecycleTests(unittest.TestCase):
                     args = self.args(action, *(["book"] if action == "encode" else []))
                     with self.assertRaisesRegex(RuntimeError, "fixture phase failure"):
                         self.run_fake(fake, args)
-                    fake.stop.assert_called_once()
+                    if phase == "encode":
+                        fake.stop.assert_not_called()
+                    else:
+                        fake.stop.assert_called_once()
 
-    def test_ctrl_c_during_work_stops_before_propagating(self):
+    def test_ctrl_c_during_work_leaves_idle_shutdown_in_charge(self):
         fake = self.fake_deployment()
         fake.encode.side_effect = KeyboardInterrupt()
         with self.assertRaises(KeyboardInterrupt):
             self.run_fake(fake, self.args("encode", "book", "--stop-delay", "300"))
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
         self.sleep.assert_not_called()
 
-    def test_ctrl_c_during_shutdown_delay_stops_immediately(self):
+    def test_deprecated_stop_delay_does_not_hold_the_client_or_stop_a_ready_service(self):
         fake = self.fake_deployment()
         self.sleep.side_effect = KeyboardInterrupt()
         self.assertEqual(self.run_fake(fake, self.args("update", "--stop-delay", "300")), 0)
-        self.sleep.assert_called_once_with(300)
-        fake.stop.assert_called_once()
+        self.sleep.assert_not_called()
+        fake.stop.assert_not_called()
 
     def test_shutdown_ignores_interrupt_signals_then_restores_handlers(self):
         fake = self.fake_deployment()
+        fake.install.side_effect = RuntimeError("failed before idle supervisor")
         originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
         handlers = dict(originals)
         def check_cleanup_handlers():
@@ -210,7 +256,8 @@ class RunpodLifecycleTests(unittest.TestCase):
                 patch("epub_tts_narrator.renderer.runpod.signal.getsignal", side_effect=handlers.get), \
                 patch("epub_tts_narrator.renderer.runpod.signal.signal", side_effect=lambda sig, handler: handlers.update({sig: handler})), \
                 redirect_stdout(StringIO()):
-            self.assertEqual(run_command(self.args("update")), 0)
+            with self.assertRaisesRegex(RuntimeError, "failed before idle supervisor"):
+                run_command(self.args("update"))
         self.assertEqual(handlers, originals)
 
     def test_previous_service_is_stopped_before_updating_code_or_config(self):
@@ -300,19 +347,20 @@ class RunpodLifecycleTests(unittest.TestCase):
 
     def test_shutdown_failure_warns_about_billing_and_redacts_secrets(self):
         fake = self.fake_deployment()
+        fake.install.side_effect = RuntimeError("failed before idle supervisor")
         fake.stop.side_effect = RuntimeError("fixture-provider-secret fixture-ceph-secret fixture-worker-secret")
         with self.assertRaisesRegex(RuntimeError, "billing may continue") as caught:
             self.run_fake(fake, self.args("update"))
         for secret in fake.secrets:
             self.assertNotIn(secret, str(caught.exception))
 
-    def test_operation_failure_skips_stop_delay_and_still_stops(self):
+    def test_operation_failure_after_readiness_leaves_the_idle_timer_active(self):
         fake = self.fake_deployment()
         fake.encode.side_effect = RuntimeError("encode fixture failure")
         with self.assertRaisesRegex(RuntimeError, "encode fixture failure"):
             self.run_fake(fake, self.args("encode", "book", "--stop-delay", "300"))
         self.sleep.assert_not_called()
-        fake.stop.assert_called_once()
+        fake.stop.assert_not_called()
 
     def test_double_failure_retains_operation_and_stop_diagnostics(self):
         fake = self.fake_deployment()
@@ -677,7 +725,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         deployment.launch.assert_called_once_with(prepare=False)
         deployment.deploy_code.assert_not_called()
         self.assertIn("new_pod-8082", deployment.url)
-        self.assertEqual(pods["new_pod"]["status"], "EXITED")
+        self.assertEqual(pods["new_pod"]["status"], "RUNNING")
 
     def test_unavailable_or_over_budget_gpu_creates_nothing(self):
         for changes in ({"availability": "NONE"}, {"price": {"secure": 10.0}}):
@@ -1092,11 +1140,13 @@ class RunpodLifecycleTests(unittest.TestCase):
         requests = [0]
 
         def request(*args):
+            if args[0] == "POST":
+                return {"maintenance": False, "ephemeral_runs": 1, "warm_activation": 1}
             clock[0] += 10
             requests[0] += 1
             if requests[0] <= 5:
                 raise ChapterClientError("loading")
-            return {"maintenance": False}
+            return {"maintenance": True, "ephemeral_runs": 1, "warm_activation": 1}
 
         def ssh(command, **kwargs):
             if command.startswith("python3 -c "):
@@ -1139,17 +1189,19 @@ class RunpodLifecycleTests(unittest.TestCase):
                 deployment.state["pod_id"] = "pod_fixture"
                 deployment.ssh = Mock(return_value=b"")
                 with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
-                    client.return_value.request.return_value = {"maintenance": prepare}
+                    client.return_value.request.side_effect = lambda method, *args: {
+                        "maintenance": method == "GET", "ephemeral_runs": 1, "warm_activation": 1}
                     deployment.launch(prepare=prepare)
                 launched = next(call.args[0] for call in deployment.ssh.call_args_list if call.args[0].startswith("nohup "))
-                action = "serve-maintenance" if prepare else "serve"
-                self.assertIn(deployment.worker_command(action) + " > ", launched)
+                self.assertIn(deployment.worker_command("serve-maintenance") + " > ", launched)
+                self.assertEqual(any(call.args[0] == "POST" for call in client.return_value.request.call_args_list),
+                                 not prepare)
                 commands = [call.args[0] for call in deployment.ssh.call_args_list]
                 self.assertEqual(deployment.worker_command("prepare") in commands, prepare)
 
     def test_launch_rejects_wrong_mode_instead_of_smoking_or_encoding(self):
         for prepare, reported in ((True, {}), (True, {"maintenance": False}),
-                                  (False, {"maintenance": True})):
+                                  (False, {"maintenance": False})):
             with self.subTest(prepare=prepare, reported=reported):
                 deployment = self.deployment()
                 deployment.state["pod_id"] = "pod_fixture"
@@ -1158,6 +1210,18 @@ class RunpodLifecycleTests(unittest.TestCase):
                     client.return_value.request.return_value = reported
                     with self.assertRaisesRegex(RuntimeError, "wrong maintenance mode"):
                         deployment.launch(prepare=prepare)
+
+    def test_cold_launch_never_activates_a_legacy_background_queue(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_fixture"
+        deployment.ssh = Mock(return_value=b"")
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
+            client.return_value.request.return_value = {"maintenance": True, "client_sessions": 1}
+            with self.assertRaisesRegex(RuntimeError, "run-scoped execution"):
+                deployment.launch(prepare=False)
+            client.return_value.request.assert_called_once_with("GET", "v1/capabilities")
+        launched = next(call.args[0] for call in deployment.ssh.call_args_list if call.args[0].startswith("nohup "))
+        self.assertIn(deployment.worker_command("serve-maintenance") + " > ", launched)
 
     def test_healthy_supervisor_ignores_ssh_warning_output(self):
         from epub_tts_narrator.renderer.chapter_client import ChapterClientError
@@ -1168,9 +1232,11 @@ class RunpodLifecycleTests(unittest.TestCase):
                    b"EPUB_TTS_WORKER_STATUS=RUNNING\n")
         deployment.ssh = Mock(side_effect=[b"", b"", warning])
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as client:
-            client.return_value.request.side_effect = [ChapterClientError("loading"), {}]
+            client.return_value.request.side_effect = [ChapterClientError("loading"),
+                {"maintenance": True, "ephemeral_runs": 1, "warm_activation": 1},
+                {"maintenance": False, "ephemeral_runs": 1, "warm_activation": 1}]
             deployment.launch()
-        self.assertEqual(client.return_value.request.call_count, 2)
+        self.assertEqual(client.return_value.request.call_count, 3)
         self.assertEqual(deployment.ssh.call_count, 3)
         self.assertFalse(any("tail -n 60" in call.args[0] for call in deployment.ssh.call_args_list))
         self.sleep.assert_called_once_with(5)

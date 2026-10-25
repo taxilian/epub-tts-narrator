@@ -256,6 +256,10 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
         _require_id(data["id"])
         return await call(jobs.open_session, data["id"])
 
+    @app.post("/v1/server/activate")
+    async def activate_server():
+        return await call(jobs.activate)
+
     @app.post("/v1/sessions/{session_id}/heartbeat")
     async def heartbeat_session(session_id: str):
         # Renewal only: an unknown or expired session is a 404 and is never
@@ -335,6 +339,14 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
             if session is not None:
                 _require_id(session)
         return with_artifact_urls(await call(jobs.retry, job_id, submission, session))
+
+    @app.post("/v1/jobs/{job_id}/ack")
+    async def acknowledge_job(job_id: str, request: Request):
+        _require_id(job_id)
+        data = await body(request)
+        fields(data, {"session"}, {"session"})
+        _require_id(data["session"])
+        return await call(jobs.acknowledge, job_id, data["session"])
 
     def parse_after(value):
         try:

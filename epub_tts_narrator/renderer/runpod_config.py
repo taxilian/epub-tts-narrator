@@ -49,7 +49,7 @@ DEPLOYMENT_DEFAULTS = {
     "data_dir": "/workspace/chapter-server-data",
     "github_url": "https://github.com/taxilian/epub-tts-narrator.git",
     "git_ref": "main",
-    "idle_timeout_seconds": 600,
+    "idle_timeout_seconds": 300,
     "pod_id": "",
 }
 

@@ -1,10 +1,18 @@
-"""Durable chapter jobs with compressed references and compressed downloads only.
+"""Run-scoped remote chapter rendering with compressed references and downloads.
 
 The remote service owns paragraph synthesis, verification, and chapter assembly.
 The client owns source provenance, voice selections, downloaded checkpoints, and
 final book packaging. Each invocation opens one ephemeral connected session and
 keeps it live with a heartbeat; work without a live session pauses losslessly
 instead of executing unattended.
+
+Scheduling state belongs only to the current invocation: jobs are submitted
+under run-scoped idempotency keys, progress is followed from a fresh event
+cursor, and nothing about the run's queue position is persisted. Resumability
+comes solely from validated chapter caches and the service's speech cache: a
+rerun starts a fresh run and reuses verified downloads. Once every artifact of
+a chapter is downloaded and hash-checked, the client records a durable cache
+descriptor and acknowledges the job so the server can discard that run's rows.
 """
 
 from __future__ import annotations
@@ -114,7 +122,7 @@ def _verify_flac_pcm(path, expected, ffmpeg):
 
 
 class ChapterClient:
-    """Small authenticated transport; credentials never enter saved job records."""
+    """Small authenticated transport; credentials never enter saved cache records."""
 
     def __init__(self, settings):
         self.settings = settings
@@ -138,10 +146,10 @@ class ChapterClient:
                 raise ChapterClientError("Chapter service JSON response is too large")
             result = json.loads(body, parse_constant=lambda value: (_ for _ in ()).throw(ValueError()))
         except HTTPError as exc:
-            raise ChapterClientError(f"Chapter service returned HTTP {exc.code}; saved jobs remain resumable",
-                                     status=exc.code) from None
+            raise ChapterClientError(f"Chapter service returned HTTP {exc.code}", status=exc.code) from None
         except (URLError, TimeoutError, ConnectionError, OSError):
-            raise ChapterClientError("Chapter service connection failed; rerun the same command to resume saved jobs") from None
+            raise ChapterClientError("Chapter service connection failed; rerun the same command to start a "
+                                     "fresh run (verified chapter caches are reused automatically)") from None
         except (ValueError, UnicodeError):
             raise ChapterClientError("Chapter service returned invalid JSON") from None
         if not isinstance(result, dict):
@@ -208,7 +216,7 @@ class ChapterClient:
                             checksum.update(data)
                             stream.write(data)
                 except (HTTPError, URLError, TimeoutError, ConnectionError, OSError):
-                    raise ChapterClientError("Chapter artifact download failed; rerun to obtain a fresh link and resume") from None
+                    raise ChapterClientError("Chapter artifact download failed; rerun to obtain a fresh link") from None
                 stream.flush()
                 os.fsync(stream.fileno())
             if received != size or checksum.hexdigest() != expected:
@@ -361,12 +369,63 @@ def validate_remote_plan(bundle, config, plan):
                 f"cannot be rendered remotely: {exc}") from exc
 
 
-def _save_job(folder, record):
-    write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+CACHE_FORMAT = "epub-tts-narrator-remote-chapter-cache"
+
+
+def _cache_descriptor(selection, spec, artifacts):
+    """Build the durable validated-artifact descriptor for one chapter.
+
+    It binds the exact source/voice/render selection and every artifact hash,
+    so completed downloads stay verifiable and assemblable after the service
+    stops. It intentionally carries no job id, event cursor, queue state,
+    session, or scheduling permission of any kind.
+    """
+    record = {"format": CACHE_FORMAT, "version": 1, "selection": deepcopy(selection),
+              "spec": deepcopy(spec),
+              "artifacts": [{key: item[key] for key in ("name", "sha256", "size", "url") if key in item}
+                            for item in artifacts]}
+    return dict(record, record_sha256=digest(record))
+
+
+def _write_cache(folder, descriptor):
+    write_json(Path(folder) / "cache.json", descriptor)
+
+
+def _clear_legacy_receipt_history(folder):
+    for receipt in Path(folder).glob("history/*/job.json"):
+        _regular_directory(receipt.parent)
+        regular_file(receipt).unlink()
+
+
+def _read_cache(folder, selection):
+    """Load the validated-artifact cache descriptor for this exact selection."""
+    _clear_legacy_receipt_history(folder)
+    path = Path(folder) / "cache.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    record = read_json(regular_file(path))
+    if not isinstance(record, dict):
+        raise ChapterClientError("Saved remote chapter cache descriptor must be an object")
+    checksum = record.pop("record_sha256", None)
+    spec = record.get("spec")
+    artifacts = record.get("artifacts")
+    names = [item.get("name") for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
+    if (checksum != signed_record(record)
+            or record.get("format") != CACHE_FORMAT or record.get("version") != 1
+            or record.get("selection") != selection or not isinstance(spec, dict)
+            or {key: value for key, value in spec.items() if key != "renderer_fingerprint"} != selection
+            or not artifacts or len(names) != len(artifacts) or len(set(names)) != len(names)
+            or any(name not in ARTIFACT_NAMES for name in names)
+            or any(not isinstance(item.get("sha256"), str) or not _HASH.fullmatch(item["sha256"])
+                   or type(item.get("size")) is not int or item["size"] < 0
+                   for item in artifacts)):
+        raise ChapterClientError("Saved remote chapter cache descriptor failed integrity checks")
+    return record
 
 
 def _read_job(folder, selection):
-    path = folder / "job.json"
+    """Read a legacy run receipt; it can only vouch for downloaded artifacts."""
+    path = Path(folder) / "job.json"
     if not path.exists() and not path.is_symlink():
         return None
     record = read_json(regular_file(path))
@@ -380,127 +439,69 @@ def _read_job(folder, selection):
     return record
 
 
-def _archive_job(folder, record):
-    """Preserve the previous receipt and partial downloads after replacement ACK."""
-    history = _regular_directory(folder / "history" / (_safe_id(record["id"]) + "-" + digest(record)))
-    receipt = history / "job.json"
-    expected = dict(record, record_sha256=digest(record))
-    if receipt.exists():
-        if read_json(regular_file(receipt)) != expected:
-            raise ChapterClientError("Previous chapter history changed; retained files were not replaced")
-    else:
-        write_json(receipt, expected)
-    for name in ARTIFACT_NAMES:
-        source, destination = folder / name, history / name
-        if not source.exists() and not source.is_symlink():
-            continue
-        regular_file(source)
-        if destination.exists() or destination.is_symlink():
-            if file_hash(regular_file(destination)) != file_hash(source):
-                raise ChapterClientError("Previous chapter artifact history changed; retained files were not replaced")
-            source.unlink()
-        else:
-            os.replace(source, destination)
-    return history.relative_to(folder).as_posix()
+def _migrate_legacy_job(folder, selection):
+    """Consume a legacy run receipt only to retain its verified downloads.
 
-
-def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, include_masters,
-                    submission=None, session=None, watchdog=None):
-    """Resume the same job, or reconcile a terminal job from an older renderer.
-
-    ``session`` is the live session id sent with every execution grant;
-    ``watchdog`` is the invocation's heartbeat, checked while waiting.
+    A past run's job.json may vouch for already-downloaded artifacts; they are
+    validated and re-recorded as a plain cache descriptor. It can never steer a
+    new run, grant resumption, or supply its event cursor. Receipts and leftover
+    files that fail validation are ignored here; unvalidated leftovers are
+    cleared before this run's fresh submission instead.
     """
-    spec = current_spec if saved is None else saved["spec"]
-    replacement = saved.get("replacement_spec") if saved is not None else None
-    if saved is not None and replacement is None and spec["renderer_fingerprint"] != current_spec["renderer_fingerprint"]:
-        def observe():
-            try:
-                status = client.request("GET", f"v1/jobs/{saved['id']}")
-            except ChapterClientError as exc:
-                if exc.status != 404:
-                    raise
-                # A confirmed 404 means this server no longer knows the saved
-                # job (it was recreated or the job was removed). The local
-                # receipt stays authoritative until a replacement is
-                # acknowledged below; resubmitting under the live session is
-                # idempotent and keeps the previous history.
-                return None
-            if status.get("id") != saved["id"] or status.get("spec_hash") != digest(spec):
-                raise ChapterClientError("Service did not confirm the saved chapter's identity; no replacement submitted")
-            return status
-        status = observe()
-        paused = status is not None and status.get("paused") is True
-        if status is not None and status.get("state") in {"queued", "generating", "assembling"} and not paused:
-            # A live old worker may still finish. Do not duplicate or cancel it.
-            # If it fails during observation, the same command can migrate it.
-            try:
-                _wait_jobs(client, {saved["id"]: (folder, saved)}, notify,
-                           include_masters=include_masters, session=watchdog)
-            except ChapterClientError:
-                status = observe()
-                paused = status is not None and status.get("paused") is True
-                if status is not None and status.get("state") not in {"failed", "cancelled"} and not paused:
-                    raise
-            else:
-                return saved, {"id": saved["id"], "state": "completed"}
-        if status is not None and status.get("state") in {"complete", "completed"}:
-            _completed_download(client, folder, saved, status, include_masters=include_masters)
-            return saved, status
-        if status is not None and status.get("state") not in {"failed", "cancelled"} and not paused:
-            raise ChapterClientError("Saved chapter state is not safely resumable; no replacement submitted")
-        # A paused legacy job has no live owner and can never progress on this
-        # server, so it is safely migratable like a failed one. A job missing
-        # from a recreated server is migrated the same way. Save intent
-        # before the mutation: a lost response must resubmit this exact
-        # spec/key even if capabilities change again on the next run.
-        saved = deepcopy(saved)
-        if status is not None:
-            saved["state"] = status["state"]
-        else:
-            saved["state"] = "missing"
-        saved["replacement_spec"] = deepcopy(current_spec)
-        _save_job(folder, saved)
-        replacement = saved["replacement_spec"]
-    if replacement is not None:
-        if (not isinstance(replacement, dict)
-                or {key: value for key, value in replacement.items() if key != "renderer_fingerprint"} != selection):
-            raise ChapterClientError("Saved replacement specification differs from the chapter selection")
-        spec = replacement
+    path = Path(folder) / "job.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        record = _read_job(folder, selection)
+        if record is None or not record.get("artifacts"):
+            return None
+        if not _cached_artifacts_present(folder, record, require_masters=False):
+            return None
+    except (ChapterClientError, KeyError, TypeError, ValueError, OSError):
+        return None
+    descriptor = _cache_descriptor(record["selection"], record["spec"], record["artifacts"])
+    _write_cache(folder, descriptor)
+    regular_file(path).unlink()
+    return descriptor
+
+
+def _clear_stale_chapter_folder(folder):
+    """Remove unvalidated past-run leftovers before a fresh submission.
+
+    Files without a validated descriptor are not accepted outputs; keeping
+    them would either obstruct this run's downloads or silently mix old
+    bytes. Accepted local chapter audio lives elsewhere and is never touched.
+    """
+    for name in ("job.json", *ARTIFACT_NAMES):
+        path = Path(folder) / name
+        if path.exists() or path.is_symlink():
+            regular_file(path).unlink()
+
+
+def _submit_chapter(client, selection, spec, *, submission, session, notify):
+    """Submit this run's own chapter job under a run-scoped idempotency key.
+
+    The key binds the chapter specification to this invocation's session, so a
+    fresh run never collides with a past server job — even on a recreated
+    database with the same deterministic identity — while retries within the
+    run stay idempotent. The returned record lives only in memory; scheduling
+    state is never persisted client-side.
+    """
     validate_spec(spec)
-    payload = {"spec": spec, "idempotency_key": digest(spec)}
+    payload = {"spec": spec, "idempotency_key": digest({"spec": digest(spec), "run": session})}
     if submission is not None:
         payload["submission"] = submission
-    if session is not None:
-        payload["session"] = session
+    payload["session"] = session
     status = client.request("POST", "v1/jobs", payload)
     job_id = _safe_id(status.get("id"))
-    if saved is not None and replacement is None and saved["id"] != job_id:
-        raise ChapterClientError("Service did not preserve the saved job's idempotency key")
-    record = saved if saved is not None and replacement is None else {
-        "format": PROTOCOL, "version": 1, "id": job_id,
-        "selection": selection, "spec": spec, "last_event": 0}
-    if replacement is not None:
-        if job_id == saved["id"] or status.get("spec_hash") != digest(spec):
-            raise ChapterClientError("Service did not confirm the replacement chapter's identity; previous files retained")
-        archive = _archive_job(folder, saved)
-        record["previous_job"] = {"id": saved["id"], "archive": archive}
-        record["state"] = status.get("state")
-        _save_job(folder, record)
-        notify(f"Chapter {selection['chapter']['number']}: resumed with the updated renderer; previous job history retained.")
-        if spec["renderer_fingerprint"] != current_spec["renderer_fingerprint"]:
-            # Reconciled an older ambiguous submission. Observe that known job
-            # before considering another replacement; never lose its receipt.
-            return _submit_chapter(client, folder, selection, record, current_spec, notify,
-                                   include_masters=include_masters, submission=submission,
-                                   session=session, watchdog=watchdog)
+    record = {"format": PROTOCOL, "version": 1, "id": job_id, "selection": deepcopy(selection),
+              "spec": deepcopy(spec), "last_event": 0, "state": status.get("state")}
     if status.get("state") in {"failed", "cancelled"}:
-        retry = {"session": session} if session is not None else {}
+        retry = {"session": session}
         if submission is not None:
             retry["submission"] = submission
         status = client.request("POST", f"v1/jobs/{job_id}/retry", retry)
     record["state"] = status.get("state")
-    _save_job(folder, record)
     return record, status
 
 
@@ -520,7 +521,7 @@ def _event(record, event, notify):
         notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: {safe_message}")
 
 
-def _completed_download(client, folder, record, status, *, include_masters=True):
+def _completed_download(client, folder, record, status, *, include_masters=True, notify=None, session=None):
     artifacts = status.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ChapterClientError("Completed chapter job has no artifacts")
@@ -529,16 +530,34 @@ def _completed_download(client, folder, record, status, *, include_masters=True)
             or not {"chapter.json", "sync.json", "verification.json", "manifest.json"}.issubset(names)):
         raise ChapterClientError("Completed chapter job lacks its timing/verification metadata")
     folder = _regular_directory(folder)
+    chapter = record["selection"]["chapter"]
+    if notify is not None:
+        notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: "
+               "downloading verified chapter artifacts")
     for artifact in artifacts:
         if artifact["name"] == "chapter.flac" and not include_masters:
             continue
         client.download(artifact, folder / artifact["name"])
     _validate_metadata(folder, record, artifacts=artifacts)
-    # Atomic JSON files are mode 0600. Keep expiring signed links privately so
+    # The durable cache descriptor binds these validated files to their exact
+    # selection and hashes. Keep expiring signed links privately in it, so
     # masters can be fetched directly from durable storage after GPU shutdown.
+    _write_cache(folder, _cache_descriptor(record["selection"], record["spec"], artifacts))
     record["artifacts"] = [{key: artifact[key] for key in ("name", "sha256", "size", "url")} for artifact in artifacts]
     record["state"] = "completed"
-    _save_job(folder, record)
+    legacy = folder / "job.json"
+    if legacy.exists() or legacy.is_symlink():
+        regular_file(legacy).unlink()
+    if notify is not None:
+        notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: verified download complete")
+    if session is not None:
+        try:
+            client.request("POST", f"v1/jobs/{record['id']}/ack", {"session": session})
+        except ChapterClientError:
+            # A lost acknowledgement is safe: the validated local cache is
+            # already authoritative, so the run must not regenerate or lose
+            # files. The server prunes the row when the session detaches.
+            pass
 
 
 def _source_timing(chunk, *, paragraph_member=False):
@@ -692,7 +711,7 @@ def _validate_metadata(folder, record, *, artifacts=None):
 
 
 def _cached_artifacts_present(folder, record, *, require_masters=True):
-    if record.get("state") != "completed" or not record.get("artifacts"):
+    if not record.get("artifacts"):
         return False
     present = True
     for item in record["artifacts"]:
@@ -709,13 +728,21 @@ def _cached_artifacts_present(folder, record, *, require_masters=True):
     return present
 
 
-def _wait_jobs(client, jobs, notify, *, include_masters=True, session=None):
+def _wait_jobs(client, jobs, notify, *, include_masters=True, session=None, watchdog=None):
+    """Watch this run's own jobs from a fresh cursor until each completes.
+
+    ``session`` is the run's session id, used to acknowledge verified
+    deliveries; ``watchdog`` is the invocation's heartbeat, checked while
+    waiting. Records exist only in memory, so every cursor starts at zero and
+    no past run's events can be replayed or suppressed.
+    """
     pending = dict(jobs)
+    total, finished = len(pending), 0
     connection, watching = None, None
     try:
         while pending:
-            if session is not None:
-                session.check()
+            if watchdog is not None:
+                watchdog.check()
             for job_id, (folder, record) in list(pending.items()):
                 response = client.request("GET", f"v1/jobs/{job_id}/events?after={record.get('last_event', 0)}")
                 for event in response.get("events", []):
@@ -724,22 +751,26 @@ def _wait_jobs(client, jobs, notify, *, include_masters=True, session=None):
                 if status.get("id") != job_id:
                     raise ChapterClientError("Chapter service returned another job's status")
                 if status.get("paused") is True:
-                    raise ChapterClientError("The remote chapter is paused because its rendering client disconnected; "
-                                             "rerun the same command to explicitly reconnect and resume it")
+                    raise ChapterClientError("The rendering service lost this run's session; rerun the same "
+                                             "command to start a fresh run (verified chapter caches are reused)")
                 state = status.get("state")
                 record["state"] = state
-                _save_job(folder, record)
                 if state in {"completed", "complete"}:
                     if record.get("last_event", 0) < status.get("last_event", 0):
                         continue
-                    _completed_download(client, folder, record, status, include_masters=include_masters)
+                    _completed_download(client, folder, record, status, include_masters=include_masters,
+                                        notify=notify, session=session)
                     del pending[job_id]
+                    finished += 1
+                    chapter = record["selection"]["chapter"]
+                    notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']} finished; "
+                           f"{finished} of {total} chapters complete in this run")
                 elif state in {"failed", "cancelled"}:
                     error = status.get("error")
                     detail = str(error)[:600] if error else "no diagnostic provided"
                     raise RemoteChapterFailed(
                         f"Remote chapter {record['selection']['chapter']['number']} {state}: {detail}. "
-                        "Accepted paragraphs remain saved; rerun to retry this job",
+                        "Accepted paragraphs remain in the service's speech cache; rerun to render this chapter again",
                         job_id=job_id, record=record, paragraph=_failed_paragraph(error))
             if not pending:
                 break
@@ -917,8 +948,10 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
             continue
         selection = _selection(bundle, chapter, config, bindings)
         folder = _regular_directory(root / digest(selection))
-        saved = _read_job(folder, selection)
-        if saved is None and not stale_local and _has_partial_local_speech(chapter, local_clip_ids):
+        descriptor = _read_cache(folder, selection)
+        if descriptor is None:
+            descriptor = _migrate_legacy_job(folder, selection)
+        if descriptor is None and not stale_local and _has_partial_local_speech(chapter, local_clip_ids):
             raise ChapterClientError(
                 f"Chapter {chapter['number']} has accepted local speech but no completed local chapter. "
                 "Partial local clip migration to the chapter service is not supported yet; the local cache is retained. "
@@ -926,22 +959,22 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         if stale_local:
             notify(f"Chapter {chapter['number']} changed; rendering the revision remotely. "
                    "Previous local audio is retained.")
-        if (saved is not None and not chapters_only
-                and _cached_artifacts_present(folder, saved, require_masters=False)
-                and not _cached_artifacts_present(folder, saved)):
+        if (descriptor is not None
+                and _cached_artifacts_present(folder, descriptor, require_masters=False)
+                and not _cached_artifacts_present(folder, descriptor)):
             # A durable storage link may still work after the GPU service stops.
-            # Consult the service only when a missing/expired link requires it.
+            # Consult it only when a missing/expired link requires the service.
             client = ChapterClient(config["remote_chapters"])
             try:
-                for artifact in saved["artifacts"]:
+                for artifact in descriptor["artifacts"]:
                     client.download(artifact, folder / artifact["name"])
             except ChapterClientError:
                 pass
-        if saved is not None and _cached_artifacts_present(folder, saved, require_masters=not chapters_only):
+        if descriptor is not None and _cached_artifacts_present(folder, descriptor):
             notify(f"Reusing downloaded chapter {chapter['number']} / {len(bundle['chapters'])}")
-            cached[chapter["id"]] = (folder, saved)
+            cached[chapter["id"]] = (folder, descriptor)
         else:
-            unfinished.append((chapter, selection, folder, saved))
+            unfinished.append((chapter, selection, folder, descriptor))
     if unfinished:
         client = ChapterClient(config["remote_chapters"])
         capabilities = client.request("GET", "v1/capabilities")
@@ -950,6 +983,9 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         if capabilities.get("client_sessions") != 1:
             raise ChapterClientError("The chapter service does not support connected client sessions; "
                                      "update the worker to the matching renderer before rendering")
+        if capabilities.get("ephemeral_runs") != 1:
+            raise ChapterClientError("The chapter service does not support run-scoped ephemeral jobs with "
+                                     "acknowledged cleanup; update the worker to the matching renderer before rendering")
         from .paragraphs import paragraph_supported
         if any(not paragraph_supported(capabilities, chunk)
                for chapter, *_ in unfinished for chunk in chapter["chunks"]):
@@ -969,7 +1005,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         heartbeat.start()
         pending = {}
 
-        def submit(chapter, selection, folder, saved):
+        def submit(chapter, selection, folder, descriptor):
             heartbeat.check()
             spec = deepcopy(selection)
             fingerprint = capabilities.get("renderer_fingerprint")
@@ -981,11 +1017,12 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
                 raise ChapterClientError(
                     f"Chapter {chapter['number']} / {len(bundle['chapters'])} "
                     f"cannot be rendered remotely: {exc}") from exc
-            record, status = _submit_chapter(client, folder, selection, saved, spec, notify,
-                                             include_masters=not chapters_only, submission=submission,
-                                             session=session_id, watchdog=heartbeat)
+            if descriptor is None:
+                _clear_stale_chapter_folder(folder)
+            record, status = _submit_chapter(client, selection, spec, submission=submission,
+                                             session=session_id, notify=notify)
             cached[chapter["id"]] = (folder, record)
-            if _cached_artifacts_present(folder, record, require_masters=not chapters_only):
+            if _cached_artifacts_present(folder, record):
                 return
             pending[record["id"]] = (folder, record)
             notify(f"Scheduled chapter {chapter['number']} / {len(bundle['chapters'])}: {record['id']}")
@@ -993,15 +1030,17 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         try:
             # Submit every chapter before watching any, so synthesis can immediately
             # enter the next queued chapter while previous chapters are encoded.
-            for chapter, selection, folder, saved in unfinished:
-                submit(chapter, selection, folder, saved)
+            for chapter, selection, folder, descriptor in unfinished:
+                submit(chapter, selection, folder, descriptor)
             while pending:
                 try:
-                    _wait_jobs(client, pending, notify, include_masters=not chapters_only,
-                               session=heartbeat)
+                    _wait_jobs(client, pending, notify, include_masters=True,
+                               session=session_id, watchdog=heartbeat)
                     break
                 except RemoteChapterFailed as failure:
                     heartbeat.check()
+                    pending = {identifier: value for identifier, value in pending.items()
+                               if value[1].get("state") != "completed"}
                     recovered = _recover_failed_paragraph(bundle, config, plan, voices, capabilities,
                                                           failure, notify)
                     if recovered is None:
@@ -1010,7 +1049,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
                     plan, replacement = recovered
                     selection = _selection(bundle, replacement, config, bindings)
                     folder = _regular_directory(root / digest(selection))
-                    submit(replacement, selection, folder, _read_job(folder, selection))
+                    submit(replacement, selection, folder, _read_cache(folder, selection))
         finally:
             heartbeat.stop()
             try:
@@ -1033,7 +1072,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
 
 def has_remote_chapters(config):
     directory = Path(config["render"]["work_dir"]) / "remote-chapters"
-    return directory.is_dir() and any(directory.glob("*/job.json"))
+    return directory.is_dir() and (any(directory.glob("*/cache.json")) or any(directory.glob("*/job.json")))
 
 
 def assemble_remote(bundle, config, *, notify=print):
@@ -1054,27 +1093,26 @@ def assemble_remote(bundle, config, *, notify=print):
                 continue
             selection = _selection(bundle, chapter, config, bindings)
             folder = Path(config["render"]["work_dir"]) / "remote-chapters" / digest(selection)
-            record = _read_job(folder, selection)
-            if record is None or not _cached_artifacts_present(folder, record, require_masters=False):
-                raise ChapterClientError(f"Chapter {chapter['number']} is not downloaded; run render --chapters-only to resume")
-            if not _cached_artifacts_present(folder, record):
+            descriptor = _read_cache(folder, selection)
+            if descriptor is None:
+                descriptor = _migrate_legacy_job(folder, selection)
+            if descriptor is None or not _cached_artifacts_present(folder, descriptor, require_masters=False):
+                raise ChapterClientError(f"Chapter {chapter['number']} is not downloaded; run render --chapters-only to download it")
+            if not _cached_artifacts_present(folder, descriptor):
                 if not config["remote_chapters"]["url"]:
                     raise ChapterClientError("Final assembly needs the remote service URL to download lossless chapter masters")
                 client = ChapterClient(config["remote_chapters"])
                 notify(f"Downloading lossless master for chapter {chapter['number']} / {len(bundle['chapters'])}")
                 try:
-                    for artifact in record["artifacts"]:
+                    for artifact in descriptor["artifacts"]:
                         client.download(artifact, folder / artifact["name"])
                 except ChapterClientError:
-                    try:
-                        status = client.request("GET", f"v1/jobs/{record['id']}")
-                    except ChapterClientError:
-                        raise ChapterClientError("Saved chapter download links are unavailable or expired and the service is offline. "
-                                                 "Restart the chapter service with its persistent store, then rerun assemble") from None
-                    if status.get("id") != record["id"] or status.get("state") not in {"completed", "complete"}:
-                        raise ChapterClientError("The saved remote chapter is no longer available for master download")
-                    _completed_download(client, folder, record, status)
-            cached[chapter["id"]] = (folder, record)
+                    raise ChapterClientError(
+                        "A legacy cache is missing its lossless master and its download link has expired. "
+                        "Restore the master from durable storage, or render with a new --work-dir against a "
+                        "live service. Existing verified files are retained; new runs download masters "
+                        "before acknowledging delivery.") from None
+            cached[chapter["id"]] = (folder, descriptor)
         return _assemble_downloads(bundle, config, plan, cached, local, notify=notify)
     finally:
         lock.rmdir()
@@ -1143,7 +1181,7 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
         result = {"format": "audiobook-render", "version": 1, "status": "complete",
                   "bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
                   "partial_book": plan["partial_book"], "series_id": plan["series_id"], "audio": audio,
-                  "remote_jobs": {key: value[1]["id"] for key, value in cached.items()},
+                  "chapter_identities": {key: digest(value[1]["spec"]) for key, value in cached.items()},
                   "verification_policy": "preserve_successful_acceptance",
                   "files_sha256": {path.relative_to(stage).as_posix(): file_hash(path)
                                    for path in sorted(stage.rglob("*")) if path.is_file()}}

@@ -42,7 +42,13 @@ def run_progress(settings, args):
             if args.job is not None:
                 jobs = [job for job in jobs if job.get("id") == args.job]
                 if not jobs:
-                    job = client.request("GET", f"v1/jobs/{args.job}")
+                    try:
+                        job = client.request("GET", f"v1/jobs/{args.job}")
+                    except ChapterClientError as exc:
+                        if exc.status != 404:
+                            raise
+                        print(json.dumps({"jobs": []}) if args.json else "No current run for this chapter; completed run history is not retained.")
+                        return 0
                     jobs = [job]
             public = []
             for job in jobs:
@@ -55,7 +61,12 @@ def run_progress(settings, args):
                         raise ChapterClientError("Worker returned an invalid progress job ID")
                     last = job.get("last_event", 0)
                     after = max(0, last - 500) if type(last) is int else 0
-                    batch = client.request("GET", f"v1/jobs/{identifier}/events?after={after}")
+                    try:
+                        batch = client.request("GET", f"v1/jobs/{identifier}/events?after={after}")
+                    except ChapterClientError as exc:
+                        if exc.status == 404:
+                            continue
+                        raise
                     for event in reversed(batch.get("events", [])):
                         message = event.get("message", "") if isinstance(event, dict) else ""
                         if not isinstance(message, str):

@@ -36,6 +36,7 @@ class FakeJobs:
         self.voices = {}
         self.submit_calls = []
         self.retry_calls = []
+        self.ack_calls = []
         self.events_requested = []
         self.idle_checks = []
         self.cancel_count = 0
@@ -90,6 +91,10 @@ class FakeJobs:
     def retry(self, job_id, submission=None, session=None):
         self.retry_calls.append((job_id, submission, session))
         return self.status(job_id)
+
+    def acknowledge(self, job_id, session):
+        self.ack_calls.append((job_id, session))
+        return {"acknowledged": True}
 
     def list_jobs(self, limit=100):
         if type(limit) is not int or not 1 <= limit <= 256:
@@ -307,6 +312,17 @@ class ChapterServerTests(unittest.TestCase):
                                                  json={**body, **payload}).status_code, 400)
                     self.assertEqual(client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH,
                                                  json=payload).status_code, 400)
+
+    def test_acknowledgement_requires_a_session_and_passes_it_to_the_service(self):
+        with self.client() as client:
+            self.assertEqual(client.post(f"/v1/jobs/{JOB}/ack", headers=AUTH,
+                                         json={"session": "f" * 64}).status_code, 200)
+            self.assertEqual(self.jobs.ack_calls, [(JOB, "f" * 64)])
+            for payload in ({}, {"session": "not-a-hash"}, {"session": "f" * 64, "extra": True}, {"no": "session"}):
+                with self.subTest(payload=payload):
+                    self.assertEqual(client.post(f"/v1/jobs/{JOB}/ack", headers=AUTH,
+                                                 json=payload).status_code, 400)
+            self.assertEqual(len(self.jobs.ack_calls), 1)
 
     def test_poll_replays_only_later_events(self):
         self.complete()
@@ -544,7 +560,7 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()["id"]
 
-    def test_real_core_completion_download_and_restart_preserve_idempotency(self):
+    def test_real_core_completion_ack_removes_rows_and_restart_never_replays(self):
         from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
 
         with self.client_type(self.app) as client:
@@ -558,26 +574,29 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(hashlib.sha256(response.content).hexdigest(), artifact["sha256"])
                 self.assertEqual(len(response.content), artifact["size"])
+            # Only the connected owner can acknowledge the verified delivery;
+            # the acknowledged run's rows disappear while its files remain.
+            self.assertEqual(client.post(f"/v1/jobs/{identifier}/ack", headers=AUTH,
+                                         json={"session": SESSION}).status_code, 200)
+            self.assertEqual(client.get(f"/v1/jobs/{identifier}", headers=AUTH).status_code, 404)
         self.assertTrue(self.executor.closed)
+        self.assertTrue(any((self.root / "render-work").rglob("chapter.m4a")))
         replacement = FixtureExecutor()
         restarted = ChapterJobs(self.root, replacement)
         with self.client_type(create_app(restarted, {"api_key": KEY})) as client:
+            # A restart clears past-run rows; the old job stays unknown until
+            # a fresh connected submission re-renders it.
+            self.assertEqual(client.get(f"/v1/jobs/{identifier}", headers=AUTH).status_code, 404)
             self.assertEqual(self.submit(client), identifier)
-            self.assertEqual(self.wait_for(client, identifier, "complete")["id"], identifier)
-            self.assertEqual(replacement.synthesis_calls, 0)
+            self.wait_for(client, identifier, "complete")
+            self.assertEqual(replacement.synthesis_calls, 1)
 
-    def test_real_maintenance_service_keeps_read_apis_and_rejects_job_writes(self):
+    def test_real_maintenance_service_discards_old_runs_and_rejects_new_job_writes(self):
         from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
 
         job = self.jobs.submit(self.spec, self.payload["idempotency_key"],
                                session=service_session(self.jobs))
         self.jobs._set_state(job["id"], "generating")
-        def durable_view(status, events):
-            # Ownership flags are instance-local scheduling metadata; durable
-            # state and history must survive a restart byte-identically.
-            return ({key: value for key, value in status.items()
-                     if key not in ("paused", "owner_connected")}, events)
-        before = durable_view(self.jobs.status(job["id"]), self.jobs.events(job["id"]))
         self.jobs.close()
         engine = FixtureExecutor()
         maintenance = ChapterJobs(self.root, engine, maintenance=True)
@@ -585,8 +604,7 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
             caps = client.get("/v1/capabilities", headers=AUTH)
             self.assertEqual(caps.status_code, 200)
             self.assertTrue(caps.json()["maintenance"])
-            live = client.get(f"/v1/jobs/{job['id']}", headers=AUTH).json()
-            self.assertEqual(durable_view(live, None)[0], before[0])
+            self.assertEqual(client.get(f"/v1/jobs/{job['id']}", headers=AUTH).status_code, 404)
             self.assertEqual(client.post("/v1/voices/ensure", headers=AUTH,
                                          json={"voices": []}).status_code, 200)
             for endpoint, payload in (("/v1/jobs", self.payload), (f"/v1/jobs/{job['id']}/retry", None)):
@@ -595,8 +613,7 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
                 self.assertIn("maintenance mode", response.text)
             self.assertEqual(engine.synthesis_calls, 0)
             self.assertEqual(engine.assembly_calls, 0)
-            self.assertEqual(before, durable_view(maintenance.status(job["id"]),
-                                                  maintenance.events(job["id"])))
+            self.assertEqual(client.get("/v1/jobs", headers=AUTH).json()["jobs"], [])
         self.assertTrue(engine.closed)
 
     def test_real_core_failure_retry_reuses_job_and_retains_event_history(self):

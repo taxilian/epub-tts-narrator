@@ -16,8 +16,8 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.chapter_client import (
     ChapterClient, ChapterClientError, PROTOCOL, _cached_artifacts_present,
-    _read_job, _render_remote_locked, _save_job, _selection, _submit_chapter, _voice_assets, _wait_jobs,
-    _validate_metadata, assemble_remote,
+    _migrate_legacy_job, _read_cache, _read_job, _render_remote_locked, _selection, _submit_chapter,
+    _voice_assets, _wait_jobs, _validate_metadata, assemble_remote,
 )
 from epub_tts_narrator.renderer.cli import main
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
@@ -165,7 +165,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
             {"events": [], "job": {"id": identifier, "state": "queued", "paused": True}},
             AssertionError("Observer kept waiting after the owner disconnected")]
         client.websocket.return_value = None
-        with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ChapterClientError, "paused"):
+        with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ChapterClientError, "lost this run's session"):
             _wait_jobs(client, {identifier: (Path(folder), {"last_event": 0})}, lambda message: None)
 
     def setUp(self):
@@ -209,7 +209,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 self.calls.append((method, path, payload))
                 if path == "v1/capabilities":
                     return {"protocol": PROTOCOL, "multi_speaker": True, "renderer_fingerprint": "f" * 64,
-                            "client_sessions": 1, "session_ttl_seconds": 30}
+                            "client_sessions": 1, "session_ttl_seconds": 30, "ephemeral_runs": 1}
                 if path == "v1/sessions":
                     self.sessions_opened += 1
                     return {"opened": True}
@@ -238,6 +238,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 if "/events?" in path:
                     job_id = path.split("/")[2]
                     return {"events": [{"sequence": 1, "message": "Ready"}], "job": self.jobs[job_id]}
+                if path.endswith("/ack"):
+                    return {"acknowledged": True}
                 raise AssertionError((method, path))
             def download(self, artifact, target):
                 target.write_bytes(self.artifacts[artifact["url"]])
@@ -254,14 +256,23 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.assertEqual(sum(path == "v1/jobs" for _, path, _ in client.calls[:first_event]), 2)
         self.assertEqual(len(result["chapters"]), 2)
         self.assertTrue(all(Path(item["audio_file"]).is_file() for item in result["chapters"]))
+        for path in (self.root / "work" / "remote-chapters").glob("*/cache.json"):
+            descriptor = json.loads(path.read_text())
+            for artifact in descriptor["artifacts"]:
+                if artifact["name"] == "chapter.flac":
+                    self.assertTrue((path.parent / "chapter.flac").is_file())
         self.assertEqual(Path(self.voice["reference_audio"]).read_bytes(), self.reference_before)
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
             _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                   notify=lambda _: None, chapters_only=True)
         factory.assert_not_called()
-        for path in (self.root / "work" / "remote-chapters").glob("*/job.json"):
+        for path in (self.root / "work" / "remote-chapters").glob("*/cache.json"):
             self.assertNotIn("api_key", path.read_text())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            descriptor = read_json(path)
+            self.assertNotIn("last_event", descriptor)
+            self.assertNotIn("id", descriptor)
+            self.assertNotIn("state", descriptor)
 
     def test_single_speaker_worker_accepts_unchanged_uniform_paragraphs(self):
         from test_renderer_workflow import EXAMPLE
@@ -291,6 +302,38 @@ class ChapterOrchestrationTests(unittest.TestCase):
         submitted = [payload["spec"]["chapter"] for _, path, payload in client.calls if path == "v1/jobs"]
         self.assertEqual(submitted, plan["chapters"])
 
+    def test_recovery_never_reobserves_a_chapter_already_downloaded_and_acknowledged(self):
+        base = self.fake_client()
+
+        class Client(base):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.retired = set()
+                self.failed = False
+
+            def request(self, method, path, payload=None, timeout=None):
+                if "/events?" in path and path.split("/")[2] in self.retired:
+                    raise AssertionError("Reobserved an acknowledged completed run")
+                result = super().request(method, path, payload, timeout=timeout)
+                if path.endswith("/ack"):
+                    self.retired.add(path.split("/")[2])
+                if path == "v1/jobs" and payload["spec"]["chapter"]["number"] == 2 and not self.failed:
+                    self.failed = True
+                    self.jobs[result["id"]].update(state="failed", error="SpeechVerificationFailed: fixture", artifacts=[])
+                return result
+
+        client = Client(self.config["remote_chapters"])
+        revised = deepcopy(self.plan)
+        replacement = revised["chapters"][1]
+        replacement["chunks"][0]["segment"]["delivery"]["direction"] = "gently"
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client), \
+                patch("epub_tts_narrator.renderer.chapter_client._recover_failed_paragraph",
+                      return_value=(revised, replacement)):
+            result = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(result["chapters"]), 2)
+        self.assertEqual(len(client.retired), 2)
+
     def test_missing_voice_fails_before_contacting_service(self):
         self.store.load.return_value = None
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
@@ -310,6 +353,105 @@ class ChapterOrchestrationTests(unittest.TestCase):
         factory.assert_not_called()
         assets.assert_not_called()
 
+    def fresh_server_client(self, notes, *, event_messages=("Chapter generating", "Encoding chapter")):
+        """A fake service backed by a freshly created database: its event
+        counter starts at 1, with no memory of any past run."""
+        owner = self
+        base = owner.fake_client()
+
+        class FreshServerClient(base):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.event_cursors, self.idempotency_keys, self.sessions = [], [], []
+
+            def request(self, method, path, payload=None, timeout=None):
+                self.calls.append((method, path, payload))
+                if path == "v1/capabilities":
+                    return {"protocol": PROTOCOL, "multi_speaker": True, "renderer_fingerprint": "f" * 64,
+                            "client_sessions": 1, "session_ttl_seconds": 30, "ephemeral_runs": 1}
+                if path == "v1/sessions":
+                    self.sessions.append(payload["id"])
+                    return {"opened": True}
+                if path.startswith("v1/sessions/"):
+                    if method == "POST":
+                        return {"renewed": True}
+                    return {"revoked": True}
+                if path == "v1/voices/ensure":
+                    return {"missing": payload["voices"]}
+                if method == "PUT":
+                    self.uploads.append(payload)
+                    return {"registered": True}
+                if path == "v1/jobs":
+                    spec = payload["spec"]
+                    self.idempotency_keys.append(payload["idempotency_key"])
+                    job_id = digest({"fresh": len(self.idempotency_keys)})
+                    files = fixture_artifacts(spec)
+                    artifacts = []
+                    for name, data in files.items():
+                        url = f"/{job_id}/{name}"
+                        self.artifacts[url] = data
+                        artifacts.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(),
+                                          "size": len(data), "url": url})
+                    self.jobs[job_id] = {"id": job_id, "state": "completed", "artifacts": artifacts,
+                                         "last_event": len(event_messages)}
+                    return {"id": job_id, "state": "queued"}
+                if "/events?" in path:
+                    job_id = path.split("/")[2]
+                    self.event_cursors.append(int(path.split("after=")[1]))
+                    events = [{"sequence": number, "message": message}
+                              for number, message in enumerate(event_messages, 1)]
+                    return {"events": events, "job": self.jobs[job_id]}
+                if path.endswith("/ack"):
+                    notes.append("acked")
+                    return {"acknowledged": True}
+                raise AssertionError((method, path))
+
+        return FreshServerClient(owner.config["remote_chapters"])
+
+    def test_old_server_cursor_and_receipt_cannot_suppress_a_fresh_run(self):
+        notes = []
+        voices = {voice_id: self.voice for voice_id in self.plan["voice_ids"]}
+        bindings, _ = _voice_assets(voices, self.root / "regression-work", FFMPEG)
+        chapter = self.plan["chapters"][0]
+        selection = _selection(self.bundle, chapter, self.config, bindings)
+        folder = self.root / "work" / "remote-chapters" / digest(selection)
+        folder.mkdir(parents=True)
+        stale = {"format": PROTOCOL, "version": 1, "id": "c" * 64, "selection": selection,
+                 "spec": {**selection, "renderer_fingerprint": "f" * 64},
+                 "last_event": 16740, "state": "generating"}
+        write_json(folder / "job.json", dict(stale, record_sha256=digest(stale)))
+        client = self.fresh_server_client(notes)
+        seen = []
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                           notify=seen.append, chapters_only=True)
+        # The fresh run polls from this run's own beginning, never from the
+        # dead server's 16740, so new progress stays visible.
+        self.assertTrue(client.event_cursors and all(cursor == 0 for cursor in client.event_cursors))
+        printed = "\n".join(seen)
+        self.assertIn("Chapter generating", printed)
+        self.assertIn("Encoding chapter", printed)
+        self.assertIn("downloading verified chapter artifacts", printed)
+        # Run-scoped idempotency: the key binds this invocation's session, so a
+        # fresh database cannot collide with the old deterministic job identity.
+        self.assertEqual(len(client.idempotency_keys), 2)
+        self.assertTrue(all(key != digest(payload["spec"])
+                            for key, (_, _, payload) in zip(client.idempotency_keys,
+                                                            [call for call in client.calls if call[1] == "v1/jobs"])))
+        posted = next(payload for _, path, payload in client.calls if path == "v1/jobs")
+        self.assertNotEqual(posted["idempotency_key"], digest(posted["spec"]))
+        self.assertEqual(notes, ["acked", "acked"])
+        self.assertFalse((folder / "job.json").exists())
+        self.assertTrue((folder / "cache.json").is_file())
+        self.assertNotIn("last_event", read_json(folder / "cache.json"))
+        self.assertEqual(len(result["chapters"]), 2)
+        # A second invocation reuses the validated cache entirely offline.
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            rerun = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                          notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        self.assertEqual(len(rerun["chapters"]), 2)
+
     def metadata_fixture(self, *, spec=None, mutate=None, mutate_manifest=None):
         if spec is None:
             bindings = {key: "a" * 64 for key in self.plan["voice_ids"]}
@@ -326,161 +468,136 @@ class ChapterOrchestrationTests(unittest.TestCase):
         record = {"spec": spec, "selection": {"chapter": spec["chapter"]}, "artifacts": artifacts}
         return folder, record
 
-    def resume_fixture(self, *, changed=True):
+    def legacy_fixture(self, *, state="failed", last_event=16740, corrupt_receipt=False):
         selection = _selection(self.bundle, self.plan["chapters"][0], self.config,
                                {key: "a" * 64 for key in self.plan["voice_ids"]})
-        old = {**deepcopy(selection), "renderer_fingerprint": "e" * 64}
-        current = {**deepcopy(selection), "renderer_fingerprint": ("f" if changed else "e") * 64}
-        folder = self.root / "resume"
-        folder.mkdir()
-        saved = {"format": PROTOCOL, "version": 1, "id": digest(old), "selection": selection,
-                 "spec": old, "last_event": 7, "state": "failed"}
-        _save_job(folder, saved)
-        return folder, selection, saved, current
+        spec = {**deepcopy(selection), "renderer_fingerprint": "f" * 64}
+        folder = self.root / "legacy"
+        folder.mkdir(exist_ok=True)
+        record = {"format": PROTOCOL, "version": 1, "id": digest({"legacy": last_event}),
+                  "selection": selection, "spec": spec, "last_event": last_event, "state": state}
+        if corrupt_receipt:
+            (folder / "job.json").write_bytes(b"{not json")
+        else:
+            write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+        return folder, selection, spec, record
 
-    def test_unchanged_renderer_retries_same_job_without_archiving(self):
-        folder, selection, saved, current = self.resume_fixture(changed=False)
+    def test_submission_uses_a_run_scoped_idempotency_key_and_retries_in_run(self):
+        selection = _selection(self.bundle, self.plan["chapters"][0], self.config,
+                               {key: "a" * 64 for key in self.plan["voice_ids"]})
+        spec = {**deepcopy(selection), "renderer_fingerprint": "f" * 64}
+        session = "d" * 64
         client = Mock()
-        client.request.side_effect = [{"id": saved["id"], "state": "failed"},
-                                      {"id": saved["id"], "state": "queued"}]
-        record, status = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-        self.assertEqual(record["id"], saved["id"])
+        client.request.side_effect = [{"id": "e" * 64, "state": "failed"},
+                                      {"id": "e" * 64, "state": "queued"}]
+        record, status = _submit_chapter(client, selection, spec, submission="a" * 64,
+                                         session=session, notify=Mock())
+        submitted, retried = client.request.call_args_list
+        self.assertEqual(submitted.args[:2], ("POST", "v1/jobs"))
+        payload = submitted.args[2]
+        self.assertEqual(payload["idempotency_key"], digest({"spec": digest(spec), "run": session}))
+        self.assertEqual(payload["submission"], "a" * 64)
+        self.assertEqual(payload["session"], session)
+        self.assertEqual(retried.args[:2], ("POST", f"v1/jobs/{'e' * 64}/retry"))
+        self.assertEqual(retried.args[2], {"session": session, "submission": "a" * 64})
+        self.assertEqual(record["id"], "e" * 64)
+        self.assertEqual(record["last_event"], 0)
         self.assertEqual(status["state"], "queued")
-        self.assertEqual(client.request.call_args_list[0].args,
-                         ("POST", "v1/jobs", {"spec": saved["spec"], "idempotency_key": digest(saved["spec"])}))
-        self.assertEqual(client.request.call_args_list[1].args[:2], ("POST", f"v1/jobs/{saved['id']}/retry"))
-        self.assertFalse((folder / "history").exists())
+        other_session = "1" * 64
+        self.assertNotEqual(digest({"spec": digest(spec), "run": other_session}), payload["idempotency_key"])
 
-    def test_changed_failed_renderer_preserves_history_and_voice_selection(self):
-        folder, selection, saved, current = self.resume_fixture()
-        (folder / "chapter.m4a").write_bytes(b"previous partial download")
-        client = Mock()
-        client.request.side_effect = [
-            {"id": saved["id"], "state": "failed", "spec_hash": digest(saved["spec"])},
-            {"id": digest(current), "state": "queued", "spec_hash": digest(current)},
-        ]
-        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-        self.assertEqual(record["spec"], current)
-        self.assertEqual(record["selection"], selection)
-        self.assertEqual(record["spec"]["voice_bindings"], saved["spec"]["voice_bindings"])
-        history = folder / record["previous_job"]["archive"]
-        self.assertEqual((history / "chapter.m4a").read_bytes(), b"previous partial download")
-        archived = _read_job(history, selection)
-        self.assertEqual(archived["id"], saved["id"])
-        self.assertEqual(archived["last_event"], 7)
-        self.assertFalse((folder / "chapter.m4a").exists())
-        self.assertEqual(_read_job(folder, selection)["id"], record["id"])
-        self.assertEqual(len(client.request.call_args_list), 2)
+    def test_completed_legacy_receipt_migrates_to_cache_descriptor_and_reuses_offline(self):
+        folder, selection, spec, record = self.legacy_fixture(state="completed", last_event=16795)
+        files = fixture_artifacts(spec)
+        record["artifacts"] = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(),
+                                "size": len(data), "url": f"https://objects.example/{name}"}
+                               for name, data in files.items()]
+        write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        descriptor = _migrate_legacy_job(folder, selection)
+        self.assertIsNotNone(descriptor)
+        self.assertFalse((folder / "job.json").exists())
+        self.assertEqual(_read_cache(folder, selection)["spec"], spec)
+        self.assertTrue(_cached_artifacts_present(folder, descriptor, require_masters=False))
+        self.assertTrue(_cached_artifacts_present(folder, descriptor))
+        for key in ("id", "state", "last_event"):
+            self.assertNotIn(key, descriptor)
+        # Migration is consumed once: only the descriptor remains.
+        self.assertIsNone(_migrate_legacy_job(folder, selection))
 
-    def test_completed_old_renderer_downloads_without_resubmission(self):
-        folder, selection, saved, current = self.resume_fixture()
-        files = fixture_artifacts(saved["spec"])
-        artifacts = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
-                      "url": f"https://objects.example/{name}"} for name, data in files.items()]
-        client = Mock()
-        client.request.return_value = {"id": saved["id"], "state": "completed",
-                                       "spec_hash": digest(saved["spec"]), "artifacts": artifacts}
-        client.download.side_effect = lambda artifact, target: target.write_bytes(files[artifact["name"]])
-        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-        client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
-        self.assertEqual(record["spec"], saved["spec"])
-        self.assertTrue(_cached_artifacts_present(folder, record, require_masters=False))
-        self.assertFalse((folder / "chapter.flac").exists())
-        self.assertFalse((folder / "history").exists())
+    def test_incomplete_legacy_receipts_and_leftovers_cannot_steer_a_fresh_run(self):
+        voices = {voice_id: self.voice for voice_id in self.plan["voice_ids"]}
+        bindings, _ = _voice_assets(voices, self.root / "legacy-assets", FFMPEG)
+        chapter = self.plan["chapters"][0]
+        selection = _selection(self.bundle, chapter, self.config, bindings)
+        for state, corrupt in (("generating", False), ("completed", False), ("failed", True)):
+            with self.subTest(state=state, corrupt_receipt=corrupt):
+                config = deepcopy(self.config)
+                config["render"]["work_dir"] = str(self.root / f"work-{state}-{int(corrupt)}")
+                folder = Path(config["render"]["work_dir"]) / "remote-chapters" / digest(selection)
+                folder.mkdir(parents=True)
+                spec = {**deepcopy(selection), "renderer_fingerprint": "f" * 64}
+                record = {"format": PROTOCOL, "version": 1, "id": "c" * 64, "selection": selection,
+                          "spec": spec, "last_event": 16740, "state": state}
+                if corrupt:
+                    (folder / "job.json").write_bytes(b"{not json")
+                else:
+                    write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+                stale = folder / "chapter.m4a"
+                stale.write_bytes(b"stale past-run audio")
+                client = self.fake_client()(config["remote_chapters"])
+                with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+                    result = _render_remote_locked(self.bundle, config, self.plan, self.store,
+                                                   notify=lambda _: None, chapters_only=True)
+                submitted = [payload["spec"]["chapter"]["number"] for _, path, payload in client.calls
+                             if path == "v1/jobs"]
+                self.assertIn(1, submitted)
+                self.assertFalse((folder / "job.json").exists())
+                self.assertTrue((folder / "cache.json").is_file())
+                self.assertEqual(stale.read_bytes(), fixture_artifacts(spec)["chapter.m4a"])
+                self.assertEqual(len(result["chapters"]), 2)
 
-    def test_unconfirmed_old_job_never_replaces_receipt_or_partial_downloads(self):
-        folder, selection, saved, current = self.resume_fixture()
-        partial = folder / "chapter.m4a"
-        partial.write_bytes(b"retain old audio")
-        receipt = (folder / "job.json").read_bytes()
-        for response in [ChapterClientError("HTTP 400"),
-                         {"id": saved["id"], "state": "unknown", "spec_hash": digest(saved["spec"])},
-                         {"id": saved["id"], "state": "failed", "spec_hash": "0" * 64}]:
-            with self.subTest(response=response):
-                client = Mock()
-                client.request.side_effect = [response]
-                with self.assertRaises(ChapterClientError):
-                    _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-                client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
-                self.assertEqual((folder / "job.json").read_bytes(), receipt)
-                self.assertEqual(partial.read_bytes(), b"retain old audio")
-                self.assertFalse((folder / "history").exists())
+    def test_corrupted_legacy_downloads_are_cleared_and_regenerated_not_trusted(self):
+        voices = {voice_id: self.voice for voice_id in self.plan["voice_ids"]}
+        bindings, _ = _voice_assets(voices, self.root / "corrupt-assets", FFMPEG)
+        chapter = self.plan["chapters"][0]
+        selection = _selection(self.bundle, chapter, self.config, bindings)
+        folder = self.root / "work" / "remote-chapters" / digest(selection)
+        folder.mkdir(parents=True)
+        spec = {**deepcopy(selection), "renderer_fingerprint": "f" * 64}
+        files = fixture_artifacts(spec)
+        record = {"format": PROTOCOL, "version": 1, "id": "c" * 64, "selection": selection,
+                  "spec": spec, "last_event": 16737, "state": "completed",
+                  "artifacts": [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                                for name, data in files.items()]}
+        write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+        (folder / "chapter.m4a").write_bytes(b"corrupted past download")
+        self.assertIsNone(_migrate_legacy_job(folder, selection))
+        client = self.fake_client()(self.config["remote_chapters"])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                  notify=lambda _: None, chapters_only=True)
+        self.assertFalse((folder / "job.json").exists())
+        self.assertTrue((folder / "cache.json").is_file())
+        self.assertEqual((folder / "chapter.m4a").read_bytes(), files["chapter.m4a"])
 
-    def test_lost_replacement_response_reuses_persisted_spec_before_archiving(self):
-        folder, selection, saved, current = self.resume_fixture()
-        partial = folder / "chapter.m4a"
-        partial.write_bytes(b"retain until acknowledgement")
-        client = Mock()
-        client.request.side_effect = [
-            {"id": saved["id"], "state": "failed", "spec_hash": digest(saved["spec"])},
-            ChapterClientError("lost response"),
-        ]
-        with self.assertRaisesRegex(ChapterClientError, "lost response"):
-            _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-        pending = _read_job(folder, selection)
-        self.assertEqual(pending["id"], saved["id"])
-        self.assertEqual(pending["replacement_spec"], current)
-        self.assertEqual(partial.read_bytes(), b"retain until acknowledgement")
-        self.assertFalse((folder / "history").exists())
-        first_payload = client.request.call_args.args[2]
-        client.request.reset_mock()
-        client.request.side_effect = [{"id": digest(current), "state": "queued", "spec_hash": digest(current)}]
-        record, _ = _submit_chapter(client, folder, selection, pending, current, Mock(), include_masters=False)
-        client.request.assert_called_once_with("POST", "v1/jobs", first_payload)
-        self.assertEqual((folder / record["previous_job"]["archive"] / "chapter.m4a").read_bytes(),
-                         b"retain until acknowledgement")
+    def test_service_without_ephemeral_run_support_fails_closed(self):
+        client = self.fake_client()(self.config["remote_chapters"])
+        original = client.request
 
-    def test_active_old_renderer_is_observed_and_migrated_only_after_failure(self):
-        folder, selection, saved, current = self.resume_fixture()
-        client = Mock()
-        old_status = {"id": saved["id"], "spec_hash": digest(saved["spec"])}
-        client.request.side_effect = [{**old_status, "state": "generating"},
-                                      {**old_status, "state": "failed"},
-                                      {"id": digest(current), "state": "queued", "spec_hash": digest(current)}]
-        with patch("epub_tts_narrator.renderer.chapter_client._wait_jobs",
-                   side_effect=ChapterClientError("old worker failed")) as wait:
-            record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-        self.assertEqual(wait.call_args.args[1], {saved["id"]: (folder, saved)})
-        self.assertEqual(record["id"], digest(current))
-        self.assertEqual([call.args[:2] for call in client.request.call_args_list],
-                         [("GET", f"v1/jobs/{saved['id']}"), ("GET", f"v1/jobs/{saved['id']}"), ("POST", "v1/jobs")])
+        def legacy_capabilities(method, path, payload=None, timeout=None):
+            result = original(method, path, payload)
+            if path == "v1/capabilities":
+                result.pop("ephemeral_runs")
+            return result
 
-    def test_missing_job_on_recreated_server_resubmits_and_retains_history(self):
-        folder, selection, saved, current = self.resume_fixture()
-        (folder / "chapter.m4a").write_bytes(b"previous partial download")
-        missing = ChapterClientError("Chapter service returned HTTP 404; saved jobs remain resumable", status=404)
-        client = Mock()
-        client.request.side_effect = [
-            missing,
-            {"id": digest(current), "state": "queued", "spec_hash": digest(current)},
-        ]
-        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False,
-                                    session="d" * 64)
-        self.assertEqual([call.args[:2] for call in client.request.call_args_list],
-                         [("GET", f"v1/jobs/{saved['id']}"), ("POST", "v1/jobs")])
-        posted = client.request.call_args_list[1].args[2]
-        self.assertEqual(posted["session"], "d" * 64)
-        self.assertEqual(posted["idempotency_key"], digest(current))
-        self.assertEqual(record["spec"], current)
-        history = folder / record["previous_job"]["archive"]
-        self.assertEqual((history / "chapter.m4a").read_bytes(), b"previous partial download")
-        self.assertEqual(_read_job(history, selection)["id"], saved["id"])
-        self.assertEqual(_read_job(folder, selection)["id"], record["id"])
-
-    def test_unconfirmed_http_status_never_replaces_a_missing_job_receipt(self):
-        folder, selection, saved, current = self.resume_fixture()
-        receipt = (folder / "job.json").read_bytes()
-        for error in (ChapterClientError("Chapter service connection failed"),
-                      ChapterClientError("Chapter service returned HTTP 403", status=403),
-                      ChapterClientError("Chapter service returned HTTP 500", status=500)):
-            with self.subTest(error=error):
-                client = Mock()
-                client.request.side_effect = [error]
-                with self.assertRaises(ChapterClientError):
-                    _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
-                client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
-                self.assertEqual((folder / "job.json").read_bytes(), receipt)
-                self.assertFalse((folder / "history").exists())
+        with patch.object(client, "request", side_effect=legacy_capabilities), \
+                patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            with self.assertRaisesRegex(ChapterClientError, "update the worker"):
+                _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                      notify=lambda _: None, chapters_only=True)
+        self.assertFalse(any(path == "v1/jobs" for _, path, _ in client.calls))
 
     def test_http_errors_carry_status_and_transport_failures_do_not(self):
         from urllib.error import HTTPError, URLError
@@ -547,7 +664,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ChapterClientError, "manifest"):
             _validate_metadata(folder, record)
 
-    def test_chapter_only_metadata_allows_deferred_lossless_master_but_not_missing_audio(self):
+    def test_legacy_chapter_only_metadata_allows_deferred_lossless_master_but_not_missing_audio(self):
         folder, record = self.metadata_fixture()
         (folder / "chapter.flac").unlink()
         _validate_metadata(folder, record)
@@ -690,7 +807,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 if path == "v1/capabilities":
                     return {"protocol": PROTOCOL, "multi_speaker": True,
                             "renderer_fingerprint": "f" * 64, "submission_budget": True,
-                            "client_sessions": 1, "session_ttl_seconds": 30,
+                            "client_sessions": 1, "session_ttl_seconds": 30, "ephemeral_runs": 1,
                             "engine": {"engine": {"engine": "fixture"}}}
                 if path == "v1/sessions" or path.startswith("v1/sessions/"):
                     return super().request(method, path, payload)
@@ -805,8 +922,21 @@ class ChapterOrchestrationTests(unittest.TestCase):
         fixtures = {}
         engine = FixtureEngine(fixtures)
         executor = ChapterExecutor(self.config, engine=engine, verifier=FixtureVerifier(fixtures))
+
+        class ObjectStore:
+            """Independent compressed-artifact storage whose links outlive job rows."""
+            def __init__(self):
+                self.objects = {}
+            def publish(self, job_id, name, path, sha256):
+                self.objects[self.url({"key": f"{job_id}/{name}"})] = Path(path).read_bytes()
+                return {"key": f"{job_id}/{name}"}
+            def url(self, record):
+                return f"https://objects.example/{record['key']}?signature=fixture"
+
+        store = ObjectStore()
         service = ChapterJobs(self.root / "server", executor,
-                              {"ffprobe": FFPROBE, "assembly_workers": 2, "max_pending_jobs": 10})
+                              {"ffprobe": FFPROBE, "assembly_workers": 2, "max_pending_jobs": 10},
+                              publisher=store)
         self.addCleanup(service.close)
         service.start()
         downloads, uploads = [], []
@@ -841,6 +971,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
                     identifier = path.split("/")[2]
                     return {"events": service.events(identifier, int(path.split("after=")[1])),
                             "job": service.status(identifier)}
+                if path.endswith("/ack"):
+                    return service.acknowledge(path.split("/")[2], payload["session"])
                 if method == "GET" and path.startswith("v1/jobs/"):
                     return service.status(path.rsplit("/", 1)[-1])
                 raise AssertionError((method, path))
@@ -850,16 +982,14 @@ class ChapterOrchestrationTests(unittest.TestCase):
                         raise ChapterClientError("fixture cached artifact differs")
                     return target
                 downloads.append(artifact["name"])
-                identifier = artifact["url"].split("/")[3]
-                source = service.artifact(identifier, artifact["name"])
-                shutil.copyfile(source, target)
+                target.write_bytes(store.objects[artifact["url"]])
                 if file_hash(target) != artifact["sha256"]:
                     raise AssertionError("transfer changed bytes")
                 return target
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
             _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                   notify=lambda _: None, chapters_only=True)
-            self.assertNotIn("chapter.flac", downloads)
+            self.assertIn("chapter.flac", downloads)
             self.assertIn("chapter.m4a", downloads)
             calls_before_assembly = len(engine.speech_calls)
             # Cached durable artifact URLs suffice even after the job API stops.
@@ -892,8 +1022,10 @@ class ChapterOrchestrationTests(unittest.TestCase):
             revised = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                             notify=lambda _: None, chapters_only=False)
         self.assertEqual(len(engine.speech_calls), calls_before_assembly + 1)
-        self.assertNotEqual(revised["remote_jobs"]["chapter-0001"], previous["remote_jobs"]["chapter-0001"])
-        self.assertEqual(revised["remote_jobs"]["chapter-0002"], previous["remote_jobs"]["chapter-0002"])
+        self.assertNotEqual(revised["chapter_identities"]["chapter-0001"],
+                            previous["chapter_identities"]["chapter-0001"])
+        self.assertEqual(revised["chapter_identities"]["chapter-0002"],
+                         previous["chapter_identities"]["chapter-0002"])
         self.assertEqual(revised, read_json(self.root / "output" / "render.json"))
         self.assertEqual(revised["bundle_hash"], self.bundle["bundle_hash"])
         self.assertEqual(unchanged_chapter, file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a"))

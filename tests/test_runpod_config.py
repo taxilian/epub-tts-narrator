@@ -308,6 +308,7 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertTrue(DEPLOYMENT_DEFAULTS["prefer_h100"])
         self.assertEqual(DEPLOYMENT_DEFAULTS["gpu_type_id"], DEFAULT_GPU_TYPE_ID)
         self.assertEqual(DEPLOYMENT_DEFAULTS["max_hourly_price"], 2.60)
+        self.assertEqual(DEPLOYMENT_DEFAULTS["idle_timeout_seconds"], 300)
         settings = load_settings(self.path)
         self.assertTrue(settings["deployment"]["prefer_h100"])
         # TOML has no null and the writer omits None values, so only concrete
