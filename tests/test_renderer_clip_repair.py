@@ -183,6 +183,30 @@ class BroadRepairTests(unittest.TestCase):
         self.assertEqual(len(self.client.repair_calls), 1)
         self.assertEqual(len(self.client.review_calls), 2)
 
+    def test_operationally_failed_repair_resumes_approved_plan_without_new_model_calls(self):
+        from epub_tts_narrator.renderer.workflow import RenderBlocked
+        synthesize = self.engine.synthesize
+
+        def transport_failure(*args, **kwargs):
+            synthesize(*args, **kwargs)
+            raise RuntimeError('offline transport failure')
+
+        with patch.object(self.engine, 'synthesize', side_effect=transport_failure):
+            with self.assertRaises(RenderBlocked):
+                self.render_chunk()
+        path = next((self.work / 'clips').glob('*/clip-repair.json'))
+        state = read_json(path)
+        self.assertEqual(state['phase'], 'failed')
+        self.assertEqual(state['error_code'], 'synthesis_or_input_failure')
+        calls_before = len(self.engine.calls)
+        self.render_chunk()
+        state = read_json(path)
+        self.assertEqual(state['phase'], 'evaluated')
+        self.assertTrue(list((self.work / 'clips').glob('*/accepted.json')))
+        self.assertEqual(len(self.engine.calls), calls_before + 2)
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+
     def test_plan_cannot_spend_more_than_the_shared_cap(self):
         self.config['verification']['max_resolution_attempts'] = 4
         self.render_chunk()

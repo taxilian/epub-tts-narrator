@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from .common import digest
-from .clip_repair_contract import synthesis_request
+from .clip_repair_contract import approved, synthesis_request
 from .clip_repair_execute import execute_plan
 from .clip_repair_state import ClipRepairState, ClipRecoveryUnavailable
 from .exhaustion_candidates import retained_candidates
@@ -52,6 +52,12 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
             if not failures and failure_report:
                 failures = [{'original_report': failure_report}]
             plan = session.prepare(failures, maximum - budget.episode_started(episode) - reserve)
+            if (plan is None and session.state['phase'] == 'failed'
+                    and session.state.get('error_code') in
+                    {'synthesis_or_input_failure', 'shared_budget_exhausted'}):
+                session.state['phase'] = 'approved'
+                session.save()
+                plan = approved(request, session.state['audit'])
             if plan is not None or session.state['phase'] == 'evaluated':
                 notify('  Restoring the completed clip repair.' if session.state['phase'] == 'evaluated'
                        else '  Executing a clip-local repair approved by two independent reviewers.')

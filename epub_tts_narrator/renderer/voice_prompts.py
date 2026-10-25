@@ -3,8 +3,7 @@
 
 MAX_PROMPT_CHARACTERS = 4000
 AUDIOBOOK_VOICE_CONTEXT = (
-    "Adult audiobook narrator portraying a character in a book. "
-    "Create an adult performer's imitation of the following vocal qualities:"
+    "Adult voice mimicking a character that sounds like "
 )
 _CONTEXT_PREFIX = AUDIOBOOK_VOICE_CONTEXT + " "
 _CONTEXT_PREFIXES = (
