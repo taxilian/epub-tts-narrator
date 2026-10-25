@@ -1973,6 +1973,31 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             chapter = replacement
 
 
+def _publish_chapter_link(config, composed, *, notify):
+    """Point a stable chapter-NN name in the output directory at the finished file."""
+    encoded = composed.get("encoded_path")
+    if not encoded:
+        return
+    try:
+        output = Path(config["render"]["output_dir"])
+        encoded = Path(encoded)
+        suffix = encoded.suffix
+        link = output / f"chapter-{composed['track_number']:02d}{suffix}"
+        relative = os.path.relpath(encoded, output)
+        if link.exists() and not link.is_symlink():
+            notify(f"Chapter link not created: {link} already exists")
+            return
+        if link.is_symlink() and os.readlink(link) == relative:
+            return
+        temporary = output / f".chapter-{composed['track_number']:02d}{suffix}.link"
+        output.mkdir(parents=True, exist_ok=True)
+        os.symlink(relative, temporary)
+        os.replace(temporary, link)
+        notify(f"Chapter link updated: {link.name} -> {relative}")
+    except OSError as exc:
+        notify(f"Could not create the chapter link: {exc}")
+
+
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
     run_started = monotonic()
     retry_budget = SpeechRetryBudget()
@@ -2022,9 +2047,10 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         def completed(composed, chapter_acceptance, chapter_label, chapter_started):
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
-            notify(f"Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
+            _publish_chapter_link(config, composed, notify=notify)
+            notify(f"=== Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
-                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready).")
+                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready). ===")
 
         def finish_pending():
             nonlocal pending_assembly

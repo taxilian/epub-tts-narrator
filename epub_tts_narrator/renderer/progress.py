@@ -51,6 +51,12 @@ def set_phase(notify, phase, *, generated=False):
 
 _GENERATION_NOTIFY = ContextVar("audiobook_generation_notify", default=None)
 
+# Console-only display policy (ChapterProgress with notify=print): these lines
+# are already represented by the rewritten live status line. Custom notify
+# callbacks (tests, integrations) always receive every message.
+_FIRST_ATTEMPT = re.compile(r"\s*Generating (?:speech|paragraph), attempt 1/\d+\s*$")
+_CACHE_CHECK = re.compile(r"\s*Chunk \d+/\d+: checking (?:speech|paragraph) cache\b")
+
 
 @contextmanager
 def generation_activity(notify):
@@ -160,6 +166,8 @@ class ChapterProgress:
         return False
 
     def __call__(self, message):
+        if not self._custom_notify and _CACHE_CHECK.match(message):
+            return
         with self._lock:
             self._clear_line()
             self._emit(message)
@@ -167,6 +175,8 @@ class ChapterProgress:
                 self._show(force=True)
 
     def _task_message(self, index, message):
+        if not self._custom_notify and _FIRST_ATTEMPT.match(message):
+            return
         with self._lock:
             task = self._active.get(index)
             if task and task.worker and not message.lstrip().startswith("Chunk "):
@@ -193,6 +203,10 @@ class ChapterProgress:
             if event != "source":
                 task.phase_started = self._clock()
             message = _worker_message(event, worker, elapsed)
+            if not self._custom_notify and event == "started":
+                message = None
+            if not self._custom_notify and event == "completed" and elapsed is not None:
+                message = f"{worker} done in {format_duration(elapsed)}"
             if message:
                 self(f"  Chunk {index + 1}: {message}")
             elif self._tty:
@@ -275,6 +289,10 @@ class ChapterProgress:
     def _status(self, *, final=None, compact=False):
         now = self._clock()
         elapsed = format_duration(now - self._started)
+        chapter_percent = round(100 * len(self._done) / max(1, len(self._weights)))
+        book_percent = round(100 * ((self.number - 1)
+                                    + len(self._done) / max(1, len(self._weights)))
+                             / max(1, self.total_chapters))
         if compact and final is None and any(task.worker for task in self._active.values()):
             # Put machine activity before totals so an 80-column terminal shows
             # remote generation even while an earlier block verifies locally.
@@ -295,14 +313,17 @@ class ChapterProgress:
                 else:
                     label = "cache" if "saved" in task.phase else "ready"
                 active.append(f"{label} #{index + 1}")
-            return (f"Ch {self.number}/{self.total_chapters} | " + "; ".join(active)
-                    + f" | {len(self._done)}/{len(self._weights)} blocks | {elapsed} elapsed")
+            return (f"Ch {self.number}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active)
+                    + f" | {len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)"
+                    + f" | {elapsed} elapsed")
         if compact:
-            parts = [f"Ch {self.number}/{self.total_chapters}",
-                     f"{len(self._done)}/{len(self._weights)} blocks", f"{elapsed} elapsed"]
+            parts = [f"Ch {self.number}/{self.total_chapters} ({book_percent}%)",
+                     f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
+                     f"{elapsed} elapsed"]
         else:
-            parts = [f"Chapter {self.number} / {self.total_chapters}",
-                     f"Blocks {len(self._done)} / {len(self._weights)} complete", f"elapsed {elapsed}"]
+            parts = [f"Chapter {self.number} / {self.total_chapters} (book {book_percent}%)",
+                     f"Blocks {len(self._done)} / {len(self._weights)} complete ({chapter_percent}%)",
+                     f"elapsed {elapsed}"]
         if final is not None:
             parts.append(f"speech {final}")
         remaining = self._remaining(now) if final is None else None

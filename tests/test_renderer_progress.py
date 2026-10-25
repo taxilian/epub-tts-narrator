@@ -76,7 +76,7 @@ class ProgressTests(unittest.TestCase):
                 progress.refresh()
                 self.assertIn("Blocks 0 / 1 complete", self.messages[-1])
                 self.assertIn("generating speech, attempt 1/3 01:05", self.messages[-1])
-                self.assertNotIn("%", self.messages[-1])
+                self.assertIn("Blocks 0 / 1 complete (0%)", self.messages[-1])
                 set_phase(notify, "verifying speech, attempt 1/3")
                 self.clock.advance(2)
                 progress.refresh()
@@ -176,7 +176,7 @@ class ProgressTests(unittest.TestCase):
                     self.assertLessEqual(len(current), 79)
                     self.assertIn("~00:19 left", current)
                     self.assertIn("#4 gen 1/3", current)
-                    self.assertIn("00:01", current)
+                    self.assertIn("(60%)", current)
 
     def test_redirected_output_is_plain_and_periodic(self):
         output = io.StringIO()
