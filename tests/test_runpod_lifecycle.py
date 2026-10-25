@@ -720,6 +720,62 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(spec["dataCenterIds"], ["US-CO-1"])
         self.assertEqual(spec["mounts"]["network"][0]["volumeId"], "saved_volume")
 
+    def test_deleted_saved_pod_is_replaced_by_bootstrap_reusing_the_volume(self):
+        self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_deleted_elsewhere"
+        deployment.state["volume_id"] = "volume_fixture"
+        deployment.save()
+        self.api.get_pod.side_effect = RunpodAPIError(
+            "Runpod could not find the requested resource (HTTP 404)", status=404)
+
+        deployment.provision()
+
+        self.assertEqual(deployment.pod_id, "pod_fixture")
+        self.api.create_pod.assert_called_once()
+        self.api.create_volume.assert_not_called()
+        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"]["network"][0]["volumeId"],
+                         "volume_fixture")
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("no longer exists", notices)
+
+    def test_stop_treats_a_pod_deleted_elsewhere_as_nothing_to_stop(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_deleted_elsewhere"
+        deployment.save()
+        self.api.get_pod.side_effect = RunpodAPIError(
+            "Runpod could not find the requested resource (HTTP 404)", status=404)
+
+        deployment.stop()
+
+        self.api.stop_pod.assert_not_called()
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("nothing to stop", notices)
+
+    def test_start_reports_a_pod_deleted_elsewhere_with_bootstrap_guidance(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_deleted_elsewhere"
+        deployment.save()
+        self.api.get_pod.side_effect = RunpodAPIError(
+            "Runpod could not find the requested resource (HTTP 404)", status=404)
+
+        with self.assertRaisesRegex(RuntimeError, "runpod bootstrap"):
+            deployment.start()
+
+    def test_status_reports_a_pod_deleted_elsewhere(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_deleted_elsewhere"
+        deployment.save()
+        self.api.get_pod.side_effect = RunpodAPIError(
+            "Runpod could not find the requested resource (HTTP 404)", status=404)
+        with patch("epub_tts_narrator.renderer.runpod_config.load_settings", return_value=self.settings), \
+                patch("epub_tts_narrator.renderer.runpod.Deployment", return_value=deployment), \
+                redirect_stdout(StringIO()) as output:
+            run_command(self.args("status"))
+        status = json.loads(output.getvalue())
+        self.assertIn("deleted", status["status"])
+        self.assertIn("bootstrap", status["status"])
+
     def test_volume_timeout_is_reconciled_before_another_volume_creation(self):
         deployment = self.deployment()
         self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")

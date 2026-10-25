@@ -100,6 +100,11 @@ def ssh_endpoint(pod):
     return host, port
 
 
+def _resource_missing(exc):
+    """A confirmed 404 answer: the Runpod resource no longer exists."""
+    return isinstance(exc, RunpodAPIError) and exc.status == 404
+
+
 class Deployment:
     def __init__(self, settings, *, api=None, notify=print):
         self.settings = settings
@@ -229,7 +234,20 @@ class Deployment:
 
     def provision(self):
         if self.pod_id and not self.state.get("pod_creation_pending"):
-            return
+            try:
+                self.api.get_pod(self.pod_id)
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                # The saved worker was deleted (for example in the Runpod
+                # console). Persistent storage survives, so provision a new
+                # worker from the saved volume instead of failing on it.
+                self.notify(f"Saved worker {self.pod_id} no longer exists in Runpod; creating a new one.")
+                self.state.pop("pod_id", None)
+                self.state.pop("last_status", None)
+                self.save()
+            else:
+                return
         name = self.cfg["name"] + "-" + self.state["deployment_id"]
         # Reconcile a previous uncertain creation before making any mutation.
         if self.state.get("pod_creation_pending"):
@@ -516,6 +534,17 @@ class Deployment:
             updated = self.api.get_pod(self.pod_id)
         return updated
 
+    def _require_pod(self):
+        try:
+            return self.api.get_pod(self.pod_id)
+        except RunpodAPIError as exc:
+            if not _resource_missing(exc):
+                raise
+            raise RuntimeError(
+                f"The saved worker {self.pod_id} no longer exists in Runpod (deleted outside this tool). "
+                "Run runpod bootstrap to create a new worker; persistent storage is retained."
+            ) from None
+
     def start(self):
         if not self.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
@@ -525,7 +554,7 @@ class Deployment:
         # At most the original worker and one replacement. Capacity errors on
         # a recovered/replacement allocation cannot cause a creation loop.
         for _ in range(2):
-            pod = self.api.get_pod(self.pod_id)
+            pod = self._require_pod()
             if self._actual_rate_over_limit(pod.get("costPerHr"), cap=self.cfg["max_hourly_price"],
                                             gpu_id=self.gpu_type_id):
                 preferred = " or the preferred H100 hourly limit" if self.gpu_type_id in H100_CANDIDATE_IDS else ""
@@ -536,7 +565,7 @@ class Deployment:
                 try:
                     self.api.start_pod(self.pod_id)
                 except RunpodAmbiguousOutcome:
-                    if self.api.get_pod(self.pod_id).get("desiredStatus") != "RUNNING":
+                    if self._require_pod().get("desiredStatus") != "RUNNING":
                         raise
                 except RunpodAPIError as exc:
                     if exc.reason != "host_capacity":
@@ -547,7 +576,7 @@ class Deployment:
         self.notify("Waiting for the worker's SSH connection…")
         deadline = time.monotonic() + self.cfg["startup_timeout_seconds"]
         while time.monotonic() < deadline:
-            pod = self.api.get_pod(self.pod_id)
+            pod = self._require_pod()
             endpoint = ssh_endpoint(pod)
             if endpoint:
                 self.endpoint = endpoint
@@ -592,17 +621,38 @@ class Deployment:
 
     def _stop_pod(self, pod_id):
         self.notify(f"Stopping worker {pod_id}…")
+
+        def missing():
+            self.notify(f"Worker {pod_id} no longer exists in Runpod; nothing to stop.")
+
         for attempt in range(3):
-            pod = self.api.get_pod(pod_id)
+            try:
+                pod = self.api.get_pod(pod_id)
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                missing()
+                return
             if pod.get("desiredStatus") in {"EXITED", "STOPPED", "TERMINATED"}:
                 break
             try:
                 self.api.stop_pod(pod_id)
             except RunpodAmbiguousOutcome:
                 pass  # Observe status before any repeat stop request.
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                missing()
+                return
             time.sleep(3)
         else:
-            pod = self.api.get_pod(pod_id)
+            try:
+                pod = self.api.get_pod(pod_id)
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                missing()
+                return
         if pod.get("desiredStatus") not in {"EXITED", "STOPPED", "TERMINATED"}:
             raise RuntimeError(f"STOP NOT CONFIRMED for Runpod worker {pod_id}; GPU billing may continue. Stop it in the Runpod console.")
         if pod_id == self.pod_id:
@@ -796,7 +846,12 @@ def run_command(args):
     with deployment_lock(directory):
         deployment = Deployment(settings)
         if args.runpod_action == "status":
-            pod = deployment.api.get_pod(deployment.pod_id) if deployment.pod_id else {}
+            try:
+                pod = deployment.api.get_pod(deployment.pod_id) if deployment.pod_id else {}
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                pod = {"desiredStatus": "deleted in Runpod; run bootstrap to create a new worker"}
             summary = {"pod_id": deployment.pod_id, "status": pod.get("desiredStatus", "not created"),
                        "volume_id": deployment.state.get("volume_id"), "revision": deployment.state.get("revision"),
                        "bootstrapped": deployment.state.get("bootstrapped", False)}
