@@ -324,6 +324,28 @@ class SpeechNormalizationTests(unittest.TestCase):
         self.assertEqual(record["original"], record["replacement"])
         self.assertTrue(record["direction"].strip())
 
+    def test_direction_only_edit_can_cover_more_than_eight_unchanged_words(self):
+        text = "A steady voice carries every clear word across the room."
+        source = document(text)
+        before = deepcopy(source)
+        requests = Requests({text: text})
+
+        result = normalize_document_speech(source, requests)
+
+        self.assertEqual(source, before)
+        self.assertEqual(result["segments"][0]["spoken_text"], text)
+        self.assertEqual(result["provenance"]["speech_normalization"]["applied_edits"], 1)
+        self.assertEqual(len(requests.calls), 4)
+        self.assertEqual(len(result["provenance"]["speech_normalization"]["decisions"][0]["votes"]), 3)
+
+    def test_long_lexical_rewrite_still_reports_the_eight_word_limit(self):
+        text = "A steady voice carries every clear word across the room."
+        row = document(text)["segments"][0]
+        change = edit(text, text, text.replace("steady", "steadier"))
+
+        with self.assertRaisesRegex(ValueError, "8 words"):
+            _validate_scan({"segments": [{"segment_id": row["id"], "edits": [change]}]}, [row], [])
+
     def test_noop_edit_without_direction_is_rejected(self):
         source = document("Yes-yes!")
         row = source["segments"][0]

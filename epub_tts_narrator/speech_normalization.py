@@ -241,9 +241,12 @@ def _guard_edit(edit, row, names):
         return None
     before, after = edit["original"], edit["replacement"]
     before_words, after_words = _WORDS.findall(before), _WORDS.findall(after)
-    if (len(before) > 160 or len(after) > 160 or len(before_words) > 8 or len(after_words) > 8
+    if (len(before) > 160 or len(after) > 160
+            or (before != after and (len(before_words) > 8 or len(after_words) > 8))
             or bool(before_words) != bool(after_words)):
-        raise ValueError("Speech spelling edits must be bounded and must not add or remove all lexical content")
+        raise ValueError("Speech spelling edits must use at most 160 characters per source/replacement, "
+                         "and lexical rewrites at most 8 words per side; split longer edits. "
+                         "Edits must not add or remove all lexical content.")
     if not _word_forms_accounted_for(before, after):
         from .speech_word_review import word_alignment
         if word_alignment(before, after) is None:
