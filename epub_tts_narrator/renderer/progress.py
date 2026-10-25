@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 
+from .render_metrics import METRICS, classify_outcome
+
 
 def format_duration(seconds):
     """Format a monotonic duration, including hours for long book renders."""
@@ -140,6 +142,7 @@ class ChapterProgress:
         self._active = {}
         self._done = set()
         self._generated_samples = []
+        self._clip_operation = None
 
     def __enter__(self):
         with self._lock:
@@ -151,6 +154,10 @@ class ChapterProgress:
                 self._thread = threading.Thread(target=self._tick,
                                                 name="audiobook-progress", daemon=True)
                 self._thread.start()
+            # Started last so nothing after it can fail inside __enter__ and
+            # leak the chapter-clips gauges.
+            self._clip_operation = METRICS.operation("chapter_clips")
+            self._clip_operation.start()
         return self
 
     def __exit__(self, exc_type, exc, traceback):
@@ -163,6 +170,9 @@ class ChapterProgress:
             self._clear_line()
             state = "complete" if exc_type is None and len(self._done) == len(self._weights) else "stopped"
             self._emit(self._status(final=state))
+            operation, self._clip_operation = self._clip_operation, None
+        if operation is not None:
+            operation.end(classify_outcome(exc))
         return False
 
     def __call__(self, message):
@@ -224,13 +234,13 @@ class ChapterProgress:
             self._active[index] = _Task("checking saved audio", self._clock())
             if self._tty:
                 self._show(force=True)
-        try:
-            yield _TaskNotifier(self, index)
-        except BaseException:
-            with self._lock:
-                self._active.pop(index, None)
-            raise
-        else:
+        with METRICS.active("clip"):
+            try:
+                yield _TaskNotifier(self, index)
+            except BaseException:
+                with self._lock:
+                    self._active.pop(index, None)
+                raise
             with self._lock:
                 task = self._active.pop(index)
                 self._done.add(index)

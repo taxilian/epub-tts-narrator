@@ -6,20 +6,29 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextvars import copy_context
 from threading import Lock, get_ident
 
+from .render_metrics import METRICS, STAGES, classify_outcome
+
 
 class LocalRuntime:
     """Serial execution with thread affinity, lazy streams, and reentrant calls.
 
     Production MLX operations request stream initialization explicitly. Test
     doubles and non-MLX plugins never import or allocate a GPU runtime here.
+    ``metrics_stage`` opts a runtime into payload-free resource metrics; the
+    queued gauge covers dispatch-to-thread wait and the active gauge covers
+    execution on the persistent thread. Reentrant same-thread delegation stays
+    part of the enclosing operation and is never counted twice.
     """
 
-    def __init__(self, *, name="audiobook-local-mlx"):
+    def __init__(self, *, name="audiobook-local-mlx", metrics_stage=None):
+        if metrics_stage is not None and metrics_stage not in STAGES:
+            raise ValueError("metrics_stage must be one of the render_metrics.STAGES names")
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=name)
         self._thread_id = None
         self._streams = None
         self._state = Lock()
         self._closed = False
+        self._metrics_stage = metrics_stage
 
     def initialize_mlx(self):
         """Create this worker's CPU/GPU streams before its first model load."""
@@ -32,11 +41,21 @@ class LocalRuntime:
                 mx.set_default_stream(stream)
             self._streams = streams
 
-    def _invoke(self, function, args, kwargs, initialize_mlx):
+    def _invoke(self, function, args, kwargs, initialize_mlx, operation=None):
         self._thread_id = get_ident()
-        if initialize_mlx:
-            self.initialize_mlx()
-        return function(*args, **kwargs)
+        if operation is not None:
+            operation.start()
+        try:
+            if initialize_mlx:
+                self.initialize_mlx()
+            result = function(*args, **kwargs)
+        except BaseException as error:
+            if operation is not None:
+                operation.end(classify_outcome(error))
+            raise
+        if operation is not None:
+            operation.end("completed")
+        return result
 
     def run(self, function, *args, initialize_mlx=False, **kwargs):
         with self._state:
@@ -48,8 +67,16 @@ class LocalRuntime:
                 # stop conditions onto the persistent inference thread; a
                 # Context object is never reused concurrently.
                 context = copy_context()
-                future = self._executor.submit(
-                    lambda: context.run(self._invoke, function, args, kwargs, initialize_mlx))
+                operation = (METRICS.operation(self._metrics_stage)
+                             if self._metrics_stage is not None else None)
+                try:
+                    future = self._executor.submit(
+                        lambda: context.run(self._invoke, function, args, kwargs,
+                                            initialize_mlx, operation))
+                except BaseException:
+                    if operation is not None:
+                        operation.cancel()
+                    raise
         if reentrant:
             # Model wrappers can delegate to another operation on the same lane.
             return self._invoke(function, args, kwargs, initialize_mlx)

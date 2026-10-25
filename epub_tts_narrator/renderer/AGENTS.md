@@ -20,7 +20,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 ## STRUCTURE
 
-1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, recovery identity.
+1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, payload-free render metrics, recovery identity.
 2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `verification_prompts.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
 3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_sessions.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
@@ -77,6 +77,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 ## NOTES
 
+- `render_metrics.py` owns payload-free bounded stage metrics: closed `STAGES` set, fixed histogram buckets, completed/failed/cancelled outcome counters. Instrument resource entry/exit only; snapshots never carry text, URLs, keys, or user labels, and `gpu_telemetry` is a constant until a collector exists.
 - `common.py` has only 51 lines but 33 internal consumers; treat changes as high blast radius.
 - `workflow.py` is about 2,060 lines and the largest maintenance risk; keep changes local.
 - `workflow.render()` restores completed chapters when the context hash matches.

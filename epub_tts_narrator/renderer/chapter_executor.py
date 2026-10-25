@@ -24,6 +24,7 @@ from .chapter_records import (
 )
 from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .quality import QUALITY_VERSION
+from .render_metrics import METRICS
 from .retry_budget import SpeechRetryBudget
 from .workflow import _render_chapter_chunks
 
@@ -185,11 +186,12 @@ class ChapterExecutor:
                for chunk in chapter["chunks"]):
             raise ValueError("The configured server engine cannot render multi-speaker paragraphs")
         engine_identity, verifier_identity = deepcopy(engine.identity), deepcopy(verifier.identity)
-        clips, acceptance = _render_chapter_chunks(
-            chapter, registered, engine, engine_identity, verifier, config, work,
-            notify=notify, total_chapters=spec["total_chapters"],
-            take_locks=self._take_locks, take_locks_guard=self._take_locks_guard,
-            retry_budget=retry_budget, paragraph_split_available=False)
+        with METRICS.active("chapter"):
+            clips, acceptance = _render_chapter_chunks(
+                chapter, registered, engine, engine_identity, verifier, config, work,
+                notify=notify, total_chapters=spec["total_chapters"],
+                take_locks=self._take_locks, take_locks_guard=self._take_locks_guard,
+                retry_budget=retry_budget, paragraph_split_available=False)
         context = {"version": 1, "spec_hash": digest(spec),
                    "source_fingerprint": spec["source_fingerprint"],
                    "total_chapters": spec["total_chapters"],

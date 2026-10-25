@@ -14,6 +14,7 @@ from .engines import EngineError, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 from .progress import generation_notifier, report_worker_activity
+from .render_metrics import METRICS
 
 
 _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
@@ -69,12 +70,14 @@ class _SerializedVerifier:
             if _text_review_method(name, method):
                 # Keep the reusable HTTP clients serialized, but do not occupy
                 # the inference thread or its lock during a network request.
-                return self._review_runtime.run(method, *args, **kwargs)
+                with METRICS.active("review"):
+                    return self._review_runtime.run(method, *args, **kwargs)
 
             def run():
                 with self._lock:
                     return method(*args, **kwargs)
-            return self._runtime.run(run, initialize_mlx=requires_mlx(self._verifier))
+            with METRICS.active("recognition"):
+                return self._runtime.run(run, initialize_mlx=requires_mlx(self._verifier))
         finally:
             with self._state:
                 self._active -= 1
@@ -182,7 +185,7 @@ class RenderPool:
         selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
         self.sampling = pool_sampling(config)
         self.local_lock = RLock()
-        self._local_runtime = LocalRuntime()
+        self._local_runtime = LocalRuntime(metrics_stage="model_thread")
         self._review_runtime = LocalRuntime(name="audiobook-text-review")
         self._closed = False
         self._workers = [_Worker(worker, config["engine"], self.sampling)
@@ -257,10 +260,11 @@ class RenderPool:
             return
         acquired = False
         try:
-            while not acquired:
+            with METRICS.waiting("admission"):
+                while not acquired:
+                    check()
+                    acquired = self._admission.acquire(timeout=0.1)
                 check()
-                acquired = self._admission.acquire(timeout=0.1)
-            check()
             yield
         finally:
             if acquired:
@@ -273,7 +277,8 @@ class RenderPool:
             raise EngineError("The render pool is closed")
         notify = generation_notifier()
         report_worker_activity(notify, "waiting")
-        worker = self._slots.get()
+        with METRICS.waiting("synthesis_slot"):
+            worker = self._slots.get()
         try:
             name = worker.settings["name"]
             report_worker_activity(notify, "assigned", name)
@@ -283,19 +288,20 @@ class RenderPool:
                 stop_if_requested()
                 started = monotonic()
                 report_worker_activity(notify, "started", name)
-                try:
-                    engine = worker.engine()
-                    if worker.local and requires_mlx(engine):
-                        self._local_runtime.initialize_mlx()
-                    metadata = getattr(engine, method)(*args, **kwargs)
-                    if not isinstance(metadata, dict):
-                        raise EngineError("TTS worker returned invalid generation metadata")
-                    result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
-                except BaseException:
-                    report_worker_activity(notify, "failed", name, monotonic() - started)
-                    raise
-                report_worker_activity(notify, "completed", name, monotonic() - started)
-                return result
+                with METRICS.active("synthesis"):
+                    try:
+                        engine = worker.engine()
+                        if worker.local and requires_mlx(engine):
+                            self._local_runtime.initialize_mlx()
+                        metadata = getattr(engine, method)(*args, **kwargs)
+                        if not isinstance(metadata, dict):
+                            raise EngineError("TTS worker returned invalid generation metadata")
+                        result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                    except BaseException:
+                        report_worker_activity(notify, "failed", name, monotonic() - started)
+                        raise
+                    report_worker_activity(notify, "completed", name, monotonic() - started)
+                    return result
             if worker.local:
                 # All model loading, arrays and default streams belong to one
                 # persistent thread, shared with local speech verification.
