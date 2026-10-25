@@ -263,6 +263,27 @@ class Deployment:
             return
         price = self.quote()
         volume_id = self.state.get("volume_id") or self.cfg.get("volume_id")
+        if volume_id:
+            try:
+                volume = self.api.get_volume(volume_id)
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                if self.state.get("volume_id") != volume_id:
+                    raise ValueError(
+                        f"The configured persistent volume {volume_id} does not exist in Runpod; "
+                        "correct or remove runpod.volume_id in the configuration.") from None
+                # The saved volume was deleted together with its pod; its data
+                # cannot be recovered, so provision a new empty volume.
+                self.notify(f"Saved persistent volume {volume_id} no longer exists in Runpod; creating a new one.")
+                self.state.pop("volume_id", None)
+                self.save()
+                volume_id = None
+            else:
+                if volume.get("dataCenterId") != self.cfg["data_center_id"]:
+                    raise ValueError("Persistent volume must be in the selected GPU datacenter")
+                self.state["volume_id"] = volume_id
+                self.save()
         if not volume_id:
             if self.state.get("volume_creation_pending"):
                 matches = [v for v in self.api.list_volumes() if v.get("name") == name]
@@ -283,12 +304,6 @@ class Deployment:
             volume_id = volume["id"]
             self.state["volume_id"] = volume_id
             self.state.pop("volume_creation_pending", None)
-            self.save()
-        else:
-            volume = self.api.get_volume(volume_id)
-            if volume.get("dataCenterId") != self.cfg["data_center_id"]:
-                raise ValueError("Persistent volume must be in the selected GPU datacenter")
-            self.state["volume_id"] = volume_id
             self.save()
         # v1 validates datacenter IDs against a stale enum. v2 accepts the
         # current catalog's IDs and retains explicit placement beside the

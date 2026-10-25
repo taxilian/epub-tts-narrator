@@ -739,6 +739,36 @@ class RunpodLifecycleTests(unittest.TestCase):
         notices = " ".join(call.args[0] for call in self.notify.call_args_list)
         self.assertIn("no longer exists", notices)
 
+    def test_deleted_saved_volume_is_replaced_by_bootstrap_too(self):
+        deployment = self.deployment()
+        deployment.state["pod_id"] = "pod_deleted_elsewhere"
+        deployment.state["volume_id"] = "volume_deleted_elsewhere"
+        deployment.save()
+        missing = RunpodAPIError("Runpod could not find the requested resource (HTTP 404)", status=404)
+        self.api.get_pod.side_effect = missing
+        self.api.get_volume.side_effect = missing
+
+        deployment.provision()
+
+        self.assertEqual(deployment.pod_id, "pod_fixture")
+        self.assertEqual(deployment.state["volume_id"], "volume_fixture")
+        self.api.create_volume.assert_called_once()
+        self.api.create_pod.assert_called_once()
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("persistent volume volume_deleted_elsewhere no longer exists", notices)
+
+    def test_missing_configured_volume_is_a_configuration_error(self):
+        self.settings["deployment"]["volume_id"] = "volume_from_config"
+        deployment = self.deployment()
+        self.api.get_volume.side_effect = RunpodAPIError(
+            "Runpod could not find the requested resource (HTTP 404)", status=404)
+
+        with self.assertRaisesRegex(ValueError, "runpod.volume_id"):
+            deployment.provision()
+
+        self.api.create_volume.assert_not_called()
+        self.api.create_pod.assert_not_called()
+
     def test_stop_treats_a_pod_deleted_elsewhere_as_nothing_to_stop(self):
         deployment = self.deployment()
         deployment.state["pod_id"] = "pod_deleted_elsewhere"
