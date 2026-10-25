@@ -686,17 +686,35 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertNotIn("pod_creation_pending", deployment.state)
         self.api.create_pod.assert_called_once()
 
-    def test_unconfirmed_create_is_not_blindly_repeated(self):
+    def test_unconfirmed_create_retries_once_inventory_shows_nothing(self):
+        deployment = self.deployment()
+        self.api.create_pod.side_effect = [RunpodAmbiguousOutcome("uncertain"),
+                                           {"id": "pod_fixture", "cost": 2.0, "status": "PROVISIONING"}]
+        self.api.list_pods.return_value = []
+        self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
+        with self.assertRaises(RunpodAmbiguousOutcome):
+            deployment.provision()
+        self.assertTrue(deployment.state["pod_creation_pending"])
+
+        deployment.provision()
+
+        self.assertEqual(deployment.pod_id, "pod_fixture")
+        self.assertNotIn("pod_creation_pending", deployment.state)
+        self.assertEqual(self.api.create_pod.call_count, 2)  # the first raised ambiguous; this retry created
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("made nothing", notices)
+
+    def test_unconfirmed_create_with_duplicate_names_refuses_to_create(self):
         deployment = self.deployment()
         self.api.create_pod.side_effect = RunpodAmbiguousOutcome("uncertain")
         self.api.list_pods.return_value = []
         with self.assertRaises(RunpodAmbiguousOutcome):
             deployment.provision()
-        self.assertTrue(deployment.state["pod_creation_pending"])
-        with self.assertRaisesRegex(RuntimeError, "No replacement"):
+        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
+        self.api.list_pods.return_value = [{"name": name, "id": "pod_a"}, {"name": name, "id": "pod_b"}]
+        with self.assertRaisesRegex(RuntimeError, "multiple Pods share its name"):
             deployment.provision()
         self.api.create_pod.assert_called_once()
-        self.api.create_volume.assert_called_once()
 
     def test_definite_create_rejection_clears_pending_flag(self):
         deployment = self.deployment()
@@ -817,6 +835,34 @@ class RunpodLifecycleTests(unittest.TestCase):
         deployment.provision()
         self.api.create_volume.assert_called_once()
         self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"]["network"][0]["volumeId"], "recovered_volume")
+
+    def test_unconfirmed_volume_creation_retries_once_inventory_shows_nothing(self):
+        deployment = self.deployment()
+        self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
+        with self.assertRaises(RunpodAmbiguousOutcome):
+            deployment.provision()
+        self.assertTrue(deployment.state["volume_creation_pending"])
+        self.api.list_volumes.return_value = []
+        self.api.create_volume.side_effect = None
+
+        deployment.provision()
+
+        self.assertEqual(deployment.state["volume_id"], "volume_fixture")
+        self.assertNotIn("volume_creation_pending", deployment.state)
+        self.assertEqual(self.api.create_volume.call_count, 2)  # the first raised ambiguous; this retry created
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("made nothing", notices)
+
+    def test_unconfirmed_volume_creation_with_duplicate_names_refuses_to_create(self):
+        deployment = self.deployment()
+        self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
+        with self.assertRaises(RunpodAmbiguousOutcome):
+            deployment.provision()
+        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
+        self.api.list_volumes.return_value = [{"name": name, "id": "volume_a"}, {"name": name, "id": "volume_b"}]
+        with self.assertRaisesRegex(RuntimeError, "multiple volumes share its name"):
+            deployment.provision()
+        self.api.create_volume.assert_called_once()
 
     def test_pending_pod_recovery_does_not_depend_on_current_stock(self):
         deployment = self.deployment()

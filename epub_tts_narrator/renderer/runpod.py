@@ -252,15 +252,23 @@ class Deployment:
         # Reconcile a previous uncertain creation before making any mutation.
         if self.state.get("pod_creation_pending"):
             matches = [p for p in self.api.list_pods() if p.get("name") == name]
-            if len(matches) != 1:
-                raise RuntimeError("Previous Pod creation is unconfirmed; inspect Runpod and saved state before retrying. No replacement created.")
-            self.state["pod_id"] = matches[0]["id"]
-            self.save()
-            self._validate_recovered_creation(matches[0])
+            if len(matches) > 1:
+                raise RuntimeError("Previous Pod creation is unconfirmed; multiple Pods share its name. "
+                                   "Inspect Runpod and delete the duplicates before retrying. No replacement created.")
+            if matches:
+                self.state["pod_id"] = matches[0]["id"]
+                self.save()
+                self._validate_recovered_creation(matches[0])
+                self.state.pop("pod_creation_pending", None)
+                self.state.pop("pod_creation_spec", None)
+                self.save()
+                return
+            # The inventory shows the unconfirmed creation made nothing, so a
+            # retry cannot duplicate it.
+            self.notify("The unconfirmed worker creation made nothing; creating a new worker.")
             self.state.pop("pod_creation_pending", None)
             self.state.pop("pod_creation_spec", None)
             self.save()
-            return
         price = self.quote()
         volume_id = self.state.get("volume_id") or self.cfg.get("volume_id")
         if volume_id:
@@ -287,10 +295,18 @@ class Deployment:
         if not volume_id:
             if self.state.get("volume_creation_pending"):
                 matches = [v for v in self.api.list_volumes() if v.get("name") == name]
-                if len(matches) != 1:
-                    raise RuntimeError("Previous volume creation is unconfirmed; inspect Runpod before retrying. No duplicate created.")
-                volume = matches[0]
-            else:
+                if len(matches) > 1:
+                    raise RuntimeError("Previous volume creation is unconfirmed; multiple volumes share its name. "
+                                       "Inspect Runpod and delete the duplicates before retrying. No duplicate created.")
+                if matches:
+                    volume = matches[0]
+                else:
+                    # The inventory shows the unconfirmed creation made nothing,
+                    # so a retry cannot duplicate it.
+                    self.notify("The unconfirmed volume creation made nothing; creating a new volume.")
+                    self.state.pop("volume_creation_pending", None)
+                    self.save()
+            if not self.state.get("volume_creation_pending"):
                 self.state["volume_creation_pending"] = True
                 self.save()
                 try:
