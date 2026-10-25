@@ -1462,6 +1462,7 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
                 bundle, config, plan, voices, rendered, acceptance, previous["engine"], verifier_identity)
     if unchanged:
         notify(f"Audiobook unchanged; reusing {output / 'book.m4b'}")
+        _publish_chapter_links(config, rendered, notify=notify)
         return previous
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
         stage = Path(temporary) / "ready"
@@ -1505,6 +1506,7 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
         write_json(stage / "render.json", result)
         _publish(stage, output, expected=expected)
     notify(f"Audiobook ready: {output / 'book.m4b'}")
+    _publish_chapter_links(config, rendered, notify=notify)
     return result
 
 
@@ -1974,28 +1976,40 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
 
 
 def _publish_chapter_link(config, composed, *, notify):
-    """Point a stable chapter-NN name in the output directory at the finished file."""
+    """Point a stable chapter-links/chapter-NN name at the finished chapter file."""
     encoded = composed.get("encoded_path")
     if not encoded:
         return
     try:
-        output = Path(config["render"]["output_dir"])
+        links = Path(config["render"]["output_dir"]) / "chapter-links"
         encoded = Path(encoded)
         suffix = encoded.suffix
-        link = output / f"chapter-{composed['track_number']:02d}{suffix}"
-        relative = os.path.relpath(encoded, output)
+        link = links / f"chapter-{composed['track_number']:02d}{suffix}"
+        relative = os.path.relpath(encoded, links)
         if link.exists() and not link.is_symlink():
             notify(f"Chapter link not created: {link} already exists")
             return
         if link.is_symlink() and os.readlink(link) == relative:
             return
-        temporary = output / f".chapter-{composed['track_number']:02d}{suffix}.link"
-        output.mkdir(parents=True, exist_ok=True)
+        temporary = links / f".chapter-{composed['track_number']:02d}{suffix}.link"
+        links.mkdir(parents=True, exist_ok=True)
         os.symlink(relative, temporary)
         os.replace(temporary, link)
         notify(f"Chapter link updated: {link.name} -> {relative}")
     except OSError as exc:
         notify(f"Could not create the chapter link: {exc}")
+
+
+def _publish_chapter_links(config, rendered, *, notify):
+    """After publication, link each chapter to its copy inside the output."""
+    output = Path(config["render"]["output_dir"])
+    for composed in rendered:
+        encoded = composed.get("encoded_path")
+        if not encoded:
+            continue
+        published = output / "chapters" / (
+            f"chapter-{composed['track_number']:04d}" + Path(encoded).suffix)
+        _publish_chapter_link(config, dict(composed, encoded_path=str(published)), notify=notify)
 
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False):
@@ -2047,7 +2061,6 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         def completed(composed, chapter_acceptance, chapter_label, chapter_started):
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
-            _publish_chapter_link(config, composed, notify=notify)
             notify(f"=== Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
                    f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready). ===")

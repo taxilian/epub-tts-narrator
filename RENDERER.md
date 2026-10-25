@@ -667,7 +667,7 @@ Only successful, checksum-verified recordings enter this index. Compatible legac
 
 Completed chapters also check the prepared speech inputs against their saved performances. If an engine-input change makes some clips obsolete, `render` reports the affected block count, rebuilds that chapter, and reuses its matching verified clips. For example, older Drama 3 takes may record a freeform delivery direction without actually applying it; those passages need a new take when the direction is now sent to the engine. An unchanged script or request hash alone cannot prove that the performance matches. Corrupted audio, checkpoints, and verification records still stop rendering. `assemble` does not generate speech and reports that `render` is needed when a chapter contains obsolete performances.
 
-The previous audiobook remains available while its replacement is prepared. Failed speech or encoding leaves it intact; a failed final rename restores it. Replacement requires a complete, unmodified renderer output for the same source book, with no extra files or symlinks. Unrelated or manually modified output directories are refused before generation. Keep personal files outside the generated output directory. A partial chapter selection cannot replace an audiobook covering different chapters: use `--chapters-only`, followed by a full `render` or `assemble`, or publish the subset to another directory.
+The previous audiobook remains available while its replacement is prepared. Failed speech or encoding leaves it intact; a failed final rename restores it. Replacement requires a complete, unmodified renderer output for the same source book, with no extra files and no symlinks outside the renderer-owned `chapter-links/` convenience directory. Unrelated or manually modified output directories are refused before generation. Keep personal files outside the generated output directory. A partial chapter selection cannot replace an audiobook covering different chapters: use `--chapters-only`, followed by a full `render` or `assemble`, or publish the subset to another directory.
 
 M4A chapters with AAC audio at 128 kb/s are the default. They are directly playable and use the same codec as the final M4B. `--chapter-format mp3` on `render` or `assemble` produces MP3 chapter copies when needed; the final book remains AAC in an M4B container. Bitrates are global settings in `[render]`.
 
@@ -929,6 +929,7 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 | --- | --- |
 | `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio using original manifest numbers, including when a subset is selected; empty entries are marked skipped. |
 | `book.m4b` | AAC audiobook with chapter titles and timing. |
+| `chapter-links/chapter-01.m4a` etc. | Convenience symlinks to each finished chapter's audio inside `chapters/`; renderer-owned and ignored during replacement validation. Entries are always symlinks. |
 | `artwork/cover.jpg` or `.png` | Original declared EPUB cover, when available. |
 | `sync.json` | Exact PCM frame ranges linking audio chunks to source text. |
 | `source.json`, `cast.json` | Portable canonical text and voice assignments. |

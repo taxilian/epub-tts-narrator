@@ -40,11 +40,15 @@ def published_book(directory, book_id):
         for path in directory.rglob("*"):
             name = path.relative_to(directory).as_posix()
             if path.is_symlink():
+                if name.startswith("chapter-links/"):
+                    continue
                 raise ValueError(f"published output contains a symlink: {name}")
             if path.is_dir():
-                if name not in expected_dirs:
+                if name != "chapter-links" and name not in expected_dirs:
                     raise ValueError(f"output contains an untracked directory: {name}")
             elif path.is_file():
+                if name.startswith("chapter-links/"):
+                    raise ValueError(f"chapter-links entries must be symlinks: {name}")
                 found.add(name)
             else:
                 raise ValueError(f"output contains a nonregular file: {name}")

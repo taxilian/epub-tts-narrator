@@ -119,6 +119,24 @@ class PublicationSafetyTests(unittest.TestCase):
             publish(stage, self.output, expected=None)
         self.assertEqual(read_json(self.output / "render.json"), self.previous)
 
+    def test_renderer_owned_chapter_links_are_accepted_for_replacement(self):
+        links = self.output / "chapter-links"
+        links.mkdir()
+        link = links / "chapter-01.m4a"
+        link.symlink_to(self.output / "book.m4b")
+        self.assertEqual(published_book(self.output, "fixture-book"), self.previous)
+        stray = self.output / "chapter-02.m4a"
+        stray.symlink_to(self.output / "book.m4b")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            published_book(self.output, "fixture-book")
+        stray.unlink()
+        real = links / "chapter-02.m4a"
+        real.write_bytes(b"Not a link")
+        with self.assertRaisesRegex(ValueError, "chapter-links entries must be symlinks"):
+            published_book(self.output, "fixture-book")
+        real.unlink()
+        self.assertEqual(published_book(self.output, "fixture-book"), self.previous)
+
     def test_malformed_chapter_metadata_is_a_controlled_validation_failure(self):
         for chapters in (None, "chapters", [None], [{}], [{"id": 1}]):
             with self.subTest(chapters=chapters):
