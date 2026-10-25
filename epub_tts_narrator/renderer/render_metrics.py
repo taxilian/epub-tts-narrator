@@ -43,6 +43,8 @@ STAGES = frozenset({
     "synthesis",       # active synthesis on a slot
     "recognition",     # active serialized model-affine verification
     "review",          # active text-only network review lane
+    "preparation",     # bounded audio preparation lane (normalization, metrics)
+    "review_coordination",  # blind-review coordination executor (not HTTP itself)
     "model_thread",    # persistent local inference thread (LocalRuntime)
     "chapter",         # chapter coordination (ChapterExecutor.synthesize)
     "chapter_clips",   # chapter clip window (ChapterProgress lifecycle)
