@@ -8,6 +8,7 @@ Safe task boundaries, not the signal handler, decide when a graceful stop raises
 from __future__ import annotations
 
 from contextlib import contextmanager
+import contextvars
 import os
 import signal
 import subprocess
@@ -18,7 +19,21 @@ class RenderInterrupted(KeyboardInterrupt):
     """Rendering stopped at a boundary after active cache writes completed."""
 
 
+class RenderPaused(Exception):
+    """A scoped stop fired at a durable boundary; active work drains losslessly.
+
+    The chapter service raises this when a job's connected client disappeared:
+    the job returns to the queue with its budget, cache, and history intact,
+    never marked failed or cancelled.
+    """
+
+
 _active: RenderInterrupts | None = None
+
+# Scoped stop conditions carry owner-loss stops into worker threads. Executor
+# submissions propagate them with contextvars.copy_context(); a copied context
+# is never reused concurrently and each future receives its own fresh copy.
+_scoped_stop: contextvars.ContextVar = contextvars.ContextVar("renderer_scoped_stop", default=None)
 
 
 class RenderInterrupts:
@@ -128,13 +143,43 @@ class RenderInterrupts:
 
 def stop_requested() -> bool:
     """Whether this render should stop dispatching new tasks."""
-    return _active is not None and _active.requested
+    if _active is not None and _active.requested:
+        return True
+    check = _scoped_stop.get()
+    return check is not None and check() is not None
 
 
 def stop_if_requested() -> None:
     """Raise only when called at a completed, durably cached task boundary."""
-    if stop_requested():
+    if _active is not None and _active.requested:
         raise RenderInterrupted()
+    check = _scoped_stop.get()
+    if check is not None:
+        error = check()
+        if error is not None:
+            raise error
+
+
+@contextmanager
+def scoped_stop_condition(predicate, error):
+    """Raise ``error()`` at safe task boundaries while ``predicate()`` holds.
+
+    Scopes one owner's stop condition to work running for that owner, such as
+    a chapter job whose rendering client disconnected. Nested scopes chain, so
+    an inherited condition keeps applying inside an inner scope.
+    """
+    outer = _scoped_stop.get()
+
+    def check():
+        if predicate():
+            return error() if callable(error) and not isinstance(error, BaseException) else error
+        return None if outer is None else outer()
+
+    token = _scoped_stop.set(check)
+    try:
+        yield
+    finally:
+        _scoped_stop.reset(token)
 
 
 @contextmanager

@@ -20,7 +20,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, recovery identity.
 2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `verification_prompts.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
-3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
+3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_sessions.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
 6. Assembly/publication: `assembly.py`, `publication.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.
@@ -72,6 +72,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - See `ENGINE_NOTES.md` for engine-specific details.
 - See root `RENDERER.md` for renderer configuration and operation.
 - See root `REMOTE_RENDERING.md` for distributed rendering contracts.
+- Chapter execution requires an ephemeral connected-client session; restart and passive progress never grant ownership. Disconnect drains accepted work to a safe boundary, then pauses the job without deleting cache or history.
 - `reference_cache.py` owns bounded validated WAV reuse for `serve`; `fish_http.py` negotiates it via successful response headers, never for pinned native/SGLang protocols.
 - Local `workflow.render()` overlaps one chapter assembly with the next chapter's synthesis; drain assembly before releasing locks. Chunk/recovery algorithms remain shared with chapter jobs.
 - `diagnostics.py` owns fatal frame formatting and payload-free SDK/HTTP error details; managed Runpod failures skip optional stop delays.

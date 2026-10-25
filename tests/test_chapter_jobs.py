@@ -15,6 +15,7 @@ from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
 from epub_tts_narrator.renderer.chapter_protocol import validate_spec
 from epub_tts_narrator.renderer.common import digest, write_json
 from test_renderer_workflow import write_tone
+from shared_fixtures import service_session
 
 
 class Executor:
@@ -77,10 +78,13 @@ class ChapterJobsTests(unittest.TestCase):
         self.engine = Executor()
         self.service = ChapterJobs(self.root / "server", self.engine, {"assembly_workers": 2})
         self.addCleanup(self.service.close)
+        self.session = service_session(self.service)
 
-    def submit(self, number=1, submission=None):
-        spec = specification(self.service, number)
-        return self.service.submit(spec, digest(spec), submission)
+    def submit(self, number=1, submission=None, service=None, session=None):
+        service = service if service is not None else self.service
+        session = session if session is not None else self.session
+        spec = specification(service, number)
+        return service.submit(spec, digest(spec), submission, session)
 
     def terminal(self, job_id):
         until = time.monotonic() + 5
@@ -98,7 +102,9 @@ class ChapterJobsTests(unittest.TestCase):
         other = ChapterJobs(self.root / "server", Executor())
         self.addCleanup(other.close)
         spec = specification(other)
-        self.assertEqual(other.submit(spec, digest(spec))["id"], first["id"])
+        # The restarted service owns nothing: only this explicit connected
+        # submit reattaches the durable job to a live client.
+        self.assertEqual(other.submit(spec, digest(spec), None, service_session(other))["id"], first["id"])
         other.start()
         self.service = other
         self.assertEqual(self.terminal(first["id"])["state"], "complete")
@@ -106,10 +112,10 @@ class ChapterJobsTests(unittest.TestCase):
     def test_changed_payload_cannot_reuse_idempotency_key(self):
         spec = specification(self.service)
         key = digest(spec)
-        self.service.submit(spec, key)
+        self.service.submit(spec, key, None, self.session)
         spec["chapter"]["title"] = "Different chapter"
         with self.assertRaisesRegex(ValueError, "different chapter"):
-            self.service.submit(spec, key)
+            self.service.submit(spec, key, None, self.session)
 
     def test_generation_of_next_chapter_overlaps_assembly(self):
         release = threading.Event()
@@ -136,7 +142,7 @@ class ChapterJobsTests(unittest.TestCase):
         events = self.service.events(job["id"], 0)
         last = events[-1]["sequence"]
         self.engine.fail = False
-        self.service.retry(job["id"])
+        self.service.retry(job["id"], session=self.session)
         self.assertEqual(self.terminal(job["id"])["state"], "complete")
         resumed = self.service.events(job["id"], last)
         self.assertTrue(all(event["sequence"] > last for event in resumed))
@@ -217,14 +223,14 @@ class ChapterJobsTests(unittest.TestCase):
         self.service.start()
         self.assertEqual(self.terminal(job["id"])["state"], "failed")
         original = self.engine.budgets[0]
-        self.service.retry(job["id"])
+        self.service.retry(job["id"], session=self.session)
         self.assertEqual(self.terminal(job["id"])["state"], "failed")
         self.assertIs(self.engine.budgets[1], original)
-        self.service.retry(job["id"], "e" * 64)
+        self.service.retry(job["id"], "e" * 64, self.session)
         self.assertEqual(self.terminal(job["id"])["state"], "failed")
         self.assertIsNot(self.engine.budgets[2], original)
         self.engine.fail = False
-        self.service.retry(job["id"])
+        self.service.retry(job["id"], session=self.session)
         self.assertEqual(self.terminal(job["id"])["state"], "complete")
         self.assertIs(self.engine.budgets[3], self.engine.budgets[2])
 
@@ -260,6 +266,8 @@ class ChapterJobsTests(unittest.TestCase):
         self.addCleanup(other.close)
         with self.assertRaisesRegex(RuntimeError, "Another chapter service"):
             other.start()
+        # The owner from the connected submit is still live, so the recovered
+        # generation resumes for that same client without a new submission.
         self.assertEqual(self.terminal(job["id"])["state"], "complete")
         self.assertTrue(any("Recovered" in event["message"] for event in self.service.events(job["id"])))
 
@@ -267,7 +275,12 @@ class ChapterJobsTests(unittest.TestCase):
         jobs = [self.submit(number) for number in range(1, 4)]
         self.service._set_state(jobs[1]["id"], "generating")
         self.service._set_state(jobs[2]["id"], "assembling")
-        before = [(self.service.status(job["id"]), self.service.events(job["id"])) for job in jobs]
+        def durable(view):
+            # Ownership flags are instance-local scheduling metadata; durable
+            # state and history must survive a restart byte-identically.
+            return ({key: value for key, value in view[0].items()
+                     if key not in ("paused", "owner_connected")}, view[1])
+        before = [durable((self.service.status(job["id"]), self.service.events(job["id"]))) for job in jobs]
         accepted = self.service.root / "render-work" / "accepted.flac"
         accepted.write_bytes(b"accepted take must remain unchanged")
         self.service.close()
@@ -281,7 +294,11 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(engine.generated, [])
         self.assertEqual(maintenance._threads, [])
         self.assertIsNone(maintenance._assembly)
-        self.assertEqual(before, [(maintenance.status(job["id"]), maintenance.events(job["id"])) for job in jobs])
+        self.assertEqual(before, [durable((maintenance.status(job["id"]), maintenance.events(job["id"])))
+                                  for job in jobs])
+        for job in jobs:
+            self.assertTrue(maintenance.status(job["id"])["paused"])
+            self.assertFalse(maintenance.status(job["id"])["owner_connected"])
         contender = ChapterJobs(self.root / "server", Executor())
         self.addCleanup(contender.close)
         with self.assertRaisesRegex(RuntimeError, "Another chapter service"):
@@ -290,6 +307,12 @@ class ChapterJobsTests(unittest.TestCase):
         self.assertEqual(accepted.read_bytes(), b"accepted take must remain unchanged")
         contender.start()
         self.service = contender
+        # The restarted service never executes on its own; each job resumes
+        # only when its client explicitly reattaches with a live session.
+        contender_session = service_session(contender)
+        for job, number in zip(jobs, range(1, 4)):
+            spec = specification(contender, number)
+            contender.submit(spec, digest(spec), None, contender_session)
         for job in jobs:
             self.assertEqual(self.terminal(job["id"])["state"], "complete")
         self.assertEqual(contender.executor.generated, [1, 2, 3])
@@ -298,7 +321,10 @@ class ChapterJobsTests(unittest.TestCase):
     def test_maintenance_rejects_submissions_and_retries_without_changing_history(self):
         job = self.submit()
         self.service._set_state(job["id"], "failed", error="retained failure")
-        before = self.service.status(job["id"]), self.service.events(job["id"])
+        def durable(view):
+            return ({key: value for key, value in view[0].items()
+                     if key not in ("paused", "owner_connected")}, view[1])
+        before = durable((self.service.status(job["id"]), self.service.events(job["id"])))
         self.service.close()
         maintenance = ChapterJobs(self.root / "server", Executor(), maintenance=True)
         self.addCleanup(maintenance.close)
@@ -306,10 +332,10 @@ class ChapterJobsTests(unittest.TestCase):
         for number in (1, 2):
             spec = specification(maintenance, number)
             with self.assertRaisesRegex(RuntimeError, "maintenance mode"):
-                maintenance.submit(spec, digest(spec))
+                maintenance.submit(spec, digest(spec), None, service_session(maintenance))
         with self.assertRaisesRegex(RuntimeError, "maintenance mode"):
-            maintenance.retry(job["id"])
-        self.assertEqual(before, (maintenance.status(job["id"]), maintenance.events(job["id"])))
+            maintenance.retry(job["id"], session=service_session(maintenance))
+        self.assertEqual(before, durable((maintenance.status(job["id"]), maintenance.events(job["id"]))))
 
     def test_maintenance_paused_jobs_do_not_block_idle_shutdown_but_uploads_do(self):
         self.submit()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import nullcontext
+from contextvars import copy_context
 import os
 from pathlib import Path
 import re
@@ -1892,7 +1893,13 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             try:
                 while next_index < len(chunks) and len(pending) < parallel:
                     stop_if_requested()
-                    pending[executor.submit(run, next_index)] = next_index
+                    # Each future gets its own fresh context copy, captured
+                    # here on the dispatching thread so any scoped stop
+                    # condition (such as a disconnected chapter client) is
+                    # visible inside the chunk thread. A Context object is
+                    # never reused concurrently.
+                    context = copy_context()
+                    pending[executor.submit(context.run, run, next_index)] = next_index
                     next_index += 1
                 while pending:
                     finished, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -1904,7 +1911,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                     stop_if_requested()
                     while next_index < len(chunks) and len(pending) < parallel:
                         stop_if_requested()
-                        pending[executor.submit(run, next_index)] = next_index
+                        context = copy_context()
+                        pending[executor.submit(context.run, run, next_index)] = next_index
                         next_index += 1
             finally:
                 for future in pending:

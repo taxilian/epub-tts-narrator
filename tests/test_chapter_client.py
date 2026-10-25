@@ -191,12 +191,22 @@ class ChapterOrchestrationTests(unittest.TestCase):
             settings = owner.config["remote_chapters"]
             def __init__(self, settings):
                 self.calls, self.jobs, self.artifacts, self.uploads = [], {}, {}, []
+                self.sessions_opened, self.sessions_revoked = 0, 0
             def websocket(self, *args):
                 return None
-            def request(self, method, path, payload=None):
+            def request(self, method, path, payload=None, timeout=None):
                 self.calls.append((method, path, payload))
                 if path == "v1/capabilities":
-                    return {"protocol": PROTOCOL, "multi_speaker": True, "renderer_fingerprint": "f" * 64}
+                    return {"protocol": PROTOCOL, "multi_speaker": True, "renderer_fingerprint": "f" * 64,
+                            "client_sessions": 1, "session_ttl_seconds": 30}
+                if path == "v1/sessions":
+                    self.sessions_opened += 1
+                    return {"opened": True}
+                if path.startswith("v1/sessions/"):
+                    if method == "POST":
+                        return {"renewed": True}
+                    self.sessions_revoked += 1
+                    return {"revoked": True}
                 if path == "v1/voices/ensure":
                     return {"missing": payload["voices"]}
                 if method == "PUT":
@@ -256,7 +266,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         client = self.fake_client()(config["remote_chapters"])
         request = client.request
 
-        def single_voice_capabilities(method, path, payload=None):
+        def single_voice_capabilities(method, path, payload=None, timeout=None):
             result = request(method, path, payload)
             if path == "v1/capabilities":
                 result.update(multi_speaker=False, single_speaker_paragraph=True)
@@ -423,6 +433,57 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.assertEqual(record["id"], digest(current))
         self.assertEqual([call.args[:2] for call in client.request.call_args_list],
                          [("GET", f"v1/jobs/{saved['id']}"), ("GET", f"v1/jobs/{saved['id']}"), ("POST", "v1/jobs")])
+
+    def test_missing_job_on_recreated_server_resubmits_and_retains_history(self):
+        folder, selection, saved, current = self.resume_fixture()
+        (folder / "chapter.m4a").write_bytes(b"previous partial download")
+        missing = ChapterClientError("Chapter service returned HTTP 404; saved jobs remain resumable", status=404)
+        client = Mock()
+        client.request.side_effect = [
+            missing,
+            {"id": digest(current), "state": "queued", "spec_hash": digest(current)},
+        ]
+        record, _ = _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False,
+                                    session="d" * 64)
+        self.assertEqual([call.args[:2] for call in client.request.call_args_list],
+                         [("GET", f"v1/jobs/{saved['id']}"), ("POST", "v1/jobs")])
+        posted = client.request.call_args_list[1].args[2]
+        self.assertEqual(posted["session"], "d" * 64)
+        self.assertEqual(posted["idempotency_key"], digest(current))
+        self.assertEqual(record["spec"], current)
+        history = folder / record["previous_job"]["archive"]
+        self.assertEqual((history / "chapter.m4a").read_bytes(), b"previous partial download")
+        self.assertEqual(_read_job(history, selection)["id"], saved["id"])
+        self.assertEqual(_read_job(folder, selection)["id"], record["id"])
+
+    def test_unconfirmed_http_status_never_replaces_a_missing_job_receipt(self):
+        folder, selection, saved, current = self.resume_fixture()
+        receipt = (folder / "job.json").read_bytes()
+        for error in (ChapterClientError("Chapter service connection failed"),
+                      ChapterClientError("Chapter service returned HTTP 403", status=403),
+                      ChapterClientError("Chapter service returned HTTP 500", status=500)):
+            with self.subTest(error=error):
+                client = Mock()
+                client.request.side_effect = [error]
+                with self.assertRaises(ChapterClientError):
+                    _submit_chapter(client, folder, selection, saved, current, Mock(), include_masters=False)
+                client.request.assert_called_once_with("GET", f"v1/jobs/{saved['id']}")
+                self.assertEqual((folder / "job.json").read_bytes(), receipt)
+                self.assertFalse((folder / "history").exists())
+
+    def test_http_errors_carry_status_and_transport_failures_do_not(self):
+        from urllib.error import HTTPError, URLError
+        cases = ((HTTPError("https://worker.example/v1/jobs", 404, "missing", None, BytesIO(b"")), 404),
+                 (URLError("unreachable"), None))
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                opener = Mock()
+                opener.open.side_effect = error
+                with patch("epub_tts_narrator.renderer.chapter_client.build_opener", return_value=opener):
+                    client = ChapterClient(self.config["remote_chapters"])
+                    with self.assertRaises(ChapterClientError) as caught:
+                        client.request("GET", "v1/jobs/" + "a" * 64)
+                self.assertEqual(caught.exception.status, expected)
 
     def test_downloaded_metadata_requires_complete_speech_and_exact_source_mapping(self):
         def both(files, change):
@@ -614,11 +675,14 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 super().__init__(settings)
                 self.specs = []
 
-            def request(self, method, path, payload=None):
+            def request(self, method, path, payload=None, timeout=None):
                 if path == "v1/capabilities":
                     return {"protocol": PROTOCOL, "multi_speaker": True,
                             "renderer_fingerprint": "f" * 64, "submission_budget": True,
+                            "client_sessions": 1, "session_ttl_seconds": 30,
                             "engine": {"engine": {"engine": "fixture"}}}
+                if path == "v1/sessions" or path.startswith("v1/sessions/"):
+                    return super().request(method, path, payload)
                 if path == "v1/jobs":
                     self.specs.append(deepcopy(payload["spec"]))
                     if len(self.specs) == 1:
@@ -741,9 +805,18 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 pass
             def websocket(self, *args):
                 return None
-            def request(self, method, path, payload=None):
+            def request(self, method, path, payload=None, timeout=None):
                 if path == "v1/capabilities":
                     return service.capabilities()
+                if path == "v1/sessions":
+                    service.sessions.open(payload["id"])
+                    return {"opened": True, "session_ttl_seconds": service.sessions.ttl}
+                if path.startswith("v1/sessions/"):
+                    identifier = path.split("/")[2]
+                    if method == "POST":
+                        service.sessions.heartbeat(identifier)
+                        return {"renewed": True}
+                    return {"revoked": service.sessions.revoke(identifier)}
                 if path == "v1/voices/ensure":
                     return {"missing": service.ensure_voices(payload["voices"])}
                 if method == "PUT":
@@ -751,7 +824,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
                     uploads.append(audio)
                     return service.register_voice(path.rsplit("/", 1)[-1], payload["manifest"], audio)
                 if path == "v1/jobs":
-                    return service.submit(payload["spec"], payload["idempotency_key"])
+                    return service.submit(payload["spec"], payload["idempotency_key"],
+                                          payload.get("submission"), payload.get("session"))
                 if "/events?after=" in path:
                     identifier = path.split("/")[2]
                     return {"events": service.events(identifier, int(path.split("after=")[1])),

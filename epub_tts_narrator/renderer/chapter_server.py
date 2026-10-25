@@ -1,8 +1,10 @@
 """Authenticated HTTP and reconnectable WebSocket transport for chapter jobs.
 
-The job service owns all work. Connections only submit work or observe durable
-state, so losing a socket cannot cancel a chapter. FastAPI and uvicorn are
-optional dependencies, imported only when this server is started.
+The job service owns all work. Execution is granted only to explicitly opened,
+live client sessions; observations never create, renew, or require one. Losing
+a transport pauses work at a durable boundary instead of cancelling it, and an
+explicit reconnect resumes it. FastAPI and uvicorn are optional dependencies,
+imported only when this server is started.
 """
 
 import asyncio
@@ -247,6 +249,25 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
     async def capabilities():
         return await call(jobs.capabilities)
 
+    @app.post("/v1/sessions", status_code=201)
+    async def open_session(request: Request):
+        data = await body(request)
+        fields(data, {"id"}, {"id"})
+        _require_id(data["id"])
+        return await call(jobs.open_session, data["id"])
+
+    @app.post("/v1/sessions/{session_id}/heartbeat")
+    async def heartbeat_session(session_id: str):
+        # Renewal only: an unknown or expired session is a 404 and is never
+        # recreated here. Only the explicit open endpoint creates sessions.
+        _require_id(session_id)
+        return await call(jobs.heartbeat_session, session_id)
+
+    @app.delete("/v1/sessions/{session_id}")
+    async def revoke_session(session_id: str):
+        _require_id(session_id)
+        return await call(jobs.revoke_session, session_id)
+
     @app.post("/v1/voices/ensure")
     async def ensure_voices(request: Request):
         data = await body(request)
@@ -274,17 +295,27 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
             raise HTTPException(400, "Voice uploads must be FLAC audio")
         return await call(jobs.register_voice, asset_id, manifest, audio)
 
+    @app.get("/v1/jobs")
+    async def list_jobs(limit: str = "100"):
+        try:
+            parsed = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Job list limit must be an integer from 1 through 256") from exc
+        return {"jobs": await call(jobs.list_jobs, parsed)}
+
     @app.post("/v1/jobs", status_code=202)
     async def submit_job(request: Request):
         data = await body(request)
-        fields(data, {"spec", "idempotency_key", "submission"}, {"spec", "idempotency_key"})
+        fields(data, {"spec", "idempotency_key", "submission", "session"}, {"spec", "idempotency_key"})
         if not isinstance(data["spec"], dict):
             raise HTTPException(400, "spec must be a chapter specification object")
         key = _require_id(data["idempotency_key"])
-        submission = data.get("submission")
+        submission, session = data.get("submission"), data.get("session")
         if submission is not None:
             _require_id(submission)
-        return with_artifact_urls(await call(jobs.submit, data["spec"], key, submission))
+        if session is not None:
+            _require_id(session)
+        return with_artifact_urls(await call(jobs.submit, data["spec"], key, submission, session))
 
     @app.get("/v1/jobs/{job_id}")
     async def job_status(job_id: str):
@@ -293,15 +324,17 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
     @app.post("/v1/jobs/{job_id}/retry", status_code=202)
     async def retry_job(job_id: str, request: Request):
         _require_id(job_id)
-        submission = None
+        submission, session = None, None
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if content_type == "application/json":
             data = await body(request)
-            fields(data, {"submission"})
-            submission = data.get("submission")
+            fields(data, {"submission", "session"})
+            submission, session = data.get("submission"), data.get("session")
             if submission is not None:
                 _require_id(submission)
-        return with_artifact_urls(await call(jobs.retry, job_id, submission))
+            if session is not None:
+                _require_id(session)
+        return with_artifact_urls(await call(jobs.retry, job_id, submission, session))
 
     def parse_after(value):
         try:

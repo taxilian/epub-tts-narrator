@@ -3,6 +3,7 @@
 from copy import deepcopy
 import hashlib
 import io
+import os
 import shutil
 import wave
 import zipfile
@@ -13,6 +14,13 @@ from epub_tts_narrator.renderer.quality import validate_policy
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+
+def service_session(service):
+    """Open an ephemeral connected-client session for a ChapterJobs under test."""
+    session = os.urandom(32).hex()
+    service.sessions.open(session)
+    return session
 
 
 class Terminal(io.StringIO):

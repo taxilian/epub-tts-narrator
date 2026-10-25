@@ -19,6 +19,7 @@ from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.workflow import make_render_plan
 from test_chapter_jobs import Executor, specification
 from test_renderer_workflow import EXAMPLE
+from shared_fixtures import service_session
 
 
 class ChapterProtocolAuditTests(unittest.TestCase):
@@ -113,10 +114,11 @@ class ChapterLifetimeAuditTests(unittest.TestCase):
                 setattr(engine, stage, interrupt_first)
                 service = ChapterJobs(self.root / stage, engine)
                 self.addCleanup(service.close)
+                session = service_session(service)
                 first = specification(service, 1)
                 second = specification(service, 2)
-                a = service.submit(first, digest(first))
-                b = service.submit(second, digest(second))
+                a = service.submit(first, digest(first), None, session)
+                b = service.submit(second, digest(second), None, session)
                 service.start()
                 status = self.terminal(service, a["id"])
                 self.assertEqual(status["state"], "failed")
@@ -132,7 +134,7 @@ class ChapterLifetimeAuditTests(unittest.TestCase):
         self.addCleanup(service.close)
         spec = specification(service)
         key = digest(spec)
-        old = service.submit(spec, key)
+        old = service.submit(spec, key, None, service_session(service))
         service.start()
         self.assertEqual(self.terminal(service, old["id"])["state"], "complete")
         service.close()
@@ -141,20 +143,23 @@ class ChapterLifetimeAuditTests(unittest.TestCase):
         replacement = ChapterJobs(self.root / "server", new_engine)
         self.addCleanup(replacement.close)
         self.assertNotEqual(service.fingerprint, replacement.fingerprint)
-        resumed = replacement.submit(spec, key)
+        # A complete job stays readable; the idempotent submit only needs a
+        # session because it is an execution-grant endpoint.
+        resumed = replacement.submit(spec, key, None, service_session(replacement))
         self.assertEqual(resumed["id"], old["id"])
         self.assertEqual(resumed["state"], "complete")
         self.assertTrue(resumed["artifacts"])
         self.assertEqual(new_engine.generated, [])
         with self.assertRaisesRegex(ValueError, "renderer changed"):
-            replacement.submit(spec, digest("a brand-new idempotency key"))
+            replacement.submit(spec, digest("a brand-new idempotency key"), None,
+                               service_session(replacement))
 
     def test_failure_redaction_precedes_truncation(self):
         secret = "api_key_fixture_" + "a" * 100
         service = ChapterJobs(self.root / "server", Executor(), {"api_key": secret})
         self.addCleanup(service.close)
         spec = specification(service)
-        job = service.submit(spec, digest(spec))
+        job = service.submit(spec, digest(spec), None, service_session(service))
         service._failure(job["id"], RuntimeError("x" * 1970 + secret))
         message = service.status(job["id"])["error"]
         self.assertNotIn("api_key_fixture", message)

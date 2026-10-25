@@ -20,6 +20,7 @@ from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import make_render_plan
 from test_chapter_jobs import Executor, specification
+from shared_fixtures import service_session
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureVerifier, pcm_key, write_tone
 
@@ -123,12 +124,13 @@ class ChapterPipelineTests(unittest.TestCase):
         service.register_voice(self.voice_hash, self.manifest, self.audio)
         first = chapter_spec(executor, 1, "First chapter finishes speech before verification.", self.voice_hash)
         second = chapter_spec(executor, 2, "Second chapter can start speech immediately.", self.voice_hash)
+        session = service_session(service)
         with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend) as factory:
-            job1 = service.submit(first, digest(first))
+            job1 = service.submit(first, digest(first), None, session)
             service.start()
             try:
                 self.assertTrue(verifier.entered.wait(4))
-                job2 = service.submit(second, digest(second))
+                job2 = service.submit(second, digest(second), None, session)
                 self.assertTrue(backend.next_speech.wait(4), "next chapter waited for previous verification")
                 self.assertEqual(service.status(job1["id"])["state"], "generating")
                 self.assertFalse(service.begin_shutdown_if_idle(.001))
@@ -217,6 +219,107 @@ class ChapterPipelineTests(unittest.TestCase):
         self.addCleanup(executor.close)
         self.assertEqual(executor.parallel_chapters, 1)
 
+    def two_chunk_spec(self, executor, voice_hash, texts):
+        spec = chapter_spec(executor, 1, texts[0], voice_hash)
+        chunks = [spec["chapter"]["chunks"][0]]
+        for index, text in enumerate(texts[1:], 2):
+            row = deepcopy(chunks[0]["segment"])
+            row.update(id=f"s1.{index}", block_id=f"b1.{index}", text=text,
+                       spoken_text=text, start=index * 100, end=index * 100 + len(text))
+            chunk = deepcopy(chunks[0])
+            chunk.update(chunk_id=digest(row)[:32], segment=row, spoken_text=text,
+                         spoken_start=0, spoken_end=len(text),
+                         source_ranges=[{"start": row["start"], "end": row["end"]}])
+            chunks.append(chunk)
+        spec["chapter"]["chunks"] = chunks
+        return spec
+
+    def test_disconnect_stops_parallel_chunk_dispatch_and_resume_reuses_cached_takes(self):
+        config, backend = settings(2), CountingEngine()
+        release = backend.generation_release = Event()
+        verifier = FixtureVerifier(backend.fixture_transcripts)
+        executor = ChapterExecutor(config, verifier=verifier)
+        service = ChapterJobs(self.root / "server", executor)
+        self.addCleanup(service.close)
+        service.register_voice(self.voice_hash, self.manifest, self.audio)
+        spec = self.two_chunk_spec(executor, self.voice_hash,
+                                   ["First parallel chunk keeps its take.", "Second parallel chunk too."])
+        session = service_session(service)
+        job = service.submit(spec, digest(spec), None, session)
+        self.addCleanup(release.set)
+        with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend):
+            service.start()
+            deadline = time.monotonic() + 5
+            while len(backend.thread_ids) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(backend.thread_ids), 2)
+            self.assertEqual(backend.maximum, 2)
+            service.sessions.revoke(session)
+            # In-flight GPU work is never killed: both takes finish, verify,
+            # and save before the lossless pause.
+            release.set()
+            until = time.monotonic() + 8
+            status = service.status(job["id"])
+            while time.monotonic() < until:
+                status = service.status(job["id"])
+                if status["state"] == "queued" and status["paused"]:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(status["paused"])
+            self.assertIsNone(status["error"])
+            self.assertEqual(len(backend.speech_calls), 2)
+            self.assertEqual(len(list((self.root / "server" / "render-work" / "clips").glob("*/accepted.json"))), 2)
+            # The explicit reconnect resumes on the cached takes: no further
+            # engine dispatch, same job, same budget, verified acceptance.
+            resumed = service.submit(spec, digest(spec), None, service_session(service))
+            self.assertEqual(resumed["id"], job["id"])
+            until = time.monotonic() + 8
+            while time.monotonic() < until and service.status(job["id"])["state"] != "complete":
+                time.sleep(0.02)
+            self.assertEqual(service.status(job["id"])["state"], "complete")
+            self.assertEqual(len(backend.speech_calls), 2)
+
+    def test_a_chunk_waiting_for_a_pool_slot_never_starts_after_disconnect(self):
+        config, backend = settings(1), CountingEngine()
+        release = backend.generation_release = Event()
+        verifier = FixtureVerifier(backend.fixture_transcripts)
+        executor = ChapterExecutor(config, verifier=verifier)
+        service = ChapterJobs(self.root / "server", executor)
+        self.addCleanup(service.close)
+        service.register_voice(self.voice_hash, self.manifest, self.audio)
+        spec = self.two_chunk_spec(executor, self.voice_hash,
+                                   ["First chunk holds the only worker slot.", "Second chunk waits for the slot."])
+        session = service_session(service)
+        job = service.submit(spec, digest(spec), None, session)
+        self.addCleanup(release.set)
+        with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend):
+            service.start()
+            self.assertTrue(backend.generation_entered.wait(5))
+            deadline = time.monotonic() + 2
+            while len(backend.speech_calls) < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            service.sessions.revoke(session)
+            release.set()
+            until = time.monotonic() + 8
+            status = service.status(job["id"])
+            while time.monotonic() < until:
+                status = service.status(job["id"])
+                if status["state"] == "queued" and status["paused"]:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(status["paused"])
+            self.assertIsNone(status["error"])
+            # The queued chunk checked its stop condition at the slot boundary
+            # instead of starting a new generation for a departed client.
+            self.assertEqual(len(backend.speech_calls), 1)
+            resumed = service.submit(spec, digest(spec), None, service_session(service))
+            self.assertEqual(resumed["id"], job["id"])
+            until = time.monotonic() + 8
+            while time.monotonic() < until and service.status(job["id"])["state"] != "complete":
+                time.sleep(0.02)
+            self.assertEqual(service.status(job["id"])["state"], "complete")
+            self.assertEqual(len(backend.speech_calls), 2)
+
 
 class AtomicChapterClaimTests(unittest.TestCase):
     def test_two_coordinators_claim_every_job_exactly_once_and_drain(self):
@@ -226,10 +329,11 @@ class AtomicChapterClaimTests(unittest.TestCase):
             service = ChapterJobs(Path(temporary), engine)
             self.addCleanup(service.close)
             identifiers = []
+            session = service_session(service)
             for number in range(1, 31):
                 spec = specification(service, number)
                 spec["total_chapters"] = 30
-                identifiers.append(service.submit(spec, digest(spec))["id"])
+                identifiers.append(service.submit(spec, digest(spec), None, session)["id"])
             service.start()
             until = time.monotonic() + 8
             while time.monotonic() < until:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextvars import copy_context
 from threading import Lock, get_ident
 
 
@@ -42,8 +43,13 @@ class LocalRuntime:
             if self._closed:
                 raise RuntimeError("The local inference runtime is closed")
             reentrant = get_ident() == self._thread_id
-            future = None if reentrant else self._executor.submit(
-                self._invoke, function, args, kwargs, initialize_mlx)
+            if not reentrant:
+                # A fresh context copy per submitted operation carries scoped
+                # stop conditions onto the persistent inference thread; a
+                # Context object is never reused concurrently.
+                context = copy_context()
+                future = self._executor.submit(
+                    lambda: context.run(self._invoke, function, args, kwargs, initialize_mlx))
         if reentrant:
             # Model wrappers can delegate to another operation on the same lane.
             return self._invoke(function, args, kwargs, initialize_mlx)

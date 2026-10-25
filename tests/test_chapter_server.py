@@ -15,7 +15,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.chapter_server import create_app, serve
+from epub_tts_narrator.renderer.chapter_sessions import ClientSessions
 from epub_tts_narrator.renderer.config import DEFAULTS, load_config
+from shared_fixtures import service_session
 
 
 HAS_SERVER_DEPS = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
@@ -23,6 +25,7 @@ JOB = "a" * 64
 VOICE = "b" * 64
 KEY = "local-test-credential"
 AUTH = {"Authorization": f"Bearer {KEY}"}
+SESSION = hashlib.sha256(b"connected-client-fixture").hexdigest()
 
 
 class FakeJobs:
@@ -37,6 +40,7 @@ class FakeJobs:
         self.idle_checks = []
         self.cancel_count = 0
         self.shutdown_ready = False
+        self.sessions = ClientSessions()
         self.job = {
             "id": JOB, "state": "queued", "artifacts": [], "last_event": 1,
         }
@@ -51,6 +55,17 @@ class FakeJobs:
     def capabilities(self):
         return {"version": 1, "chapter_formats": ["m4a"], "voice_format": "flac"}
 
+    def open_session(self, session_id):
+        self.sessions.open(session_id)
+        return {"opened": True, "session_ttl_seconds": self.sessions.ttl}
+
+    def heartbeat_session(self, session_id):
+        self.sessions.heartbeat(session_id)
+        return {"renewed": True, "session_ttl_seconds": self.sessions.ttl}
+
+    def revoke_session(self, session_id):
+        return {"revoked": self.sessions.revoke(session_id)}
+
     def ensure_voices(self, voices):
         return [voice for voice in voices if voice not in self.voices]
 
@@ -58,8 +73,8 @@ class FakeJobs:
         self.voices[asset_id] = {"manifest": manifest, "audio": audio}
         return {"id": asset_id}
 
-    def submit(self, spec, idempotency_key, submission=None):
-        self.submit_calls.append((spec, idempotency_key, submission))
+    def submit(self, spec, idempotency_key, submission=None, session=None):
+        self.submit_calls.append((spec, idempotency_key, submission, session))
         return deepcopy(self.job)
 
     def status(self, job_id):
@@ -72,9 +87,16 @@ class FakeJobs:
         self.events_requested.append(after)
         return [event for event in self.log if event["sequence"] > after]
 
-    def retry(self, job_id, submission=None):
-        self.retry_calls.append((job_id, submission))
+    def retry(self, job_id, submission=None, session=None):
+        self.retry_calls.append((job_id, submission, session))
         return self.status(job_id)
+
+    def list_jobs(self, limit=100):
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("Job list limit must be an integer from 1 through 256")
+        return [{"id": JOB, "state": self.job["state"], "paused": False,
+                 "owner_connected": True, "chapter_number": 2, "total_chapters": 5,
+                 "source_fingerprint": "a" * 64, "updated": 1.0, "last_event": 1}][:limit]
 
     def artifact(self, job_id, name):
         status = self.status(job_id)
@@ -233,25 +255,53 @@ class ChapterServerTests(unittest.TestCase):
 
     def test_submit_returns_immediately_and_keeps_idempotency_key(self):
         with self.client() as client:
-            body = {"spec": {"chapter": {"number": 2}}, "idempotency_key": "c" * 64}
+            body = {"spec": {"chapter": {"number": 2}}, "idempotency_key": "c" * 64,
+                    "session": "f" * 64}
             result = client.post("/v1/jobs", headers=AUTH, json=body)
             self.assertEqual(result.status_code, 202)
             self.assertEqual(result.json()["id"], JOB)
-            self.assertEqual(self.jobs.submit_calls, [(body["spec"], body["idempotency_key"], None)])
-            retry = client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH)
+            self.assertEqual(self.jobs.submit_calls, [(body["spec"], body["idempotency_key"], None, "f" * 64)])
+            retry = client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH,
+                                json={"session": "f" * 64})
             self.assertEqual(retry.status_code, 202)
-            self.assertEqual(self.jobs.retry_calls, [(JOB, None)])
+            self.assertEqual(self.jobs.retry_calls, [(JOB, None, "f" * 64)])
+
+    def test_sessions_open_renew_only_and_revoke(self):
+        with self.client() as client:
+            opened = client.post("/v1/sessions", headers=AUTH, json={"id": "1" * 64})
+            self.assertEqual(opened.status_code, 201, opened.text)
+            self.assertTrue(opened.json()["opened"])
+            renewed = client.post(f"/v1/sessions/{'1' * 64}/heartbeat", headers=AUTH)
+            self.assertEqual(renewed.status_code, 200, renewed.text)
+            # A heartbeat never recreates a revoked session.
+            self.assertEqual(client.delete(f"/v1/sessions/{'1' * 64}", headers=AUTH).json(), {"revoked": True})
+            self.assertEqual(client.post(f"/v1/sessions/{'1' * 64}/heartbeat", headers=AUTH).status_code, 404)
+            self.assertEqual(client.delete(f"/v1/sessions/{'1' * 64}", headers=AUTH).json(), {"revoked": False})
+            self.assertEqual(client.post(f"/v1/sessions/{'1' * 64}/heartbeat", headers=AUTH).status_code, 404)
+            for payload in ({}, {"id": "nothex"}, {"id": "2" * 64, "extra": True}):
+                with self.subTest(payload=payload):
+                    self.assertEqual(client.post("/v1/sessions", headers=AUTH, json=payload).status_code, 400)
+
+    def test_job_list_is_read_only_and_validates_limit(self):
+        with self.client() as client:
+            listed = client.get("/v1/jobs", headers=AUTH)
+            self.assertEqual(listed.status_code, 200, listed.text)
+            self.assertEqual(listed.json()["jobs"][0]["id"], JOB)
+            self.assertNotIn("spec", listed.json()["jobs"][0])
+            self.assertEqual(client.get("/v1/jobs?limit=0", headers=AUTH).status_code, 400)
+            self.assertEqual(client.get("/v1/jobs?limit=257", headers=AUTH).status_code, 400)
+            self.assertEqual(client.get("/v1/jobs?limit=nope", headers=AUTH).status_code, 400)
 
     def test_submission_identity_passes_through_and_malformed_values_are_rejected(self):
         with self.client() as client:
             body = {"spec": {"chapter": {"number": 2}}, "idempotency_key": "c" * 64,
-                    "submission": "d" * 64}
+                    "submission": "d" * 64, "session": "f" * 64}
             self.assertEqual(client.post("/v1/jobs", headers=AUTH, json=body).status_code, 202)
             self.assertEqual(client.post(f"/v1/jobs/{JOB}/retry", headers=AUTH,
-                                         json={"submission": "e" * 64}).status_code, 202)
-            self.assertEqual(self.jobs.submit_calls[-1], (body["spec"], body["idempotency_key"], "d" * 64))
-            self.assertEqual(self.jobs.retry_calls[-1], (JOB, "e" * 64))
-            for payload in ({"submission": "not-a-hash"}, {"unknown": True}):
+                                         json={"submission": "e" * 64, "session": "f" * 64}).status_code, 202)
+            self.assertEqual(self.jobs.submit_calls[-1], (body["spec"], body["idempotency_key"], "d" * 64, "f" * 64))
+            self.assertEqual(self.jobs.retry_calls[-1], (JOB, "e" * 64, "f" * 64))
+            for payload in ({"submission": "not-a-hash"}, {"session": "not-a-hash"}, {"unknown": True}):
                 with self.subTest(payload=payload):
                     self.assertEqual(client.post("/v1/jobs", headers=AUTH,
                                                  json={**body, **payload}).status_code, 400)
@@ -470,6 +520,11 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
         }
         self.payload = {"spec": self.spec, "idempotency_key": "e" * 64}
 
+    def connect(self, client):
+        response = client.post("/v1/sessions", headers=AUTH, json={"id": SESSION})
+        self.assertEqual(response.status_code, 201, response.text)
+        return SESSION
+
     def wait_for(self, client, job_id, state):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -484,7 +539,8 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
         self.fail(f"Job {job_id} did not reach {state}")
 
     def submit(self, client):
-        response = client.post("/v1/jobs", json=self.payload, headers=AUTH)
+        payload = dict(self.payload, session=self.connect(client))
+        response = client.post("/v1/jobs", json=payload, headers=AUTH)
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()["id"]
 
@@ -513,9 +569,15 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
     def test_real_maintenance_service_keeps_read_apis_and_rejects_job_writes(self):
         from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
 
-        job = self.jobs.submit(self.spec, self.payload["idempotency_key"])
+        job = self.jobs.submit(self.spec, self.payload["idempotency_key"],
+                               session=service_session(self.jobs))
         self.jobs._set_state(job["id"], "generating")
-        before = self.jobs.status(job["id"]), self.jobs.events(job["id"])
+        def durable_view(status, events):
+            # Ownership flags are instance-local scheduling metadata; durable
+            # state and history must survive a restart byte-identically.
+            return ({key: value for key, value in status.items()
+                     if key not in ("paused", "owner_connected")}, events)
+        before = durable_view(self.jobs.status(job["id"]), self.jobs.events(job["id"]))
         self.jobs.close()
         engine = FixtureExecutor()
         maintenance = ChapterJobs(self.root, engine, maintenance=True)
@@ -523,7 +585,8 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
             caps = client.get("/v1/capabilities", headers=AUTH)
             self.assertEqual(caps.status_code, 200)
             self.assertTrue(caps.json()["maintenance"])
-            self.assertEqual(client.get(f"/v1/jobs/{job['id']}", headers=AUTH).json(), before[0])
+            live = client.get(f"/v1/jobs/{job['id']}", headers=AUTH).json()
+            self.assertEqual(durable_view(live, None)[0], before[0])
             self.assertEqual(client.post("/v1/voices/ensure", headers=AUTH,
                                          json={"voices": []}).status_code, 200)
             for endpoint, payload in (("/v1/jobs", self.payload), (f"/v1/jobs/{job['id']}/retry", None)):
@@ -532,7 +595,8 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
                 self.assertIn("maintenance mode", response.text)
             self.assertEqual(engine.synthesis_calls, 0)
             self.assertEqual(engine.assembly_calls, 0)
-            self.assertEqual(before, (maintenance.status(job["id"]), maintenance.events(job["id"])))
+            self.assertEqual(before, durable_view(maintenance.status(job["id"]),
+                                                  maintenance.events(job["id"])))
         self.assertTrue(engine.closed)
 
     def test_real_core_failure_retry_reuses_job_and_retains_event_history(self):
@@ -541,8 +605,10 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
             identifier = self.submit(client)
             failed = self.wait_for(client, identifier, "failed")
             self.assertIn("Fixture speech check failed", failed["error"])
-            response = client.post(f"/v1/jobs/{identifier}/retry", headers=AUTH)
-            self.assertEqual(response.status_code, 202)
+            session = self.connect(client)
+            response = client.post(f"/v1/jobs/{identifier}/retry", headers=AUTH,
+                                   json={"session": session})
+            self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(response.json()["id"], identifier)
             completed = self.wait_for(client, identifier, "complete")
             self.assertGreater(completed["last_event"], failed["last_event"])

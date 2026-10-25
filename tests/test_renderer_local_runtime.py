@@ -7,12 +7,38 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.renderer.interrupts import RenderPaused, scoped_stop_condition, stop_if_requested
 from epub_tts_narrator.renderer.local_runtime import LocalRuntime, requires_mlx
 from epub_tts_narrator.renderer.pool import RenderPool
 from test_renderer_pool import pool_config, worker
 
 
 class LocalRuntimeTests(unittest.TestCase):
+    def test_scoped_stop_conditions_reach_the_persistent_thread_with_live_predicates(self):
+        runtime = LocalRuntime()
+        self.addCleanup(runtime.close)
+        stopped = []
+
+        def operation():
+            try:
+                stop_if_requested()
+            except RenderPaused:
+                stopped.append("paused")
+                return "paused"
+            return "ran"
+
+        self.assertEqual(runtime.run(operation), "ran")
+        with scoped_stop_condition(lambda: True, lambda: RenderPaused("owner gone")):
+            self.assertEqual(runtime.run(operation), "paused")
+        # The predicate is evaluated lazily on the inference thread: flipping
+        # it after submission still stops the queued operation.
+        live = []
+        with scoped_stop_condition(lambda: live and live[0], lambda: RenderPaused("owner gone")):
+            live.append(False)
+            self.assertEqual(runtime.run(operation), "ran")
+            live[0] = True
+            self.assertEqual(runtime.run(operation), "paused")
+        self.assertEqual(stopped, ["paused", "paused"])
     def test_operations_from_different_callers_use_one_persistent_thread_and_reenter(self):
         runtime = LocalRuntime()
         self.addCleanup(runtime.close)

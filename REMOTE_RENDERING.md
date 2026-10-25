@@ -2,8 +2,10 @@
 
 The chapter service owns synthesis, speech verification, retries, chapter
 assembly, loudness normalization, and encoding. The client submits several
-chapters, watches progress, and downloads completed chapters. Closing the client
-does not cancel submitted jobs.
+chapters, watches progress, and downloads completed chapters. Only an
+explicitly connected client's jobs execute; closing the client pauses its
+unfinished jobs losslessly at durable boundaries instead of cancelling them
+(see [Connected client sessions](#connected-client-sessions)).
 
 Local and remote rendering share the clip-generation, verification, and recovery
 pipeline. When a paragraph uses one saved voice and delivery style, recovery can
@@ -202,14 +204,58 @@ Registered reference bytes and transcripts are reused. Model-specific reference
 encoding reuse depends on the configured inference backend; this registry does
 not implement or modify that backend's KV cache or batching internals.
 
+## Connected client sessions
+
+The service executes work only for explicitly connected clients; it never
+automatically resumes a queued job on restart, on a stale queue, for an
+observer, or for an unrelated book's connection.
+
+- Capabilities advertise `client_sessions: 1` and `session_ttl_seconds`
+  (default 30). A client that does not support sessions cannot execute against
+  this server, and this client refuses servers without that capability.
+- `POST /v1/sessions` with `{"id": <sha256>}` explicitly opens one ephemeral
+  session. Sessions live in memory only: restarting the service clears every
+  session and all ownership.
+- `POST /v1/sessions/{id}/heartbeat` renews only an already-live session and
+  never recreates an expired or revoked one. `DELETE /v1/sessions/{id}`
+  revokes immediately. Every session endpoint uses the same bearer
+  authentication as the rest of the API.
+- `POST /v1/jobs` and `POST /v1/jobs/{id}/retry` take the session id in their
+  `session` payload field, separate from the existing `submission` retry
+  budget. Every execution grant requires a live session; resubmitting the same
+  idempotent chapter explicitly rebinds it to the new connected client. A job
+  owned by another live client returns 409 instead of being stolen.
+- Reads never grant or renew anything: `GET /v1/jobs/{id}`, the event
+  endpoints, the WebSocket, and artifact downloads neither require a session
+  nor extend one.
+- `GET /v1/jobs` is a read-only queue list (`limit` 1–256, default 100) with
+  `id`, `state`, `paused`, `owner_connected`, `chapter_number`,
+  `total_chapters`, `source_fingerprint`, `updated`, and `last_event` per job.
+  It exposes no specification text, transcripts, errors, or session ids.
+
+While a job generates, the server rechecks its owner's session at every safe
+task boundary: before dispatching each chunk, at engine admission, when
+reacquiring a pool slot, and before every new take. If the client disconnects,
+in-flight GPU work, verification, and atomic cache writes finish and save; no
+further GPU starts. The job then returns to the queue paused — never failed or
+cancelled — with its retry budget, accepted cache, and history intact. An
+explicit reconnect (a fresh invocation opening a new session and resubmitting
+the same chapter) resumes that work. A real failure while the client is still
+connected keeps the existing failed behavior. Client heartbeats run on a
+dedicated thread for the whole invocation (submissions, waits, and downloads),
+stop before the client deletes its session, and a heartbeat error surfaces in
+the foreground promptly. Session identifiers are hashes and never appear in
+logs or reports.
+
 ## Resume and integrity
 
 Submission pins the script, voice hashes, render settings, and renderer
 fingerprint. Retrying a submission returns the same durable job. Reconnecting
 replays numbered events, with HTTP polling available if WebSockets fail. Retrying
 a failed job reuses its accepted paragraphs. An interrupted service recovers
-pending jobs when restarted against the same data directory and compatible
-renderer configuration.
+its in-flight jobs as paused queue entries when restarted against the same
+data directory and compatible renderer configuration; they stay paused, and
+generate nothing, until their client explicitly reconnects and resubmits.
 
 Speech retries share one bounded allowance across all chapter jobs of a client
 submission and their retries, matching one local render invocation; a new

@@ -26,12 +26,18 @@ from .chapter_protocol import (
     ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix,
     require_hash, validate_spec, validate_voice_manifest,
 )
+from .chapter_sessions import ClientSessions, require_session_id
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .interrupts import RenderPaused, scoped_stop_condition
 from .retry_budget import SpeechRetryBudget
 
 
+_ACTIVE_STATES = ("queued", "generating", "assembling")
+
+
 class ChapterJobs:
-    def __init__(self, data_dir, executor, settings=None, *, publisher=None, maintenance=False):
+    def __init__(self, data_dir, executor, settings=None, *, publisher=None, maintenance=False,
+                 sessions=None):
         if type(maintenance) is not bool:
             raise ValueError("Maintenance mode must be a boolean")
         self._maintenance = maintenance
@@ -41,6 +47,13 @@ class ChapterJobs:
         self.settings = dict(settings or {})
         self.identity = deepcopy(executor.identity)
         self.fingerprint = digest(self.identity)
+        # Execution is granted only to explicitly connected clients. Sessions
+        # are memory-only: a restart clears every lease, so persisted jobs from
+        # earlier clients stay queued but paused until a client reattaches.
+        self.sessions = sessions if sessions is not None else ClientSessions(
+            self.settings.get("session_ttl_seconds", 30))
+        self._owners = {}
+        self._epochs = {}
         parallel = getattr(executor, "parallel_chapters", 1)
         if type(parallel) is not int or parallel < 1:
             raise ValueError("Executor chapter concurrency must be a positive integer")
@@ -89,6 +102,54 @@ class ChapterJobs:
         finally:
             db.close()
 
+    def _owner_flags(self, job_id, state):
+        owner = self._owners.get(job_id)
+        connected = owner is not None and self.sessions.live(owner)
+        return {"owner_connected": connected,
+                "paused": state in _ACTIVE_STATES and not connected}
+
+    def status(self, job_id):
+        with self._condition, self._connect() as db:
+            row = self._row(db, job_id)
+            last = db.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE job_id=?", (job_id,)).fetchone()[0]
+            artifacts = json.loads(row["artifacts"])
+            result = {"id": row["id"], "state": row["state"], "last_event": last,
+                      "created": row["created"], "updated": row["updated"], "error": row["error"],
+                      "spec_hash": digest(json.loads(row["spec"])), "artifacts": []}
+            result.update(self._owner_flags(row["id"], row["state"]))
+        for item in artifacts:
+            public = {key: item[key] for key in ("name", "sha256", "size")}
+            public["url"] = (self.publisher.url(item["published"]) if self.publisher and item.get("published")
+                             else f"/v1/jobs/{job_id}/artifacts/{item['name']}")
+            result["artifacts"].append(public)
+        return result
+
+    def list_jobs(self, limit=100):
+        """Read-only queue overview for progress observers.
+
+        Never binds ownership, renews sessions, or executes anything. Only
+        chapter counts, fingerprints, and scheduling flags are exposed; no
+        specification text, titles, transcripts, errors, or session ids.
+        """
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("Job list limit must be an integer from 1 through 256")
+        with self._condition, self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM jobs ORDER BY CASE WHEN state IN ('complete','failed','cancelled') "
+                "THEN 1 ELSE 0 END, created, id LIMIT ?", (limit,)).fetchall()
+            last_events = dict(db.execute("SELECT job_id, MAX(sequence) FROM events GROUP BY job_id").fetchall())
+            jobs = []
+            for row in rows:
+                spec = json.loads(row["spec"])
+                entry = {"id": row["id"], "state": row["state"],
+                         "chapter_number": spec["chapter"]["number"],
+                         "total_chapters": spec["total_chapters"],
+                         "source_fingerprint": spec["source_fingerprint"],
+                         "updated": row["updated"], "last_event": last_events.get(row["id"], 0)}
+                entry.update(self._owner_flags(row["id"], row["state"]))
+                jobs.append(entry)
+            return jobs
+
     def capabilities(self):
         return {"protocol": PROTOCOL, "engine": deepcopy(self.identity),
                 "renderer_fingerprint": self.fingerprint,
@@ -96,9 +157,28 @@ class ChapterJobs:
                 "single_speaker_paragraph": getattr(self.executor, "single_speaker_paragraph", False),
                 "parallel_chapters": self._parallel_chapters,
                 "submission_budget": True,
+                "client_sessions": 1, "session_ttl_seconds": self.sessions.ttl,
                 "maintenance": self._maintenance,
                 "voice_format": "flac", "chapter_format": "m4a",
                 "timing_precision": "paragraph_or_chunk"}
+
+    def open_session(self, session_id):
+        self.sessions.open(session_id)
+        return {"opened": True, "session_ttl_seconds": self.sessions.ttl}
+
+    def heartbeat_session(self, session_id):
+        self.sessions.heartbeat(session_id)
+        return {"renewed": True, "session_ttl_seconds": self.sessions.ttl}
+
+    def revoke_session(self, session_id):
+        revoked = self.sessions.revoke(session_id)
+        if revoked:
+            with self._condition:
+                for job_id, owner in self._owners.items():
+                    if owner == session_id:
+                        self._epochs[job_id] = self._epochs.get(job_id, 0) + 1
+                self._condition.notify_all()
+        return {"revoked": revoked}
 
     def _submission_budget(self, submission):
         require_hash(submission, "Submission")
@@ -220,7 +300,33 @@ class ChapterJobs:
         with self._condition, self._connect() as db:
             self._event(db, job_id, message)
 
-    def submit(self, spec, idempotency_key, submission=None):
+    def _bind_owner(self, job_id, session, state):
+        """Attach this job's execution grant to a live connected client.
+
+        A missing or expired session never grants execution. Another live
+        client's unfinished job is never silently stolen. Rebinding a job
+        whose previous owner expired is safe: any in-flight generation stops
+        at its next durable boundary and no new generation starts until the
+        old task drains its slot.
+        """
+        if session is None:
+            raise ValueError("Chapter execution requires a connected client: open a session with "
+                             "POST /v1/sessions and send its id in the 'session' field")
+        require_session_id(session)
+        with self._condition:
+            if not self.sessions.live(session):
+                raise ValueError("The client session is unknown or expired; open a new session with "
+                                 "POST /v1/sessions, then resubmit this chapter to resume it")
+            owner = self._owners.get(job_id)
+            if (owner is not None and owner != session and state in _ACTIVE_STATES
+                    and self.sessions.live(owner)):
+                raise RuntimeError("Another connected client owns this chapter; its execution was not taken over")
+            if owner != session:
+                self._owners[job_id] = session
+                self._epochs[job_id] = self._epochs.get(job_id, 0) + 1
+                self._condition.notify_all()
+
+    def submit(self, spec, idempotency_key, submission=None, session=None):
         with self._condition:
             if self._maintenance:
                 self._admit_job()
@@ -228,13 +334,16 @@ class ChapterJobs:
         require_hash(idempotency_key, "Idempotency key")
         if submission is not None:
             require_hash(submission, "Submission")
+        if session is not None:
+            require_session_id(session)
         identifier = digest({"key": idempotency_key, "renderer": spec["renderer_fingerprint"]})
         payload = json.dumps(spec, sort_keys=True, ensure_ascii=False, allow_nan=False)
         with self._condition, self._connect() as db:
-            existing = db.execute("SELECT spec FROM jobs WHERE id=?", (identifier,)).fetchone()
+            existing = db.execute("SELECT spec,state FROM jobs WHERE id=?", (identifier,)).fetchone()
         if existing is not None:
             if existing["spec"] != payload:
                 raise ValueError("Idempotency key was already used for a different chapter")
+            self._bind_owner(identifier, session, existing["state"])
             return self.status(identifier)
         if spec["renderer_fingerprint"] != self.fingerprint:
             raise ValueError("The server renderer changed; fetch capabilities before submitting")
@@ -257,24 +366,10 @@ class ChapterJobs:
                 if submission is not None:
                     self._job_budgets[identifier] = self._submission_budget(submission)
                 self._last_activity = time.monotonic()
+            self._bind_owner(identifier, session, "queued")
             db.commit()
             self._condition.notify_all()
         return self.status(identifier)
-
-    def status(self, job_id):
-        with self._condition, self._connect() as db:
-            row = self._row(db, job_id)
-            last = db.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE job_id=?", (job_id,)).fetchone()[0]
-            artifacts = json.loads(row["artifacts"])
-            result = {"id": row["id"], "state": row["state"], "last_event": last,
-                      "created": row["created"], "updated": row["updated"], "error": row["error"],
-                      "spec_hash": digest(json.loads(row["spec"])), "artifacts": []}
-        for item in artifacts:
-            public = {key: item[key] for key in ("name", "sha256", "size")}
-            public["url"] = (self.publisher.url(item["published"]) if self.publisher and item.get("published")
-                             else f"/v1/jobs/{job_id}/artifacts/{item['name']}")
-            result["artifacts"].append(public)
-        return result
 
     def events(self, job_id, after=0):
         if type(after) is not int or after < 0:
@@ -285,7 +380,7 @@ class ChapterJobs:
                               (job_id, after)).fetchall()
             return [dict(json.loads(row["payload"]), sequence=row["sequence"]) for row in rows]
 
-    def retry(self, job_id, submission=None):
+    def retry(self, job_id, submission=None, session=None):
         with self._condition, self._connect() as db:
             self._admit_job()
             row = self._row(db, job_id)
@@ -295,6 +390,7 @@ class ChapterJobs:
                 pending = db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','generating','assembling')").fetchone()[0]
                 if pending >= self.settings.get("max_pending_jobs", 256):
                     raise RuntimeError("Chapter job queue is full; retry later")
+                self._bind_owner(job_id, session, "queued")
                 db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
                 self._event(db, job_id, "Retry queued; accepted paragraphs will be reused", state="queued")
                 if submission is not None:
@@ -302,6 +398,10 @@ class ChapterJobs:
                     # submission's fresh allowance, like a rerun of the CLI.
                     self._job_budgets[job_id] = self._submission_budget(submission)
                 self._last_activity = time.monotonic()
+            else:
+                # Even a no-op retry is a mutation from a connected client;
+                # it must not succeed with an unowned or stale session.
+                self._bind_owner(job_id, session, row["state"])
             db.commit()
             self._condition.notify_all()
         return self.status(job_id)
@@ -341,7 +441,8 @@ class ChapterJobs:
             with self._connect() as db:
                 for row in db.execute("SELECT id FROM jobs WHERE state IN ('generating','assembling')").fetchall():
                     db.execute("UPDATE jobs SET state='queued',updated=? WHERE id=?", (time.time(), row["id"]))
-                    self._event(db, row["id"], "Recovered interrupted chapter; accepted paragraphs retained", state="queued")
+                    self._event(db, row["id"], "Recovered interrupted chapter; it stays paused until its "
+                                "rendering client reconnects; accepted paragraphs retained", state="queued")
             workers = self.settings.get("assembly_workers", 2)
             self._assembly = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chapter-assembly")
             self._slots = threading.Semaphore(workers + self._parallel_chapters)
@@ -396,33 +497,66 @@ class ChapterJobs:
             self._condition.notify_all()
 
     def _claim_next(self):
-        """Claim state and activity under one lock before another worker reads."""
+        """Claim state and activity under one lock before another worker reads.
+
+        Only a job whose connected owner session is live can be claimed; jobs
+        without one stay durably queued and paused. The whole read-decide-write
+        sequence holds the condition lock, so two workers can never claim the
+        same row.
+        """
         with self._condition:
             while True:
                 if self._stopping:
                     return None
                 with self._connect() as db:
-                    row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created,id LIMIT 1").fetchone()
-                    if row is not None and self._slots.acquire(blocking=False):
-                        try:
+                    rows = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created,id").fetchall()
+                for row in rows:
+                    owner = self._owners.get(row["id"])
+                    if owner is None or not self.sessions.live(owner):
+                        continue
+                    if not self._slots.acquire(blocking=False):
+                        break
+                    try:
+                        with self._connect() as db:
                             now = time.time()
                             db.execute("UPDATE jobs SET state='generating',error=NULL,updated=? WHERE id=?",
                                        (now, row["id"]))
                             self._event(db, row["id"], "Chapter generating", state="generating")
                             db.commit()
-                        except BaseException:
-                            self._slots.release()
-                            raise
-                        self._active += 1
-                        self._last_activity = time.monotonic()
-                        return row
+                    except BaseException:
+                        self._slots.release()
+                        raise
+                    epoch = self._epochs[row["id"]] = self._epochs.get(row["id"], 0) + 1
+                    self._active += 1
+                    self._last_activity = time.monotonic()
+                    return dict(row), epoch
                 self._condition.wait(timeout=1)
+
+    def _pause(self, job_id):
+        """Return an interrupted generation to the queue without any loss."""
+        with self._condition, self._connect() as db:
+            row = db.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is not None and row["state"] in {"generating", "assembling"}:
+                db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
+                self._event(db, job_id, "The rendering client paused the chapter at a durable boundary; "
+                            "rerun the same command on a connected client to resume", state="queued")
+                db.commit()
+            self._condition.notify_all()
+
+    def _grant_live(self, job_id, epoch):
+        """Whether this exact claimed generation still has its connected owner."""
+        with self._condition:
+            if self._epochs.get(job_id) != epoch:
+                return False
+            owner = self._owners.get(job_id)
+            return owner is not None and self.sessions.live(owner)
 
     def _run(self):
         while True:
-            row = self._claim_next()
-            if row is None:
+            claimed = self._claim_next()
+            if claimed is None:
                 return
+            row, epoch = claimed
             job_id = row["id"]
             try:
                 if row["renderer"] != self.fingerprint:
@@ -431,11 +565,22 @@ class ChapterJobs:
                 voices = {voice: self._voice(asset) for voice, asset in spec["voice_bindings"].items()}
                 with self._condition:
                     budget = self._job_budgets.get(job_id)
-                prepared = self.executor.synthesize(spec, voices, self.root / "render-work",
-                                                    lambda message: self._log(job_id, message),
-                                                    retry_budget=budget)
+                with scoped_stop_condition(
+                        lambda: not self._grant_live(job_id, epoch),
+                        lambda: RenderPaused("The chapter's rendering client disconnected; generation paused "
+                                             "at a verified boundary with all accepted work retained")):
+                    prepared = self.executor.synthesize(spec, voices, self.root / "render-work",
+                                                        lambda message: self._log(job_id, message),
+                                                        retry_budget=budget)
+                if not self._grant_live(job_id, epoch):
+                    raise RenderPaused("The chapter's rendering client disconnected before assembly")
                 self._set_state(job_id, "assembling")
-                self._assembly.submit(self._finish, job_id, spec, prepared)
+                self._assembly.submit(self._finish, job_id, spec, prepared, epoch)
+            except RenderPaused:
+                # A lost owner pauses losslessly: budget, accepted cache, and
+                # history stay intact; the job is never marked failed.
+                self._pause(job_id)
+                self._done()
             except BaseException as exc:
                 # Model adapters execute on this worker thread. A raised
                 # KeyboardInterrupt/SystemExit must not strand a durable job
@@ -445,14 +590,18 @@ class ChapterJobs:
                 finally:
                     self._done()
 
-    def _finish(self, job_id, spec, prepared):
+    def _finish(self, job_id, spec, prepared, epoch):
         try:
+            if not self._grant_live(job_id, epoch):
+                raise RenderPaused("The chapter's rendering client disconnected before assembly")
             paths = self.executor.assemble(spec, prepared, self.root / "render-work",
                                            lambda message: self._log(job_id, message))
             if not isinstance(paths, dict) or not paths or set(paths) - ARTIFACT_NAMES:
                 raise ValueError("Executor returned an unsupported artifact; WAV transfers are forbidden")
             artifacts = []
             for name, supplied in sorted(paths.items()):
+                if not self._grant_live(job_id, epoch):
+                    raise RenderPaused("The chapter's rendering client disconnected before publication")
                 path = regular_file(supplied)
                 if not path.resolve().is_relative_to(self.root) or path.suffix not in {".flac", ".m4a", ".json"}:
                     raise ValueError("Executor artifact must be compressed audio or JSON in the server store")
@@ -462,6 +611,8 @@ class ChapterJobs:
                     item["published"] = self.publisher.publish(job_id, name, path, item["sha256"])
                 artifacts.append(item)
             self._set_state(job_id, "complete", artifacts=artifacts)
+        except RenderPaused:
+            self._pause(job_id)
         except BaseException as exc:
             self._failure(job_id, exc)
         finally:
@@ -469,8 +620,9 @@ class ChapterJobs:
 
     def idle_seconds(self):
         with self._condition, self._connect() as db:
-            pending = db.execute("SELECT 1 FROM jobs WHERE state IN ('queued','generating','assembling') LIMIT 1").fetchone()
-            return 0.0 if (pending and not self._maintenance) or self._active else max(0.0, time.monotonic() - self._last_activity)
+            rows = db.execute("SELECT id FROM jobs WHERE state IN ('queued','generating','assembling')").fetchall()
+            connected = any(self.sessions.live(self._owners.get(row["id"])) for row in rows)
+            return 0.0 if (connected and not self._maintenance) or self._active else max(0.0, time.monotonic() - self._last_activity)
 
     def begin_shutdown_if_idle(self, timeout):
         with self._condition:

@@ -2,7 +2,9 @@
 
 The remote service owns paragraph synthesis, verification, and chapter assembly.
 The client owns source provenance, voice selections, downloaded checkpoints, and
-final book packaging. A disconnected client never cancels a submitted job.
+final book packaging. Each invocation opens one ephemeral connected session and
+keeps it live with a heartbeat; work without a live session pauses losslessly
+instead of executing unattended.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 from urllib.error import HTTPError, URLError
@@ -39,13 +42,18 @@ _JOB = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
 class ChapterClientError(RuntimeError):
-    pass
+    def __init__(self, message, *, status=None):
+        super().__init__(message)
+        # Set only for definite HTTP answers; its absence means transport
+        # uncertainty, which never authorizes fallback behavior.
+        self.status = status
 
 
 class RemoteChapterFailed(ChapterClientError):
     """A remote job reached a terminal failed state on this client's watch."""
 
-    def __init__(self, message, *, job_id, record, paragraph=None):
+    def __init__(self, message, *, job_id, record, paragraph=None, status=None):
+        super().__init__(message, status=status)
         super().__init__(message)
         self.job_id = job_id
         self.record = record
@@ -117,20 +125,21 @@ class ChapterClient:
     def _url(self, path):
         return self.base_url + path.lstrip("/")
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, *, timeout=None):
         data = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         headers = {**self.headers, "Accept": "application/json", "User-Agent": USER_AGENT}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(self._url(path), data=data, headers=headers, method=method)
         try:
-            with self.opener.open(request, timeout=self.settings["timeout_seconds"]) as response:
+            with self.opener.open(request, timeout=timeout or self.settings["timeout_seconds"]) as response:
                 body = response.read(100 * 1024 * 1024 + 1)
             if len(body) > 100 * 1024 * 1024:
                 raise ChapterClientError("Chapter service JSON response is too large")
             result = json.loads(body, parse_constant=lambda value: (_ for _ in ()).throw(ValueError()))
         except HTTPError as exc:
-            raise ChapterClientError(f"Chapter service returned HTTP {exc.code}; saved jobs remain resumable") from None
+            raise ChapterClientError(f"Chapter service returned HTTP {exc.code}; saved jobs remain resumable",
+                                     status=exc.code) from None
         except (URLError, TimeoutError, ConnectionError, OSError):
             raise ChapterClientError("Chapter service connection failed; rerun the same command to resume saved jobs") from None
         except (ValueError, UnicodeError):
@@ -208,6 +217,48 @@ class ChapterClient:
         finally:
             Path(temporary).unlink(missing_ok=True)
         return target
+
+
+class ClientHeartbeat:
+    """Keep this invocation's session live on one dedicated heartbeat thread.
+
+    The heartbeat spans every submission, wait, and download of the rendering
+    run. It is explicitly bounded (short timeout), stops before the caller
+    revokes the session, and the server never lets a heartbeat recreate an
+    expired or revoked session, so no late beat can outlive a delete. The
+    session identifier is a hash and never enters logs or notifications.
+    """
+
+    def __init__(self, client, session_id, interval, *, timeout=5.0):
+        self.client = client
+        self.session_id = session_id
+        self.interval = interval
+        self.timeout = timeout
+        self._stop = threading.Event()
+        self._thread = None
+        self.failure = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._beat, name="chapter-session-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _beat(self):
+        while not self._stop.wait(self.interval):
+            try:
+                self.client.request("POST", f"v1/sessions/{self.session_id}/heartbeat", timeout=self.timeout)
+            except ChapterClientError as exc:
+                self.failure = str(exc)
+                return
+
+    def check(self):
+        """Raise promptly in the foreground once the heartbeat thread died."""
+        if self._thread is not None and not self._thread.is_alive() and self.failure is not None:
+            raise ChapterClientError(f"The rendering session heartbeat failed: {self.failure}")
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.timeout + 5)
 
 
 def _voice_assets(voices, work, ffmpeg):
@@ -354,37 +405,59 @@ def _archive_job(folder, record):
 
 
 def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, include_masters,
-                    submission=None):
-    """Resume the same job, or reconcile a terminal job from an older renderer."""
+                    submission=None, session=None, watchdog=None):
+    """Resume the same job, or reconcile a terminal job from an older renderer.
+
+    ``session`` is the live session id sent with every execution grant;
+    ``watchdog`` is the invocation's heartbeat, checked while waiting.
+    """
     spec = current_spec if saved is None else saved["spec"]
     replacement = saved.get("replacement_spec") if saved is not None else None
     if saved is not None and replacement is None and spec["renderer_fingerprint"] != current_spec["renderer_fingerprint"]:
         def observe():
-            status = client.request("GET", f"v1/jobs/{saved['id']}")
+            try:
+                status = client.request("GET", f"v1/jobs/{saved['id']}")
+            except ChapterClientError as exc:
+                if exc.status != 404:
+                    raise
+                # A confirmed 404 means this server no longer knows the saved
+                # job (it was recreated or the job was removed). The local
+                # receipt stays authoritative until a replacement is
+                # acknowledged below; resubmitting under the live session is
+                # idempotent and keeps the previous history.
+                return None
             if status.get("id") != saved["id"] or status.get("spec_hash") != digest(spec):
                 raise ChapterClientError("Service did not confirm the saved chapter's identity; no replacement submitted")
             return status
         status = observe()
-        if status.get("state") in {"queued", "generating", "assembling"}:
+        paused = status is not None and status.get("paused") is True
+        if status is not None and status.get("state") in {"queued", "generating", "assembling"} and not paused:
             # A live old worker may still finish. Do not duplicate or cancel it.
             # If it fails during observation, the same command can migrate it.
             try:
-                _wait_jobs(client, {saved["id"]: (folder, saved)}, notify, include_masters=include_masters)
+                _wait_jobs(client, {saved["id"]: (folder, saved)}, notify,
+                           include_masters=include_masters, session=watchdog)
             except ChapterClientError:
                 status = observe()
-                if status.get("state") not in {"failed", "cancelled"}:
+                if status is None or status.get("state") not in {"failed", "cancelled"}:
                     raise
             else:
                 return saved, {"id": saved["id"], "state": "completed"}
-        if status.get("state") in {"complete", "completed"}:
+        if status is not None and status.get("state") in {"complete", "completed"}:
             _completed_download(client, folder, saved, status, include_masters=include_masters)
             return saved, status
-        if status.get("state") not in {"failed", "cancelled"}:
+        if status is not None and status.get("state") not in {"failed", "cancelled"} and not paused:
             raise ChapterClientError("Saved chapter state is not safely resumable; no replacement submitted")
-        # Save intent before the mutation. A lost response must resubmit this
-        # exact spec/key even if capabilities change again on the next run.
+        # A paused legacy job has no live owner and can never progress on this
+        # server, so it is safely migratable like a failed one. A job missing
+        # from a recreated server is migrated the same way. Save intent
+        # before the mutation: a lost response must resubmit this exact
+        # spec/key even if capabilities change again on the next run.
         saved = deepcopy(saved)
-        saved["state"] = status["state"]
+        if status is not None:
+            saved["state"] = status["state"]
+        else:
+            saved["state"] = "missing"
         saved["replacement_spec"] = deepcopy(current_spec)
         _save_job(folder, saved)
         replacement = saved["replacement_spec"]
@@ -397,6 +470,8 @@ def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, i
     payload = {"spec": spec, "idempotency_key": digest(spec)}
     if submission is not None:
         payload["submission"] = submission
+    if session is not None:
+        payload["session"] = session
     status = client.request("POST", "v1/jobs", payload)
     job_id = _safe_id(status.get("id"))
     if saved is not None and replacement is None and saved["id"] != job_id:
@@ -416,10 +491,13 @@ def _submit_chapter(client, folder, selection, saved, current_spec, notify, *, i
             # Reconciled an older ambiguous submission. Observe that known job
             # before considering another replacement; never lose its receipt.
             return _submit_chapter(client, folder, selection, record, current_spec, notify,
-                                   include_masters=include_masters)
+                                   include_masters=include_masters, submission=submission,
+                                   session=session, watchdog=watchdog)
     if status.get("state") in {"failed", "cancelled"}:
-        status = client.request("POST", f"v1/jobs/{job_id}/retry",
-                                {"submission": submission} if submission is not None else {})
+        retry = {"session": session} if session is not None else {}
+        if submission is not None:
+            retry["submission"] = submission
+        status = client.request("POST", f"v1/jobs/{job_id}/retry", retry)
     record["state"] = status.get("state")
     _save_job(folder, record)
     return record, status
@@ -630,11 +708,13 @@ def _cached_artifacts_present(folder, record, *, require_masters=True):
     return present
 
 
-def _wait_jobs(client, jobs, notify, *, include_masters=True):
+def _wait_jobs(client, jobs, notify, *, include_masters=True, session=None):
     pending = dict(jobs)
     connection, watching = None, None
     try:
         while pending:
+            if session is not None:
+                session.check()
             for job_id, (folder, record) in list(pending.items()):
                 response = client.request("GET", f"v1/jobs/{job_id}/events?after={record.get('last_event', 0)}")
                 for event in response.get("events", []):
@@ -863,6 +943,9 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         capabilities = client.request("GET", "v1/capabilities")
         if capabilities.get("protocol") != PROTOCOL:
             raise ChapterClientError("Chapter service uses an incompatible protocol")
+        if capabilities.get("client_sessions") != 1:
+            raise ChapterClientError("The chapter service grants work only to client sessions it does not "
+                                     "support; update the worker to the matching renderer before rendering")
         from .paragraphs import paragraph_supported
         if any(not paragraph_supported(capabilities, chunk)
                for chapter, *_ in unfinished for chunk in chapter["chunks"]):
@@ -872,9 +955,18 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         # One retry allowance spans every job of this submission and their
         # retries; the next render_remote invocation starts a fresh budget.
         submission = os.urandom(32).hex() if capabilities.get("submission_budget") is True else None
+        # A new explicit invocation always opens a new ephemeral session;
+        # sessions are never persisted permissions.
+        session_id = os.urandom(32).hex()
+        client.request("POST", "v1/sessions", {"id": session_id})
+        ttl = capabilities.get("session_ttl_seconds")
+        interval = max(1.0, min(10.0, ttl / 6)) if type(ttl) in (int, float) and ttl > 0 else 5.0
+        heartbeat = ClientHeartbeat(client, session_id, interval)
+        heartbeat.start()
         pending = {}
 
         def submit(chapter, selection, folder, saved):
+            heartbeat.check()
             spec = deepcopy(selection)
             fingerprint = capabilities.get("renderer_fingerprint")
             if fingerprint is not None:
@@ -886,31 +978,41 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
                     f"Chapter {chapter['number']} / {len(bundle['chapters'])} "
                     f"cannot be rendered remotely: {exc}") from exc
             record, status = _submit_chapter(client, folder, selection, saved, spec, notify,
-                                             include_masters=not chapters_only, submission=submission)
+                                             include_masters=not chapters_only, submission=submission,
+                                             session=session_id, watchdog=heartbeat)
             cached[chapter["id"]] = (folder, record)
             if _cached_artifacts_present(folder, record, require_masters=not chapters_only):
                 return
             pending[record["id"]] = (folder, record)
             notify(f"Scheduled chapter {chapter['number']} / {len(bundle['chapters'])}: {record['id']}")
 
-        # Submit every chapter before watching any, so synthesis can immediately
-        # enter the next queued chapter while previous chapters are encoded.
-        for chapter, selection, folder, saved in unfinished:
-            submit(chapter, selection, folder, saved)
-        while pending:
+        try:
+            # Submit every chapter before watching any, so synthesis can immediately
+            # enter the next queued chapter while previous chapters are encoded.
+            for chapter, selection, folder, saved in unfinished:
+                submit(chapter, selection, folder, saved)
+            while pending:
+                try:
+                    _wait_jobs(client, pending, notify, include_masters=not chapters_only,
+                               session=heartbeat)
+                    break
+                except RemoteChapterFailed as failure:
+                    heartbeat.check()
+                    recovered = _recover_failed_paragraph(bundle, config, plan, voices, capabilities,
+                                                          failure, notify)
+                    if recovered is None:
+                        raise
+                    pending.pop(failure.job_id, None)
+                    plan, replacement = recovered
+                    selection = _selection(bundle, replacement, config, bindings)
+                    folder = _regular_directory(root / digest(selection))
+                    submit(replacement, selection, folder, _read_job(folder, selection))
+        finally:
+            heartbeat.stop()
             try:
-                _wait_jobs(client, pending, notify, include_masters=not chapters_only)
-                break
-            except RemoteChapterFailed as failure:
-                recovered = _recover_failed_paragraph(bundle, config, plan, voices, capabilities,
-                                                      failure, notify)
-                if recovered is None:
-                    raise
-                pending.pop(failure.job_id, None)
-                plan, replacement = recovered
-                selection = _selection(bundle, replacement, config, bindings)
-                folder = _regular_directory(root / digest(selection))
-                submit(replacement, selection, folder, _read_job(folder, selection))
+                client.request("DELETE", f"v1/sessions/{session_id}")
+            except ChapterClientError:
+                pass
     if chapters_only:
         completed = []
         for chapter in plan["chapters"]:
