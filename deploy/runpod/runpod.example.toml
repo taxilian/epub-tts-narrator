@@ -5,9 +5,12 @@
 name = "epub-tts-narrator"
 # Verified Runpod base 1.0.7, CUDA 12.9, Linux x86_64; SSH enabled by the CLI.
 image = "runpod/base@sha256:c776d549e38023c51a28c25267e029ec2aa53a525c87a934b77694d76572c629"
-gpu_type_id = "NVIDIA H100 80GB HBM3"
+# Fallback GPU. With prefer_h100, any available H100 (80GB HBM3, PCIe, NVL)
+# strictly under $2.60/hour wins; otherwise this RTX PRO 6000 is used.
+gpu_type_id = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+prefer_h100 = true
 data_center_id = "US-MO-1"
-max_hourly_price = 4.10
+max_hourly_price = 2.60
 volume_size_gb = 150
 container_disk_gb = 30
 state_dir = "./dist/runpod"

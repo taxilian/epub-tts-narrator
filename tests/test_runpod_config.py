@@ -302,6 +302,24 @@ class RunpodConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "top_k must be 30"):
             self.remote(settings)
 
+    def test_h100_preference_defaults_on_and_only_accepts_booleans(self):
+        from epub_tts_narrator.renderer.runpod_config import DEPLOYMENT_DEFAULTS
+        from epub_tts_narrator.renderer.runpod_gpu import DEFAULT_GPU_TYPE_ID
+        self.assertTrue(DEPLOYMENT_DEFAULTS["prefer_h100"])
+        self.assertEqual(DEPLOYMENT_DEFAULTS["gpu_type_id"], DEFAULT_GPU_TYPE_ID)
+        self.assertEqual(DEPLOYMENT_DEFAULTS["max_hourly_price"], 2.60)
+        settings = load_settings(self.path)
+        self.assertTrue(settings["deployment"]["prefer_h100"])
+        # TOML has no null and the writer omits None values, so only concrete
+        # wrong types can reach validation.
+        for value in ("true", 1, 0, [], 2.60):
+            with self.subTest(value=value):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"prefer_h100": value}})
+                with self.assertRaisesRegex(ValueError, "runpod.prefer_h100"):
+                    load_settings(self.path)
+        (self.directory / "runpod.local.toml").write_text("[runpod]\nprefer_h100 = false\n")
+        self.assertFalse(load_settings(self.path)["deployment"]["prefer_h100"])
+
 
 if __name__ == "__main__":
     unittest.main()

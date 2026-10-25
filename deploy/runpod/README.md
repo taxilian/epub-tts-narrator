@@ -30,6 +30,22 @@ checked when creating compute. The selected region must also support network
 volumes. The example's 150 GB volume costs storage fees even while stopped;
 the hourly ceiling covers compute and does not cap storage charges.
 
+### GPU selection
+
+By default (`prefer_h100 = true`) a new Pod prefers any available NVIDIA H100
+variant (80GB HBM3/SXM, PCIe, or NVL) whose catalog rate is **strictly under
+$2.60/hour** and within `max_hourly_price`, choosing the cheapest eligible one
+in your configured `data_center_id`. If no such H100 exists — too expensive,
+out of stock, or absent from your datacenter — the Pod uses the configured
+`gpu_type_id` fallback (the RTX PRO 6000 in the example), which must be
+available at or under `max_hourly_price` or nothing is created. Set
+`prefer_h100 = false` to pin the configured GPU exactly. After creation the
+provider's actual rate is checked against the same rules and the worker is
+stopped if it exceeds them. Catalog and hourly prices cover compute only;
+persistent storage is billed separately. The chosen GPU is saved before the
+Pod is created, so a retried or restarted deployment keeps the same hardware,
+and a healthy existing Pod is never replaced just to upgrade its GPU.
+
 `[runpod].service_port` selects the chapter service's listen port and Runpod
 proxy port; it defaults to **8082**. The pinned base image reserves 8081 for
 nginx. Choose an unused port if using another image; ports 22 and 8080 are
@@ -119,11 +135,15 @@ capacity becoming available on the Pod's machine; immediate restart is not
 guaranteed. Native model loading also takes time on every process start.
 
 For managed deployments, a confirmed host-capacity error triggers at most one
-replacement Pod per operation. The replacement uses the same GPU, image,
-datacenter, and existing network volume and must meet the configured hourly
-cap. The previous Pod remains stopped. The client does not allocate another
-volume or choose a different region or GPU. A deployment with an explicit
-`runpod.pod_id` is fixed and is never replaced automatically.
+replacement Pod per operation. The replacement keeps the same image,
+datacenter, and existing network volume, and must meet the configured hourly
+cap. Its GPU is selected by the same policy as a new Pod: a preferred H100
+under $2.60/hour when `prefer_h100` is set, otherwise the configured
+`gpu_type_id`. The old Pod's GPU is recorded as the replacement's immutable
+source, and the stopped Pod is validated against it even when the replacement
+targets a different GPU. The previous Pod remains stopped. The client does not
+allocate another volume or choose a different region. A deployment with an
+explicit `runpod.pod_id` is fixed and is never replaced automatically.
 
 Replacement intent is saved before creation. If the API response is lost, the
 client looks for that uniquely named Pod and verifies its placement before

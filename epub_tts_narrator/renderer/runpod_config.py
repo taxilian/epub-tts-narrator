@@ -19,17 +19,20 @@ from epub_tts_narrator.config import resolve_config_path
 from .common import write_private
 from .config import DEFAULTS, load_config
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
+from .runpod_gpu import DEFAULT_GPU_TYPE_ID
 
 
 DEPLOYMENT_DEFAULTS = {
     "name": "epub-tts-narrator",
     "image": "",
-    "gpu_type_id": "NVIDIA H100 PCIe",
+    # Fallback GPU; when prefer_h100 is set, an affordable available H100 wins.
+    "gpu_type_id": DEFAULT_GPU_TYPE_ID,
+    "prefer_h100": True,
     "data_center_id": "",
     "volume_id": "",
     "volume_size_gb": 150,
     "container_disk_gb": 20,
-    "max_hourly_price": 3.50,
+    "max_hourly_price": 2.60,
     "state_dir": "./dist/runpod",
     "startup_timeout_seconds": 900,
     "service_port": 8082,
@@ -177,6 +180,8 @@ def _deployment_settings(values, directory):
     price = settings["max_hourly_price"]
     if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price <= 100:
         raise ValueError("runpod.max_hourly_price must be a positive hourly limit at most 100")
+    if type(settings["prefer_h100"]) is not bool:
+        raise ValueError("runpod.prefer_h100 must be true or false")
     for key in ("app_dir", "fish_source", "sglang_source", "remote_config", "model_dir", "whisper_dir", "data_dir"):
         value = settings[key]
         if (not isinstance(value, str) or not value.startswith("/workspace/")

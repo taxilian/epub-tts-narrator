@@ -24,7 +24,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
 5. TTS engines: `engines.py`, `fish_http.py`, `mlx_audio_engine.py`, local runtime, model setup, Drama 3 model/design/sampling modules.
 6. Assembly/publication: `assembly.py`, `publication.py`, `cleanup.py`, paragraphs, paragraph recovery, loudness, pacing.
-7. Runpod deployment: `runpod.py`, `runpod_api.py`, `runpod_config.py`.
+7. Runpod deployment: `runpod.py`, `runpod_api.py`, `runpod_gpu.py`, `runpod_config.py`.
 
 ## WHERE TO LOOK
 
@@ -38,7 +38,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
 | Assemble and publish an audiobook | `assembly.py`, `publication.py`, `loudness.py`, `pacing.py` |
-| Operate Runpod workers | `runpod.py`, `runpod_api.py`, `runpod_config.py` |
+| Operate Runpod workers | `runpod.py`, `runpod_api.py`, `runpod_config.py`; GPU selection policy in `runpod_gpu.py` |
 
 ## CONVENTIONS
 
