@@ -138,6 +138,8 @@ class CastingSession:
         self._validate_paths()
         lock = self.store.lock()
         try:
+            from ..voice_profile_guard import require_valid_profiles
+            require_valid_profiles(self.bundle["directory"])
             self.store.persist_aliases()
             yield
         finally:

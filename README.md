@@ -55,9 +55,18 @@ epub-tts-narrator analyze book.epub
 
 # Continue a series; the earlier output directory supplies the cast.
 epub-tts-narrator analyze book-two.epub -o runs/book-02 --continue-from runs/book-01
+
+# Refresh existing voice profiles in a completed book directory under the
+# current profile guidance; only each voice's description, traits, and
+# speechTraits change, atomically with its series continuation metadata.
+epub-tts-narrator refresh-voice-profiles runs/book-01 --workers 1
 ```
 
 Analysis is resumable: after a failure, rerun the same command — validated model responses are reused from the request cache. If speech remains unassigned after bounded automatic work, the CLI asks you to pick speakers in the terminal and exits with status 2; unassigned speech blocks audio generation, advisory notes do not.
+
+`refresh-voice-profiles` never touches source text, segments, attribution, characters, roles, voice identity or order, audition scripts, reference recordings, or render caches. It rebinds the hidden `cast_fingerprint` records (analysis provenance and the book-local `audition-scripts.json`) so casting keeps working, backs up the originals, and refreshes descendant continuation links in the same transaction. The next render picks up the new profiles automatically; rerunning after everything is current makes no changes.
+
+Before model work, refresh durably marks all profiles invalid and checkpoints each prepared proposal. Rendering is blocked for that book and its descendants until publication completes. Rerun the same command after a failure to resume prepared work without repeating completed model calls; reference recordings stay intact. Pending state is cleared only after the published profiles and bindings are complete.
 
 Cast and render (see [RENDERER.md](RENDERER.md) for the full workflow):
 

@@ -42,29 +42,28 @@ A direction such as 'sound like the protagonist' or a fictional species name is 
 describe the intended vocal presentation, resonance, texture, and phrasing.
 Choose a few distinctive, compatible traits rather than a repetitive list.
 Design voices as a cast, not one at a time. Listeners identify speakers by ear,
-often mid-scene with few speech tags, so compare each new or revised voice with
-the voices already in the cast. Characters who share scenes should differ
+often mid-scene with few speech tags. When other cast profiles are supplied,
+compare each new or revised voice with those profiles. If only one voice is
+supplied, refine that voice from the supplied context; do not invent an unseen
+cast or claim to have compared it. Characters who share scenes should differ
 clearly in at least two audible dimensions, such as register, texture, pace,
 and accent. Give major recurring characters the most distinctive voices; minor
 characters can be simpler but should not duplicate a major character's sound.
 Every voice is performed by an adult voice actor, and every description makes
 that adult its subject. The character's age describes the portrayal, not the
-performer. Voice engines refuse any request that could produce a minor's voice
-and judge the words rather than the intent, so a child or adolescent role must
-read unmistakably as an adult performing a younger voice. This is how
-audiobooks are made: adult actors voice children. For such a role, state the
-performer's adult age range. Words such as child-like, youthful, or boyish may
-describe the performance, but never the speaker or the voice on their own; tie
-each one to the imitation ("making her voice sound child-like", "performing a
-teenage boy's voice"). Immediately after the first youth reference, state
-plainly that this is an adult imitating a child's or teenager's voice, not an
-actual child. Describe the imitation through the techniques an adult actor uses
+performer. If wording could be interpreted as requesting a young-sounding voice,
+make unmistakably clear that the performer is an adult using voice acting to
+portray a younger character, not an actual child performer or an independent
+child voice. Certain wording can help make that distinction, but no phrase
+guarantees that an engine will accept or follow the request. Keep the adult
+actor as the subject and tie words such as child-like, youthful, or boyish to
+that actor's performed imitation rather than describing a child voice on its
+own. Describe the imitation through techniques an adult actor uses
 (pitch lifted within their natural range, a brighter, more forward tone,
 quicker, bouncier phrasing, wider intonation) rather than an exact childhood
-age. For example: 'A woman voice actor in her late twenties making her voice
-sound child-like (an adult imitating a child, not an actual child), with pitch
-lifted toward the top of her range, a bright, forward tone, and quick, bouncy
-phrasing.' Preserve the character's age in character metadata and source
+age. For example: 'An adult woman voice actor portraying a younger character
+through voice acting, lifting pitch within her adult range, with a bright,
+forward tone and quick, bouncy phrasing.' Preserve the character's age in character metadata and source
 evidence; this framing does not change the character's identity or story facts.
 Mature and elderly roles keep their intended vocal qualities within the same
 adult-performer framing. Include gender presentation and fictional context when
@@ -105,16 +104,19 @@ adding them here doubles them. Leave out emotion and mood, which come from
 delivery directions; a standing emotion fights every scene that needs a
 different one. Also leave out personality, scene acting, markup, brackets,
 voice-creation prose, and any reference to age or youth; the cloned voice
-already carries the performance. Everything in speechTraits must also appear in
-description and in a labeled traits[] entry, so the reference voice has the
-trait and its basis stays traceable.
+already carries the performance. For a newly designed voice, everything in
+speechTraits must also appear in description and in a labeled traits[] entry,
+so the reference design and its basis stay traceable. Later-book performance
+refinements may improve speechTraits without replacing the reference recording
+or rewriting its original creation description; do not claim that the saved
+recording already demonstrates a newly requested trait.
 Write description, speechTraits, and trait values as direct, positive audible
 directions only. Do not include commentary about the analysis, the source's
 omissions, the basis of a choice, or what the voice should NOT do. Even a phrase
 such as 'screams are scene delivery only' puts screaming into the actual
 voice-generation prompt; omit that phrase entirely. The one exception is the
-adult-performer clarification for younger roles, where the negation is exactly
-what the engine needs. Keep the text/casting distinction in basis and evidence,
+adult-performer clarification when needed to distinguish adult voice acting
+from a request for an actual child voice. Keep the text/casting distinction in basis and evidence,
 not in audible directions. Add an issue only for a genuinely unresolved decision
 or contradiction that needs review. Ordinary casting choices, unspecified vocal
 age/gender/accent, keeping local delivery separate, and using an unidentified
@@ -183,11 +185,17 @@ sound effects using the voice profile contract. Preserve supported stable traits
 and label creative choices as casting. Return complete voice upserts only when
 needed, preserving their IDs and character/role ownership. Do not redesign an
 established earlier-series voice merely because this book depicts new emotions
-or circumstances. A voice without speechTraits needs them: derive them from its
-existing description and traits[] and return the complete voice upsert. Likewise
-rewrite any description that uses youth words without tying them to an adult
-performer's imitation and the required clarification. Both are refinements of
-an established voice, not a redesign; keep its sound unchanged. Existing identity protections and series continuity rules
+or circumstances. A new or locally defined voice without speechTraits needs
+them: derive them from its description and traits[] and return a complete voice
+upsert. For an inherited voice whose originating definition lacks speechTraits,
+do not backfill only this later book. Report that the defining book and voice
+must be updated first; continuation must fail until that definition is supplied.
+Once speechTraits are defined at the origin, later books may improve them as
+explicit performance refinements while retaining the voice ID, source-backed
+identity, and selected reference recording. Do not silently discard those
+refinements or claim that the original recording was regenerated. Likewise
+clarify youth-related descriptions as adult voice acting without implying an
+actual child voice. Existing identity protections and series continuity rules
 still apply; this acoustic review cannot bypass pending identity decisions.
 """
 

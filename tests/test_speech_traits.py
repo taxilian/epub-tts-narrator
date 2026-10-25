@@ -117,6 +117,64 @@ class SpeechTraitsTests(unittest.TestCase):
                              if voice["id"] == voice_id)
         self.assertEqual(set(context_voice), {"id", "description", "traits", "source_fingerprint"})
 
+    def test_first_traits_cannot_be_added_only_to_a_descendant_voice(self):
+        for voice_index in (0, 1):
+            with self.subTest(voice_index=voice_index), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "series.json"
+                registry = load_registry(path)
+                first = link_analysis(fixture(), registry)
+                save_registry(path, registry, first)
+                registry = load_registry(path)
+                original = deepcopy(registry)
+                current = fixture(sequel=True)
+                propose(current, first["cast"]["characters"][0]["id"])
+                current["cast"]["voices"][voice_index]["speechTraits"] = "Glaswegian Scottish accent"
+                owner = first["cast"]["voices"][voice_index]["id"]
+
+                with self.assertRaisesRegex(ValueError, "originating book") as raised:
+                    link_analysis(current, registry)
+
+                self.assertIn(owner, str(raised.exception))
+                self.assertIn(first["source"]["book"]["title"], str(raised.exception))
+                self.assertEqual(registry, original)
+
+    def test_later_book_refinements_are_retained_and_exposed_to_future_books(self):
+        initial_traits = "Neutral General American accent; measured pace"
+        refined_traits = "Rural Maine accent; clipped, measured phrasing"
+        original = fixture()
+        original["cast"]["voices"][1]["speechTraits"] = initial_traits
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "series.json"
+            registry = load_registry(path)
+            first = link_analysis(original, registry)
+            save_registry(path, registry, first)
+            registry = load_registry(path)
+            current = fixture(sequel=True)
+            old_character = first["cast"]["characters"][0]
+            propose(current, old_character["id"])
+            current["cast"]["voices"][1]["speechTraits"] = refined_traits
+
+            later = link_analysis(current, registry)
+            save_registry(path, registry, later)
+            registry = load_registry(path)
+            context = series_context(registry, current["source"])
+            following = fixture(sequel=True)
+            following["source"]["book"].update(id="book3", title="A Third Walk")
+            propose(following, old_character["id"])
+            continued = link_analysis(following, registry)
+
+        later_voice = next(voice for voice in later["cast"]["voices"]
+                           if voice["id"] == old_character["voice_id"])
+        context_voice = next(voice for voice in context["voices"]
+                             if voice["id"] == old_character["voice_id"])
+        self.assertEqual(later_voice["speechTraits"], refined_traits)
+        self.assertEqual(context_voice["speechTraits"], refined_traits)
+        continued_voice = next(voice for voice in continued["cast"]["voices"]
+                               if voice["id"] == old_character["voice_id"])
+        self.assertEqual(continued_voice["speechTraits"], refined_traits)
+        self.assertEqual(first["cast"]["voices"][1]["speechTraits"], initial_traits)
+        self.assertEqual(registry["books"][0]["cast"]["voices"][1]["speechTraits"], initial_traits)
+
 
 if __name__ == "__main__":
     unittest.main()

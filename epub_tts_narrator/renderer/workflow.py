@@ -942,6 +942,8 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
     store = voice_store(bundle, config)
     lock = store.lock()
     try:
+        from ..voice_profile_guard import require_valid_profiles
+        require_valid_profiles(bundle["directory"])
         store.persist_aliases()
         requested_id = voice_id
         voice_id = store.canonical_id(voice_id)
@@ -1054,6 +1056,8 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
 
 
 def _check_analysis_update(bundle):
+    from ..voice_profile_guard import require_valid_profiles
+    require_valid_profiles(bundle["directory"])
     lock = Path(bundle["directory"]) / ".analysis-update.lock"
     if lock.exists() or lock.is_symlink():
         raise RenderBlocked(f"This book's analysis is being updated; retry when it finishes: {lock}")

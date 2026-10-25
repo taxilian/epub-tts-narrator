@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 41 flat modules, stdlib-only
+├── epub_tts_narrator/        # analyzer package: 46 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 80 flat modules, own CLI + AGENTS.md
-├── tests/                    # 235 flat unittest files + fixtures/ + shared helpers
+├── tests/                    # 239 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -69,6 +69,8 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 
 ## CONVENTIONS (deviations from Python defaults)
 
+- **Every non-fast command must be resumable.** Persist pending/invalid state before expensive work, checkpoint completed units durably, and resume them on rerun. Do not present stale outputs as valid after a failed refresh. Fast read-only commands need no progress journal.
+
 - **Stdlib-only core is an architecture constraint.** `dependencies = []`; no third-party imports in `epub_tts_narrator/` outside optional-extras paths (`verification`, `remote`, `chapter-server`, `cuda-verification`). Renderer ML deps live in root `*.requirements.txt`, NOT pyproject.
 - **Lazy heavy imports.** ML/HTTP imports (mlx, fastapi, msgpack, websockets) are function-local. New heavy deps go inside functions, never module top level.
 - **unittest, not pytest.** No pytest config, no conftest.py, no markers. Run: `python3.11 -m unittest discover -s tests -q`.
@@ -113,6 +115,7 @@ uv pip install --python .venv-renderer/bin/python -e .
 # Run
 python3.11 -m epub_tts_narrator analyze BOOK.epub        # or: epub-tts-narrator ...
 python -m epub_tts_narrator.renderer render BUNDLE       # or: audiobook-render ...
+python3.11 -m epub_tts_narrator refresh-voice-profiles BOOK_DIRECTORY   # profile-only refresh (analysis_revision scope="voice-profiles")
 
 # Offline fixture rebuild / live regression
 python3.11 examples/build_example.py /tmp/example-out
@@ -137,3 +140,6 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - LLM prompts live in per-domain modules: `prompts.py` (shared contracts, discovery/reconciliation guidance), `identity_prompts.py`, `attribution_review_prompts.py`, `speaker_completion_prompts.py`, `audition_prompts.py`, `voice_refresh_prompts.py`, `voice_ensemble_prompts.py`, `jev_prompts.py`, and `renderer/verification_prompts.py`. Prompt bytes are cache/policy identity; changes must be intentional.
 - `speech_word_review.py` separates ordered word coverage from spelling heuristics. Unfamiliar aligned pairs require explicit contextual jury evidence; only proposal/provenance metadata changes, never the six-field applied edit schema.
 - `speech_traits.py` validates optional voice-profile `speechTraits`; analysis proposes mood-independent, explicit-accent performance traits separately from creation descriptions. Renderer binding/composition lives in `renderer/speech_traits.py`; absent fields retain legacy conditioning.
+- Series speech-trait backfills must be made in the originating voice definition, never silently discarded or added only to a descendant. Existing baseline traits may improve in later books; `_history` carries their latest value without mutating prior snapshots or reference voices.
+- `voice_profile_refresh.py` owns validated profile-only proposals and preserved evidence traits; `voice_profile_workflow.py` publishes them through `analysis_revision` scope="voice-profiles". It rebinds audition fingerprints, refreshes descendant links, and never changes segments, aliases, reference assets, or render caches. Update series books in order.
+- `voice_profile_state.py` invalidates all profiles before refresh and checkpoints input-bound proposals. `voice_profile_guard.py` blocks generation for pending books and descendants, coordinates refresh leases, and retains `.lease` ownership artifacts. Rerun `refresh-voice-profiles` to resume API or publication failures.

@@ -118,7 +118,9 @@ def _history(registry, source):
     characters, voices, narrators = {}, {}, {}
     for book in books:
         for voice in book["cast"]["voices"]:
-            voices.setdefault(voice["id"], {"voice": voice, "source_fingerprint": book["source_fingerprint"], "book": book["book"]})
+            record = voices.setdefault(voice["id"], {"voice": voice, "source_fingerprint": book["source_fingerprint"], "book": book["book"]})
+            if "speechTraits" in record["voice"] and "speechTraits" in voice:
+                record["voice"] = dict(record["voice"], speechTraits=voice["speechTraits"])
         for character in book["cast"]["characters"]:
             if character["id"] not in characters:
                 characters[character["id"]] = deepcopy(character)
@@ -412,9 +414,18 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
             if shared["voice_id"] == role["voice_id"]:
                 author_origins[shared["id"]] = origin
 
-    def inherited_voice(identity):
+    def inherited_voice(identity, proposed):
         record = author_voice_records.get(identity, prior_voices[identity])
         voice = deepcopy(record["voice"])
+        if "speechTraits" in proposed:
+            owner = prior_voices[identity]
+            if "speechTraits" not in owner["voice"]:
+                raise ValueError(
+                    f"speechTraits for voice {identity} must first be defined in its originating book "
+                    f"{owner['book']['title']!r} ({owner['book']['id']}). "
+                    "Update that voice definition before continuing; a descendant-only change is not allowed."
+                )
+            voice["speechTraits"] = proposed["speechTraits"]
         origin = {"kind": "series_casting_reuse", "series_id": registry["series_id"],
                   "source_fingerprint": record["source_fingerprint"], "voice_id": identity}
         voice["series_origin"] = origin
@@ -427,7 +438,7 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
     for voice in updated["voices"]:
         new_id = voice_ids[voice["id"]]
         voice["id"] = new_id
-        voices[new_id] = (inherited_voice(new_id) if new_id in prior_voices
+        voices[new_id] = (inherited_voice(new_id, voice) if new_id in prior_voices
                           and prior_voices[new_id]["source_fingerprint"] != source_hash else voice)
     for character in updated["characters"]:
         local_id = character["id"]
@@ -455,7 +466,7 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
         if prior_voices[identity]["source_fingerprint"] == source_hash:
             voices[identity] = dict(deepcopy(voices[current_voice]), id=identity)
         else:
-            voices[identity] = inherited_voice(identity)
+            voices[identity] = inherited_voice(identity, voices[current_voice])
 
     for role in updated["roles"]:
         local_character = role["character_id"]

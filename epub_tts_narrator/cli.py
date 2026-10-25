@@ -257,6 +257,15 @@ def parser():
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
     speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
     speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    refresh_profiles = commands.add_parser(
+        "refresh-voice-profiles",
+        help="Refresh existing voice-profile descriptions, traits, and speechTraits in a completed book directory")
+    refresh_profiles.add_argument("directory", type=Path,
+                                  help="Completed analysis directory to update in place; originals are backed up")
+    refresh_profiles.add_argument("--config", type=Path,
+                                  help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    refresh_profiles.add_argument("--workers", type=int, default=1,
+                                  help="Concurrent model requests, 1-5 (default 1; capped by analysis.attribution_workers)")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -437,6 +446,10 @@ def main(argv=None):
             remaining = sum(len(unassigned_segments(document)) for document in revised.values())
             print(f"Speaker completion finished: {remaining} unassigned spoken passage(s) remain.")
             return 2 if remaining else 0
+        if args.command == "refresh-voice-profiles":
+            from .voice_profile_refresh import refresh_book_voice_profiles
+            refresh_book_voice_profiles(args.directory, args.config, workers=args.workers)
+            return 0
         directory_mode = (args.command == "analyze" and
                           (args.input.is_dir() or args.output is None or args.output.suffix.lower() != ".json"))
         if args.command == "analyze" and directory_mode:

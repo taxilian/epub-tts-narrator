@@ -67,6 +67,65 @@ def _snapshot(document):
             "issues": deepcopy(document["issues"]), "readiness": readiness(document)}
 
 
+PROFILE_FIELDS = {"description", "traits", "speechTraits"}
+_REFRESH_PROVENANCE = {"voice_samples", "voice_profile_refresh"}
+
+
+def _outside_profile_fields(voice):
+    return {key: value for key, value in voice.items() if key not in PROFILE_FIELDS}
+
+
+def profile_revision_differences(original, candidate):
+    """Return every candidate change outside the voice-profile refresh allowlist.
+
+    Only cast voice description/traits/speechTraits, their provenance
+    ``cast_fingerprint`` rebind, and the refresh audit record may differ.
+    Source, segments, issues, characters, roles, voice identity and order,
+    sample scripts, and all other provenance stay exact.
+    """
+    errors = []
+    for key in ("format", "version", "source", "segments", "issues"):
+        if candidate[key] != original[key]:
+            errors.append(key)
+    if candidate["provenance"].get("series") != original["provenance"].get("series"):
+        errors.append("provenance.series")
+
+    def unbound(document):
+        return {key: value for key, value in document["provenance"].items() if key not in _REFRESH_PROVENANCE}
+
+    if unbound(candidate) != unbound(original):
+        errors.append("provenance")
+    refresh = candidate["provenance"].get("voice_profile_refresh")
+    if refresh is not None and not isinstance(refresh, dict):
+        errors.append("provenance.voice_profile_refresh")
+    before, after = original["provenance"].get("voice_samples"), candidate["provenance"].get("voice_samples")
+    if before is not None or after is not None:
+        def frozen(samples):
+            return {key: value for key, value in samples.items() if key != "cast_fingerprint"}
+        if (not isinstance(before, dict) or not isinstance(after, dict)
+                or frozen(before) != frozen(after)
+                or after.get("cast_fingerprint") != fingerprint(candidate["cast"])):
+            errors.append("provenance.voice_samples scripts or binding")
+    if candidate["cast"]["characters"] != original["cast"]["characters"]:
+        errors.append("cast.characters")
+    if candidate["cast"]["roles"] != original["cast"]["roles"]:
+        errors.append("cast.roles")
+    if ({key: value for key, value in candidate["cast"].items() if key != "voices"}
+            != {key: value for key, value in original["cast"].items() if key != "voices"}):
+        errors.append("cast metadata")
+    before_voices, after_voices = original["cast"]["voices"], candidate["cast"]["voices"]
+    if [voice.get("id") for voice in after_voices] != [voice.get("id") for voice in before_voices]:
+        errors.append("cast.voices identity or order")
+    elif any(_outside_profile_fields(after) != _outside_profile_fields(before)
+             for before, after in zip(before_voices, after_voices)):
+        errors.append("cast.voice fields outside description/traits/speechTraits")
+    fixed = {"format", "version", "source", "cast", "segments", "issues", "provenance", "readiness"}
+    if ({key for key in candidate if key not in fixed} != {key for key in original if key not in fixed}
+            or any(candidate[key] != original[key] for key in candidate if key not in fixed)):
+        errors.append("document metadata")
+    return errors
+
+
 def _install(source, destination):
     """An individual file replacement is atomic; the journal covers the chain."""
     destination = Path(destination)
@@ -81,33 +140,65 @@ def _install(source, destination):
         Path(temporary).unlink(missing_ok=True)
 
 
-def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print):
+def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
+                       scope="attribution", sidecars=None):
     """Stage and validate all changes, back up originals, and refresh descendants.
 
     This operation only revises attribution and its audit/review state. Source,
     cast, voice identities, and book locations stay fixed. Voice stores, aliases,
     render caches, and existing audiobooks are never part of the write inventory.
+
+    ``scope`` selects the change contract: ``"attribution"`` (default) permits
+    speaker revisions only; ``"voice-profiles"`` instead permits exactly the
+    allowlisted voice profile fields (description, traits, speechTraits), their
+    provenance cast_fingerprint rebind, and the refresh audit record.
+    ``sidecars`` optionally maps a directory to already validated JSON records
+    (keyed by plain existing filenames, e.g. audition-scripts.json) that are
+    backed up, replaced, and rolled back atomically with the revision.
     """
     from .cli import export_bundle
+    if scope not in {"attribution", "voice-profiles"}:
+        raise ValueError("Revision scope must be attribution or voice-profiles")
+    sidecars = {} if sidecars is None else {
+        Path(path).resolve(): {name: deepcopy(record) for name, record in files.items()}
+        for path, files in sidecars.items()}
+    if sidecars and scope != "voice-profiles":
+        raise ValueError("Revision sidecars are supported only for voice-profile audition bindings")
     revisions = {Path(path).resolve(): deepcopy(document) for path, document in revisions.items()}
     paths = related_directories(directories or revisions)
     if not set(revisions) <= set(paths):
         raise ValueError("Revision directories must be included in the update chain")
+    if not set(sidecars) <= set(paths):
+        raise ValueError("Sidecar directories must be included in the update chain")
     originals, manifests, names, original_hashes = {}, {}, {}, {}
     for path in paths:
         document, registry, bundle_names = _completed_directory(path)
         originals[path] = document, registry
         manifests[path] = _read(path / "manifest.json")
         names[path] = ["analysis.json", "series-cast.json", *bundle_names, "manifest.json"]
+        for name in sidecars.get(path, {}):
+            if name != "audition-scripts.json" or name in names[path]:
+                raise ValueError(f"Invalid revision sidecar name: {name}")
+            target = path / name
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(f"Revision sidecars must already exist as regular files: {name}")
+            names[path].append(name)
         original_hashes[path] = {name: _hash(path / name) for name in names[path]}
         if expected_manifest_hashes is not None:
             expected = expected_manifest_hashes.get(str(path), expected_manifest_hashes.get(path))
             if expected != original_hashes[path]["manifest.json"]:
                 raise ValueError(f"Analysis changed while speaker decisions were being reviewed: {path}")
         candidate = revisions.get(path, document)
-        if (candidate["source"] != document["source"] or candidate["cast"] != document["cast"]
-                or candidate["provenance"].get("series") != document["provenance"].get("series")):
-            raise ValueError("Speaker revisions must preserve source, cast, and series identities")
+        if scope == "attribution":
+            if (candidate["source"] != document["source"] or candidate["cast"] != document["cast"]
+                    or candidate["provenance"].get("series") != document["provenance"].get("series")):
+                raise ValueError("Speaker revisions must preserve source, cast, and series identities")
+        else:
+            differences = profile_revision_differences(document, candidate)
+            if differences:
+                raise ValueError("Voice-profile revisions may change only cast voice description, traits, "
+                                 "and speechTraits with their provenance bindings; rejected: "
+                                 + "; ".join(differences[:6]))
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
         if _render_active(path):
@@ -135,7 +226,8 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
             # A resolved parent attribution may have been copied into descendants
             # as a review issue. Refresh only such inherited review records.
             history = dict(registry, books=registry["books"][:-1])
-            _refresh_import_reviews(document, history, document["provenance"]["series"])
+            if scope == "attribution":
+                _refresh_import_reviews(document, history, document["provenance"]["series"])
             document["readiness"] = readiness(document)
             snapshot = _snapshot(document)
             registry["books"][-1] = snapshot
@@ -152,6 +244,8 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
             export_bundle(document, after, allow_review=True)
             write_json(after / "analysis.json", document)
             write_json(after / "series-cast.json", registry)
+            for name, record in sidecars.get(path, {}).items():
+                write_json(after / name, record)
             manifest = _read(after / "manifest.json")
             if {row["path"] for row in manifest["files"]["scripts"]} != {
                     row["path"] for row in manifests[path]["files"]["scripts"]}:
@@ -192,7 +286,7 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                 # arrive after os.replace succeeds but before _install returns.
                 installed.append((entry, name))
                 _install(Path(entry["prepared"]) / name, path / name)
-            progress(f"Updated speaker assignments and continuation metadata: {path}")
+            progress(f"Updated analysis and continuation metadata: {path}")
         for path in paths:
             _completed_directory(path)
             continuation_directories(path)

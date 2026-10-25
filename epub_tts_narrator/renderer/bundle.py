@@ -16,6 +16,8 @@ from .quality import normalize_words
 
 def load_bundle(directory):
     directory = Path(directory).resolve()
+    from ..voice_profile_guard import require_valid_profiles
+    require_valid_profiles(directory)
     manifest = read_json(regular_file(directory / "manifest.json"))
     if manifest.get("format") != "epub-audiobook-bundle" or manifest.get("version") != 2:
         raise ValueError("Renderer requires a version-2 chapter bundle; re-export older analyses")
