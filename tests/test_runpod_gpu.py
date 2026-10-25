@@ -7,6 +7,7 @@ from epub_tts_narrator.renderer.runpod_gpu import (
     DEFAULT_GPU_TYPE_ID, H100_CANDIDATE_IDS, PREFERRED_H100_HOURLY_LIMIT,
     available_in, catalog_price, select_gpu,
 )
+from epub_tts_narrator.renderer import runpod_gpu
 
 FALLBACK = DEFAULT_GPU_TYPE_ID
 DATACENTER = "US-FIXTURE-1"
@@ -132,6 +133,61 @@ class RunpodGpuPolicyTests(unittest.TestCase):
         self.assertNotIn(DEFAULT_GPU_TYPE_ID, H100_CANDIDATE_IDS)
         self.assertNotEqual(DEFAULT_GPU_TYPE_ID, "NVIDIA RTX 6000 Ada Generation")
         self.assertEqual(PREFERRED_H100_HOURLY_LIMIT, 2.60)
+
+
+class USPlacementTests(unittest.TestCase):
+    def choose(self, rows, centers, **overrides):
+        options = dict(fallback_id=FALLBACK, prefer_h100=True, max_hourly_price=2.60,
+                       preferred_data_center="US-NC-2", volume_data_centers=())
+        options.update(overrides)
+        return runpod_gpu.select_placement(rows, centers, **options)
+
+    def centers(self, *identifiers):
+        return [{"id": identifier, "networkVolumeTypes": ["STANDARD"]} for identifier in identifiers]
+
+    def test_configured_location_is_only_a_hint_and_gpu_only_locations_are_skipped(self):
+        centers = self.centers("US-CO-1") + [{"id": "US-NC-2", "networkVolumeTypes": []}]
+        result = self.choose([catalog_row(FALLBACK, datacenters=("US-NC-2", "US-CO-1"))], centers)
+        self.assertEqual(result.data_center_id, "US-CO-1")
+
+    def test_existing_volume_is_a_tie_breaker_not_a_datacenter_lock(self):
+        centers = self.centers("US-NC-1", "US-CO-1")
+        result = self.choose([catalog_row(FALLBACK, datacenters=("US-CO-1",))], centers,
+                             volume_data_centers=("US-NC-1",))
+        self.assertEqual(result.data_center_id, "US-CO-1")
+        result = self.choose([catalog_row(FALLBACK, datacenters=("US-CO-1", "US-NC-1"))], centers,
+                             preferred_data_center="US-CO-1", volume_data_centers=("US-NC-1",))
+        self.assertEqual(result.data_center_id, "US-NC-1")
+
+    def test_an_affordable_us_h100_beats_reusing_an_rtx_volume(self):
+        rows = [catalog_row(FALLBACK, 2.49, datacenters=("US-NC-1",)),
+                catalog_row("NVIDIA H100 PCIe", 2.59, datacenters=("US-CO-1",))]
+        result = self.choose(rows, self.centers("US-NC-1", "US-CO-1"), volume_data_centers=("US-NC-1",))
+        self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
+        self.assertEqual(result.data_center_id, "US-CO-1")
+
+    def test_non_us_and_storage_incompatible_locations_are_never_selected(self):
+        rows = [catalog_row("NVIDIA H100 PCIe", 1.00, datacenters=("CA-MTL-3", "EU-RO-1")),
+                catalog_row(FALLBACK, 2.49, datacenters=("US-CO-1",))]
+        result = self.choose(rows, self.centers("CA-MTL-3", "EU-RO-1", "US-CO-1"),
+                             preferred_data_center="CA-MTL-3", volume_data_centers=("CA-MTL-3",))
+        self.assertEqual(result.data_center_id, "US-CO-1")
+
+    def test_volume_preference_does_not_beat_stronger_gpu_availability(self):
+        row = catalog_row(FALLBACK, 2.49, datacenters=("US-NC-1", "US-CO-1"))
+        row["dataCenters"][0]["availability"] = "LOW"
+        result = self.choose([row], self.centers("US-NC-1", "US-CO-1"), volume_data_centers=("US-NC-1",))
+        self.assertEqual(result.data_center_id, "US-CO-1")
+
+    def test_no_eligible_us_placement_fails_before_allocation(self):
+        with self.assertRaisesRegex(ValueError, "US"):
+            self.choose([catalog_row(FALLBACK, 2.49, datacenters=("CA-MTL-3",))], self.centers("CA-MTL-3"))
+
+    def test_invalid_stock_entries_do_not_mask_valid_stock_for_the_same_location(self):
+        row = catalog_row("NVIDIA H100 PCIe", 2.19, datacenters=("US-CO-1",))
+        row["dataCenters"].insert(0, {"id": "US-CO-1", "availability": []})
+        result = self.choose([row], self.centers("US-CO-1"))
+        self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
 
 
 if __name__ == "__main__":

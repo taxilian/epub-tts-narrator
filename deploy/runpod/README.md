@@ -26,31 +26,37 @@ both the Pod and your Mac.
 
 Copy [runpod.example.toml](runpod.example.toml) to `runpod.local.toml` beside your
 normal configuration. Its image is pinned; GPU availability and prices are
-checked when creating compute. The selected region must also support network
-volumes. The example's 150 GB volume costs storage fees even while stopped;
-the hourly ceiling covers compute and does not cap storage charges.
+checked when creating compute. `runpod.data_center_id` is an **optional location
+hint**, not a requirement: empty, stale, or non-US values are ignored, never
+errors. The example's 150 GB volume costs storage fees even while stopped; the
+hourly ceiling covers compute and does not cap storage charges.
 
-The selected datacenter must support **standard network volumes**, not just
-the requested GPU. The live catalog is checked before allocation; a GPU-only
-location such as US-NC-2 is rejected locally with supported alternatives.
-Provider 5xx errors include bounded, credential-redacted JSON error details
-so a storage-placement rejection is visible instead of a blind retry message.
+Every managed allocation searches all eligible US datacenters that support
+**standard network volumes**, not just the hinted one. The live catalog is
+checked before allocation; a GPU-only location such as US-NC-2 is simply never
+selected. Provider 5xx errors include bounded, credential-redacted JSON error
+details so a storage-placement rejection is visible instead of a blind retry
+message.
 
 ### GPU selection
 
 By default (`prefer_h100 = true`) a new Pod prefers any available NVIDIA H100
 variant (80GB HBM3/SXM, PCIe, or NVL) whose catalog rate is **strictly under
 $2.60/hour** and within `max_hourly_price`, choosing the cheapest eligible one
-in your configured `data_center_id`. If no such H100 exists — too expensive,
-out of stock, or absent from your datacenter — the Pod uses the configured
+across all eligible US datacenters. If no such H100 exists — too expensive,
+out of stock, or absent from the US catalog — the Pod uses the configured
 `gpu_type_id` fallback (the RTX PRO 6000 in the example), which must be
-available at or under `max_hourly_price` or nothing is created. Set
-`prefer_h100 = false` to pin the configured GPU exactly. After creation the
-provider's actual rate is checked against the same rules and the worker is
-stopped if it exceeds them. Catalog and hourly prices cover compute only;
-persistent storage is billed separately. The chosen GPU is saved before the
-Pod is created, so a retried or restarted deployment keeps the same hardware,
-and a healthy existing Pod is never replaced just to upgrade its GPU.
+available at or under `max_hourly_price` in some eligible US datacenter or
+nothing is created. Set `prefer_h100 = false` to pin the configured GPU
+exactly. GPU class, price, and stock decide first; regions that already hold
+your network volumes and then your configured `data_center_id` hint only break
+ties, so an affordable H100 in another US region beats reusing an RTX region.
+After creation the provider's actual rate is checked against the same rules
+and the worker is stopped if it exceeds them. Catalog and hourly prices cover
+compute only; persistent storage is billed separately. The chosen GPU and
+region are saved before the Pod is created, so a retried or restarted
+deployment keeps the same hardware, and a healthy existing Pod is never
+replaced just to upgrade its GPU or move its region.
 
 `[runpod].service_port` selects the chapter service's listen port and Runpod
 proxy port; it defaults to **8082**. The pinned base image reserves 8081 for
@@ -104,17 +110,32 @@ If the Pod or network volume was deleted in the Runpod console, the next
 managed `encode` recovers by itself. It first validates the local book and
 configuration — a preflight failure creates and starts nothing — and then
 verifies both saved resources before any paid mutation. A deleted managed Pod
-is recreated beside the retained volume; a deleted volume is replaced with a
+is recreated under the US-wide placement policy, reusing retained storage when
+that region wins; a deleted volume is replaced with a
 new empty one, and a surviving Pod that mounted it is stopped and confirmed
 stopped before any replacement is created, so nothing ever boots on dead
 storage. Local caches, Ceph objects, lease and lock files are never touched.
 
-Storage replacement invalidates the saved deployed revision and smoke flag:
-encode redeploys this checkout, runs the full install, downloads models, and
-passes the smoke check before submitting the book. `--no-update` never skips
-this mandatory bootstrap; it is ignored with a notice when the deployment was
-deleted or never bootstrapped. A healthy deployment keeps the fast path:
-runtime install only, no smoke check, no redeploy.
+When the selection policy picks a different US region than the retained
+storage — for example an affordable H100 elsewhere — the client creates a new
+**empty** volume colocated with the new Pod, keeps the old volume and its
+contents where they are, and reports that the retained volume continues to
+bill for storage. Nothing is copied, moved, or deleted: caches, models, and
+voices live on the old volume until you remove it in the Runpod console.
+Returning to a region later reuses its known volume after re-verifying it
+with the provider; only a confirmed 404 discards a mapping, and uncertain
+answers (403/5xx) never release storage.
+
+Storage replacement invalidates the saved deployed revision and smoke flag
+through a durable `bootstrap_required` marker: encode redeploys this checkout,
+runs the full install, downloads models, and passes the smoke check before
+submitting the book. `--no-update` never skips this mandatory bootstrap; it
+is ignored with a notice, and the marker is re-checked after the worker
+starts because a host-capacity replacement can switch storage during startup.
+The marker clears only after a successful smoke check, so an interrupted
+setup always resumes with the full local deploy, install, prepare, and smoke.
+A healthy deployment keeps the fast path: runtime install only, no smoke
+check, no redeploy.
 
 An explicit `runpod.pod_id` or `runpod.volume_id` is a pin: a pin the provider
 confirms missing is a configuration error, never a silent recreation. Managed
@@ -194,19 +215,28 @@ capacity becoming available on the Pod's machine; immediate restart is not
 guaranteed. Native model loading also takes time on every process start.
 
 For managed deployments, a confirmed host-capacity error triggers at most one
-replacement Pod per operation. The replacement keeps the same image,
-datacenter, and existing network volume, and must meet the configured hourly
-cap. Its GPU is selected by the same policy as a new Pod: a preferred H100
-under $2.60/hour when `prefer_h100` is set, otherwise the configured
-`gpu_type_id`. The old Pod's GPU is recorded as the replacement's immutable
-source, and the stopped Pod is validated against it even when the replacement
-targets a different GPU. The previous Pod remains stopped. The client does not
-allocate another volume or choose a different region. A deployment with an
-explicit `runpod.pod_id` is fixed and is never replaced automatically.
+replacement Pod per operation. The replacement keeps the same image and must
+meet the configured hourly cap; its GPU is selected by the same policy as a
+new Pod across eligible US datacenters, so the target region may differ from
+the source. The old Pod's GPU, datacenter, image, and mounts are recorded as
+an immutable source snapshot before anything is created, and the stopped Pod
+is validated against that snapshot independently of the replacement target —
+a changed `data_center_id` hint is not a mismatch. Storage is colocated with
+the target: the existing volume in the same region, a previously retained
+volume there, or a new empty volume whose creation is persisted and resumed
+exactly like a first creation. The old Pod remains stopped and the previous
+Pod and volume IDs are retained; a new target volume switches the active
+storage only after the candidate is fully validated, and then requires the
+full bootstrap described above. A deployment with an explicit `runpod.pod_id`
+is fixed and is never replaced automatically, and an explicit
+`runpod.volume_id` pins the worker to that volume's US datacenter.
 
 Replacement intent is saved before creation. If the API response is lost, the
 client looks for that uniquely named Pod and verifies its placement before
 adopting it. Rerunning resumes this check instead of creating another Pod.
+Pending replacements are resumed before ordinary provisioning, even if the
+old Pod was subsequently deleted. Only a confirmed 404 permits treating the
+source as gone; permission and service errors leave the saved intent intact.
 An unresolved creation is reported by `runpod status` and shutdown diagnostics;
 inspect Runpod when the CLI cannot confirm which resource was created. Keep
 the private deployment state so the client can reconcile the outcome safely.

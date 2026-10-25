@@ -741,7 +741,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.datacenters.return_value = {"dataCenters": [
             {"id": "US-FIXTURE-1", "networkVolumeTypes": []},
             {"id": "US-SUPPORTED-1", "networkVolumeTypes": ["STANDARD"]}]}
-        with self.assertRaisesRegex(ValueError, "US-SUPPORTED-1"):
+        with self.assertRaisesRegex(ValueError, "US"):
             self.deployment().provision()
         self.api.create_volume.assert_not_called()
         self.api.create_pod.assert_not_called()
@@ -900,7 +900,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         with self.assertRaises(RunpodAmbiguousOutcome):
             deployment.provision()
         self.assertTrue(deployment.state["volume_creation_pending"])
-        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
+        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"] + "-us-fixture-1"
         self.api.list_volumes.return_value = [{"name": name, "id": "recovered_volume", "dataCenterId": "US-FIXTURE-1"}]
         deployment.provision()
         self.api.create_volume.assert_called_once()
@@ -929,7 +929,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
         with self.assertRaises(RunpodAmbiguousOutcome):
             deployment.provision()
-        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
+        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"] + "-us-fixture-1"
         self.api.list_volumes.return_value = [{"name": name, "id": "volume_a"}, {"name": name, "id": "volume_b"}]
         with self.assertRaisesRegex(RuntimeError, "multiple volumes share its name"):
             deployment.provision()

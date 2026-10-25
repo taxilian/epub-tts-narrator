@@ -11,6 +11,7 @@ pricing fails closed before any resource is created.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 
 # Exact catalog IDs from the public Runpod GPU type list. The fallback is the
@@ -39,11 +40,14 @@ def catalog_price(gpu):
 
 def available_in(gpu, data_center_id):
     """True when overall and configured-datacenter availability are known, not NONE."""
-    if gpu.get("availability") not in _AVAILABLE:
+    availability = gpu.get("availability")
+    centers = gpu.get("dataCenters")
+    if not isinstance(availability, str) or availability not in _AVAILABLE or not isinstance(centers, list):
         return False
     return any(isinstance(center, dict) and center.get("id") == data_center_id
+               and isinstance(center.get("availability"), str)
                and center.get("availability") in _AVAILABLE
-               for center in gpu.get("dataCenters") or [])
+               for center in centers)
 
 
 def select_gpu(rows, *, fallback_id, prefer_h100, data_center_id, max_hourly_price,
@@ -77,3 +81,45 @@ def select_gpu(rows, *, fallback_id, prefer_h100, data_center_id, max_hourly_pri
             or (prefer_h100 and fallback_id in H100_CANDIDATE_IDS and price >= h100_hourly_limit)):
         raise ValueError("Current GPU catalog price exceeds runpod.max_hourly_price or is unavailable")
     return fallback_id, price
+
+
+@dataclass(frozen=True, slots=True)
+class Placement:
+    gpu_type_id: str
+    data_center_id: str
+    hourly_price: float
+
+
+def select_placement(rows, data_centers, *, fallback_id, prefer_h100, max_hourly_price,
+                     preferred_data_center="", volume_data_centers=(), pinned_data_center=None):
+    """Choose US compute colocated with supported storage; location hints only break ties."""
+    if not isinstance(rows, list) or not isinstance(data_centers, list):
+        raise ValueError("Runpod returned an invalid GPU or US datacenter catalog; no allocation is safe")
+    candidates = []
+    for center in data_centers:
+        if not isinstance(center, dict):
+            continue
+        identifier = center.get("id")
+        volume_types = center.get("networkVolumeTypes")
+        if (not isinstance(identifier, str) or not identifier.startswith("US-")
+                or not isinstance(volume_types, list) or "STANDARD" not in volume_types
+                or (pinned_data_center is not None and identifier != pinned_data_center)):
+            continue
+        try:
+            gpu_id, price = select_gpu(rows, fallback_id=fallback_id, prefer_h100=prefer_h100,
+                                       data_center_id=identifier, max_hourly_price=max_hourly_price)
+        except ValueError:
+            continue
+        gpu = next(row for row in rows if isinstance(row, dict) and row.get("id") == gpu_id)
+        stock = min({"HIGH": 0, "MEDIUM": 1, "LOW": 2}[row["availability"]]
+                    for row in gpu["dataCenters"] if isinstance(row, dict)
+                    and row.get("id") == identifier and isinstance(row.get("availability"), str)
+                    and row["availability"] in _AVAILABLE)
+        gpu_class = 0 if prefer_h100 and gpu_id in H100_CANDIDATE_IDS else 1
+        rank = (gpu_class, price, stock, identifier not in volume_data_centers,
+                identifier != preferred_data_center, identifier, gpu_id)
+        candidates.append((rank, Placement(gpu_id, identifier, float(price))))
+    if not candidates:
+        raise ValueError("No eligible US datacenter has available compute and standard network volumes within "
+                         "the configured GPU policy and hourly price cap; no resources were created")
+    return min(candidates, key=lambda candidate: candidate[0])[1]
