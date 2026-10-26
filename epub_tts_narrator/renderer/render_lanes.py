@@ -114,8 +114,36 @@ class ResourceLane:
         return job.future
 
     def run(self, function, *args, owner=(None, None), **kwargs):
-        """Submit and wait synchronously; return the value or raise the error."""
-        return self.submit(function, *args, owner=owner, **kwargs).result()
+        """Submit and wait synchronously, applying caller backpressure.
+
+        While the pending queue is full the caller blocks until capacity
+        frees, so saturated lanes slow transaction runners instead of
+        failing their transactions with ``LaneFull``. The wait polls the
+        global stop controller and re-checks the closed state; the function
+        itself is submitted exactly once, after capacity exists, so it can
+        never run twice. Same-lane callers are refused like ``submit``.
+        """
+        from .interrupts import stop_if_requested
+
+        if get_ident() in self._worker_idents:
+            raise RuntimeError("A lane worker must not submit work to its own lane")
+        if not callable(function):
+            raise TypeError("submit requires a callable")
+        with self._cond:
+            while self._pending >= self._max_pending:
+                stop_if_requested()
+                if self._closed:
+                    raise RuntimeError("The resource lane is closed")
+                self._cond.wait(0.1)
+            stop_if_requested()
+            if self._closed:
+                raise RuntimeError("The resource lane is closed")
+            operation = METRICS.operation(self._stage)
+            job = _Job(copy_context(), function, args, kwargs, Future(), operation)
+            self._owners.setdefault(owner, deque()).append(job)
+            self._pending += 1
+            self._cond.notify()
+        return job.future.result()
 
     def close(self, *, drain=False):
         """Stop submissions; cancel queued work (default) or drain it, then join."""

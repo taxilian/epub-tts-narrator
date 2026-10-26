@@ -228,13 +228,20 @@ class CancellationAndCloseTests(SchedulerTestCase):
             pass
         self.assertLessEqual(threading.active_count(), baseline)
 
-    def test_errors_propagate_unchanged_and_do_not_stop_the_scheduler(self):
-        scheduler = self.start_scheduler(1, 1)
+    def test_errors_propagate_unchanged_and_close_only_that_owner(self):
+        scheduler = self.start_scheduler(2, 2)
         failing = self.submit("book:1", "1-a", error=ValueError("boom"))
         with self.assertRaises(ValueError):
             failing.result(10)
-        healthy = self.submit("book:1", "1-b")
-        self.assertEqual(healthy.result(10), "1-b")
+        # The failed chapter's admission is closed; other owners keep running.
+        with self.assertRaises(RuntimeError):
+            self.submit("book:1", "1-b")
+        healthy = self.submit("book:2", "2-a")
+        self.assertEqual(healthy.result(10), "2-a")
+        # Retiring the drained owner reopens it for a fresh generation.
+        self.assertTrue(scheduler.retire_owner("book:1"))
+        retried = self.submit("book:1", "1-b")
+        self.assertEqual(retried.result(10), "1-b")
 
     def test_close_with_pending_limit_waiters_wakes_blocked_submitters(self):
         baseline = threading.active_count()
@@ -291,7 +298,11 @@ class ContextAndStopTests(SchedulerTestCase):
         with self.assertRaises(RenderPaused):
             queued.result(10)
         self.starts.expect_absent("1-b")
-        # A later submission outside the stop scope runs normally.
+        # The owner-loss stop closed this chapter's admission; retiring the
+        # drained owner opens a fresh scheduling generation.
+        with self.assertRaises(RuntimeError):
+            self.submit("book:1", "1-c")
+        self.assertTrue(scheduler.retire_owner("book:1"))
         recovered = self.submit("book:1", "1-c")
         self.assertEqual(recovered.result(10), "1-c")
 

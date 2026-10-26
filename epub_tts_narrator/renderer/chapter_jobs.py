@@ -68,6 +68,7 @@ class ChapterJobs:
         self._stopping = self._draining = False
         self._started = self._closed = self._closing = False
         self._active = 0
+        self._scheduler_owner_supported = None
         self._last_activity = time.monotonic()
         self._thread = self._assembly = self._file_lock = None
         self._threads = []
@@ -642,6 +643,26 @@ class ChapterJobs:
             owner = self._owners.get(job_id)
             return owner is not None and self.sessions.live(owner)
 
+    def _synthesize(self, spec, voices, job_id, epoch, work, notify, budget):
+        """Delegate to the executor, adding the run-unique scheduling owner
+        only when the executor explicitly names the parameter. A plain
+        ``**kwargs`` forwarding wrapper is not an opt-in: it would forward
+        the unknown keyword to a target that rejects it, so unknown and
+        wrapped executors keep their exact existing call."""
+        if self._scheduler_owner_supported is None:
+            try:
+                import inspect
+                parameters = inspect.signature(self.executor.synthesize).parameters
+                self._scheduler_owner_supported = "scheduler_owner" in parameters
+            except (TypeError, ValueError):
+                self._scheduler_owner_supported = False
+        if self._scheduler_owner_supported:
+            return self.executor.synthesize(spec, voices, work, notify=notify,
+                                            retry_budget=budget,
+                                            scheduler_owner=(job_id, epoch))
+        return self.executor.synthesize(spec, voices, work, notify=notify,
+                                        retry_budget=budget)
+
     def _run(self):
         while True:
             claimed = self._claim_next()
@@ -660,9 +681,9 @@ class ChapterJobs:
                         lambda: not self._grant_live(job_id, epoch),
                         lambda: RenderPaused("The chapter's rendering client disconnected; generation paused "
                                              "at a verified boundary with all accepted work retained")):
-                    prepared = self.executor.synthesize(spec, voices, self.root / "render-work",
-                                                        lambda message: self._log(job_id, message),
-                                                        retry_budget=budget)
+                    prepared = self._synthesize(spec, voices, job_id, epoch, self.root / "render-work",
+                                                lambda message: self._log(job_id, message),
+                                                budget)
                 if not self._grant_live(job_id, epoch):
                     raise RenderPaused("The chapter's rendering client disconnected before assembly")
                 self._set_state(job_id, "assembling")

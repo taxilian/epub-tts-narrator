@@ -96,6 +96,95 @@ class ChapterJobsTests(unittest.TestCase):
             time.sleep(.01)
         self.fail("Job did not finish")
 
+    def test_forwarding_wrappers_receive_the_exact_existing_call(self):
+        calls = []
+
+        class Target:
+            identity = {"engine": "wrapped-target"}
+
+            def synthesize(self, spec, voices, work, notify, retry_budget=None):
+                notify("generated")
+                return {}
+
+            def assemble(self, spec, prepared, work, notify):
+                folder = work / digest(spec)
+                folder.mkdir(exist_ok=True)
+                (folder / "chapter.m4a").write_bytes(b"x")
+                return {"chapter.m4a": folder / "chapter.m4a"}
+
+        class RejectingTarget(Target):
+            def synthesize(self, spec, voices, work, notify, retry_budget=None,
+                           **forbidden):
+                if "scheduler_owner" in forbidden:
+                    raise TypeError(f"unexpected keyword scheduler_owner")
+                return Target.synthesize(self, spec, voices, work, notify,
+                                         retry_budget=retry_budget)
+
+        class ForwardingWrapper:
+            identity = {"engine": "forwarding-wrapper"}
+
+            def __init__(self, target):
+                self.target = target
+                self.multi_speaker = False
+
+            def synthesize(self, spec, *args, **kwargs):
+                if "scheduler_owner" in kwargs:
+                    raise TypeError("scheduler_owner must never reach a wrapper")
+                calls.append(dict(kwargs))
+                return self.target.synthesize(spec, *args, **kwargs)
+
+            def assemble(self, spec, prepared, work, notify):
+                return self.target.assemble(spec, prepared, work, notify)
+
+        self.service = ChapterJobs(self.root / "wrapped",
+                                   ForwardingWrapper(RejectingTarget()),
+                                   {"assembly_workers": 2})
+        self.addCleanup(self.service.close)
+        self.service.start()
+        self.session = service_session(self.service)
+        done = self.submit()
+        self.assertEqual(self.terminal(done["id"])["state"], "complete")
+        # The wrapper saw the exact legacy call: retry budget only, never an
+        # unknown scheduling keyword it would forward to its target.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(set(calls[0]), {"notify", "retry_budget"})
+
+    def test_named_owner_executors_receive_job_and_epoch_owners(self):
+        observed = []
+
+        class OwnerAwareExecutor:
+            identity = {"engine": "owner-aware"}
+            multi_speaker = False
+
+            def synthesize(self, spec, voices, work, notify, retry_budget=None,
+                           scheduler_owner=None):
+                observed.append(scheduler_owner)
+                notify("done")
+                return {}
+
+            def assemble(self, spec, prepared, work, notify):
+                folder = work / digest(spec)
+                folder.mkdir(exist_ok=True)
+                (folder / "chapter.m4a").write_bytes(b"x")
+                return {"chapter.m4a": folder / "chapter.m4a"}
+
+        self.service = ChapterJobs(self.root / "owner-aware", OwnerAwareExecutor(),
+                                   {"assembly_workers": 2})
+        self.addCleanup(self.service.close)
+        self.service.start()
+        self.session = service_session(self.service)
+        first = self.submit(1)
+        second = self.submit(2)
+        self.assertEqual(self.terminal(first["id"])["state"], "complete")
+        self.assertEqual(self.terminal(second["id"])["state"], "complete")
+        self.assertEqual(len(observed), 2)
+        self.assertEqual([owner[0] for owner in observed],
+                         [first["id"], second["id"]])
+        # Both first claims carry the same epoch number with distinct job
+        # identities: the owner pair is run-unique per chapter job.
+        self.assertEqual(observed[0][1], observed[1][1])
+        self.assertNotEqual(observed[0][0], observed[1][0])
+
     def test_restart_clears_unowned_rows_and_never_autoexecutes_them(self):
         first = self.submit()
         self.assertEqual(self.submit()["id"], first["id"])

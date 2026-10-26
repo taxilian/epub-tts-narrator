@@ -47,6 +47,10 @@ def chapter_share(global_limit, chapter_concurrency):
     return max(1, global_limit // chapter_concurrency)
 
 
+class AdmissionClosed(RuntimeError):
+    """The owner's chapter admission closed after a terminal transaction."""
+
+
 def _checked(function, args, kwargs):
     stop_if_requested()
     return function(*args, **kwargs)
@@ -98,6 +102,12 @@ class LogicalClipScheduler:
                 if self._closed:
                     raise RuntimeError("The logical clip scheduler is closed")
             entry = self._owners.get(owner)
+            if entry is not None and entry.get("closed"):
+                # A terminal transaction closed this chapter's admission; a
+                # fresh generation must retire the drained owner first.
+                raise AdmissionClosed(
+                    "The logical clip admission for this owner is closed "
+                    "after a terminal failure")
             if entry is None:
                 entry = {"queue": deque(), "active": 0}
                 self._owners[owner] = entry
@@ -111,17 +121,38 @@ class LogicalClipScheduler:
         return [future.result() for future in futures]
 
     def cancel_owner(self, owner):
-        """Cancel every queued transaction of one owner; started work drains."""
+        """Cancel every queued transaction of one owner; started work drains.
+
+        Future cancellation fires done-callbacks, so no scheduler lock is
+        held while cancelling: queued items are popped under the condition
+        and cancelled after it is released.
+        """
         with self._cond:
             entry = self._owners.get(owner)
-            cancelled = 0
+            cancelled, popped = 0, []
             while entry is not None and entry["queue"]:
-                future = entry["queue"].popleft()[0]
+                popped.append(entry["queue"].popleft()[0])
                 self._pending -= 1
-                if future.cancel():
-                    cancelled += 1
             self._cond.notify_all()
+        for future in popped:
+            if future.cancel():
+                cancelled += 1
         return cancelled
+
+    def retire_owner(self, owner):
+        """Drop one owner's entry after its work fully drained.
+
+        Bounded memory for a warm server: finished chapter owners leave no
+        scheduling residue. The entry is removed only when its queue is
+        empty and no transaction is active; retiring a closed entry is how
+        a fresh scheduling generation reopens the owner.
+        """
+        with self._cond:
+            entry = self._owners.get(owner)
+            if entry is None or entry["queue"] or entry["active"]:
+                return False
+            del self._owners[owner]
+            return True
 
     def close(self, *, wait=True):
         """Cancel queued work, drain started transactions, stop submission."""
@@ -129,12 +160,15 @@ class LogicalClipScheduler:
             if self._closed:
                 return
             self._closed = True
+            popped = []
             for entry in self._owners.values():
                 while entry["queue"]:
+                    popped.append(entry["queue"].popleft()[0])
                     self._pending -= 1
-                    entry["queue"].popleft()[0].cancel()
             self._owners.clear()
             self._cond.notify_all()
+        for future in popped:
+            future.cancel()
         self._executor.shutdown(wait=wait)
 
     def _pump(self):
@@ -151,7 +185,7 @@ class LogicalClipScheduler:
                 entry = self._owners[keys[index]]
                 if (entry["queue"] and entry["active"] < self._share
                         and self._inflight < self._limit):
-                    self._dispatch(entry)
+                    self._dispatch(keys[index], entry)
                     last_served = index
                     if self._inflight >= self._limit:
                         break
@@ -159,7 +193,15 @@ class LogicalClipScheduler:
                 return
             self._cursor = (last_served + 1) % count
 
-    def _dispatch(self, entry):
+    def _close_owner_admission_locked(self, entry):
+        """Pop and return queued work of a closed owner. Caller holds _cond."""
+        popped = []
+        while entry["queue"]:
+            popped.append(entry["queue"].popleft()[0])
+            self._pending -= 1
+        return popped
+
+    def _dispatch(self, owner, entry):
         future, function, args, kwargs, context = entry["queue"].popleft()
         self._pending -= 1
         if not future.set_running_or_notify_cancel():
@@ -171,15 +213,33 @@ class LogicalClipScheduler:
             previous = getattr(self._threads, "logical", False)
             self._threads.logical = True
             try:
-                future.set_result(context.run(_checked, function, args, kwargs))
+                result = context.run(_checked, function, args, kwargs)
             except BaseException as error:
+                result = None
+                # The chapter's admission closes at the failure instant:
+                # queued siblings are popped before any pump can dispatch
+                # them. Collectors treat their later cancellation as drain
+                # outcome, never as the chapter's failure, so the original
+                # error below is the one that surfaces.
+                with self._cond:
+                    entry["active"] -= 1
+                    self._inflight -= 1
+                    entry["closed"] = True
+                    popped = self._close_owner_admission_locked(entry)
+                    self._pump()
+                for sibling in popped:
+                    sibling.cancel()
                 future.set_exception(error)
-            finally:
-                self._threads.logical = previous
+            else:
                 with self._cond:
                     entry["active"] -= 1
                     self._inflight -= 1
                     self._pump()
-                    self._cond.notify_all()
+                # Accounting precedes resolution, so a collector that saw
+                # this future finish can immediately retire the owner.
+                future.set_result(result)
+            self._threads.logical = previous
+            with self._cond:
+                self._cond.notify_all()
 
         self._executor.submit(run)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import os
+import uuid
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,7 +30,9 @@ from .retry_budget import SpeechRetryBudget
 from .workflow import _render_chapter_chunks
 
 
-MAX_PARALLEL_CHAPTERS = 2
+# Absolute safety ceiling on concurrent chapter coordinators, regardless of
+# configuration; the configured count comes from effective scheduling.
+MAX_PARALLEL_CHAPTERS = 16
 
 
 def _pcm_data_hash(path):
@@ -118,7 +121,10 @@ class ChapterExecutor:
         engine, _ = self._components()
         # The pool owns global inference slots and model/thread affinity. Other
         # plugins have no concurrency contract and retain serial chapter jobs.
-        return MAX_PARALLEL_CHAPTERS if isinstance(engine, RenderPool) else 1
+        if not isinstance(engine, RenderPool):
+            return 1
+        from .render_pipeline_config import effective_scheduling
+        return effective_scheduling(self.config)["chapter_concurrency"]
 
     @property
     def multi_speaker(self):
@@ -155,7 +161,8 @@ class ChapterExecutor:
         chapter_settings(config["render"], censorship_policy=config["censorship"])
         return config
 
-    def synthesize(self, spec, voices, work, notify=print, retry_budget=None):
+    def synthesize(self, spec, voices, work, notify=print, retry_budget=None,
+                   scheduler_owner=None):
         config = self._settings(spec)
         engine, verifier = self._components()
         if retry_budget is None:
@@ -191,7 +198,9 @@ class ChapterExecutor:
                 chapter, registered, engine, engine_identity, verifier, config, work,
                 notify=notify, total_chapters=spec["total_chapters"],
                 take_locks=self._take_locks, take_locks_guard=self._take_locks_guard,
-                retry_budget=retry_budget, paragraph_split_available=False)
+                retry_budget=retry_budget, paragraph_split_available=False,
+                scheduler_owner=scheduler_owner or (f"job-{uuid.uuid4().hex[:16]}",
+                                                    chapter["number"]))
         context = {"version": 1, "spec_hash": digest(spec),
                    "source_fingerprint": spec["source_fingerprint"],
                    "total_chapters": spec["total_chapters"],
