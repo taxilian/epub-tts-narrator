@@ -738,6 +738,12 @@ class CachedRequests:
                 'Check EVERY delivery object. The default is {"direction":"","evidence":[]}; a nonempty '
                 "direction needs exact supporting evidence. Keep unsupported directions empty.",
             ])
+            if any(code in str(error) for code in ("(U+2018)", "(U+2019)", "(U+201C)", "(U+201D)", "(U+2013)", "(U+2014)")):
+                guidance.append(
+                    "The source uses typographic punctuation: curly quotes (“ ”), apostrophes (’), and dashes (– —). "
+                    "Copy them exactly; never substitute the ASCII lookalikes \" or '. Fix exactly the reported "
+                    "character offset and leave every other character unchanged."
+                )
         if speech_spelling:
             correction["instruction"] = (
                 'Return one complete {"segments":[...]} response, not a patch. Include EVERY target_segments '

@@ -370,6 +370,28 @@ class PipelineTests(unittest.TestCase):
         spelling_guidance = [item for item in guidance if "plain words" in item]
         self.assertEqual(len(spelling_guidance), 1)
 
+    def test_attribution_repair_guidance_names_typographic_character_classes(self):
+        class RepairClient(FakeClient):
+            def complete(self, system, payload):
+                self.calls.append(deepcopy(payload))
+                if len(self.calls) == 1:
+                    return {"units": []}
+                return {"units": [{"unit_id": "u1", "segments": []}]}
+
+        payload = {"target_units": [{"unit_id": "u1"}], "final_cast": {}}
+
+        def validate(response):
+            if len(response["units"]) != 1:
+                raise ValueError("Text changed or omitted in unit u0001449 at offset 51; first differs at "
+                                 "offset 51. Expected character: '’' (U+2019); received character: \"'\" (U+0027)")
+            return response
+
+        client = RepairClient()
+        requests = CachedRequests(client, self.cache)
+        requests.run("Fixture system", payload, validate)
+        guidance = client.calls[1]["correction"]["guidance"]
+        self.assertTrue(any("typographic punctuation" in item for item in guidance))
+
     def test_analysis_forwards_validation_repair_progress(self):
         progress = []
         with self.assertRaisesRegex(ValueError, "Text changed"):
