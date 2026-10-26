@@ -33,6 +33,55 @@ def group_word_counts(corpus):
     return counts
 
 
+def metrics_window(start, end):
+    """Bounded counter deltas over one labeled measurement window.
+
+    Counters are monotone, so subtraction isolates the window without
+    resetting live gauges; instantaneous queued/active gauges come from the
+    window's end and must read zero once its work has fully drained.
+    """
+    window = {}
+    for stage, after in end.items():
+        if not isinstance(after, dict):
+            continue
+        before = start.get(stage, {})
+        entry = {"queued_now": after["queued_now"], "active_now": after["active_now"]}
+        for key in ("wait_seconds", "wait_count", "active_seconds", "active_count"):
+            entry[key] = round(after[key] - before.get(key, 0.0), 6)
+        for kind in ("wait_buckets", "active_buckets"):
+            entry[kind] = {name: after[kind][name] - before.get(kind, {}).get(name, 0)
+                           for name in after[kind]}
+        entry["outcomes"] = {name: after["outcomes"][name] - before.get("outcomes", {}).get(name, 0)
+                             for name in after["outcomes"]}
+        window[stage] = entry
+    return window
+
+
+def build_telemetry(window_start, warmup_end, active_end, gauges):
+    """Stage histograms/outcomes per window plus lane/backlog/logical gauges.
+
+    ``gauges`` comes from the live pool before shutdown; None means legacy
+    scheduling without a lane runtime, reported as explicitly unavailable.
+    """
+    telemetry = {"warmup_window": metrics_window(window_start, warmup_end),
+                 "active_window": metrics_window(warmup_end, active_end)}
+    if gauges is None:
+        telemetry["resource_lanes"] = "unavailable"
+        telemetry["backlog"] = "unavailable"
+        telemetry["logical"] = "unavailable"
+        telemetry["runtime_limits"] = "unavailable"
+        telemetry["backlog_peak_integration"] = "unavailable"
+        return telemetry
+    telemetry["resource_lanes"] = gauges["lanes"]
+    telemetry["backlog"] = gauges["backlog"]
+    telemetry["logical"] = gauges["logical"]
+    telemetry["runtime_limits"] = gauges["runtime_limits"]
+    captured = isinstance(gauges["backlog"], dict) and any(
+        key.startswith("peak_") for key in gauges["backlog"])
+    telemetry["backlog_peak_integration"] = "captured" if captured else "pending"
+    return telemetry
+
+
 def init_output(output, corpus, scheduler, *, fake_engine):
     """Create a fresh run root or validate an interrupted one for resume."""
     output = Path(output).resolve()

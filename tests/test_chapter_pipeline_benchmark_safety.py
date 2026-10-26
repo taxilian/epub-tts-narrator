@@ -5,10 +5,12 @@ passages, manifest-less outputs, and the pipeline scheduler's real lane
 runtime must all behave correctly before any measured run is trusted.
 """
 
+import json
 import subprocess
 import unittest
 
 from scripts.chapter_benchmark_fakeengine import LEAF_ENGINES
+from scripts.chapter_benchmark_corpus import load_corpus
 from epub_tts_narrator.renderer.common import read_json, write_json
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.render_pipeline import chapter_share
@@ -75,6 +77,92 @@ class RunSafetyTests(BenchmarkFixture):
         self.assertEqual(len(pool.resources.tts._threads), pool.max_parallel)
         self.assertEqual(len(LEAF_ENGINES), 1)
         self.assert_clean_teardown()
+
+
+def _stage_delta(report, window, stage, field):
+    return report["telemetry"][window][stage][field]
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
+class TelemetryReportTests(BenchmarkFixture):
+    """Active-window stage metrics must be real, separated, and redacted."""
+
+    def complete_pipeline_run_report(self):
+        self.fresh_fake_registry()
+        self.run_main("run", str(self.frozen), "--config", str(self.config_path),
+                      "--scheduler", "pipeline", "--output", str(self.root / "run"), "--fake-engine")
+        return self.assert_valid_m4b(self.root / "run")
+
+    def test_active_window_stage_metrics_are_real_separated_and_balanced(self):
+        report = self.complete_pipeline_run_report()
+        telemetry = report["telemetry"]
+        # Real overlap counters, not an empty structural schema: the active
+        # window shows the measured 8 clips plus per-clip preparation and
+        # recognition work, distinctly from the single warmup clip.
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "synthesis", "active_count"), 8)
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "synthesis", "outcomes")["completed"], 8)
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "recognition", "active_count"), 8)
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "preparation", "active_count"), 8)
+        warm = telemetry["warmup_window"]["synthesis"]["outcomes"]["completed"]
+        self.assertEqual(warm, 1)  # warmup must not contaminate the active window
+        self.assertLessEqual(_stage_delta(report, "warmup_window", "synthesis", "active_count"), 1)
+        # Queue balance at window close: nothing queued or active remains.
+        for stage in ("synthesis", "recognition", "preparation"):
+            self.assertEqual(telemetry["active_window"][stage]["queued_now"], 0, stage)
+            self.assertEqual(telemetry["active_window"][stage]["active_now"], 0, stage)
+
+    def test_resource_lanes_backlog_and_limits_are_captured_while_pool_alive(self):
+        report = self.complete_pipeline_run_report()
+        telemetry = report["telemetry"]
+        self.assertEqual(telemetry["runtime_limits"]["max_inflight"], 16)
+        self.assertEqual(telemetry["runtime_limits"]["max_parallel"], 1)
+        self.assertEqual(telemetry["logical"]["global_limit"], 16)
+        self.assertEqual(telemetry["resource_lanes"]["tts"]["workers"], 1)
+        self.assertEqual(telemetry["resource_lanes"]["recognition"]["max_pending"], 16)
+        backlog = telemetry["backlog"]
+        self.assertIsInstance(backlog, dict)
+        for key in ("pending_count", "materialized_bytes", "max_pending", "max_materialized_bytes"):
+            self.assertIsInstance(backlog[key], int)
+        # Peak gauges arrive with the core's backlog work; until then the
+        # report says pending integration instead of inventing zeros.
+        marker = telemetry["backlog_peak_integration"]
+        if any(key.startswith("peak_") for key in backlog):
+            self.assertEqual(marker, "captured")
+        else:
+            self.assertEqual(marker, "pending")
+
+    def test_telemetry_is_numeric_bounded_and_secret_free(self):
+        report = self.complete_pipeline_run_report()
+        dumped = json.dumps(report["telemetry"], sort_keys=True)
+        self.assertNotIn("api_key", dumped.lower())
+        corpus, _ = load_corpus(self.frozen)
+        passage = corpus["cases"][0]["chunk"]["spoken_text"][:24]
+        self.assertNotIn(passage, dumped)
+        def walk(value):
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+            else:
+                self.assertIsInstance(value, (int, float, str))
+                if isinstance(value, str):
+                    self.assertIn(value, {"unavailable", "captured", "pending"})
+        walk(report["telemetry"])
+
+    def test_legacy_mode_reports_lanes_and_backlog_as_unavailable_not_zero(self):
+        self.fresh_fake_registry()
+        self.run_main("run", str(self.frozen), "--config", str(self.config_path),
+                      "--scheduler", "legacy", "--output", str(self.root / "run"), "--fake-engine")
+        report = self.assert_valid_m4b(self.root / "run")
+        telemetry = report["telemetry"]
+        self.assertEqual(telemetry["resource_lanes"], "unavailable")
+        self.assertEqual(telemetry["backlog"], "unavailable")
+        self.assertEqual(telemetry["logical"], "unavailable")
+        # Legacy still records real stage aggregates through the pool paths.
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "synthesis", "active_count"), 8)
+        self.assertGreaterEqual(_stage_delta(report, "active_window", "recognition", "active_count"), 8)
 
 
 if __name__ == "__main__":

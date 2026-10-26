@@ -67,7 +67,10 @@ def cmd_prepare(args):
 def cmd_run(args):
     from epub_tts_narrator.renderer.config import load_config
     from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
+    from epub_tts_narrator.renderer.render_metrics import METRICS
     from scripts.chapter_benchmark_assembly import assemble_book
+    from scripts.chapter_benchmark_report import build_telemetry
+    from scripts.chapter_benchmark_service import telemetry_snapshot
 
     corpus, voices = load_corpus(args.frozen)
     config = load_config(args.config, require_verifier=not args.fake_engine,
@@ -137,6 +140,10 @@ def cmd_run(args):
         bindings = delivery.register_voices(voices)
         report["timing"]["cold_setup_seconds"] = time.perf_counter() - began
         save_report(output, report)
+        # Active-window telemetry: snapshots bracket the warmup and the
+        # measured groups separately, so warmup never contaminates the
+        # histograms; nothing is reset while work is in flight.
+        window_start = METRICS.snapshot()
         with sampler:
             began = time.perf_counter()
             warmup_selection = build_selection(corpus, None, bindings)
@@ -147,8 +154,13 @@ def cmd_run(args):
                 delivery.wait({record["id"]: (folder, record)})
             report["timing"]["warmup_cache_hit"] = warmup_hit
             report["timing"]["warmup_seconds"] = time.perf_counter() - began
+            warmup_end = METRICS.snapshot()
             save_report(output, report)
             report["timing"]["active_pipeline_seconds"] = pending_downloads()
+            active_end = METRICS.snapshot()
+            pool = service.jobs.executor._components()[0]
+            report["telemetry"] = build_telemetry(window_start, warmup_end, active_end,
+                                                  telemetry_snapshot(pool))
             report["gpu_samples"] = list(sampler.samples)
             save_report(output, report)
             began = time.perf_counter()

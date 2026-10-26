@@ -130,6 +130,26 @@ def cached_record(folder, selection):
     return None
 
 
+def telemetry_snapshot(pool):
+    """Payload-free lane/backlog/logical gauges while the pool is still alive.
+
+    The backlog snapshot is captured wholesale, so peak gauges the core adds
+    later flow into reports automatically. Legacy scheduling has no lane
+    runtime or backlog budget; the caller reports those as unavailable.
+    """
+    if pool is None or pool.resources is None or pool.logical is None:
+        return None
+    lanes = {}
+    for name, lane in (("tts", pool.resources.tts), ("preparation", pool.resources.preparation),
+                       ("recognition", pool.resources.recognition), ("review", pool.resources.review),
+                       ("review_coordination", pool.resources.review_coordination)):
+        lanes[name] = {"workers": len(lane._threads), "max_pending": lane._max_pending,
+                       "pending_now": lane._pending}
+    return {"lanes": lanes, "backlog": pool.resources.backlog.snapshot(),
+            "logical": {"global_limit": pool.logical.global_limit, "chapter_share": pool.logical.share},
+            "runtime_limits": {"max_inflight": pool.max_inflight, "max_parallel": pool.max_parallel}}
+
+
 class Delivery:
     """The production client session: submission budget, heartbeat, ACK waits."""
 
