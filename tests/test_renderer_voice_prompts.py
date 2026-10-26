@@ -24,7 +24,7 @@ class AudiobookVoicePromptTests(unittest.TestCase):
             AUDIOBOOK_VOICE_CONTEXT + " " + direction,
         )
 
-    def test_youthful_character_is_explicitly_an_adult_performance(self):
+    def test_youthful_character_uses_audiobook_context_and_preserves_description(self):
         description = "A young girl's light, bright tone with crisp consonants and lively phrasing."
         prompt = default_voice_prompt({"description": description})
         self.assertTrue(prompt.startswith("Adult voice mimicking a character that sounds like "))
