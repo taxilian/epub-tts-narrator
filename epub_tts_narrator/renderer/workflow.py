@@ -629,6 +629,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                             metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
                         else:
                             metadata = generate(raw, seed)
+                    if attempt_ticket is not None:
+                        # The raw candidate is materialized untranscribed
+                        # audio the moment generation returns, before any
+                        # queued normalization starts.
+                        attempt_ticket.materialize(regular_file(raw).stat().st_size)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
                                       "seed": seed, "raw_file": raw.name,

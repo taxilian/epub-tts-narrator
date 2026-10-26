@@ -974,14 +974,15 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     ticket = begin_attempt_ticket(False, materialized)
     try:
         return _checked_audio_report(path, expected_text, verifier, policy,
-                                     purpose=purpose)
+                                     purpose=purpose, ticket=ticket)
     finally:
         if ticket is not None:
             ticket.release()
 
 
 def _checked_audio_report(path, expected_text: str, verifier,
-                          policy: dict | None = None, *, purpose: str = "speech") -> dict:
+                          policy: dict | None = None, *, purpose: str = "speech",
+                          ticket=None) -> dict:
     purpose = _validate_purpose(purpose)
     settings = validate_policy(policy)
     if not isinstance(expected_text, str):
@@ -1026,7 +1027,14 @@ def _checked_audio_report(path, expected_text: str, verifier,
         transcribe = getattr(verifier, "transcribe_reference", None) if purpose == "reference" else None
         if not callable(transcribe):
             transcribe = verifier.transcribe
-        result = transcribe(Path(path))
+        try:
+            result = transcribe(Path(path))
+        finally:
+            # Primary ASR returned: free the attempt slot and its bytes
+            # before any comparison, JEV judge, review, or caller-side
+            # recovery work.
+            if ticket is not None:
+                ticket.release()
         if isinstance(result, dict) and isinstance(result.get("text"), str):
             # Keep useful evidence even if an alignment/schema check fails;
             # this unvalidated text never substitutes for a passed transcript.

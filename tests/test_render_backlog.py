@@ -10,7 +10,14 @@ import wave
 from copy import deepcopy
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
+import epub_tts_narrator.renderer.workflow as render_workflow
+from epub_tts_narrator.renderer.clip_repair_contract import (
+    _directed_text, part_direction,
+)
+from epub_tts_narrator.renderer.clip_repair_execute import execute_plan
+from epub_tts_narrator.renderer.clip_repair_state import ClipRepairState
 from epub_tts_narrator.renderer.common import digest, file_hash, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_audio, validate_policy
@@ -18,6 +25,7 @@ from epub_tts_narrator.renderer.quality import validation_key as make_validation
 from epub_tts_narrator.renderer.render_resource_context import resource_scope
 from epub_tts_narrator.renderer.render_resources import RenderResources
 from epub_tts_narrator.renderer.speech_recovery import recover_speech
+from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.workflow import (
     SpeechRetryBudget, SpeechVerificationFailed, verified_take,
 )
@@ -921,7 +929,254 @@ class ChunkedVerifier:
             data = source.readframes(frames)
         words = [self.fixtures[hashlib.sha256(data[start:start + 88200]).hexdigest()]
                  for start in range(0, len(data), 88200)]
-        return timed_transcript("".join(words))
+        return timed_transcript(" ".join(word.strip() for word in words))
+
+
+REQUESTED = "Insang Mortuary Services! What does it—"
+RECOGNIZED = "In saying Mortuary Services! What does it—"
+
+
+class BlockingJudgeVerifier:
+    """ASR fixture whose JEV judge blocks after primary recognition returns."""
+
+    def __init__(self, inner, judge_identity):
+        self.inner = inner
+        self.identity = inner.identity
+        self.reference_judge_identity = judge_identity
+        self.asr_returned = threading.Event()
+        self.judge_entered = threading.Event()
+        self.release_judge = threading.Event()
+
+    def transcribe(self, path):
+        transcript = self.inner.transcribe(path)
+        self.asr_returned.set()
+        return transcript
+
+    def judge_reference(self, expected, transcript, secondary):
+        self.judge_entered.set()
+        if not self.release_judge.wait(WORKER_WAIT):
+            raise AssertionError("judge watchdog timed out")
+        return {"identity": self.reference_judge_identity,
+                "decision": "different",
+                "probabilities": {"roughly_same": 0.01}}
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required for boundary tests")
+class BacklogBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.config = deepcopy(DEFAULTS)
+        self.config["render"].update(
+            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE,
+            keep_intermediate_audio=True,
+        )
+        self.config["quality"] = validate_policy({})
+        self.fixtures = {}
+        self.engine = FixtureEngine(self.fixtures)
+        self.verifier = FixtureVerifier(self.fixtures)
+        self.text = "Hello there."
+        self.request = {"kind": "speech", "text": self.text,
+                        "engine": self.engine.identity}
+        self.budget = BacklogBudget(max_pending=1,
+                                    max_materialized_bytes=10 * 1024 * 1024)
+        self.samples = []
+        self.probe = GaugeProbe(self.verifier, self.budget, self.samples)
+
+    def candidate(self, heard):
+        takes = self.root / "takes"
+        takes.mkdir(parents=True, exist_ok=True)
+        wav = takes / "candidate.wav"
+        self.engine._write(heard, wav, 5)
+        return wav
+
+    def test_jev_blocked_after_primary_asr_sees_zero_gauges_and_fresh_tts_can_start(self):
+        wav = self.candidate(RECOGNIZED)
+        verifier = BlockingJudgeVerifier(
+            self.verifier,
+            {"policy_version": 1, "threshold": 0.5, "model": "fixture-judge"})
+        outcome = {}
+
+        def verify():
+            try:
+                with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+                    outcome["report"] = validate_audio(
+                        wav, REQUESTED, verifier, self.config["quality"],
+                        purpose="speech")
+            except BaseException as error:
+                outcome["error"] = error
+
+        thread = threading.Thread(target=verify)
+        thread.start()
+        self.assertTrue(verifier.judge_entered.wait(WORKER_WAIT))
+        # Primary ASR returned: the slot and its bytes are already free while
+        # the JEV judge is still blocked.
+        self.assertTrue(wait_until(
+            lambda: self.budget.snapshot()["pending_count"] == 0))
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+        # A fresh generation can start under one permit during the block.
+        with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+            fresh = begin_attempt_ticket(True)
+            self.assertIsNotNone(fresh)
+            fresh.release()
+        # A released ticket must not suppress a later adopt reservation.
+        with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+            adopted = begin_attempt_ticket(False, 12)
+            self.assertIsNotNone(adopted)
+            adopted.release()
+        verifier.release_judge.set()
+        thread.join(WORKER_WAIT)
+        self.assertNotIn("error", outcome, outcome)
+        self.assertEqual(outcome["report"]["reasons"], ["text_mismatch"])
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+
+    def test_recognition_failure_releases_the_boundary_with_the_error_report(self):
+        wav = self.candidate(self.text)
+
+        class ExplodingVerifier:
+            identity = {"backend": "exploding-fixture"}
+
+            def transcribe(self, path):
+                raise RuntimeError("recognition outage")
+
+        with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+            report = validate_audio(wav, self.text, ExplodingVerifier(),
+                                    self.config["quality"], purpose="speech")
+        self.assertEqual(report["reasons"],
+                         ["verification_failed: RuntimeError: recognition outage"])
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+        self.assertIsNone(current_ticket())
+
+    def test_raw_candidate_is_charged_before_queued_normalization(self):
+        real_normalize = render_workflow.normalize_clip
+        normalize_entered = threading.Event()
+        release_normalize = threading.Event()
+
+        def blocked_normalize(raw, wav, **kwargs):
+            normalize_entered.set()
+            if not release_normalize.wait(WORKER_WAIT):
+                raise AssertionError("normalize watchdog timed out")
+            return real_normalize(raw, wav, **kwargs)
+
+        def generate(path, seed):
+            return self.engine._write(self.text, path, seed)
+
+        outcome = {}
+
+        def attempt():
+            try:
+                outcome["result"] = self.take(generate=generate)
+            except BaseException as error:
+                outcome["error"] = error
+
+        with patch.object(render_workflow, "normalize_clip", blocked_normalize):
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            self.assertTrue(normalize_entered.wait(WORKER_WAIT))
+            raw = self.root / "takes" / "attempt-001-raw.wav"
+            self.assertTrue(raw.exists())
+            snapshot = self.budget.snapshot()
+            self.assertEqual(snapshot["pending_count"], 1)
+            self.assertEqual(snapshot["materialized_bytes"], raw.stat().st_size)
+            self.assertGreater(snapshot["materialized_bytes"], 0)
+            release_normalize.set()
+            thread.join(WORKER_WAIT)
+        self.assertNotIn("error", outcome, outcome)
+        wav, accepted = outcome["result"]
+        self.assertTrue(accepted["report"]["passed"], accepted)
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+
+    def take(self, generate=None):
+        with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+            return verified_take(
+                self.text, generate or self.generate, self.root / "takes",
+                dict(self.request), self.probe, self.config,
+                notify=lambda _: None, retry_budget=SpeechRetryBudget(),
+            )
+
+    def generate(self, path, seed):
+        return self.engine._write(self.text, path, seed)
+
+
+REPAIR_PLAN = {"parts": [{"text": "Hum.", "delivery": "", "speech_traits": ""},
+                         {"text": "Again.", "delivery": "", "speech_traits": ""}],
+               "reason": "Try alternate phonetics."}
+
+
+class RepairPlanClient:
+    identity = {"fixture": "boundary-plan"}
+
+    def complete(self, prompt, payload):
+        if payload["mode"] == "clip_repair":
+            return deepcopy(REPAIR_PLAN)
+        return {"approve": True, "reason": "Reasonable clip-local experiment."}
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required for repair boundary tests")
+class BacklogClipRepairBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.config = deepcopy(DEFAULTS)
+        self.config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE)
+        self.config["quality"] = validate_policy({})
+        self.fixtures = {}
+        self.engine = FixtureEngine(self.fixtures)
+        self.verifier = ChunkedVerifier(self.fixtures)
+        self.budget = BacklogBudget(max_pending=2,
+                                    max_materialized_bytes=1024 * 1024)
+        self.samples = []
+        self.probe = GaugeProbe(self.verifier, self.budget, self.samples)
+        self.request = {"kind": "speech",
+                        "chunk": {"spoken_text": "Hum. Again."},
+                        "voice": {"id": "v"}}
+
+    def test_direct_repair_parts_hold_one_batch_reservation_until_joined_asr(self):
+        session = ClipRepairState(self.root / "repair", self.request,
+                                  RepairPlanClient())
+        session.prepare([{"reason": "mismatch"}], 3)
+        entries = []
+
+        def generate(part, path, seed):
+            entries.append(("engine-entry", dict(self.budget.snapshot())))
+            text = part["text"]
+            trimmed = trim_speech_text(text)
+            _, control = _directed_text(trimmed, part_direction(part))
+            metadata = self.engine._write(trimmed, path, seed)
+            metadata.update({"synthesis_text": trimmed, **control})
+            entries.append(("raw-returned", dict(self.budget.snapshot())))
+            entries[-1] += (Path(path).stat().st_size,)
+            return metadata
+
+        with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+            result = execute_plan(session, generate, self.probe, self.config,
+                                  budget=SpeechRetryBudget(),
+                                  episode=digest(self.request), reserve=0)
+        self.assertIsNotNone(result)
+        wav, record = result
+        self.assertTrue(record["report"]["passed"], record)
+        self.assertGreaterEqual(len(entries), 4)
+        # Each direct engine entry runs under the one batch reservation.
+        self.assertEqual(entries[0][1]["pending_count"], 1)
+        self.assertEqual(entries[0][1]["materialized_bytes"], 0)
+        # The first part's raw bytes are charged before the second part's
+        # generation starts; both parts' audio is accounted at the joined
+        # ASR boundary.
+        self.assertEqual(entries[2][1]["pending_count"], 1)
+        self.assertEqual(entries[2][1]["materialized_bytes"], entries[1][2])
+        landing = [snapshot for _, snapshot in self.samples]
+        self.assertEqual(len(landing), 1)
+        self.assertEqual(landing[0]["pending_count"], 1)
+        self.assertEqual(landing[0]["materialized_bytes"], wav.stat().st_size)
+        self.assertGreater(landing[0]["materialized_bytes"], entries[1][2])
+        settled = self.budget.snapshot()
+        self.assertEqual(settled["pending_count"], 0)
+        self.assertEqual(settled["materialized_bytes"], 0)
 
 
 if __name__ == "__main__":
