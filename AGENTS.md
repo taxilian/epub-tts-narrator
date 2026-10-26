@@ -18,7 +18,7 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 epub-tts-narrator/
 ├── epub_tts_narrator/        # analyzer package: 56 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 115 flat modules, own CLI + AGENTS.md
-├── tests/                    # 291 flat unittest files + fixtures/ + shared helpers
+├── tests/                    # 294 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
