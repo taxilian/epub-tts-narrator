@@ -8,10 +8,11 @@ import unittest
 
 import epub_tts_narrator
 from epub_tts_narrator.renderer.interrupts import RenderPaused, scoped_stop_condition
+from epub_tts_narrator.renderer.local_runtime import LocalRuntime
 from epub_tts_narrator.renderer.render_lanes import ResourceLane
 from epub_tts_narrator.renderer.render_resource_context import (
     current_owner, current_resources, resource_scope, run_preparation,
-    run_recognition, run_review_leaf,
+    run_recognition, run_review_leaf, suppress_resource_routing,
 )
 from epub_tts_narrator.renderer.render_resources import RenderResources
 
@@ -195,6 +196,49 @@ class LaneRoutingTests(unittest.TestCase):
         gate.set()
         worker.join(5)
         self.assertNotEqual(seen["leaf_thread"], get_ident())
+
+
+class ModelThreadLeafSuppressionTests(unittest.TestCase):
+    """Model-affine LocalRuntime execution direct-calls leaves; coordination keeps routing."""
+
+    def setUp(self):
+        self.runtime = resources()
+        self.addCleanup(self.runtime.close)
+        self.model = LocalRuntime()
+        self.addCleanup(self.model.close)
+
+    def test_leaves_inside_model_execution_run_inline_while_scope_stays_readable(self):
+        threads = []
+        seen = {}
+
+        def model_operation():
+            seen["resources"] = current_resources() is self.runtime
+            seen["owner"] = current_owner()
+            return run_recognition(lambda: threads.append(get_ident()) or "inline")
+
+        with resource_scope(self.runtime, ("run", 1)):
+            self.assertEqual(self.model.run(model_operation), "inline")
+        self.assertTrue(seen["resources"])
+        self.assertEqual(seen["owner"], ("run", 1))
+        self.assertEqual(threads, [self.model.run(get_ident)],
+                         "the suppressed leaf must run on the model thread, not a lane")
+
+    def test_scope_routing_resumes_once_model_execution_ends(self):
+        with resource_scope(self.runtime, ("run", 1)):
+            self.model.run(lambda: run_recognition(lambda: "inline"))
+            routed = run_recognition(lambda: get_ident())
+        self.assertNotEqual(routed, get_ident(),
+                            "ordinary scope routing must survive the model operation")
+
+    def test_suppress_routing_restores_the_previous_state_and_survives_errors(self):
+        with resource_scope(self.runtime, ("run", 1)):
+            with suppress_resource_routing():
+                self.assertEqual(run_recognition(lambda: "direct"), "direct")
+            self.assertEqual(run_recognition(lambda: "routed"), "routed")
+            with self.assertRaises(ValueError):
+                with suppress_resource_routing():
+                    run_recognition(_raise_value_error)
+            self.assertEqual(run_review_leaf(lambda: "routed"), "routed")
 
 
 class DrainBoundaryTests(unittest.TestCase):

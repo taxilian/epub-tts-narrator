@@ -7,6 +7,7 @@ from contextvars import copy_context
 from threading import Lock, get_ident
 
 from .render_metrics import METRICS, STAGES, classify_outcome
+from .render_resource_context import suppress_resource_routing
 
 
 class LocalRuntime:
@@ -17,7 +18,10 @@ class LocalRuntime:
     ``metrics_stage`` opts a runtime into payload-free resource metrics; the
     queued gauge covers dispatch-to-thread wait and the active gauge covers
     execution on the persistent thread. Reentrant same-thread delegation stays
-    part of the enclosing operation and is never counted twice.
+    part of the enclosing operation and is never counted twice. The model
+    function runs with resource routing suppressed: bounded lanes block on
+    this thread, so nested leaves direct-call instead of re-entering a lane
+    whose worker is waiting for this very operation.
     """
 
     def __init__(self, *, name="audiobook-local-mlx", metrics_stage=None):
@@ -48,7 +52,8 @@ class LocalRuntime:
         try:
             if initialize_mlx:
                 self.initialize_mlx()
-            result = function(*args, **kwargs)
+            with suppress_resource_routing():
+                result = function(*args, **kwargs)
         except BaseException as error:
             if operation is not None:
                 operation.end(classify_outcome(error))
