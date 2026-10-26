@@ -1090,6 +1090,110 @@ class BacklogBoundaryTests(unittest.TestCase):
         self.assertEqual(self.budget.snapshot()["pending_count"], 0)
         self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
 
+    def test_fresh_generation_releases_the_held_ticket_at_the_asr_boundary(self):
+        self.config["render"]["max_attempts"] = 1
+        self.verifier.transcribe = lambda path: timed_transcript(RECOGNIZED)
+        verifier = BlockingJudgeVerifier(
+            self.verifier,
+            {"policy_version": 1, "threshold": 0.5, "model": "fixture-judge"})
+        requested = REQUESTED
+        outcome = {}
+
+        def attempt():
+            try:
+                with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
+                    outcome["result"] = verified_take(
+                        requested,
+                        lambda path, seed: self.engine._write(requested, path, seed),
+                        self.root / "fresh-takes",
+                        {"kind": "speech", "text": requested,
+                         "engine": self.engine.identity},
+                        verifier, self.config, notify=lambda _: None,
+                        retry_budget=SpeechRetryBudget())
+            except BaseException as error:
+                outcome["error"] = error
+
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        self.assertTrue(verifier.asr_returned.wait(WORKER_WAIT))
+        self.assertTrue(verifier.judge_entered.wait(WORKER_WAIT))
+        # The fresh take's attempt ticket must already be free while the JEV
+        # judge is blocked: primary ASR returned, so the slot and its bytes
+        # are gone before any comparison or judgment work.
+        self.assertTrue(wait_until(
+            lambda: self.budget.snapshot()["pending_count"] == 0))
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+        # One permit: a fresh TTS generation must be able to start now.
+        with resource_scope(ScopedRuntime(self.budget), ("run", 2)):
+            fresh = begin_attempt_ticket(True)
+            self.assertIsNotNone(fresh)
+            fresh.release()
+        verifier.release_judge.set()
+        thread.join(WORKER_WAIT)
+        # The take terminates (here with the unavailable-confirmation raise,
+        # since the fixture judge record is deliberately incomplete) and the
+        # gauges are fully restored.
+        self.assertIsNotNone(outcome.get("error"), outcome)
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+        # The released ticket must not suppress a later adopt reservation.
+        with resource_scope(ScopedRuntime(self.budget), ("run", 3)):
+            adopted = begin_attempt_ticket(False, 12)
+            self.assertIsNotNone(adopted)
+            adopted.release()
+
+    def test_fresh_take_stays_balanced_when_recognition_fails_or_acoustics_reject(self):
+        self.config["render"]["max_attempts"] = 1
+        requested = REQUESTED
+
+        class ExplodingVerifier:
+            identity = {"backend": "fresh-exploding"}
+
+            def transcribe(self, path):
+                raise RuntimeError("recognition outage")
+
+        def attempt(verifier, config, directory):
+            try:
+                with resource_scope(ScopedRuntime(self.budget), ("run", 9)):
+                    verified_take(
+                        requested,
+                        lambda path, seed: self.engine._write(requested, path, seed),
+                        directory,
+                        {"kind": "speech", "text": requested,
+                         "engine": self.engine.identity},
+                        verifier, config, notify=lambda _: None,
+                        retry_budget=SpeechRetryBudget())
+            except BaseException as error:
+                return error
+            return None
+
+        thread = threading.Thread(
+            target=lambda: outcome.update(error=attempt(
+                ExplodingVerifier(), self.config, self.root / "fresh-takes-asr")))
+        outcome = {}
+        thread.start()
+        thread.join(WORKER_WAIT)
+        self.assertIsInstance(outcome["error"], SpeechVerificationFailed,
+                              outcome)
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+
+        acoustic = deepcopy(self.config)
+        acoustic["quality"] = validate_policy(
+            {**acoustic["quality"], "min_duration_seconds": 30.0})
+        outcome = {}
+        thread = threading.Thread(
+            target=lambda: outcome.update(error=attempt(
+                FixtureVerifier(self.fixtures), acoustic,
+                self.root / "fresh-takes-acoustic")))
+        thread.start()
+        thread.join(WORKER_WAIT)
+        self.assertIsInstance(outcome["error"], SpeechVerificationFailed,
+                              outcome)
+        self.assertEqual(self.budget.snapshot()["pending_count"], 0)
+        self.assertEqual(self.budget.snapshot()["materialized_bytes"], 0)
+        self.assertIsNone(current_ticket())
+
     def take(self, generate=None):
         with resource_scope(ScopedRuntime(self.budget), ("run", 1)):
             return verified_take(

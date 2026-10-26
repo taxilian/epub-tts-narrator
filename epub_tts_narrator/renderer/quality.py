@@ -1032,9 +1032,15 @@ def _checked_audio_report(path, expected_text: str, verifier,
         finally:
             # Primary ASR returned: free the attempt slot and its bytes
             # before any comparison, JEV judge, review, or caller-side
-            # recovery work.
-            if ticket is not None:
-                ticket.release()
+            # recovery work. When this verification adopted its own ticket
+            # it is released here; when a generation attempt already held
+            # one, the innermost held ticket is released instead — count
+            # and bytes only, because the ContextVar token reset belongs to
+            # the acquiring thread's outer finally.
+            from .render_backlog import current_ticket
+            held = ticket if ticket is not None else current_ticket()
+            if held is not None:
+                held.release()
         if isinstance(result, dict) and isinstance(result.get("text"), str):
             # Keep useful evidence even if an alignment/schema check fails;
             # this unvalidated text never substitutes for a passed transcript.
