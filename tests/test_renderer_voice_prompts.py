@@ -8,6 +8,14 @@ from epub_tts_narrator.renderer.voice_prompts import (
 )
 
 
+LEGACY_PREFIXES = (
+    "Adult audiobook narrator portraying a character in a book. "
+    "Create an adult performer's imitation of the following vocal qualities: ",
+    "audiobook narrator portraying a character in a book: ",
+    AUDIOBOOK_VOICE_CONTEXT + "  ",
+)
+
+
 class AudiobookVoicePromptTests(unittest.TestCase):
     def test_context_is_explicit_and_custom_direction_is_preserved_exactly(self):
         direction = "  A thin, high rasp.\nKeep the character's urgent cadence.  "
@@ -19,19 +27,60 @@ class AudiobookVoicePromptTests(unittest.TestCase):
     def test_youthful_character_is_explicitly_an_adult_performance(self):
         description = "A young girl's light, bright tone with crisp consonants and lively phrasing."
         prompt = default_voice_prompt({"description": description})
-        self.assertTrue(prompt.startswith("Adult audiobook narrator"))
-        self.assertIn("adult performer's imitation", prompt)
+        self.assertTrue(prompt.startswith("Adult voice mimicking a character that sounds like "))
         self.assertTrue(prompt.endswith(description))
 
     def test_old_context_is_upgraded_once_and_still_matches_its_description(self):
         description = "A bright, youthful character with light resonance."
-        old = "audiobook narrator portraying a character in a book: " + description
-        new = audiobook_voice_prompt(old)
-        self.assertTrue(new.startswith("Adult audiobook narrator"))
-        self.assertEqual(new, audiobook_voice_prompt(description))
-        self.assertEqual(voice_prompt_description(old), description)
-        self.assertEqual(voice_prompt_description(new), description)
-        self.assertEqual(audiobook_voice_prompt(new), new)
+        for prefix in LEGACY_PREFIXES:
+            with self.subTest(prefix=prefix):
+                old = prefix + description
+                new = audiobook_voice_prompt(old)
+                self.assertTrue(new.startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+                self.assertEqual(new, audiobook_voice_prompt(description))
+                self.assertEqual(voice_prompt_description(old), description)
+                self.assertEqual(voice_prompt_description(new), description)
+                self.assertEqual(audiobook_voice_prompt(new), new)
+
+    def test_default_prompt_recognizes_wrappers_before_normalizing_prose(self):
+        description = "A clear,\n measured voice."
+        expected = AUDIOBOOK_VOICE_CONTEXT + " A clear, measured voice."
+        for prefix in ("", AUDIOBOOK_VOICE_CONTEXT + " ", *LEGACY_PREFIXES):
+            with self.subTest(prefix=prefix):
+                first = default_voice_prompt({"description": prefix + description})
+                self.assertEqual(first, expected)
+                self.assertEqual(default_voice_prompt({"description": first}), expected)
+                self.assertEqual(first.count(AUDIOBOOK_VOICE_CONTEXT), 1)
+
+    def test_known_wrappers_preserve_custom_description_bytes_without_broad_stripping(self):
+        description = "A thin, high rasp.\nKeep this  spacing.  "
+        for prefix in (AUDIOBOOK_VOICE_CONTEXT + " ", *LEGACY_PREFIXES):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(voice_prompt_description(prefix + description), description)
+                self.assertEqual(audiobook_voice_prompt(prefix + description),
+                                 AUDIOBOOK_VOICE_CONTEXT + " " + description)
+        # Longer custom whitespace is not mistaken for the exact historical
+        # double-space separator, and new custom input remains byte-exact.
+        for leading in ("  ", "\t", "\n"):
+            custom = leading + description
+            wrapped = audiobook_voice_prompt(custom)
+            self.assertEqual(voice_prompt_description(wrapped), custom)
+            self.assertEqual(audiobook_voice_prompt(wrapped), wrapped)
+
+    def test_gemini_recovery_matches_all_known_wrappers_without_changing_saved_requests(self):
+        from copy import deepcopy
+        from epub_tts_narrator.renderer.casting import _recovery_inputs
+        description = "A dry rasp with measured phrasing."
+        current = {"designer": {"engine": "gemini_voice_design", "model": "fixture"},
+                   "prompt": audiobook_voice_prompt(description), "nonce": "current"}
+        for prefix in LEGACY_PREFIXES:
+            saved = dict(current, prompt=prefix + description, nonce="saved")
+            before = deepcopy(saved)
+            with self.subTest(prefix=prefix):
+                self.assertEqual(_recovery_inputs(saved), _recovery_inputs(current))
+                self.assertEqual(saved, before)
+        changed = dict(current, prompt=audiobook_voice_prompt("A bright, quick voice."))
+        self.assertNotEqual(_recovery_inputs(changed), _recovery_inputs(current))
 
     def test_context_is_not_treated_as_a_description(self):
         with self.assertRaisesRegex(ValueError, "nonempty"):
