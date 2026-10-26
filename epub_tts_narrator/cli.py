@@ -276,7 +276,7 @@ def parser():
                                   help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     refresh_profiles.add_argument("--workers", type=int, default=1,
                                   help="Concurrent model requests, 1-5 (default 1; capped by analysis.attribution_workers)")
-    pronunciations = commands.add_parser("discover-pronunciations", help="Find unusual names and words in an existing book without repeating analysis")
+    pronunciations = commands.add_parser("discover-pronunciations", help="Collect names and unusual words and prepare CMU name suggestions without repeating analysis")
     pronunciations.add_argument("directory", type=Path)
     pronunciations.add_argument("--config", type=Path, help="Global TOML configuration")
     for command in (plan, run):
@@ -361,9 +361,9 @@ def main(argv=None):
                 and not audition_preparation_pending(revised)):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
-            from .pronunciations import discovery_pending
-            print("Saved character and passage analysis is complete; checking pronunciation discovery."
-                  if discovery_pending(directory, original) else
+            from .pronunciations import preparation_pending
+            print("Saved character and passage analysis is complete; preparing pronunciation suggestions."
+                  if preparation_pending(directory, original) else
                   "Saved analysis is complete; no model calls or analysis changes are needed.")
             from .pronunciation_workflow import prepare_book_pronunciations
             prepare_book_pronunciations(directory, config, document=original, client_factory=OpenAICompatibleClient)
@@ -602,7 +602,9 @@ def main(argv=None):
                                            + " Baseline includes one spoken-spelling scan; the final segment count determines additional bounded batches."
                                              " Add three independent reviews for each batch proposing spelling edits."
                                            + (" Directory analysis also scans pronunciation candidates in bounded source batches; "
-                                              "the baseline includes one request and long books need more. Guesses are never auto-confirmed."
+                                              "the baseline includes one request and long books need more. "
+                                              "Add one cached CMU proposal request per pending character/place-name word without an inherited decision; "
+                                              "this count is unknown before discovery. Guesses are never auto-confirmed."
                                               if directory_mode else "")),
                                   "exclusions": source["exclusions"]}
                 if registry is not None:

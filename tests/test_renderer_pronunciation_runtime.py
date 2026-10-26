@@ -288,7 +288,7 @@ class PronunciationPlanTests(unittest.TestCase):
 
 class PronunciationInheritancePlanTests(unittest.TestCase):
     def test_late_ancestor_correction_applies_without_reloading_child_or_reanalysis(self):
-        from epub_tts_narrator.pronunciations import set_pronunciation, save_candidates, reset_pronunciation
+        from epub_tts_narrator.pronunciations import set_pronunciation, save_candidates, save_proposal, reset_pronunciation
         from epub_tts_narrator.renderer.config import DEFAULTS
         from test_pronunciations import PronunciationsTests, candidate
         with tempfile.TemporaryDirectory() as temporary:
@@ -300,6 +300,8 @@ class PronunciationInheritancePlanTests(unittest.TestCase):
             config = deepcopy(DEFAULTS)
             baseline = make_plan(child, config)
             save_candidates(second, second_doc, [candidate()])
+            save_proposal(second, second_doc, "Mara", {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+            self.assertEqual(make_plan(child, config), baseline)
             set_pronunciation(first, first_doc, "Mara", {"alphabet": "respelling", "value": "MAH-ruh"})
             updated = make_plan(child, config)
             def replacements(plan):

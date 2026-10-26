@@ -13,7 +13,7 @@ from .pipeline import fingerprint, write_json
 
 FORMAT = "epub-tts-pronunciations"
 VERSION = 1
-DISCOVERY_VERSION = 1
+DISCOVERY_VERSION = 2
 FILENAME = "pronunciations.json"
 KINDS = frozenset({"name", "place", "invented", "foreign", "ambiguous", "other"})
 STATUSES = frozenset({"pending", "confirmed", "ignored"})
@@ -44,6 +44,14 @@ def validate_pronunciation(value):
     return deepcopy(value)
 
 
+def validate_proposal(value):
+    """A proposed pronunciation remains a guess until explicitly confirmed."""
+    checked = validate_pronunciation(value)
+    if checked["alphabet"] != "cmu_arpabet":
+        raise ValueError("Pronunciation proposals must use cmu_arpabet")
+    return checked
+
+
 def _plain(value, maximum):
     return (isinstance(value, str) and 0 < len(value) <= maximum and value == value.strip()
             and not any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value))
@@ -69,7 +77,7 @@ def _evidence_contains_word(word, quote, source_text):
 def validate_entry(entry, source):
     """Validate stored/proposed metadata against its own book, not a descendant."""
     fields = {"id", "word", "status", "kind", "reason", "evidence"}
-    if not isinstance(entry, dict) or set(entry) - fields - {"pronunciation"} or not fields <= set(entry):
+    if not isinstance(entry, dict) or set(entry) - fields - {"pronunciation", "proposal"} or not fields <= set(entry):
         raise ValueError("Pronunciation entry has missing or unsupported fields")
     word = validate_word(entry["word"])
     if (entry["id"] != word_id(word) or not isinstance(entry["status"], str) or entry["status"] not in STATUSES
@@ -89,6 +97,10 @@ def validate_entry(entry, source):
         validate_pronunciation(entry.get("pronunciation"))
     elif "pronunciation" in entry:
         raise ValueError("Only confirmed pronunciation entries may contain a pronunciation")
+    if "proposal" in entry:
+        if entry["status"] != "pending":
+            raise ValueError("Only pending pronunciation entries may contain a proposal")
+        validate_proposal(entry["proposal"])
     return deepcopy(entry)
 
 
@@ -178,14 +190,21 @@ def load_pronunciations(directory):
     for owner in [directory, *ancestors]:
         record = _load_local(owner)
         if record is not None:
-            found.extend(dict(deepcopy(entry), origin_directory=str(owner), inherited=owner != directory)
-                         for entry in record["entries"])
+            for entry in record["entries"]:
+                visible = dict(deepcopy(entry), origin_directory=str(owner), inherited=owner != directory)
+                if "proposal" in visible:
+                    visible["proposal_origin_directory"] = str(owner)
+                found.append(visible)
     effective = {}
     # An unresolved descendant proposal must never shadow a resolved ancestor.
     for status_group in (("confirmed", "ignored"), ("pending",)):
         for entry in found:
             if entry["status"] in status_group:
                 effective.setdefault(entry["id"], entry)
+                selected = effective[entry["id"]]
+                if selected["status"] == "pending" and "proposal" not in selected and "proposal" in entry:
+                    selected["proposal"] = deepcopy(entry["proposal"])
+                    selected["proposal_origin_directory"] = entry["proposal_origin_directory"]
     if not effective:
         return []
     current_words = {match.group() for block in _source(directory)["blocks"] for match in WORD_PATTERN.finditer(block["text"])}
@@ -211,12 +230,20 @@ def discovery_pending(directory, document):
     return _load_local(directory, source).get("discovery") != _discovery_marker(document)
 
 
+def preparation_pending(directory, document):
+    """Resume discovery or missing name guesses, without reconsidering decisions."""
+    return discovery_pending(directory, document) or any(
+        entry["status"] == "pending" and entry["kind"] in {"name", "place"} and "proposal" not in entry
+        for entry in load_pronunciations(directory))
+
+
 def _mutate(directory, operation):
     from .renderer.run_locks import acquire_directory_lock
     lock = acquire_directory_lock(directory / ".pronunciations.lock")
     try:
         record = operation()
-        write_json(directory / FILENAME, record, overwrite=True)
+        if record is not None:
+            write_json(directory / FILENAME, record, overwrite=True)
     finally:
         lock.rmdir()
     return record
@@ -238,12 +265,49 @@ def save_candidates(directory, document, candidates):
         entries = {entry["id"]: entry for entry in record["entries"]}
         for entry in checked:
             if entries.get(entry["id"], {}).get("status", "pending") == "pending":
-                entries[entry["id"]] = entry
+                prior = entries.get(entry["id"], {})
+                replacement = deepcopy(entry)
+                if "proposal" in prior:
+                    replacement["proposal"] = deepcopy(prior["proposal"])
+                entries[entry["id"]] = replacement
         record["entries"] = sorted(entries.values(), key=lambda entry: entry["word"])
         record["discovery"] = _discovery_marker(document)
         return record
     _mutate(directory, update)
     return load_pronunciations(directory)
+
+
+def save_proposal(directory, document, word, proposal):
+    """Checkpoint a CMU guess only while its exact word remains unresolved.
+
+    Re-read under the local registry lock: a slow model response must not undo
+    a concurrent human choice or replace a proposal already checkpointed by
+    another process. Inherited pending entries may get a local proposal with
+    evidence from this book; ancestor registries are never changed.
+    """
+    directory = _directory(directory)
+    source = _document_source(directory, document)
+    identity = word_id(word)
+    proposal = validate_proposal(proposal)
+    def update():
+        record = _load_local(directory, source)
+        effective = next((entry for entry in load_pronunciations(directory) if entry["id"] == identity), None)
+        if effective is None or effective["status"] != "pending" or "proposal" in effective:
+            return None
+        entries = {entry["id"]: entry for entry in record["entries"]}
+        if identity in entries:
+            entry = deepcopy(entries[identity])
+        else:
+            evidence = next({"block_id": block["id"], "quote": word}
+                            for block in source["blocks"] if _word_in(word, block["text"]))
+            entry = {key: deepcopy(effective[key]) for key in ("id", "word", "status", "kind", "reason")}
+            entry["evidence"] = [evidence]
+        entry["proposal"] = proposal
+        entries[identity] = validate_entry(entry, source)
+        record["entries"] = sorted(entries.values(), key=lambda item: item["word"])
+        return record
+    _mutate(directory, update)
+    return next((entry for entry in load_pronunciations(directory) if entry["id"] == identity), None)
 
 
 def set_pronunciation(directory, document, word, pronunciation=None, status="confirmed"):
@@ -266,6 +330,8 @@ def set_pronunciation(directory, document, word, pronunciation=None, status="con
                                                    "reason": "Manually selected for pronunciation review.", "evidence": [evidence]}))
         entry["status"] = status
         entry.pop("pronunciation", None)
+        if status != "pending":
+            entry.pop("proposal", None)
         if pronunciation is not None:
             entry["pronunciation"] = pronunciation
         entries[entry["id"]] = validate_entry(entry, source)

@@ -41,6 +41,12 @@ def _description(pronunciation):
     return prefix + pronunciation["value"]
 
 
+def _preferred(row):
+    """A pending guess must never displace an explicit current decision."""
+    return (row.get("draft") or row.get("pronunciation") or
+            (row.get("proposal") if row.get("status") == "pending" else None))
+
+
 def _context(entry):
     evidence = entry.get("evidence", [])
     if evidence and isinstance(evidence[0], dict):
@@ -53,9 +59,14 @@ def _show(rows, output):
     for index, row in enumerate(rows, 1):
         extra = " — inherited" if row.get("inherited") else ""
         draft = row.get("draft")
-        description = _description(draft or row.get("pronunciation"))
+        description = _description(_preferred(row))
         if draft:
             description += " (draft; not applied to the book)"
+        elif row["status"] == "pending" and row.get("proposal"):
+            description += " (guessed; not verified or applied)"
+            if (row.get("proposal_origin_directory") and
+                    row["proposal_origin_directory"] != row.get("origin_directory")):
+                description += " (inherited proposal)"
         output(display(f"{index:3}. {row['word']} — {row['status']}{extra}; {description}"))
         if row.get("reason"):
             output(display("     " + str(row["reason"]).replace("\n", " ")))
@@ -157,11 +168,12 @@ def _reject_preview(folder, state, reason):
 
 
 class PronunciationReviewSession:
-    def __init__(self, bundle, config, *, engine_factory=None, store=None, notify=print):
+    def __init__(self, bundle, config, *, engine_factory=None, store=None, notify=print, proposal_fn=None):
         self.bundle, self.config = bundle, deepcopy(config)
         self.notify = notify
         self._engine_factory, self._engine, self._store = engine_factory, None, store
         self._resolved = None
+        self.proposal_fn = proposal_fn
 
     @property
     def settings(self):
@@ -223,11 +235,41 @@ class PronunciationReviewSession:
             raise ValueError("Choose a word from the pronunciation menu")
         self._write_draft(word, pronunciation)
 
+    def propose(self, word, respelling=None):
+        """Keep generated phones pending until their exact audition is approved."""
+        from ..pronunciations import set_pronunciation, validate_pronunciation, validate_word
+        validate_word(word)
+        if respelling is not None:
+            _pronunciation(say_as=respelling)
+        if self.proposal_fn is None:
+            raise ValueError("CMU pronunciation suggestions require the configured analysis model; "
+                             "use P or --phonemes to supply phones directly")
+        pronunciation = validate_pronunciation(self.proposal_fn(word, respelling))
+        if pronunciation["alphabet"] != "cmu_arpabet":
+            raise ValueError("Pronunciation suggestion must provide CMU Arpabet phones")
+        if not self.rows(word):
+            set_pronunciation(self.bundle["directory"], self.bundle, word, status="pending")
+        self._write_draft(word, pronunciation)
+        self.notify(display(f"Guessed {_description(pronunciation)}. Audition these exact phones before confirming."))
+        return pronunciation
+
+    def selection(self, row):
+        proposed = _preferred(row)
+        if (proposed is None and row.get("status") == "pending" and row.get("kind") in {"name", "place"}
+                and self.proposal_fn is not None):
+            return self.propose(row["word"])
+        return proposed
+
     def confirm(self, row):
         from ..pronunciations import set_pronunciation
-        pronunciation = row.get("draft") or row.get("pronunciation")
+        current = self.rows(row["word"])
+        pronunciation = _preferred(current[0]) if current else None
         if pronunciation is None:
             raise ValueError("Enter a correction first, or use I to keep the default pronunciation")
+        preview = self.audition(row["word"], pronunciation, cached_only=True)
+        if preview.get("played") != {"request_sha256": digest(preview["request"]),
+                                     "audio_sha256": preview["audio_sha256"]}:
+            raise ValueError("Play this exact pronunciation with the current voice before confirming it")
         set_pronunciation(self.bundle["directory"], self.bundle, row["word"], pronunciation, status="confirmed")
         self._write_draft(row["word"], None)
 
@@ -287,7 +329,7 @@ class PronunciationReviewSession:
             raise ValueError("No spoken excerpt with an existing saved voice contains this word; cast its character first")
         return min(candidates, key=lambda item: item[:2])[2]
 
-    def audition(self, word, pronunciation=None):
+    def audition(self, word, pronunciation=None, *, cached_only=False):
         """Return a resumable FLAC preview; never create or modify a voice."""
         from ..performance_plan import slice_performance
         from ..pronunciations import validate_pronunciation, validate_word
@@ -329,10 +371,12 @@ class PronunciationReviewSession:
                    "text": text, "word": word, "pronunciation": pronunciation, "options": options,
                    "seed": self.settings["render"]["seed"], "sample_rate": self.settings["render"]["sample_rate"]}
         key = digest(request)
-        self.directory.mkdir(parents=True, exist_ok=True)
         folder = self.directory / key
         if folder.is_symlink():
             raise ValueError("Pronunciation preview cache must not be a symlink")
+        if cached_only and not folder.is_dir():
+            raise ValueError("Play this exact pronunciation with the current voice before confirming it")
+        self.directory.mkdir(parents=True, exist_ok=True)
         folder.mkdir(exist_ok=True)
         lock = acquire_directory_lock(folder / ".preview.lock")
         try:
@@ -346,8 +390,12 @@ class PronunciationReviewSession:
                         raise ValueError("Pronunciation preview changed; remove its cache entry to regenerate")
                     _remove_redundant_wavs(folder, state)
                     return dict(state, path=str(audio))
+                if cached_only:
+                    raise ValueError("Play this exact pronunciation with the current voice before confirming it")
                 if state.get("status") == "rejected":
                     state = _retry_rejected_take(folder, state, request)
+            if cached_only:
+                raise ValueError("Play this exact pronunciation with the current voice before confirming it")
             state = state or {"format": _FORMAT, "request": request, "status": "pending",
                               "purpose": "unverified_pronunciation_listening_preview"}
             state.setdefault("take", 1)
@@ -385,6 +433,24 @@ class PronunciationReviewSession:
         finally:
             lock.rmdir()
 
+    def mark_played(self, preview):
+        """Bind successful playback (including any-key stop) to this exact take."""
+        folder = self.directory / digest(preview["request"])
+        if folder.is_symlink():
+            raise ValueError("Pronunciation preview cache must not be a symlink")
+        lock = acquire_directory_lock(folder / ".preview.lock")
+        try:
+            state_path = folder / "preview.json"
+            state = read_json(regular_file(state_path))
+            if (state.get("status") != "ready" or state.get("request") != preview["request"]
+                    or state.get("audio_sha256") != preview.get("audio_sha256")
+                    or file_hash(regular_file(folder / "sample.flac")) != preview["audio_sha256"]):
+                raise ValueError("Pronunciation preview changed during playback; play it again before confirming")
+            state["played"] = {"request_sha256": digest(state["request"]), "audio_sha256": state["audio_sha256"]}
+            write_json(state_path, state)
+        finally:
+            lock.rmdir()
+
     def close(self):
         if self._engine is not None:
             close = getattr(self._engine, "close", None)
@@ -393,9 +459,10 @@ class PronunciationReviewSession:
 
 
 def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=print,
-                             engine_factory=None, store=None, player=None, playback_fn=None):
-    """Dispatch model-free edits or a small keyboard-driven listening menu."""
+                             engine_factory=None, store=None, player=None, playback_fn=None, proposal_fn=None):
+    """Dispatch explicit edits or a keyboard-driven proposal/listening menu."""
     from ..pronunciations import load_pronunciations, reset_pronunciation, set_pronunciation, validate_word
+    from ..provider import ProviderError
     action = getattr(args, "action", "review")
     word = getattr(args, "word", None)
     correction = _pronunciation(getattr(args, "say_as", None), getattr(args, "phonemes", None))
@@ -411,10 +478,11 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
     if action == "set":
         if correction is None:
             raise ValueError("Provide --say-as or --phonemes; use --action ignore to keep the default")
-        set_pronunciation(bundle["directory"], bundle, word, correction, status="confirmed")
-        PronunciationReviewSession(bundle, config)._write_draft(word, None)
-        output(display(f"Confirmed {word}: {_description(correction)}. Existing audio is unchanged."))
-        return 0
+        if correction["alphabet"] == "cmu_arpabet":
+            set_pronunciation(bundle["directory"], bundle, word, correction, status="confirmed")
+            PronunciationReviewSession(bundle, config)._write_draft(word, None)
+            output(display(f"Confirmed {word}: {_description(correction)}. Existing audio is unchanged."))
+            return 0
     if action == "ignore":
         set_pronunciation(bundle["directory"], bundle, word, status="ignored")
         PronunciationReviewSession(bundle, config)._write_draft(word, None)
@@ -425,7 +493,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
         PronunciationReviewSession(bundle, config)._write_draft(word, None)
         output(display(f"Removed the local pronunciation decision for {word}; inherited decisions apply."))
         return 0
-    if action not in {"review", "play"}:
+    if action not in {"review", "play", "set"}:
         raise ValueError("Unsupported pronunciation review action")
     if input_fn is None:
         from .terminal import enable_line_editing
@@ -434,7 +502,8 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
     if playback_fn is None:
         from .terminal import play_sample
         playback_fn = play_sample
-    session = PronunciationReviewSession(bundle, config, engine_factory=engine_factory, store=store, notify=output)
+    session = PronunciationReviewSession(bundle, config, engine_factory=engine_factory, store=store, notify=output,
+                                         proposal_fn=proposal_fn)
     player = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
 
     def say(value):
@@ -442,18 +511,24 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
 
     def play(selected_word, proposed):
         preview = session.audition(selected_word, proposed)
+        say(f"Auditioning {selected_word}: {_description(proposed)}.")
         say("Listening preview — wording and pronunciation are for you to judge; this is not accepted book audio.")
         say(f"{preview['context']['chapter_title']}: {preview['request']['text']}")
         say("Press any key to stop.")
         playback_fn(player, preview["path"])
+        session.mark_played(preview)
 
     last = None
     try:
-        if action == "play":
+        if action in {"play", "set"}:
             current = session.rows(word)
-            proposed = correction if correction is not None else (
-                current[0].get("draft") or current[0].get("pronunciation") if current else None)
+            if correction is not None and correction["alphabet"] == "respelling":
+                proposed = session.propose(word, correction["value"])
+            else:
+                proposed = correction if correction is not None else (session.selection(current[0]) if current else None)
             play(word, proposed)
+            if correction is not None and correction["alphabet"] == "respelling":
+                say("CMU draft auditioned; open pronunciation review and use C to confirm it. Existing decisions are unchanged.")
             return 0
         while True:
             rows = session.rows(word)
@@ -481,7 +556,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                     row = rows[int(selection) - 1]
                 last = row["word"]
                 if verb == "play":
-                    play(last, row.get("draft") or row.get("pronunciation"))
+                    play(last, session.selection(row))
                 elif verb == "b":
                     play(last, None)
                 elif verb in {"e", "p"}:
@@ -490,8 +565,11 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                     value = parts[2] if len(parts) > 2 else input_fn(prompt).strip()
                     if not value:
                         continue
-                    proposed = _pronunciation(value) if verb == "e" else _pronunciation(phonemes=value)
-                    session.edit(last, proposed)
+                    if verb == "e":
+                        proposed = session.propose(last, value)
+                    else:
+                        proposed = _pronunciation(phonemes=value)
+                        session.edit(last, proposed)
                     say("Draft saved for audition; C confirms it for future rendering.")
                     play(last, proposed)
                 elif verb == "c":
@@ -505,7 +583,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                     say("Local decision and audition draft removed; inherited decisions apply.")
                 else:
                     raise ValueError("Use a number, B, E, P, C, I, R, or Q")
-            except (ValueError, RuntimeError, OSError) as exc:
+            except (ValueError, RuntimeError, OSError, ProviderError) as exc:
                 from .diagnostics import configured_secrets, safe_error_text
                 say("Action stopped: " + safe_error_text(exc, secrets=configured_secrets(config)))
     except EOFError:

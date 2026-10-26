@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 54 flat modules, stdlib-only
+├── epub_tts_narrator/        # analyzer package: 56 flat modules, stdlib-only
 │   └── renderer/             # renderer subpackage: 105 flat modules, own CLI + AGENTS.md
-├── tests/                    # 275 flat unittest files + fixtures/ + shared helpers
+├── tests/                    # 276 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -41,7 +41,7 @@ epub-tts-narrator/
 | Original EPUB location | `epub_tts_narrator/source_epub.py` | Book-bound local `source-epub.json`; separate from source fingerprints; final publication rechecks EPUB bytes |
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Expressive performance planning | `performance_plan.py`, `performance_planning.py`, `performance_planning_prompts.py` | Optional source/script/cast-bound sidecar; exact spans, independent remove-only review, resumable batches |
-| Pronunciation discovery and inheritance | `pronunciations.py`, `pronunciation_discovery.py`, `pronunciation_workflow.py` | Exact-source candidates, explicit user decisions, live nearest-first continuation lookup; CLI backfill without reanalysis |
+| Pronunciation discovery and inheritance | `pronunciations.py`, `pronunciation_discovery.py`, `pronunciation_proposals.py`, `pronunciation_workflow.py` | Proactive name collection and cached CMU suggestions, explicit user decisions, live continuation lookup; CLI backfill without reanalysis |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
 | Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |
 | Voice profile/prompt refresh | `epub_tts_narrator/voice_prompt_refresh.py` | Casting-description refresh; sends a complete `known_cast` snapshot |
@@ -92,7 +92,7 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 - **Never silently bypass acceptance policy.** Ordinary verification remains the default. Exhausted speech may use the explicitly authorized, audited `llm_exhaustion_selection` policy: retain the original failed report and never claim it passed verbatim verification or re-veto a valid chooser selection with the same lexical rules. Corrupt/empty/silent audio remains unusable. Final M4B is never built by re-encoding lossy chapter files.
 - **Never delete lock/lease artifacts.** `.lease` files and ownership records are inspected, not deleted (`run_locks`); only empty legacy locks get `rmdir`.
 - **Never add global `[voices.aliases]`** — rejected; mappings belong in the book's `voice-aliases.json`.
-- **Pronunciation guesses never change synthesis.** Directory analysis saves pending candidates after publishing the bundle; discovery failures resume through cached requests. Confirmed/ignored choices live in `pronunciations.json`, not global configuration or canonical analysis. Exact-case whole words only; pending descendants never shadow explicit ancestor decisions.
+- **Pronunciation guesses never change synthesis.** Directory analysis seeds observed cast-name words, scans proper names/other uncertain words, and saves pending CMU name/place proposals after publishing the bundle. Discovery and proposal failures resume through cached requests and per-word checkpoints. Confirmed/ignored choices live in `pronunciations.json`, not global configuration or canonical analysis. Exact-case whole words only; pending descendants never shadow explicit ancestor decisions.
 - **Never create both `epub-audiobook.toml` and `epub-tts-narrator.toml`** — they do not merge; the new filename wins silently.
 - **Never fill unassigned speech with a fallback narrator** — explicit speaker choice required before generation.
 - **Never run network/model calls in tests** — FakeClient / build_opener patching / skipUnless gating (see tests/AGENTS.md).

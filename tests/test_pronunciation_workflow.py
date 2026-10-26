@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.cli import main
-from epub_tts_narrator.pronunciations import discovery_pending, load_pronunciations, set_pronunciation
+from epub_tts_narrator.pronunciations import discovery_pending, preparation_pending, load_pronunciations, set_pronunciation
 from epub_tts_narrator.provider import ProviderError
 from shared_fixtures import make_epub, snapshot
 from test_cli import NarrativeClient
@@ -18,9 +18,14 @@ from test_cli import NarrativeClient
 class CandidateClient(NarrativeClient):
     modes = []
     fail_scan = False
+    fail_proposal = False
 
     def complete(self, system, payload):
         type(self).modes.append(payload.get("mode", "attribution"))
+        if payload.get("mode") == "pronunciation_proposal":
+            if self.fail_proposal:
+                raise ProviderError("offline phoneme proposal outage")
+            return {"phonemes": "K W AO1 R M"}
         if payload.get("mode") == "pronunciation_discovery":
             if self.fail_scan:
                 raise ProviderError("offline discovery outage")
@@ -43,6 +48,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
             '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Qarm opened the door.</p></body></html>')
         CandidateClient.modes = []
         CandidateClient.fail_scan = False
+        CandidateClient.fail_proposal = False
         self.enterContext(patch("epub_tts_narrator.cli.OpenAICompatibleClient", CandidateClient))
         self.enterContext(patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", CandidateClient))
 
@@ -57,6 +63,8 @@ class PronunciationWorkflowTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         entries = load_pronunciations(self.book)
         self.assertEqual([(item["word"], item["status"]) for item in entries], [("Qarm", "pending")])
+        self.assertEqual(entries[0]["proposal"], {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
+        self.assertNotIn("pronunciation", entries[0])
         before = snapshot(self.book)
         calls = list(CandidateClient.modes)
         code, output = self.run_cli("analyze", self.book)
@@ -74,8 +82,38 @@ class PronunciationWorkflowTests(unittest.TestCase):
         CandidateClient.modes = []
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
-        self.assertEqual(CandidateClient.modes, ["pronunciation_discovery"])
+        self.assertEqual(CandidateClient.modes, ["pronunciation_discovery", "pronunciation_proposal"])
         self.assertEqual((self.book / "analysis.json").read_bytes(), analysis)
+
+    def test_proposal_outage_resumes_without_repeating_discovery_or_book_analysis(self):
+        CandidateClient.fail_proposal = True
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        self.assertEqual(code, 1, output)
+        analysis = (self.book / "analysis.json").read_bytes()
+        document = json.loads(analysis)
+        self.assertFalse(discovery_pending(self.book, document))
+        self.assertTrue(preparation_pending(self.book, document))
+        self.assertEqual(load_pronunciations(self.book)[0]["status"], "pending")
+        CandidateClient.fail_proposal = False
+        CandidateClient.modes = []
+        code, output = self.run_cli("analyze", self.book)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(CandidateClient.modes, ["pronunciation_proposal"])
+        self.assertFalse(preparation_pending(self.book, document))
+        self.assertEqual((self.book / "analysis.json").read_bytes(), analysis)
+
+    def test_readable_correction_proposer_is_lazy_cached_and_never_confirms_a_guess(self):
+        from epub_tts_narrator.pronunciation_workflow import create_pronunciation_proposer
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        self.assertEqual(code, 0, output)
+        before = snapshot(self.book)
+        CandidateClient.modes = []
+        propose = create_pronunciation_proposer(self.book, self.config, progress=lambda message: None)
+        self.assertEqual(CandidateClient.modes, [])
+        self.assertEqual(propose("Qarm", "Quarm"), {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
+        self.assertEqual(propose("Qarm", "Quarm"), {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
+        self.assertEqual(CandidateClient.modes, ["pronunciation_proposal"])
+        self.assertEqual(snapshot(self.book), before)
 
     def test_backfill_preserves_user_cmu_choice_and_does_not_change_analysis_or_scripts(self):
         CandidateClient.fail_scan = True

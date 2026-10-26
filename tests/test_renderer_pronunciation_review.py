@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
-from epub_tts_narrator.pronunciations import load_pronunciations, set_pronunciation
+from epub_tts_narrator.pronunciations import load_pronunciations, save_candidates, set_pronunciation
+from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
@@ -69,8 +70,9 @@ class PronunciationReviewTests(unittest.TestCase):
                                    self.engine.identity, {"passed": True}, {})
         set_pronunciation(self.bundle["directory"], self.bundle, "Mara", status="pending")
         self.output = []
+        self.proposal = Mock(return_value={"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
         self.session = PronunciationReviewSession(self.bundle, self.config, engine_factory=self.factory,
-                                                 store=self.store, notify=self.output.append)
+                                                 store=self.store, notify=self.output.append, proposal_fn=self.proposal)
         self.addCleanup(self.session.close)
 
     def args(self, action="review", **kwargs):
@@ -79,18 +81,29 @@ class PronunciationReviewTests(unittest.TestCase):
     def command(self, action="list", *, word=None, say_as=None, phonemes=None, **kwargs):
         args = SimpleNamespace(action=action, word=word, say_as=say_as, phonemes=phonemes)
         return run_pronunciation_review(self.bundle, self.config, args, engine_factory=self.factory,
-                                        store=self.store, output=self.output.append, **kwargs)
+                                        store=self.store, output=self.output.append,
+                                        proposal_fn=kwargs.pop("proposal_fn", self.proposal), **kwargs)
+
+    def candidate(self, *, proposal=None, kind="name"):
+        entry = {key: value for key, value in load_pronunciations(self.bundle["directory"])[0].items()
+                 if key not in {"origin_directory", "inherited", "proposal_origin_directory"}}
+        entry.update(kind=kind, status="pending")
+        entry.pop("pronunciation", None)
+        if proposal is not None:
+            entry["proposal"] = proposal
+        save_candidates(self.bundle["directory"], self.bundle, [entry])
 
     def test_listing_and_authoritative_edits_never_initialize_an_engine(self):
         self.command()
         self.assertTrue(any("Mara" in line and "pending" in line for line in self.output))
-        self.command("set", word="Mara", say_as="Mahrah")
-        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"]["value"], "Mahrah")
+        self.command("set", word="Mara", phonemes="M AA1 R AH0")
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"]["value"], "M AA1 R AH0")
         self.command("ignore", word="Mara")
         self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "ignored")
         self.command("reset", word="Mara")
         self.assertEqual(load_pronunciations(self.bundle["directory"]), [])
         self.factory.assert_not_called()
+        self.proposal.assert_not_called()
 
     def test_saved_audition_draft_survives_restart_without_becoming_render_policy(self):
         correction = {"alphabet": "respelling", "value": "Mahrah"}
@@ -98,16 +111,13 @@ class PronunciationReviewTests(unittest.TestCase):
         restarted = PronunciationReviewSession(self.bundle, self.config)
         self.assertEqual(restarted.rows()[0]["draft"], correction)
         self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
-        restarted.confirm(restarted.rows()[0])
-        self.assertNotIn("draft", restarted.rows()[0])
-        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], correction)
         self.factory.assert_not_called()
 
     def test_cli_decision_clears_older_preview_draft(self):
         self.session.edit("Mara", {"alphabet": "respelling", "value": "Mahrah"})
-        self.command("set", word="Mara", say_as="Mairah")
+        self.command("set", word="Mara", phonemes="M EH1 R AH0")
         self.assertNotIn("draft", self.session.rows()[0])
-        self.assertEqual(self.session.rows()[0]["pronunciation"]["value"], "Mairah")
+        self.assertEqual(self.session.rows()[0]["pronunciation"]["value"], "M EH1 R AH0")
 
     def test_default_is_not_confirmed_as_a_correction_without_explicit_ignore(self):
         with self.assertRaisesRegex(ValueError, "keep the default"):
@@ -147,6 +157,102 @@ class PronunciationReviewTests(unittest.TestCase):
         self.command("review", input_fn=lambda _: "q", player=player)
         self.factory.assert_not_called()
         player.stop.assert_called_once()
+
+    def test_readable_conversion_failure_keeps_the_previous_choice_and_menu_open(self):
+        original = {"alphabet": "respelling", "value": "Mahrah"}
+        set_pronunciation(self.bundle["directory"], self.bundle, "Mara", original)
+        before = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
+        commands = iter(["e 1 Mairah", "q"])
+        self.proposal.side_effect = ProviderError("proposal service unavailable")
+        self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()))
+        self.assertEqual(Path(self.bundle["directory"], "pronunciations.json").read_bytes(), before)
+        self.assertNotIn("draft", self.session.rows()[0])
+        self.assertTrue(any("Action stopped:" in line for line in self.output))
+        self.factory.assert_not_called()
+
+    def test_confirmed_respelling_is_preserved_without_proactive_conversion(self):
+        original = {"alphabet": "respelling", "value": "Mahrah"}
+        set_pronunciation(self.bundle["directory"], self.bundle, "Mara", original)
+        self.assertEqual(self.session.selection(self.session.rows()[0]), original)
+        self.proposal.assert_not_called()
+
+    def test_missing_proposal_provider_never_falls_back_to_confirming_readable_guess(self):
+        before = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "configured analysis model"):
+            self.command("set", word="Mara", say_as="Mahrah", proposal_fn=None,
+                         player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
+        self.assertEqual(Path(self.bundle["directory"], "pronunciations.json").read_bytes(), before)
+        self.factory.assert_not_called()
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_pending_name_proposal_plays_exact_phones_and_only_then_confirms(self):
+        proposed = self.proposal.return_value
+        self.candidate(proposal=proposed)
+        commands = iter(["c 1", "1", "c 1", "q"])
+        self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
+        self.assertTrue(any("guessed; not verified" in line for line in self.output))
+        self.assertTrue(any("Play this exact pronunciation" in line for line in self.output))
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[0]["compiled"])
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], proposed)
+        self.proposal.assert_not_called()
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_pending_name_without_proposal_is_guessed_once_on_number_play(self):
+        self.candidate()
+        commands = iter(["1", "1", "q"])
+        self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
+        self.proposal.assert_called_once_with("Mara", None)
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(self.session.rows()[0]["draft"], self.proposal.return_value)
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_set_readable_correction_stages_and_plays_cmu_then_confirmation_survives_restart(self):
+        self.command("set", word="Mara", say_as="Mahrah", player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
+        self.proposal.assert_called_once_with("Mara", "Mahrah")
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
+        self.assertIn("<|phoneme_start|>", self.engine.calls[0]["compiled"])
+        restarted = PronunciationReviewSession(self.bundle, self.config, engine_factory=self.factory, store=self.store)
+        self.addCleanup(restarted.close)
+        restarted.confirm(restarted.rows()[0])
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], self.proposal.return_value)
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertNotIn("draft", restarted.rows()[0])
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_play_readable_correction_keeps_cmu_draft_even_if_player_fails(self):
+        with self.assertRaisesRegex(ValueError, "playback failed"):
+            self.command("play", word="Mara", say_as="Mahrah", player=SimpleNamespace(stop=Mock()),
+                         playback_fn=Mock(side_effect=ValueError("playback failed")))
+        self.assertEqual(self.session.rows()[0]["draft"], self.proposal.return_value)
+        with self.assertRaisesRegex(ValueError, "Play this exact pronunciation"):
+            self.session.confirm(self.session.rows()[0])
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
+        self.assertEqual(len(self.engine.calls), 1)
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_confirmation_rejects_unplayed_new_draft_and_new_voice_without_generating(self):
+        proposed = self.proposal.return_value
+        self.session.edit("Mara", proposed)
+        preview = self.session.audition("Mara", proposed)
+        with self.assertRaisesRegex(ValueError, "Play this exact pronunciation"):
+            self.session.confirm(self.session.rows()[0])
+        self.session.mark_played(preview)
+        changed = {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"}
+        self.session.edit("Mara", changed)
+        with self.assertRaisesRegex(ValueError, "Play this exact pronunciation"):
+            self.session.confirm(self.session.rows()[0])
+        self.session.edit("Mara", proposed)
+        selected = self.session._sample("Mara")
+        profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == selected["voice_id"])
+        candidate = self.store.publish_candidate(profile["id"], profile, self.reference, "A different reference transcript.",
+                                                 self.engine.identity, {"passed": True}, {}, candidate_id="a" * 32)
+        self.store.select_candidate(profile["id"], candidate["candidate_id"], selected["voice"]["asset_hash"])
+        with self.assertRaisesRegex(ValueError, "Play this exact pronunciation"):
+            self.session.confirm(self.session.rows()[0])
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
 
     def test_sample_checks_each_selected_voice_once_per_request_not_once_per_occurrence(self):
         row = self.bundle["chapters"][0]["rows"][1]
@@ -234,7 +340,9 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertEqual(played[0], played[2])
         self.assertNotEqual(played[0], played[1])
         self.assertEqual(len(self.engine.calls), 2)
-        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"]["value"], "Mahrah")
+        self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], self.proposal.return_value)
+        self.proposal.assert_called_once_with("Mara", "Mahrah")
+        self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[1]["compiled"])
         self.assertTrue(self.engine.closed)
         player.stop.assert_called_once()
 

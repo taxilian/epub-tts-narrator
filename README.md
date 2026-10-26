@@ -82,7 +82,7 @@ audiobook-render assemble book.audiobook    # package the .m4b
 
 Optional [audio censorship](RENDERER.md#optional-audio-censorship) preserves a short opening sound and silences the rest of configured vulgar words without changing the dialogue's timing. Use `render BOOK --censor` for new output, or `assemble BOOK --censor --chapters 13 --chapters-only` to rebuild a saved chapter from its original verified clips. `--no-censor` overrides the global setting for an uncensored output. The feature is off by default; saved speech and voices remain unchanged.
 
-Directory analysis also collects unusual names and words for [pronunciation review](RENDERER.md#pronunciation-review). Run `audiobook-render pronunciations BOOK` to listen and correct them using readable respellings or CMU Arpabet. Existing books can add candidates with `epub-tts-narrator discover-pronunciations BOOK`, without reanalysis. Confirmed choices are per-book and inherit recursively through `--continue-from`; guesses never change narration automatically.
+Directory analysis also collects character and place names and prepares CMU Arpabet suggestions for [pronunciation review](RENDERER.md#pronunciation-review). Run `audiobook-render pronunciations BOOK` to listen and accept them, correct a name with a readable hint, or edit CMU directly. Existing books can add candidates and proposals with `epub-tts-narrator discover-pronunciations BOOK`, without reanalysis. Confirmed choices are per-book and inherit recursively through `--continue-from`; guesses never change narration automatically.
 
 ## What analysis produces
 

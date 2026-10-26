@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from epub_tts_narrator.pipeline import CachedRequests
-from epub_tts_narrator.pronunciation_discovery import count_discovery_batches, discover_pronunciations
+from epub_tts_narrator.pronunciation_discovery import character_name_candidates, count_discovery_batches, discover_pronunciations
 from epub_tts_narrator.pronunciations import WORD_PATTERN
 from test_contracts import valid_document
 
@@ -65,9 +65,50 @@ class PronunciationDiscoveryTests(unittest.TestCase):
 
     def test_zero_candidates_is_valid_and_cached(self):
         client = DiscoveryClient(words=())
+        self.document["cast"]["characters"] = []
         self.assertEqual(discover_pronunciations(self.document, self.requests(client)), [])
         self.assertEqual(discover_pronunciations(self.document, self.requests(client)), [])
         self.assertEqual(len(client.calls), 1)
+
+    def test_proactive_cast_names_are_queued_even_when_model_omits_familiar_names(self):
+        self.document["source"]["blocks"][0]["text"] = "Master Jasper Cloud met Nova, William, and O’Neill. Jas smiled."
+        self.document["cast"]["characters"] = [
+            {"id": "jasper", "name": "Master Jasper Cloud", "aliases": ["Jas", "the young master"]},
+            {"id": "nova", "name": "Nova", "aliases": []},
+            {"id": "william", "name": "William", "aliases": ["O’Neill", "Absent"]}]
+        before = deepcopy(self.document)
+        client = DiscoveryClient(words=())
+        entries = discover_pronunciations(self.document, self.requests(client))
+        self.assertEqual({entry["word"] for entry in entries}, {"Jasper", "Cloud", "Nova", "William", "O’Neill", "Jas"})
+        self.assertTrue(all(entry["status"] == "pending" and entry["kind"] == "name" for entry in entries))
+        self.assertTrue(all(entry["evidence"] == [{"block_id": "b1", "quote": entry["word"]}] for entry in entries))
+        self.assertEqual(self.document, before)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_cast_name_filter_omits_generic_titles_roles_function_words_and_placeholders(self):
+        text = "The young Captain Mara and Grandmother Vale greeted the second guard, an unnamed woman, and her mother. A voice in Mara's head spoke."
+        self.document["source"]["blocks"][0]["text"] = text
+        self.document["cast"]["characters"] = [
+            {"name": "The young Captain Mara", "aliases": ["her", "the second guard", "an unnamed woman", "her mother", "voice in Mara's head"]},
+            {"name": "Grandmother Vale", "aliases": ["unknown speaker", "Narrator", "They"]}]
+        self.assertEqual({entry["word"] for entry in character_name_candidates(self.document)}, {"Mara", "Mara's", "Vale"})
+
+    def test_deterministic_cast_names_preserve_case_typography_and_whole_word_evidence(self):
+        self.document["source"]["blocks"][0]["text"] = "Mara mara Marah Mara-Vale O'Neill O’Neill Qarmian"
+        self.document["cast"]["characters"] = [{"name": "Mara", "aliases": ["mara", "Marah", "Mara-Vale", "O'Neill", "O’Neill", "Qarm"]}]
+        client = DiscoveryClient(words=())
+        entries = discover_pronunciations(self.document, self.requests(client))
+        self.assertEqual({entry["word"] for entry in entries}, {"Mara", "mara", "Marah", "Mara-Vale", "O'Neill", "O’Neill"})
+        self.assertEqual(len({entry["id"] for entry in entries}), 6)
+
+    def test_source_scan_requests_proper_and_place_names_even_if_obvious(self):
+        client = DiscoveryClient(words=())
+        discover_pronunciations(self.document, self.requests(client))
+        system = client.calls[0][0]
+        self.assertIn("place names", system)
+        self.assertIn("pronunciation seems obvious or familiar", system)
+        self.assertIn("not a claim", system)
+        self.assertIn("Do not return IDs, status, pronunciation", system)
 
     def test_long_book_scans_all_source_in_bounded_exact_windows(self):
         self.document["source"]["blocks"] = [{"id": "long", "text": "Mara " * 6000 + "Zyrr"}]

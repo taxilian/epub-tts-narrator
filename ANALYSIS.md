@@ -145,7 +145,9 @@ Square-bracket text such as `[Fireball]` receives a separate delivery cue, inclu
 
 ## Pronunciation candidates
 
-After publishing a directory analysis, `analyze` scans the source in bounded batches with the resolved cast as context. It collects unusual character/place names, invented terms, foreign words, and ambiguous spellings in `BOOK/pronunciations.json`. Each candidate has an exact written word, source quotation, and reason to check it. The model does not select or confirm a pronunciation. Ordinary words should not crowd the review queue, but discovery is a model suggestion and can miss words; the review command also accepts a manually specified source word.
+After publishing a directory analysis, `analyze` collects character names and aliases from the resolved cast, checking each word against the actual source. It also scans the source in bounded batches for place names, other proper names, invented terms, foreign words, and ambiguous spellings. Names are included even when their spelling looks ordinary; generic titles, roles, and function words are excluded from automatic cast-name seeding. Source scanning can still miss a word, so the review command also accepts a manually specified source word.
+
+Each candidate in `BOOK/pronunciations.json` has an exact written word, source quotation, and reason to check it. Pending character and place names automatically receive a suggested CMU Arpabet pronunciation, including vowel stress. The existing configured analysis model proposes it from the name's spelling and book context. These are guesses for listening review, not canonical pronunciations or acoustic verification. Confirmed and keep-default choices, including inherited ones, are reused without new proposals.
 
 Existing books can add this queue without repeating character or passage analysis:
 
@@ -154,7 +156,7 @@ epub-tts-narrator discover-pronunciations BOOK --config epub-tts-narrator.toml
 audiobook-render pronunciations BOOK --config epub-tts-narrator.toml
 ```
 
-The scan uses the existing analysis provider and cached requests, with at most five concurrent calls. A failed scan leaves the published analysis and completed request batches intact; rerun the command to finish. Rerunning `analyze BOOK` also completes missing discovery. A completed source/cast-bound scan is skipped. Local corrections survive discovery and do not rewrite the canonical analysis, scripts, cast, or reference recordings. Legacy single-JSON analysis output does not have this per-book sidecar workflow.
+Discovery and phoneme proposals use the existing analysis provider and cached requests, with at most five concurrent calls. Each completed name proposal is saved immediately. A failure leaves the published analysis, completed discovery batches, and saved proposals intact; rerun the command to finish. Rerunning `analyze BOOK` also completes missing discovery or proposals. A completed source/cast-bound scan is skipped. Local corrections survive discovery and do not rewrite the canonical analysis, scripts, cast, or reference recordings. Legacy single-JSON analysis output does not have this per-book sidecar workflow.
 
 Pending candidates do not affect synthesis. Confirmed respellings or CMU Arpabet choices are loaded at render time, independently of expressive delivery planning. Choices follow the saved continuation chain dynamically: a correction confirmed in Book 1 after Book 2 was analyzed is available to Book 2 on its next render. A Book 2 correction or explicit keep-default decision overrides Book 1 for that word in Book 2 and its descendants. Matching uses complete words with exact spelling and case, never name resemblance or fuzzy identity merging. See [pronunciation review](RENDERER.md#pronunciation-review) for audition and correction commands.
 

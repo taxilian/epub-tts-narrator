@@ -368,18 +368,20 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 ## Pronunciation review
 
-`audiobook-render pronunciations BOOK` opens the review menu for words collected by analysis. Numbered entries play a short source excerpt using an existing saved voice; any key stops playback. `E` edits a readable respelling, `P` edits CMU Arpabet, `B` plays the default, `C` confirms, `I` keeps the default, `R` resets a local override, and `Q` quits. Commands can include an entry number or use the last selected word. Edited drafts survive quitting but apply to the book only after confirmation. Previews are listening aids, not verified audiobook clips. They are cached separately as lossless FLAC and never replace the selected character voice.
+`audiobook-render pronunciations BOOK` opens the review menu for words collected by analysis. Character and place names start with proposed CMU Arpabet pronunciations. Numbered entries play those exact phonemes in a short source excerpt using an existing saved voice; any key stops playback. `E` takes a readable pronunciation hint, converts it to a CMU proposal with the configured analysis model, and auditions that proposal. `P` edits CMU directly, `B` plays the default, `C` confirms the auditioned choice, `I` keeps the default, `R` resets a local override, and `Q` quits.
 
-For an older book, first run `epub-tts-narrator discover-pronunciations BOOK` (or `audiobook-render pronunciations BOOK --action discover`). This only discovers pronunciation candidates; it does not repeat the cast or speaker analysis. Noninteractive commands are also available:
+Commands can include an entry number or use the last selected word. The proposed phonemes are shown before playback and saved as a draft; `C` saves that same sequence without asking the model again. Confirmation requires a played preview for the current choice and saved voice. Edited drafts and preview playback records survive quitting, but drafts apply to the book only after confirmation. Previews are listening aids, not verified audiobook clips. They are cached separately as lossless FLAC and never replace the selected character voice.
+
+For an older book, first run `epub-tts-narrator discover-pronunciations BOOK` (or `audiobook-render pronunciations BOOK --action discover`). This collects candidates and prepares name pronunciations without repeating the cast or speaker analysis. Command-line actions are also available:
 
 ```sh
 audiobook-render pronunciations BOOK --action list
 
-# Listen before saving a simple correction.
+# Propose and listen to CMU from a readable hint; approve with C in the menu.
 audiobook-render pronunciations BOOK --action play --word Qarm --say-as Quarm
-audiobook-render pronunciations BOOK --action set --word Qarm --say-as Quarm
+audiobook-render pronunciations BOOK
 
-# Or specify exact CMU Arpabet symbols and stress digits.
+# Or audition exact CMU and explicitly save it without model conversion.
 audiobook-render pronunciations BOOK --action play --word Qarm --phonemes "K W AO1 R M"
 audiobook-render pronunciations BOOK --action set --word Qarm --phonemes "K W AO1 R M"
 
@@ -390,7 +392,9 @@ audiobook-render pronunciations BOOK --action ignore --word Qarm
 audiobook-render pronunciations BOOK --action reset --word Qarm
 ```
 
-Both input forms are validated. Respelling accepts one plain word, optionally hyphenated to suggest syllables; it never accepts model tags. CMU Arpabet accepts the documented consonant/vowel inventory and optional vowel stress `0`, `1`, or `2`. A readable respelling depends on the engine's interpretation, while Arpabet is more explicit. Listening determines whether either produces the intended pronunciation; schema validation and transcript matching cannot establish that. Recording-to-phoneme import is not implemented by this workflow.
+Both input forms are validated. A readable hint accepts one plain word, optionally hyphenated to suggest syllables; it never accepts model tags. Generated proposals require CMU vowel stress `0`, `1`, or `2`; manual CMU retains support for unstressed symbols. `--action set --say-as` also stages and auditions a CMU draft, requiring confirmation in the menu. Only explicit `--action set --phonemes` directly saves a supplied sequence without an audition. Read-only listing and direct manual CMU saves need no analysis model. Existing confirmed respellings remain valid and are not silently converted.
+
+Arpabet makes pronunciation explicit, but listening still determines whether the model produces the intended sound. Syntax checks and transcript matching cannot certify pronunciation, and a generated name suggestion does not establish the author's intended reading. Recording-to-phoneme import is not implemented by this workflow.
 
 Corrections apply to every occurrence of the exact complete source word in the current book, including case. Similar names, different case variants, and possessive forms are separate words. A correction can be added for a source word that discovery missed. Choices live in the book's `pronunciations.json`; the global TOML stays generic. Saved continuation links are searched from the current book backward, with the nearest explicit correction or keep-default decision taking precedence. Pending candidates never override an ancestor's confirmed choice. Ancestor books and voice references are never modified.
 

@@ -75,7 +75,7 @@ def parser():
                                  help="Review pronunciation candidates, audition corrections, or save a book-local choice")
             command.add_argument("--word", help="Exact written word, including case (e.g. Qarm)")
             correction = command.add_mutually_exclusive_group()
-            correction.add_argument("--say-as", help="Readable single-word respelling (e.g. Quarm); hyphens allowed")
+            correction.add_argument("--say-as", help="Readable pronunciation hint (e.g. Quarm); proposes and auditions CMU for review")
             correction.add_argument("--phonemes", help="Advanced: CMU Arpabet phonemes, with stress digits if needed")
         if name == "import-voice":
             command.add_argument("--voice-id", required=True)
@@ -304,7 +304,9 @@ def main(argv=None):
                 prepare_book_pronunciations(bundle["directory"], load_analysis_config(config_path))
                 return 0
             from .pronunciation_review import run_pronunciation_review
-            return run_pronunciation_review(bundle, config, args)
+            from epub_tts_narrator.pronunciation_workflow import create_pronunciation_proposer
+            return run_pronunciation_review(
+                bundle, config, args, proposal_fn=create_pronunciation_proposer(bundle["directory"], config_path))
         if args.command in {"prepare-performance", "compare-performance"}:
             from epub_tts_narrator.config import load_config as load_analysis_config
             from epub_tts_narrator.performance_planning import load_prepared_performance, prepare_performance

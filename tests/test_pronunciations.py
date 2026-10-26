@@ -7,7 +7,7 @@ import unittest
 from epub_tts_narrator.analysis_directory import continuation_registry, fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.pipeline import fingerprint, write_json
-from epub_tts_narrator.pronunciations import discovery_pending, load_pronunciations, pronunciation_counts, reset_pronunciation, save_candidates, set_pronunciation, validate_pronunciation, validate_word, word_id
+from epub_tts_narrator.pronunciations import DISCOVERY_VERSION, discovery_pending, load_pronunciations, preparation_pending, pronunciation_counts, reset_pronunciation, save_candidates, save_proposal, set_pronunciation, validate_entry, validate_pronunciation, validate_word, word_id
 from epub_tts_narrator.series import link_analysis
 from shared_fixtures import snapshot
 from test_series import fixture, propose
@@ -16,6 +16,9 @@ from test_series import fixture, propose
 def candidate(word="Mara", block_id="b1"):
     return {"id": word_id(word), "word": word, "status": "pending", "kind": "name",
             "reason": "The name may have more than one reading.", "evidence": [{"block_id": block_id, "quote": word}]}
+
+
+CMU_MARA = {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"}
 
 
 class PronunciationsTests(unittest.TestCase):
@@ -73,6 +76,145 @@ class PronunciationsTests(unittest.TestCase):
         changed = deepcopy(document)
         changed["cast"]["characters"][0]["description"] = "New context."
         self.assertTrue(discovery_pending(directory, changed))
+
+    def test_preparation_resumes_missing_name_proposals_after_discovery_completes(self):
+        directory, document = self.book()
+        self.assertTrue(preparation_pending(directory, document))
+        save_candidates(directory, document, [candidate(), dict(candidate("softly"), kind="ambiguous")])
+        self.assertFalse(discovery_pending(directory, document))
+        self.assertTrue(preparation_pending(directory, document))
+        save_proposal(directory, document, "Mara", CMU_MARA)
+        self.assertFalse(preparation_pending(directory, document))
+        saved = json.loads((directory / "pronunciations.json").read_text())
+        saved["discovery"]["version"] = DISCOVERY_VERSION - 1
+        write_json(directory / "pronunciations.json", saved, overwrite=True)
+        self.assertTrue(preparation_pending(directory, document))
+
+    def test_proposal_is_pending_only_and_requires_valid_cmu(self):
+        directory, document = self.book()
+        save_candidates(directory, document, [candidate()])
+        bad = [None, {"alphabet": "respelling", "value": "MAH-ruh"},
+               {"alphabet": "cmu_arpabet", "value": "NOPE"},
+               {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0", "status": "confirmed"}]
+        before = (directory / "pronunciations.json").read_bytes()
+        for proposal in bad:
+            with self.subTest(proposal=proposal), self.assertRaises(ValueError):
+                save_proposal(directory, document, "Mara", proposal)
+        for status in ("confirmed", "ignored"):
+            entry = dict(candidate(), status=status, proposal=CMU_MARA)
+            if status == "confirmed":
+                entry["pronunciation"] = CMU_MARA
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                validate_entry(entry, document["source"])
+        self.assertEqual((directory / "pronunciations.json").read_bytes(), before)
+        saved = save_proposal(directory, document, "Mara", CMU_MARA)
+        self.assertEqual(saved["proposal"], CMU_MARA)
+        self.assertEqual(saved["status"], "pending")
+        self.assertEqual(saved["proposal_origin_directory"], str(directory))
+        self.assertNotIn("pronunciation", saved)
+
+    def test_candidate_rediscovery_preserves_pending_proposal_and_explicit_choices_remove_it(self):
+        directory, document = self.book()
+        save_candidates(directory, document, [candidate()])
+        original = deepcopy(document)
+        protected = {name: (directory / name).read_bytes() for name in ("analysis.json", "manifest.json", "source.json", "cast.json")}
+        save_proposal(directory, document, "Mara", CMU_MARA)
+        refreshed = dict(candidate(), reason="A newly discovered reason for review.")
+        saved = save_candidates(directory, document, [refreshed])[0]
+        self.assertEqual(saved["proposal"], CMU_MARA)
+        self.assertEqual(saved["reason"], refreshed["reason"])
+        before = (directory / "pronunciations.json").read_bytes()
+        saved = save_proposal(directory, document, "Mara", {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"})
+        self.assertEqual(saved["proposal"], CMU_MARA)
+        self.assertEqual((directory / "pronunciations.json").read_bytes(), before)
+        saved = set_pronunciation(directory, document, "Mara", CMU_MARA)
+        self.assertNotIn("proposal", saved)
+        self.assertEqual(saved["pronunciation"], CMU_MARA)
+        set_pronunciation(directory, document, "Mara", status="pending")
+        save_proposal(directory, document, "Mara", CMU_MARA)
+        self.assertNotIn("proposal", set_pronunciation(directory, document, "Mara", status="ignored"))
+        self.assertEqual(document, original)
+        for name, data in protected.items():
+            self.assertEqual((directory / name).read_bytes(), data)
+
+    def test_proposal_save_does_not_create_a_candidate_or_replace_a_resolved_decision(self):
+        directory, document = self.book()
+        self.assertIsNone(save_proposal(directory, document, "Mara", CMU_MARA))
+        self.assertFalse((directory / "pronunciations.json").exists())
+        save_candidates(directory, document, [candidate()])
+        for status in ("confirmed", "ignored"):
+            set_pronunciation(directory, document, "Mara", CMU_MARA if status == "confirmed" else None, status)
+            before = (directory / "pronunciations.json").read_bytes()
+            stat_before = (directory / "pronunciations.json").stat()
+            saved = save_proposal(directory, document, "Mara", CMU_MARA)
+            self.assertEqual(saved["status"], status)
+            self.assertNotIn("proposal", saved)
+            self.assertEqual((directory / "pronunciations.json").read_bytes(), before)
+            self.assertEqual((directory / "pronunciations.json").stat().st_mtime_ns, stat_before.st_mtime_ns)
+
+    def test_pending_proposals_inherit_even_after_local_discovery_without_changing_ancestors(self):
+        first, first_doc = self.book()
+        second, second_doc = self.book("second", first)
+        third, third_doc = self.book("third", second)
+        save_candidates(first, first_doc, [candidate()])
+        save_candidates(second, second_doc, [candidate()])
+        save_candidates(third, third_doc, [candidate()])
+        self.assertTrue(preparation_pending(third, third_doc))
+        save_proposal(first, first_doc, "Mara", CMU_MARA)
+        before = snapshot(first)
+        self.assertEqual(load_pronunciations(second)[0]["proposal"], CMU_MARA)
+        self.assertEqual(load_pronunciations(third)[0]["proposal"], CMU_MARA)
+        self.assertEqual(load_pronunciations(third)[0]["proposal_origin_directory"], str(first))
+        self.assertFalse(load_pronunciations(third)[0]["inherited"])
+        self.assertFalse(preparation_pending(third, third_doc))
+        save_candidates(third, third_doc, [candidate()])
+        self.assertEqual(load_pronunciations(third)[0]["proposal"], CMU_MARA)
+        for directory in (second, third):
+            local = json.loads((directory / "pronunciations.json").read_text())["entries"][0]
+            self.assertNotIn("proposal", local)
+            self.assertNotIn("proposal_origin_directory", local)
+        save_proposal(third, third_doc, "Mara", {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"})
+        self.assertEqual(load_pronunciations(third)[0]["proposal"], CMU_MARA)
+        self.assertEqual(snapshot(first), before)
+
+    def test_proposal_for_inherited_pending_word_has_evidence_from_current_book(self):
+        first, first_doc = self.book()
+        second, second_doc = self.book("second", first)
+        save_candidates(first, first_doc, [candidate()])
+        before = snapshot(first)
+        saved = save_proposal(second, second_doc, "Mara", CMU_MARA)
+        self.assertEqual(saved["proposal"], CMU_MARA)
+        self.assertFalse(saved["inherited"])
+        local = json.loads((second / "pronunciations.json").read_text())["entries"][0]
+        self.assertEqual(validate_entry(local, second_doc["source"]), local)
+        self.assertEqual(snapshot(first), before)
+
+    def test_late_parent_resolution_prevents_saving_a_completed_model_guess(self):
+        first, first_doc = self.book()
+        second, second_doc = self.book("second", first)
+        save_candidates(second, second_doc, [candidate()])
+        before = (second / "pronunciations.json").read_bytes()
+        for status in ("confirmed", "ignored"):
+            set_pronunciation(first, first_doc, "Mara", CMU_MARA if status == "confirmed" else None, status)
+            saved = save_proposal(second, second_doc, "Mara", CMU_MARA)
+            self.assertEqual(saved["status"], status)
+            self.assertTrue(saved["inherited"])
+            self.assertNotIn("proposal", saved)
+            self.assertFalse(preparation_pending(second, second_doc))
+            self.assertEqual((second / "pronunciations.json").read_bytes(), before)
+
+    def test_proposal_for_one_case_does_not_fill_another_name(self):
+        directory = self.root / "minimal"
+        directory.mkdir()
+        document = {"source": {"book": {"id": "case-test"}, "blocks": [{"id": "b1", "text": "Mara mara Marah"}]}, "cast": {}}
+        write_json(directory / "source.json", document["source"])
+        save_candidates(directory, document, [candidate(word) for word in ("Mara", "mara", "Marah")])
+        save_proposal(directory, document, "Mara", CMU_MARA)
+        entries = {entry["word"]: entry for entry in load_pronunciations(directory)}
+        self.assertEqual(entries["Mara"]["proposal"], CMU_MARA)
+        self.assertNotIn("proposal", entries["mara"])
+        self.assertNotIn("proposal", entries["Marah"])
+        self.assertTrue(preparation_pending(directory, document))
 
     def test_candidate_merge_preserves_confirmed_and_ignored_local_choices(self):
         directory, document = self.book()

@@ -237,6 +237,12 @@ class TimeoutResumeTests(unittest.TestCase):
         self.assertIn(first.failed_key, resumed.attempted)
         self.assertTrue(saved.keys().isdisjoint(resumed.attempted))
         self.assertEqual(set(resumed.attempted.values()), {"attribute", "audition_script", "speech_spelling_scan", "pronunciation_discovery"})
+        from epub_tts_narrator.pronunciations import load_pronunciations
+        # The parent already prepared Mara's suggestion; a continuation reuses
+        # it even though it also discovers the name in its own source.
+        inherited = next(entry for entry in load_pronunciations(second_book) if entry["word"] == "Mara")
+        self.assertEqual(inherited["proposal_origin_directory"], str(first_book.resolve()))
+        self.assertEqual(inherited["proposal"], {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
         self.assertEqual(continuation_directories(second_book), [first_book.resolve()])
         self.assertTrue((second_book / "manifest.json").is_file())
         self.assertEqual(validate_document(json.loads((second_book / "analysis.json").read_text())), [])
