@@ -10,6 +10,7 @@ import re
 import shlex
 import sys
 import textwrap
+import uuid
 
 from .contracts import has_assigned_speakers, readiness, validate_document
 from .pipeline import fingerprint
@@ -114,6 +115,41 @@ def _resume_command(book_path):
     return shlex.join(["epub-tts-narrator", command, str(path)])
 
 
+def _mint_series_ids(document, name):
+    """Series-stable IDs for a prompt-defined character, so it recurs in future books.
+
+    Mirrors reconcile_series_cast: same series namespace and source hash, so
+    redefining the same name on a cache replay reproduces the same records.
+    """
+    provenance = document.get("provenance") or {}
+    series = provenance.get("series") or {}
+    try:
+        namespace = uuid.UUID(series["series_id"]) if series.get("series_id") else uuid.NAMESPACE_URL
+    except (ValueError, AttributeError, TypeError):
+        namespace = uuid.NAMESPACE_URL
+    source_hash = (series.get("source_fingerprint") or provenance.get("source_fingerprint")
+                   or fingerprint(document["source"]))
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "character"
+    base = f"{source_hash}:prompt:{slug}"
+    return ("series_char_" + uuid.uuid5(namespace, base + ":character").hex,
+            "series_voice_" + uuid.uuid5(namespace, base + ":voice").hex,
+            "role_prompt_" + uuid.uuid5(namespace, base + ":role").hex[:16])
+
+
+def _create_voice_records(document, name, description):
+    """Append a prompt-defined character, voice, and dialogue role to the cast."""
+    character_id, voice_id, role_id = _mint_series_ids(document, name)
+    character = {"id": character_id, "name": name, "aliases": [], "description": description,
+                 "evidence": [], "voice_id": voice_id}
+    voice = {"id": voice_id, "description": description, "traits": []}
+    role = {"id": role_id, "kind": "dialogue", "character_id": character_id,
+            "voice_id": voice_id, "description": name + " speaking."}
+    document["cast"]["characters"].append(character)
+    document["cast"]["voices"].append(voice)
+    document["cast"]["roles"].append(role)
+    return character, voice, role
+
+
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,
                             jev_client=None):
     """Ask for every remaining speaker, preserving progress if input ends.
@@ -185,8 +221,65 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 prose(excerpt, indent="  ", style="context")
                 say()
     decisions = []
+
+    def assign(item, choices):
+        before = deepcopy(item)
+        if len(choices) == 1:
+            role = choices[0]
+            item.update(role_id=role["id"], voice_id=role["voice_id"])
+            item.pop("simultaneous_speakers", None)
+            if role["kind"] == "narration" and item["kind"] in {"dialogue", "thought", "letter"}:
+                item["kind"] = "narration"
+            elif role["kind"] == "dialogue" and item["kind"] not in {"dialogue", "thought", "letter"}:
+                item["kind"] = "dialogue"
+        else:
+            item.update(role_id=None, voice_id=None,
+                        simultaneous_speakers=[{"role_id": role["id"], "voice_id": role["voice_id"]} for role in choices])
+            if item["kind"] not in {"dialogue", "thought", "letter"}:
+                item["kind"] = "dialogue"
+        selected = "; ".join(labels[role["id"]] for role in choices)
+        item["attribution"] = {"basis": "user", "reason": "User selected " + selected + ".",
+                               "evidence": deepcopy(before["attribution"]["evidence"]),
+                               "candidates": [], "review_required": False}
+        decisions.append({"segment_id": item["id"], "block_id": item["block_id"],
+                          "start": item["start"], "end": item["end"], "text_fingerprint": fingerprint(item["text"]),
+                          "selected_roles": [role["id"] for role in choices],
+                          "selected_voices": [role["voice_id"] for role in choices],
+                          "previous_attribution": before["attribution"], "previous_kind": before["kind"],
+                          "kind": item["kind"], "simultaneous": len(choices) > 1})
+        say("Assigned to " + selected + (" together." if len(choices) > 1 else "."))
+
+    def define_new_voice():
+        prose("Define a new character and voice. It joins this book's cast and carries into the series.")
+        print("New character name: ", end="", file=output_stream, flush=True)
+        try:
+            name = _display(input_stream.readline()).strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            name = ""
+        if not name:
+            say("No name given; passage left unchanged.")
+            return None
+        character_id, _, _ = _mint_series_ids(result, name)
+        if character_id in characters:
+            say(f"{name} is already defined; choose it from the list instead.")
+            return None
+        print("Voice description — how it should sound: ", end="", file=output_stream, flush=True)
+        try:
+            description = _display(input_stream.readline()).strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            description = ""
+        if not description:
+            say("No description given; passage left unchanged.")
+            return None
+        character, voice, role = _create_voice_records(result, name, description)
+        characters[character["id"]] = character
+        roles_by_id[role["id"]] = role
+        labels[role["id"]] = name
+        say(f"Defined new voice: {name}.")
+        return role
+
     prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
-    prose("Enter accepts the best guess. O shows all voices. Q saves progress and stops.")
+    prose("Enter accepts the best guess. O shows all voices. N defines a new voice. Q saves progress and stops.")
     prose("Comma-separated numbers mean those characters speak these SAME words together.")
     for number, item in enumerate(pending, 1):
         position = positions[item["block_id"]]
@@ -241,12 +334,14 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 say("No likely speaker found. Choose O to see all voices.")
             if not expanded:
                 say(f"  O. Other — show all {len(roles)} voices")
+            say("  N. New voice — define a new character")
             say("  Q. Save and stop")
         show_menu()
         stop = False
         while True:
-            controls = "B = back, Q = save and stop" if expanded else (
-                "Enter = 1, O = Other, Q = save and stop" if shortlist else "O = Other, Q = save and stop")
+            controls = "B = back, N = new voice, Q = save and stop" if expanded else (
+                "Enter = 1, O = Other, N = new voice, Q = save and stop" if shortlist
+                else "O = Other, N = new voice, Q = save and stop")
             print(f"Speaker number(s), {controls}: ", end="", file=output_stream, flush=True)
             try:
                 answer = input_stream.readline()
@@ -268,6 +363,15 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 expanded = False
                 show_menu()
                 continue
+            if answer in {"n", "new"}:
+                role = define_new_voice()
+                if role is None:
+                    continue
+                assign(item, [role])
+                decisions[-1]["defined_voice"] = {"character_id": role["character_id"],
+                                                  "voice_id": role["voice_id"],
+                                                  "name": characters[role["character_id"]]["name"]}
+                break
             visible_roles = roles if expanded else shortlist
             if answer == "" and not expanded and shortlist:
                 answer = "1"
@@ -286,31 +390,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                                     or len({role["voice_id"] for role in choices}) != len(choices)):
                 say("Simultaneous speech requires distinct dialogue roles with distinct voices; narration cannot be a group member.")
                 continue
-            before = deepcopy(item)
-            if len(choices) == 1:
-                role = choices[0]
-                item.update(role_id=role["id"], voice_id=role["voice_id"])
-                item.pop("simultaneous_speakers", None)
-                if role["kind"] == "narration" and item["kind"] in {"dialogue", "thought", "letter"}:
-                    item["kind"] = "narration"
-                elif role["kind"] == "dialogue" and item["kind"] not in {"dialogue", "thought", "letter"}:
-                    item["kind"] = "dialogue"
-            else:
-                item.update(role_id=None, voice_id=None,
-                            simultaneous_speakers=[{"role_id": role["id"], "voice_id": role["voice_id"]} for role in choices])
-                if item["kind"] not in {"dialogue", "thought", "letter"}:
-                    item["kind"] = "dialogue"
-            selected = "; ".join(labels[role["id"]] for role in choices)
-            item["attribution"] = {"basis": "user", "reason": "User selected " + selected + ".",
-                                   "evidence": deepcopy(before["attribution"]["evidence"]),
-                                   "candidates": [], "review_required": False}
-            decisions.append({"segment_id": item["id"], "block_id": item["block_id"],
-                              "start": item["start"], "end": item["end"], "text_fingerprint": fingerprint(item["text"]),
-                              "selected_roles": [role["id"] for role in choices],
-                              "selected_voices": [role["voice_id"] for role in choices],
-                              "previous_attribution": before["attribution"], "previous_kind": before["kind"],
-                              "kind": item["kind"], "simultaneous": len(choices) > 1})
-            say("Assigned to " + selected + (" together." if len(choices) > 1 else "."))
+            assign(item, choices)
             break
         if stop:
             break

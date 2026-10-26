@@ -12,7 +12,7 @@ import unittest
 from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
-from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+from epub_tts_narrator.speaker_decisions import _mint_series_ids, prompt_speaker_decisions
 from shared_fixtures import Terminal
 from test_contracts import valid_document
 
@@ -75,6 +75,55 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(selected["attribution"]["basis"], "user")
         self.assertIn("SAME words together", output)
         self.assertEqual(unassigned_segments(result), [])
+
+    def test_new_voice_defines_character_and_assigns_passage(self):
+        document = missing()
+        before = deepcopy(document)
+        result, output = self.decide(document, "n\nKessa\nA young woman, quick and wary.\n")
+        self.assertEqual(document, before)
+        selected = result["segments"][1]
+        role = next(row for row in result["cast"]["roles"] if row["id"] == selected["role_id"])
+        character = next(row for row in result["cast"]["characters"] if row["id"] == role["character_id"])
+        voice = next(row for row in result["cast"]["voices"] if row["id"] == role["voice_id"])
+        self.assertEqual(character["name"], "Kessa")
+        self.assertEqual(character["voice_id"], voice["id"])
+        self.assertEqual(role["kind"], "dialogue")
+        self.assertEqual(role["voice_id"], voice["id"])
+        self.assertEqual(voice["description"], "A young woman, quick and wary.")
+        self.assertTrue(character["id"].startswith("series_char_"))
+        self.assertTrue(voice["id"].startswith("series_voice_"))
+        self.assertEqual(selected["voice_id"], voice["id"])
+        self.assertEqual(selected["attribution"]["basis"], "user")
+        audit = result["provenance"]["speaker_decisions"]
+        self.assertEqual(audit["decisions"][0]["defined_voice"]["name"], "Kessa")
+        self.assertIn("N. New voice — define a new character", output)
+        self.assertIn("Defined new voice: Kessa.", output)
+        self.assertTrue(result["readiness"]["ready"])
+
+    def test_new_voice_ids_are_series_stable_and_match_the_mint(self):
+        document = missing()
+        result, _ = self.decide(document, "n\nKessa\nA wary voice.\n")
+        character = next(row for row in result["cast"]["characters"] if row["name"] == "Kessa")
+        voice = next(row for row in result["cast"]["voices"] if row["id"] == character["voice_id"])
+        role = next(row for row in result["cast"]["roles"] if row["character_id"] == character["id"])
+        expected = _mint_series_ids(document, "Kessa")
+        self.assertEqual((character["id"], voice["id"], role["id"]), expected)
+
+    def test_new_voice_rejects_a_name_that_is_already_defined(self):
+        document = missing((1, 2))
+        result, output = self.decide(document, "n\nKessa\nA wary voice.\nn\nKessa\n1\n")
+        self.assertIn("Kessa is already defined", output)
+        names = [character["name"] for character in result["cast"]["characters"]]
+        self.assertEqual(names.count("Kessa"), 1)
+        self.assertEqual(unassigned_segments(result), [])
+
+    def test_new_voice_without_a_name_leaves_passage_unchanged(self):
+        document = missing()
+        before = deepcopy(document)
+        result, output = self.decide(document, "n\n\nq\n")
+        self.assertIn("No name given; passage left unchanged.", output)
+        self.assertEqual(result["cast"], before["cast"])
+        self.assertIsNone(result["segments"][1]["role_id"])
 
     def test_mixed_block_shows_assigned_narration_tail_and_exact_unassigned_range(self):
         document = missing()

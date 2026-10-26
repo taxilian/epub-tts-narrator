@@ -107,13 +107,13 @@ finally:
             return before
 
         try:
-            prompt = b"Speaker number(s), Enter = 1, O = Other, Q = save and stop: "
+            prompt = b"Speaker number(s), Enter = 1, O = Other, N = new voice, Q = save and stop: "
             until(prompt)
             finished, _ = os.waitpid(pid, os.WNOHANG)
             self.assertEqual(finished, 0, "The child must wait for a speaker choice")
             if reprompt:
                 os.write(descriptor, b"o\n")
-                expanded_prompt = b"Speaker number(s), B = back, Q = save and stop: "
+                expanded_prompt = b"Speaker number(s), B = back, N = new voice, Q = save and stop: "
                 self.assertIn(b"All voices", until(expanded_prompt))
                 os.write(descriptor, b"\n")
                 self.assertIn(b"Enter selects a voice only", until(expanded_prompt))
