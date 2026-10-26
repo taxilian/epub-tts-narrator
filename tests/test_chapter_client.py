@@ -274,6 +274,36 @@ class ChapterOrchestrationTests(unittest.TestCase):
             self.assertNotIn("id", descriptor)
             self.assertNotIn("state", descriptor)
 
+    def test_remote_chapter_links_exist_before_ack_and_are_backfilled_offline(self):
+        client = self.fake_client()(self.config["remote_chapters"])
+        request = client.request
+        linked = []
+
+        def acknowledge(method, path, payload=None, timeout=None):
+            if path.endswith("/ack"):
+                spec = next(call[2]["spec"] for call in client.calls
+                            if call[1] == "v1/jobs" and digest(call[2]["spec"]) == path.split("/")[2])
+                link = self.root / "work" / "chapter-links" / f"chapter-{spec['chapter']['number']:02d}.m4a"
+                self.assertTrue(link.is_symlink())
+                self.assertTrue(link.resolve().is_file())
+                linked.append(link)
+            return request(method, path, payload, timeout)
+
+        client.request = acknowledge
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                  notify=lambda _: None, chapters_only=True)
+
+        self.assertEqual(len(linked), 2)
+        self.assertFalse((self.root / "output").exists())
+        for link in linked:
+            link.unlink()
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                  notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        self.assertTrue(all(link.is_symlink() and link.resolve().is_file() for link in linked))
+
     def test_single_speaker_worker_accepts_unchanged_uniform_paragraphs(self):
         from test_renderer_workflow import EXAMPLE
         bundle = load_bundle(EXAMPLE / "bundle")

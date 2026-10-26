@@ -251,12 +251,17 @@ class ClientHeartbeat:
         self._thread.start()
 
     def _beat(self):
+        consecutive_failures = 0
         while not self._stop.wait(self.interval):
             try:
                 self.client.request("POST", f"v1/sessions/{self.session_id}/heartbeat", timeout=self.timeout)
             except ChapterClientError as exc:
+                consecutive_failures += 1
+                if consecutive_failures < 2 and exc.status in {None, 502, 503, 504}:
+                    continue
                 self.failure = str(exc)
                 return
+            consecutive_failures = 0
 
     def check(self):
         """Raise promptly in the foreground once the heartbeat thread died."""
@@ -526,6 +531,18 @@ def _event(record, event, notify):
         notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: {safe_message}")
 
 
+def _publish_download_link(folder, record, notify):
+    from .workflow import _publish_chapter_link
+    if not any(item["name"] == "chapter.m4a" for item in record["artifacts"]):
+        return
+    work = Path(folder).parent.parent
+    _regular_directory(work / "chapter-links")
+    _publish_chapter_link({"render": {"output_dir": str(work)}},
+                          {"encoded_path": str(Path(folder) / "chapter.m4a"),
+                           "track_number": record["selection"]["chapter"]["number"]},
+                          notify=notify)
+
+
 def _completed_download(client, folder, record, status, *, include_masters=True, notify=None, session=None):
     artifacts = status.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -550,6 +567,7 @@ def _completed_download(client, folder, record, status, *, include_masters=True,
     _write_cache(folder, _cache_descriptor(record["selection"], record["spec"], artifacts))
     record["artifacts"] = [{key: artifact[key] for key in ("name", "sha256", "size", "url")} for artifact in artifacts]
     record["state"] = "completed"
+    _publish_download_link(folder, record, notify or (lambda _: None))
     legacy = folder / "job.json"
     if legacy.exists() or legacy.is_symlink():
         regular_file(legacy).unlink()
@@ -1013,6 +1031,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
             except ChapterClientError:
                 pass
         if descriptor is not None and _cached_artifacts_present(folder, descriptor):
+            _publish_download_link(folder, descriptor, notify)
             notify(f"Reusing downloaded chapter {chapter['number']} / {len(bundle['chapters'])}")
             cached[chapter["id"]] = (folder, descriptor)
         else:

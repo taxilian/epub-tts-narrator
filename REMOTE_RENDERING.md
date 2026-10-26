@@ -109,6 +109,13 @@ chapter copies. When packaging an M4B, `-o` (default `BOOK/audiobook`) receives
 with the analyzed EPUB to include its cover when no EPUB path is configured.
 Original voice samples and inherited book/series selections are untouched.
 
+Each verified remote download also gets a readable relative symlink at
+`WORK/chapter-links/chapter-NN.m4a`. These links are available before the whole
+book finishes, including with `--chapters-only`; rerunning backfills missing
+links from verified downloads without contacting the service. Empty chapters
+have no audio link. Links stay in the work directory so they cannot interfere
+with atomic publication into `BOOK/audiobook`.
+
 `--chapters-only` skips final book packaging, but downloads M4A, JSON and FLAC
 masters before acknowledging delivery. M4B packaging decodes those lossless masters
 locally into temporary PCM, then encodes the book once; it does not transcode the
@@ -264,8 +271,10 @@ requeued for later execution — while its accepted speech cache, registered
 voices, and artifact files stay intact. A real failure while the client is
 still connected keeps the existing failed behavior. Client heartbeats run on
 a dedicated thread for the whole invocation (submissions, waits, and
-downloads), stop before the client deletes its session, and a heartbeat error
-surfaces in the foreground promptly. Session identifiers are hashes and never
+downloads), stop before the client deletes its session, and retry one transient
+connection or HTTP 502/503/504 failure on the next beat. A successful renewal
+resets that allowance; consecutive failures surface in the foreground. An
+expired or revoked session is never reopened or retried. Session identifiers are hashes and never
 appear in logs or reports.
 
 ## Resume and integrity

@@ -314,6 +314,44 @@ class ConnectedExecutionTests(unittest.TestCase):
 
 
 class ClientHeartbeatTests(unittest.TestCase):
+    def test_isolated_connection_failure_recovers_and_resets_failure_streak(self):
+        renewed = threading.Event()
+        calls = []
+
+        class IntermittentTransport:
+            def request(self, method, path, payload=None, timeout=None):
+                calls.append(path)
+                if len(calls) in {1, 3}:
+                    raise ChapterClientError("connection failed")
+                if len(calls) >= 4:
+                    renewed.set()
+                return {"renewed": True}
+
+        heartbeat = ClientHeartbeat(IntermittentTransport(), "d" * 64, 0.01, timeout=1.0)
+        heartbeat.start()
+        try:
+            self.assertTrue(renewed.wait(2), "Heartbeat stopped instead of renewing after a transient failure")
+        finally:
+            heartbeat.stop()
+        heartbeat.check()
+        self.assertGreaterEqual(len(calls), 4)
+
+    def test_expired_session_is_not_retried_or_reopened(self):
+        calls = []
+
+        class ExpiredTransport:
+            def request(self, method, path, payload=None, timeout=None):
+                calls.append((method, path))
+                raise ChapterClientError("expired session", status=404)
+
+        heartbeat = ClientHeartbeat(ExpiredTransport(), "e" * 64, 0.01, timeout=1.0)
+        heartbeat.start()
+        heartbeat._thread.join(2)
+        heartbeat.stop()
+        with self.assertRaises(ChapterClientError):
+            heartbeat.check()
+        self.assertEqual(calls, [("POST", f"v1/sessions/{heartbeat.session_id}/heartbeat")])
+
     def make_client(self, calls, *, fail_after=None):
         class FakeTransport:
             settings = {"timeout_seconds": 5}
@@ -351,6 +389,7 @@ class ClientHeartbeatTests(unittest.TestCase):
         heartbeat.stop()
         with self.assertRaisesRegex(ChapterClientError, "heartbeat failed"):
             heartbeat.check()
+        self.assertEqual(len(calls), 2)
 
     def test_stopped_heartbeat_never_renews_a_revoked_session(self):
         sessions = ClientSessions(30)
