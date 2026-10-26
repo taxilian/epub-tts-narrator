@@ -302,7 +302,7 @@ Each segment record has `version: 1`, `text_sha256` (SHA256 of its exact UTF-8 a
 | Control | Fields and meaning |
 | --- | --- |
 | `delivery` | `start`, `end`, exact `text`, `tag`, `direction`. Tags: `style`, `whisper`, `emphasis`, `soft`, `fast`, `slow`, `stress`, `forceful`. `style` requires a plain direction; named tags specify the execution. |
-| `pronunciation` | `start`, `end`, exact `text`, `alphabet: "cmu_arpabet"`, validated `phonemes`. Syntax validation does not establish pronunciation correctness. |
+| `pronunciation` | `start`, `end`, exact `text`, and either `alphabet: "cmu_arpabet"` with validated `phonemes`, or `alphabet: "respelling"` with a plain single-word `replacement` (hyphens allowed). Syntax validation does not establish pronunciation correctness. |
 | `pause` | `offset`, `duration_ms` from 100 through 5000. Drama 3 interprets this as an approximate duration hint. |
 | `vocalization` | `offset`, `sound`: `sigh`, `laugh`, `chuckle`, `breath`, `gasp`, `sob`, `cough`, or `throat_clear`. Inline only; no standalone event clips. |
 
@@ -311,3 +311,13 @@ Optional `evidence` contains exact `{block_id, quote}` source citations; optiona
 The renderer keeps model markup out of source and `spoken_text`. Its adapter compiles validated controls to engine input; expected lexical speech remains the approved spoken text. Full controls and compiler audits remain in request and take provenance. Accepted-audio identity uses the resulting model input, voice conditioning, sampling and seed, so an unchanged effective input remains reusable even when new planning metadata is present. Evidence-only changes do not invalidate speech. Source synchronization uses actual assembled frames, and paragraph precision is reported honestly when finer timing is unavailable.
 
 Engine support is explicit. Current Drama 3 adapters support the controls above; freeform style reset and pause duration remain approximate. Standalone events, language switching, and native continuation/infilling are unsupported. See [chapter comparison](RENDERER.md#compare-legacy-and-expressive-chapter-generation) for the opt-in evaluation workflow and recovery limits.
+
+## Book pronunciation registry
+
+`pronunciations.json` is a mutable per-book sidecar, outside canonical bundle checksums. Its object has `format: "epub-tts-pronunciations"`, `version: 1`, `book_id`, `source_fingerprint`, and `entries`. An optional `discovery` marker binds the completed discovery version, source fingerprint, and cast fingerprint; an interrupted scan does not mark itself complete. Candidate requests use the ordinary validated request cache.
+
+Each entry contains `id` (`pron_` plus SHA256 of the exact UTF-8 word), `word`, `status` (`pending`, `confirmed`, or `ignored`), `kind` (`name`, `place`, `invented`, `foreign`, `ambiguous`, or `other`), a brief `reason`, and `evidence` with exact `{block_id, quote}` citations into its owning book. Only confirmed entries contain `pronunciation`, shaped as `{"alphabet":"respelling","value":"Quarm"}` or `{"alphabet":"cmu_arpabet","value":"K W AO1 R M"}`. Discovery can propose only pending entries. An ignored entry explicitly selects normal engine pronunciation and shadows any inherited correction.
+
+Effective lookup rereads the validated continuation chain. The closest confirmed or ignored entry wins for each exact word; pending entries are considered only when no explicit decision exists. Inherited entries are not copied into descendant files. Thus later parent decisions remain visible without reanalysis, while a descendant override never changes the parent. Case variants and similarly spelled names have distinct IDs. Runtime provenance includes the owning directory and whether a decision was inherited; these lookup fields are not stored in the registry.
+
+The renderer projects each applicable confirmed source word to the approved spoken span and merges it with any explicit performance record. Identical pronunciation controls deduplicate; conflicts or ambiguous source mappings fail. CMU values compile to native phoneme tokens, and readable respellings replace only the synthesis input span. Both retain canonical expected text and source coordinates. Only affected synthesis inputs acquire different audio identities; voice references stay unchanged.

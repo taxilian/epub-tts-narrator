@@ -55,6 +55,16 @@ class PerformanceCompilerTests(unittest.TestCase):
         self.assertTrue(result["verification"]["preserve_trailing_silence"])
         self.assertEqual(result["warnings"], ["pause_duration_is_approximate"])
 
+    def test_readable_respelling_changes_model_input_but_keeps_canonical_text_and_controls(self):
+        text = "Qarm, come here."
+        control = {"kind": "pronunciation", "start": 0, "end": 4, "text": "Qarm",
+                   "alphabet": "respelling", "replacement": "Quarm"}
+        result = compile_performance(text, record(text, delivery(text), control))
+        self.assertEqual(result["text"], "<whisper>Quarm, come here.</whisper>")
+        self.assertEqual(result["expected_text"], text)
+        self.assertEqual(result["verification"]["lexical_text"], text)
+        self.assertEqual(result["applied_controls"][-1], control)
+
     def test_adjacent_scopes_and_boundary_events_stay_balanced(self):
         text = "go stop"
         result = compile_performance(text, record(text, delivery(text, 0, 3), delivery(text, 3, 7, tag="forceful"),

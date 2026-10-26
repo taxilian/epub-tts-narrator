@@ -179,6 +179,13 @@ def make_plan(bundle, config):
     from .performance_runtime import (load_render_performance, row_performance,
                                       protected_spans, bind_chunk_performance)
     performances = load_render_performance(bundle, settings, selected)
+    from .pronunciation_runtime import confirmed_pronunciations, merge_row_pronunciations
+    # A render invocation freezes this policy for paragraph recovery, which can
+    # rebuild the plan after a human edits this book or a continuation ancestor.
+    # Standalone planning still reads live decisions on every invocation.
+    pronunciations = config.get("_pronunciation_snapshot")
+    if pronunciations is None:
+        pronunciations = confirmed_pronunciations(bundle["directory"])
     chapters, errors, used = [], [], set()
     established_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if established_series and config["voices"]["series_id"] != established_series:
@@ -196,7 +203,8 @@ def make_plan(bundle, config):
             if normalize_words(spoken) and not speakers:
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
             spans = list(split_text(spoken, settings["max_chunk_chars"])) or [(0, 0)]
-            performance = row_performance(row, performances)
+            performance = row_performance(row, performances, normalization=False)
+            performance = merge_row_pronunciations(row, performance, pronunciations)
             spans = protected_spans(spoken, spans, performance, settings["max_chunk_chars"])
             for start, end in spans:
                 speech = spoken[start:end]
@@ -208,7 +216,7 @@ def make_plan(bundle, config):
                 chunk["chunk_id"] = digest({"source": bundle["manifest"]["source_fingerprint"],
                                             "segment": row["id"], "start": start, "end": end,
                                             "spoken_text": speech})[:32]
-                bind_chunk_performance(chunk, performance)
+                bind_chunk_performance(chunk, performance, sparse=performances is None)
                 if not chunk["silent_control"]:
                     used.update(speaker["voice_id"] for speaker in speakers)
                 chunks.append(chunk)

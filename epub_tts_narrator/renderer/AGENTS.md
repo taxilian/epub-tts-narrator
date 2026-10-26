@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 103 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 105 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -13,6 +13,7 @@ Keep this file current: when modules, entry points, or conventions change, updat
 Subcommands: `plan`, `cache-report`, `render`, `assemble`, `refresh-metadata`, `cleanup`, `voices`, `create-voices`, `import-voice`.
 More commands: `cast`, `voice-aliases`, `doctor`, `serve`, `serve-chapters`, `runpod`.
 Performance commands: `prepare-performance`, `compare-performance`; legacy rendering remains the default.
+Pronunciation command: `pronunciations` with review/list/discover/set/ignore/reset/play actions. Readable respelling and explicit CMU Arpabet; saved character voices only.
 `serve` exposes a Fish-compatible `/v1/tts` service through `server.py`.
 `serve-chapters` runs the resumable job server in `chapter_server.py`.
 Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publish.
@@ -36,6 +37,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Resolve recurring speech failures | `speech_resolver.py`, `recurring_resolution.py`, `delivery_recovery.py` |
 | Configure engines or add a plugin | `engines.py`, `ENGINE_NOTES.md` |
 | Compile expressive controls and compare chapters | `performance_compiler.py`, `performance_runtime.py`, `performance_comparison.py`; acoustic pause evidence in `performance_audio.py` |
+| Review and apply book pronunciation choices | `pronunciation_review.py`, `pronunciation_runtime.py`; registry and discovery in the analyzer package |
 | Cast voices and manage aliases | `casting.py`, `voices.py`, `audition.py`, `voice_bindings.py` |
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
@@ -53,6 +55,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - Censorship defaults off in global `[censorship]`; `render`/`assemble --censor` and `--no-censor` override it. Match whole original-source words and project approved spellings; never infer target indices from nonexact ASR word counts. Apply validated frame masks after original edge trimming, separately per simultaneous lane before mixing. Bind policy only to composition/publication identity, never speech acceptance or voice identity.
 - `assemble --chapters-only` can rebuild censorship from original accepted clips without TTS. Missing timing may lazily load MLX Whisper for cached, known-text attention alignment. Require independent ASR complete lexical coverage first; retained missing/different words or uncertain boundaries stop with originals intact. Reject target durations below 20 ms. Preserve actual frame count, full original verification, and per-lane censorship audits in sync. Downloaded remote chapter audio alone cannot rebuild a changed policy locally.
 - Heavy ML and HTTP imports stay inside functions, never at module scope.
+- Confirmed pronunciations apply in legacy and expressive modes. `_preflight` freezes effective decisions per invocation; local/remote paragraph recovery uses that snapshot and the next run reloads ancestors. Bind only affected source-mapped slices; preserve canonical text and unchanged speech identities. Override stale normalization-derived hints only on the corrected word. Reject ambiguous multiword mappings and conflicting explicit controls. `pronunciation_review` caches isolated FLAC listening previews; these are not accepted audiobook speech or voice references. Drafts survive review exits but never affect book rendering before confirmation.
 - Use the separate Python 3.12 uv environment and root `renderer.requirements.txt`.
 - FFmpeg and FFprobe are required; paths come from TOML configuration.
 - `engines.py:create_engine` supports entry-point groups `epub_tts_narrator.tts` and legacy `audiobook_renderer.tts`.

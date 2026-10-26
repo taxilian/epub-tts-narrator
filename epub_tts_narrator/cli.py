@@ -276,6 +276,9 @@ def parser():
                                   help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     refresh_profiles.add_argument("--workers", type=int, default=1,
                                   help="Concurrent model requests, 1-5 (default 1; capped by analysis.attribution_workers)")
+    pronunciations = commands.add_parser("discover-pronunciations", help="Find unusual names and words in an existing book without repeating analysis")
+    pronunciations.add_argument("directory", type=Path)
+    pronunciations.add_argument("--config", type=Path, help="Global TOML configuration")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -358,7 +361,12 @@ def main(argv=None):
                 and not audition_preparation_pending(revised)):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
-            print("Saved analysis is complete; no model calls or analysis changes are needed.")
+            from .pronunciations import discovery_pending
+            print("Saved character and passage analysis is complete; checking pronunciation discovery."
+                  if discovery_pending(directory, original) else
+                  "Saved analysis is complete; no model calls or analysis changes are needed.")
+            from .pronunciation_workflow import prepare_book_pronunciations
+            prepare_book_pronunciations(directory, config, document=original, client_factory=OpenAICompatibleClient)
             return _speaker_completion_status(original)
 
         directories = related_directories([directory])
@@ -406,9 +414,16 @@ def main(argv=None):
             print(f"Updated saved analysis and chapter scripts in {directory}.")
         else:
             print("No analysis changes; saved files are unchanged.")
+        from .pronunciation_workflow import prepare_book_pronunciations
+        prepare_book_pronunciations(directory, config, document=revised, requests=requests,
+                                   client_factory=OpenAICompatibleClient)
         return _speaker_completion_status(revised)
 
     try:
+        if args.command == "discover-pronunciations":
+            from .pronunciation_workflow import prepare_book_pronunciations
+            prepare_book_pronunciations(args.directory, load_config(args.config))
+            return 0
         if args.command == "resolve-speakers":
             from .analysis_directory import _completed_directory
             from .analysis_revision import related_directories, revise_directories
@@ -557,8 +572,10 @@ def main(argv=None):
                                   "attribution_review_scan_requests": review_scans,
                                   "voice_ensemble_requests": 1,
                                   "speech_spelling_scan_requests_minimum": 1 if source["blocks"] else 0,
+                                  "pronunciation_scan_requests_minimum": int(directory_mode and bool(source["blocks"])),
                                   "baseline_model_requests": (base_requests + identity_scans + series_scans
-                                                              + review_scans + 1 + bool(source["blocks"])),
+                                                              + review_scans + 1 + bool(source["blocks"])
+                                                              + int(directory_mode and bool(source["blocks"]))),
                                   "note": ("Before cache reuse and bounded validation repairs; character count is not a token estimate. "
                                            + f"Baseline includes {reconciliation_rounds} cumulative cast reconciliation round(s). "
                                            + "Baseline includes one whole-cast voice design request after the cast is final; "
@@ -583,7 +600,10 @@ def main(argv=None):
                                               "that proposes corrections; the number is unknown before review."
                                               if attribution_review else " Attribution review is disabled.")
                                            + " Baseline includes one spoken-spelling scan; the final segment count determines additional bounded batches."
-                                             " Add three independent reviews for each batch proposing spelling edits."),
+                                             " Add three independent reviews for each batch proposing spelling edits."
+                                           + (" Directory analysis also scans pronunciation candidates in bounded source batches; "
+                                              "the baseline includes one request and long books need more. Guesses are never auto-confirmed."
+                                              if directory_mode else "")),
                                   "exclusions": source["exclusions"]}
                 if registry is not None:
                     planned["series"] = {"series_id": registry["series_id"], "books": len(context["prior_books"]),
@@ -641,6 +661,9 @@ def main(argv=None):
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
+                from .pronunciation_workflow import prepare_book_pronunciations
+                prepare_book_pronunciations(args.output, config, document=document, requests=sample_requests,
+                                           progress=lambda message: print(message, file=sys.stderr))
                 return _speaker_completion_status(document)
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:

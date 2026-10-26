@@ -44,6 +44,8 @@ class CompletionClient:
         self.uncertain = uncertain
 
     def complete(self, system, payload):
+        if payload.get("mode") == "pronunciation_discovery":
+            return {"candidates": []}
         if payload.get("mode") == "speech_spelling_scan":
             self.normalization_calls.append(deepcopy(payload))
             return {"segments": [{"segment_id": row["segment_id"], "edits": []}
@@ -80,7 +82,7 @@ class TruncatedCompletionClient(CompletionClient):
         self.failed_block = failed_block
 
     def complete(self, system, payload):
-        if payload.get("mode") == "speech_spelling_scan":
+        if payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery"}:
             return super().complete(system, payload)
         if (payload["reviewer_id"] == "speaker_completion_3"
                 and (self.failed_block is None or payload["target_units"][0]["block_id"] == self.failed_block)):
@@ -139,6 +141,9 @@ class AnalyzeResumeTests(unittest.TestCase):
             document = normalize_document_speech(document, CachedRequests(
                 CompletionClient(), self.root / "normalization-seed-cache", repair_attempts=0), workers=1)
         publish_directory(document, registry, path, export_bundle, continue_from=parent)
+        if normalized:
+            from epub_tts_narrator.pronunciations import save_candidates
+            save_candidates(path, document, [])
         (path / "voices").mkdir()
         (path / "voices" / "reference.wav").write_bytes(b"Existing voice remains unchanged")
         return epub, path, document

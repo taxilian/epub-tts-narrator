@@ -28,6 +28,8 @@ class NarrativeClient:
 
     def complete(self, system, payload):
         type(self).calls += 1
+        if payload.get("mode") == "pronunciation_discovery":
+            return {"candidates": []}
         if payload.get("mode") == "speech_spelling_scan":
             return {"segments": [{"segment_id": row["segment_id"], "edits": []}
                                  for row in payload["target_segments"]]}
@@ -119,7 +121,8 @@ class CLITests(unittest.TestCase):
         self.assertEqual(self.run_cli("extract", epub, "-o", source)[0], 0)
         status, stdout, stderr = self.run_cli("plan", source)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 6)
+        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 7)
+        self.assertEqual(json.loads(stdout)["pronunciation_scan_requests_minimum"], 1)
         self.assertEqual(json.loads(stdout)["speech_spelling_scan_requests_minimum"], 1)
         self.assertEqual(json.loads(stdout)["identity_scan_requests"], 1)
         self.assertEqual(json.loads(stdout)["voice_ensemble_requests"], 1)
@@ -170,7 +173,7 @@ class CLITests(unittest.TestCase):
                     base = batches + 2 if whole_book else 2 * batches + 1
                     self.assertEqual(result["identity_consensus"], consensus)
                     self.assertEqual(result["identity_scan_requests"], scans)
-                    self.assertEqual(result["baseline_model_requests"], base + scans + 2)
+                    self.assertEqual(result["baseline_model_requests"], base + scans + 3)
                     if consensus:
                         self.assertIn("unknown before analysis", result["note"])
                         self.assertIn("series matches", result["note"])
@@ -210,7 +213,7 @@ class CLITests(unittest.TestCase):
                         base = batches + 1 if whole_book else 2 * batches
                         scans = (1 if whole_book else batches) if consensus else 0
                         self.assertEqual(result["cast_reconciliation_rounds"], rounds)
-                        self.assertEqual(result["baseline_model_requests"], base + rounds + scans + 2)
+                        self.assertEqual(result["baseline_model_requests"], base + rounds + scans + 3)
 
     def test_analyze_passes_file_configured_reconciliation_rounds(self):
         self.config.write_text('[provider]\nmodel = "test-model"\n'
@@ -283,7 +286,7 @@ class CLITests(unittest.TestCase):
         plan = json.loads(stdout)
         self.assertTrue(plan["attribution_review"])
         self.assertEqual(plan["attribution_review_scan_requests"], 1)
-        self.assertEqual(plan["baseline_model_requests"], 7)
+        self.assertEqual(plan["baseline_model_requests"], 8)
         self.assertIn("three jury requests per review batch", plan["note"])
         observed = {}
 

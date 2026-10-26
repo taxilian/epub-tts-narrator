@@ -55,6 +55,14 @@ def validate_phonemes(value):
     return value
 
 
+def validate_respelling(value):
+    """A user-supplied pronunciation hint, never engine markup or new dialogue."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 200
+            or not re.fullmatch(r"[^\W_]+(?:['’\-‐‑][^\W_]+)*", value, re.UNICODE)):
+        raise ValueError("Pronunciation respelling must be one plain word, optionally hyphenated")
+    return value
+
+
 def _provenance(record, label):
     if "reason" in record and (not isinstance(record["reason"], str) or len(record["reason"]) > 1000):
         raise ValueError(f"{label}.reason must be bounded text")
@@ -116,19 +124,24 @@ whispered name without inventing a general conflicting-style nesting policy.
                 raise ValueError(f"{label}.tag is unsupported")
             item["direction"] = plain_direction(item.get("direction", ""), label + ".direction", required=item["tag"] == "style")
         elif kind == "pronunciation":
-            if set(item) != {"kind", "start", "end", "text", "alphabet", "phonemes"}:
+            alphabet = item.get("alphabet")
+            field = "replacement" if alphabet == "respelling" else "phonemes"
+            if set(item) != {"kind", "start", "end", "text", "alphabet", field}:
                 raise ValueError(f"{label} requires pronunciation bounds, alphabet and phonemes")
             _span(item, text, label)
-            if item["alphabet"] != "cmu_arpabet":
+            if not isinstance(alphabet, str) or alphabet not in {"cmu_arpabet", "respelling"}:
                 raise ValueError(f"{label}.alphabet is unsupported")
             # A phoneme control replaces one lexical word; adjacent punctuation
             # and whitespace remain canonical text outside the model token.
-            if not re.fullmatch(r"[^\W_]+(?:['’\-][^\W_]+)*", item["text"], re.UNICODE):
+            if not re.fullmatch(r"[^\W_]+(?:['’\-‐‑][^\W_]+)*", item["text"], re.UNICODE):
                 raise ValueError(f"{label} pronunciation must replace one word without surrounding punctuation")
             if (item["start"] and text[item["start"] - 1].isalnum()
                     or item["end"] < len(text) and text[item["end"]].isalnum()):
                 raise ValueError(f"{label} pronunciation must not replace only part of a word")
-            validate_phonemes(item["phonemes"])
+            if alphabet == "cmu_arpabet":
+                validate_phonemes(item["phonemes"])
+            else:
+                validate_respelling(item["replacement"])
         elif kind in {"pause", "vocalization"}:
             fields = {"kind", "offset", "duration_ms" if kind == "pause" else "sound"}
             if set(item) != fields or type(item.get("offset")) is not int or not 0 <= item["offset"] <= len(text):

@@ -102,7 +102,8 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
         # Old bundles need the new spelling pass, but known speaker/cast work
         # must not be repeated. A completed second run makes no model calls.
         self.assertLessEqual(provider.call_count, 1)
-        self.assertTrue(all(payload.get("mode") == "speech_spelling_scan" for _, payload in client.calls))
+        self.assertTrue(all(payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery"}
+                            for _, payload in client.calls))
         if command == "resolve-speakers":
             provider.assert_not_called()
         judge.assert_not_called()

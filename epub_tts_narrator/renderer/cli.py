@@ -22,7 +22,7 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -69,6 +69,14 @@ def parser():
                                  metavar=("SOURCE", "TARGET"), help="Share TARGET's voice for SOURCE in this book and descendants")
             command.add_argument("--remove", dest="alias_removals", action="append", default=[], metavar="SOURCE",
                                  help="Remove a local mapping, restoring any inherited or automatic mapping")
+        if name == "pronunciations":
+            command.add_argument("--action", default="review",
+                                 choices=("review", "list", "discover", "set", "ignore", "reset", "play"),
+                                 help="Review pronunciation candidates, audition corrections, or save a book-local choice")
+            command.add_argument("--word", help="Exact written word, including case (e.g. Qarm)")
+            correction = command.add_mutually_exclusive_group()
+            correction.add_argument("--say-as", help="Readable single-word respelling (e.g. Quarm); hyphens allowed")
+            correction.add_argument("--phonemes", help="Advanced: CMU Arpabet phonemes, with stress digits if needed")
         if name == "import-voice":
             command.add_argument("--voice-id", required=True)
             command.add_argument("--audio", type=Path, required=True)
@@ -250,7 +258,7 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command in {"refresh-metadata", "prepare-performance", "assemble"}:
+        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -289,6 +297,14 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command == "pronunciations":
+            if args.action == "discover":
+                from epub_tts_narrator.config import load_config as load_analysis_config
+                from epub_tts_narrator.pronunciation_workflow import prepare_book_pronunciations
+                prepare_book_pronunciations(bundle["directory"], load_analysis_config(config_path))
+                return 0
+            from .pronunciation_review import run_pronunciation_review
+            return run_pronunciation_review(bundle, config, args)
         if args.command in {"prepare-performance", "compare-performance"}:
             from epub_tts_narrator.config import load_config as load_analysis_config
             from epub_tts_narrator.performance_planning import load_prepared_performance, prepare_performance

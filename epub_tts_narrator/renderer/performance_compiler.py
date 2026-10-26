@@ -19,7 +19,7 @@ PERFORMANCE_CAPABILITIES = {
     "drama3": {
         "version": 1, "scoped_delivery": sorted(DELIVERY_TAGS - {"style"}),
         "passage_direction": True, "scoped_style": "approximate_reset",
-        "pronunciation_alphabets": ["cmu_arpabet"], "inline_vocal_events": True,
+        "pronunciation_alphabets": ["cmu_arpabet", "respelling"], "inline_vocal_events": True,
         "standalone_vocal_events": False, "pause_duration": "approximate",
         "language_switching": False, "context_continuation": False,
     },
@@ -170,7 +170,9 @@ The plain backend explicitly reports every unsupported requested control.
                 starts[a], closes[b] = f"<{tag}>", f"</{tag}>"
             result["applied_controls"].append(item)
         elif kind == "pronunciation":
-            replacements[control["start"]] = (control["end"], f"<|phoneme_start|>{control['phonemes']}<|phoneme_end|>")
+            spoken = (control["replacement"] if control["alphabet"] == "respelling"
+                      else f"<|phoneme_start|>{control['phonemes']}<|phoneme_end|>")
+            replacements[control["start"]] = (control["end"], spoken)
             result["applied_controls"].append(item)
         else:
             offset = control["offset"]

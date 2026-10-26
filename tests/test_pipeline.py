@@ -30,6 +30,8 @@ class FakeClient:
 
     def complete(self, system, payload):
         self.calls.append((system, deepcopy(payload)))
+        if payload.get("mode") == "pronunciation_discovery":
+            return {"candidates": []}
         if payload.get("mode") == "speech_spelling_scan":
             return {"segments": [{"segment_id": row["segment_id"], "edits": []}
                                   for row in payload["target_segments"]]}

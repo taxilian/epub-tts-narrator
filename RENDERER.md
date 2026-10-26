@@ -366,6 +366,36 @@ To use an approved plan for an ordinary render, pass `--performance-plan PATH` t
 
 Both commands read analysis-provider and renderer settings from the same global TOML file; use `--config /path/to/epub-tts-narrator.toml` from another directory. Plans, request caches, and audio are resumable local artifacts and contain book text; keep them out of Git. Transcript verification does not certify accent, identity, emphasis, or emotion, so use the comparison to judge the performance by listening. Native pause duration and freeform style resets are approximate; unsupported controls fail explicitly instead of disappearing.
 
+## Pronunciation review
+
+`audiobook-render pronunciations BOOK` opens the review menu for words collected by analysis. Numbered entries play a short source excerpt using an existing saved voice; any key stops playback. `E` edits a readable respelling, `P` edits CMU Arpabet, `B` plays the default, `C` confirms, `I` keeps the default, `R` resets a local override, and `Q` quits. Commands can include an entry number or use the last selected word. Edited drafts survive quitting but apply to the book only after confirmation. Previews are listening aids, not verified audiobook clips. They are cached separately as lossless FLAC and never replace the selected character voice.
+
+For an older book, first run `epub-tts-narrator discover-pronunciations BOOK` (or `audiobook-render pronunciations BOOK --action discover`). This only discovers pronunciation candidates; it does not repeat the cast or speaker analysis. Noninteractive commands are also available:
+
+```sh
+audiobook-render pronunciations BOOK --action list
+
+# Listen before saving a simple correction.
+audiobook-render pronunciations BOOK --action play --word Qarm --say-as Quarm
+audiobook-render pronunciations BOOK --action set --word Qarm --say-as Quarm
+
+# Or specify exact CMU Arpabet symbols and stress digits.
+audiobook-render pronunciations BOOK --action play --word Qarm --phonemes "K W AO1 R M"
+audiobook-render pronunciations BOOK --action set --word Qarm --phonemes "K W AO1 R M"
+
+# Keep the engine's default in this book, even if an ancestor has a correction.
+audiobook-render pronunciations BOOK --action ignore --word Qarm
+
+# Remove this book's choice and restore any inherited choice.
+audiobook-render pronunciations BOOK --action reset --word Qarm
+```
+
+Both input forms are validated. Respelling accepts one plain word, optionally hyphenated to suggest syllables; it never accepts model tags. CMU Arpabet accepts the documented consonant/vowel inventory and optional vowel stress `0`, `1`, or `2`. A readable respelling depends on the engine's interpretation, while Arpabet is more explicit. Listening determines whether either produces the intended pronunciation; schema validation and transcript matching cannot establish that. Recording-to-phoneme import is not implemented by this workflow.
+
+Corrections apply to every occurrence of the exact complete source word in the current book, including case. Similar names, different case variants, and possessive forms are separate words. A correction can be added for a source word that discovery missed. Choices live in the book's `pronunciations.json`; the global TOML stays generic. Saved continuation links are searched from the current book backward, with the nearest explicit correction or keep-default decision taking precedence. Pending candidates never override an ancestor's confirmed choice. Ancestor books and voice references are never modified.
+
+Confirmed pronunciations apply automatically in both legacy and expressive rendering; no new performance plan or full analysis is required. The renderer maps the source word through approved spelling edits, then adds structured pronunciation controls only to affected speech. Canonical text and synchronization coordinates stay unchanged. Each render snapshots its effective choices so edits made while it runs take effect on the next invocation, including during paragraph recovery. Rerun `render` to generate affected passages and rebuild their chapters; unchanged effective speech remains reusable. `assemble` cannot change a word already recorded. Ambiguous multiword spelling edits and conflicting explicit pronunciation controls stop with an actionable error. Backends that do not support structured performance fail explicitly rather than dropping the correction.
+
 This experimental mode keeps the existing paragraph and speaker boundaries. It supports the documented paired delivery controls, scoped freeform styles, CMU Arpabet, inline vocalizations, and approximate pauses through the Drama 3 adapters. Standalone sound effects, language switching, audio infilling, and history-conditioned continuation are not implemented. Spoken-word checks remain active; an inline laugh or sigh is not yet acoustically certified. Explicit pauses are allowed through silence checks only when their measured position and duration match the requested ASR word boundary.
 
 Whole-take retries and transcript review remain available. Text-only spelling rewrites and sentence-split recovery are disabled for expressive leaf clips because the current recovery contract cannot safely rebind their scoped controls. Failed paragraph groups can still fall back to their original independently bound turns. This limitation is confined to expressive mode; the legacy recovery path is unchanged.

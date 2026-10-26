@@ -1122,6 +1122,11 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         config = resolve_book_config(bundle, config)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
+    from .pronunciation_runtime import confirmed_pronunciations
+    # Every explicit invocation reloads current choices. Recovery within this
+    # invocation uses this private snapshot, including remote resubmissions.
+    # Only controls actually used by a chunk enter synthesis/cache identities.
+    config["_pronunciation_snapshot"] = confirmed_pronunciations(bundle["directory"])
     plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
                             single_speaker_paragraph=single_speaker_paragraph)
     if plan["errors"]:

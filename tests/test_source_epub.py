@@ -120,6 +120,8 @@ class SourceEpubTests(unittest.TestCase):
 
     def test_resuming_old_bundle_with_original_epub_remembers_location(self):
         self.publish(hint=False)
+        from epub_tts_narrator.pronunciations import save_candidates
+        save_candidates(self.directory, self.document, [])
         config = self.root / "config.toml"
         config.write_text("")
         with (patch("epub_tts_narrator.cli.source_from", return_value=deepcopy(self.document["source"])),

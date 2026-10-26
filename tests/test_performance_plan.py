@@ -84,6 +84,18 @@ class PerformancePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cross"):
             validate_performance(record(text, delivery(text, 2, 6), pronunciation(text, 0, 3)), text)
 
+    def test_respelling_accepts_plain_syllables_and_rejects_markup_or_added_dialogue(self):
+        text = "Qarm spoke."
+        control = {"kind": "pronunciation", "start": 0, "end": 4, "text": "Qarm",
+                   "alphabet": "respelling", "replacement": "Quarm"}
+        for value in ("Quarm", "KWAR-m"):
+            with self.subTest(value=value):
+                candidate = record(text, {**control, "replacement": value})
+                self.assertEqual(validate_performance(candidate, text), candidate)
+        for value in ("", "Quarm go", "<whisper>Quarm", "[laugh]", "Quarm\n", "Quarm.", "a" * 201):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_performance(record(text, {**control, "replacement": value}), text)
+
     def test_overlapping_delivery_ranges_are_rejected_not_arbitrarily_prioritized(self):
         text = "Jas spoke."
         with self.assertRaisesRegex(ValueError, "overlap"):

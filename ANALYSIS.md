@@ -143,6 +143,21 @@ Analysis normalizes intentionally stylized speech for synthesis while preserving
 
 Square-bracket text such as `[Fireball]` receives a separate delivery cue, including inside dialogue. Speaker and voice stay unchanged. The script retains exact source text and supplies `spoken_text` without delimiters for synthesis. Configure `performance_policy.bracketed_text`; balanced nested and multi-paragraph groups are supported, while unmatched delimiters are flagged. See [the format contract](FORMAT.md#bracketed-delivery).
 
+## Pronunciation candidates
+
+After publishing a directory analysis, `analyze` scans the source in bounded batches with the resolved cast as context. It collects unusual character/place names, invented terms, foreign words, and ambiguous spellings in `BOOK/pronunciations.json`. Each candidate has an exact written word, source quotation, and reason to check it. The model does not select or confirm a pronunciation. Ordinary words should not crowd the review queue, but discovery is a model suggestion and can miss words; the review command also accepts a manually specified source word.
+
+Existing books can add this queue without repeating character or passage analysis:
+
+```sh
+epub-tts-narrator discover-pronunciations BOOK --config epub-tts-narrator.toml
+audiobook-render pronunciations BOOK --config epub-tts-narrator.toml
+```
+
+The scan uses the existing analysis provider and cached requests, with at most five concurrent calls. A failed scan leaves the published analysis and completed request batches intact; rerun the command to finish. Rerunning `analyze BOOK` also completes missing discovery. A completed source/cast-bound scan is skipped. Local corrections survive discovery and do not rewrite the canonical analysis, scripts, cast, or reference recordings. Legacy single-JSON analysis output does not have this per-book sidecar workflow.
+
+Pending candidates do not affect synthesis. Confirmed respellings or CMU Arpabet choices are loaded at render time, independently of expressive delivery planning. Choices follow the saved continuation chain dynamically: a correction confirmed in Book 1 after Book 2 was analyzed is available to Book 2 on its next render. A Book 2 correction or explicit keep-default decision overrides Book 1 for that word in Book 2 and its descendants. Matching uses complete words with exact spelling and case, never name resemblance or fuzzy identity merging. See [pronunciation review](RENDERER.md#pronunciation-review) for audition and correction commands.
+
 ## Reusing a series cast
 
 Directory analysis saves a cumulative series cast. Continue a series with `--continue-from`; the prior directory stays unchanged and the new output receives its history and a relative continuation link.

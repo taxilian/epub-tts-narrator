@@ -20,7 +20,7 @@ def load_render_performance(bundle, settings, chapters):
     return load_prepared_performance(bundle, path, chapters=sorted(chapters))["segments"]
 
 
-def _with_normalization_directions(row, record):
+def _with_normalization_directions(row, record, *, suppressed_normalizations=()):
     """Scope approved spelling-repair directions to their spoken replacements.
 
     Earlier renderers applied every spelling hint to the entire passage. Split
@@ -32,6 +32,8 @@ def _with_normalization_directions(row, record):
     edits = row.get("speech_normalization", {}).get("edits", [])
     hints = []
     for edit in edits:
+        if (edit["start"], edit["end"]) in suppressed_normalizations:
+            continue
         direction = edit.get("direction", "").strip()
         if not direction:
             continue
@@ -61,12 +63,14 @@ def _with_normalization_directions(row, record):
     return validate_performance(record, text)
 
 
-def row_performance(row, records):
+def row_performance(row, records, *, normalization=True):
     if records is None:
         return None
     if row["id"] not in records:
         raise ValueError("Performance plan is missing a selected source segment")
-    return _with_normalization_directions(row, records[row["id"]])
+    if normalization:
+        return _with_normalization_directions(row, records[row["id"]])
+    return validate_performance(records[row["id"]], build_spoken(row)[0])
 
 
 def protected_spans(text, spans, record, maximum):
@@ -87,14 +91,17 @@ def protected_spans(text, spans, record, maximum):
     return list(zip(ordered, ordered[1:])) or [(0, 0)]
 
 
-def bind_chunk_performance(chunk, record):
+def bind_chunk_performance(chunk, record, *, sparse=False):
     if record is None:
         return
     row = chunk["segment"]
     spoken = build_spoken(row)[0]
-    chunk["expressive_performance"] = (slice_performance(
+    scoped = (slice_performance(
         record, spoken, chunk["spoken_start"], chunk["spoken_end"])
         if spoken else validate_performance(record, spoken))
+    if sparse and not any(control["kind"] == "pronunciation" for control in scoped["controls"]):
+        return
+    chunk["expressive_performance"] = scoped
     scene = deepcopy(row)
     scene.pop("speech_normalization", None)
     chunk["expressive_direction"] = effective_delivery(scene)
@@ -124,7 +131,7 @@ def synthesis_direction(chunk, voice_id):
 def require_engine_support(plan, engine):
     if (any(is_expressive(chunk) for chapter in plan["chapters"] for chunk in chapter["chunks"])
             and not getattr(engine, "capabilities", {}).get("structured_performance", False)):
-        raise ValueError("This TTS backend does not support structured performance plans; use legacy mode or a supported Drama 3 adapter")
+        raise ValueError("This TTS backend does not support structured performance or pronunciation controls; select a supported Drama 3 adapter")
 
 
 def verification_options(request):

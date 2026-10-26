@@ -67,6 +67,7 @@ def validate_book_paths(bundle, config):
     protected = [directory / name for name in
                  ("manifest.json", "analysis.json", "series-cast.json", "source.json", "audition-scripts.json", ".audition-scripts.lock",
                   "cast.json", "review.json", "scripts", "voice-aliases.json", ".voice-aliases.lock",
+                  "pronunciations.json", ".pronunciations.lock",
                   "source-epub.json",
                   ".audio-render.lock", ".analysis-update.lock")]
     if not config.get("_book_local_voices"):

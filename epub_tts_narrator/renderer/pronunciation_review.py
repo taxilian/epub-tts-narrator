@@ -1,0 +1,516 @@
+"""Book pronunciation review and isolated listening previews with saved voices.
+
+Auditions are never accepted audiobook clips or newly created voice references.
+Only an explicit confirmation changes the book's pronunciation registry.
+"""
+
+from __future__ import annotations
+
+from array import array
+from copy import deepcopy
+import math
+from pathlib import Path
+import re
+import sys
+import wave
+
+from .audition import AudioPlayer, display
+from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json
+from .run_locks import acquire_directory_lock
+
+
+_FORMAT = "epub-tts-pronunciation-preview"
+_DRAFT_FORMAT = "epub-tts-pronunciation-drafts"
+_MAX_SAMPLE = 360
+
+
+def _pronunciation(say_as=None, phonemes=None):
+    from ..pronunciations import validate_pronunciation
+    if say_as is not None and phonemes is not None:
+        raise ValueError("Choose --say-as or --phonemes, not both")
+    if say_as is None and phonemes is None:
+        return None
+    return validate_pronunciation({"alphabet": "respelling" if say_as is not None else "cmu_arpabet",
+                                   "value": say_as if say_as is not None else phonemes})
+
+
+def _description(pronunciation):
+    if not pronunciation:
+        return "default pronunciation"
+    prefix = "say as " if pronunciation["alphabet"] == "respelling" else "CMU phonemes "
+    return prefix + pronunciation["value"]
+
+
+def _context(entry):
+    evidence = entry.get("evidence", [])
+    if evidence and isinstance(evidence[0], dict):
+        return str(evidence[0].get("quote", "")).replace("\n", " ")[:180]
+    return ""
+
+
+def _show(rows, output):
+    output(display(f"\nPronunciations — {sum(row['status'] == 'pending' for row in rows)} pending / {len(rows)} total"))
+    for index, row in enumerate(rows, 1):
+        extra = " — inherited" if row.get("inherited") else ""
+        draft = row.get("draft")
+        description = _description(draft or row.get("pronunciation"))
+        if draft:
+            description += " (draft; not applied to the book)"
+        output(display(f"{index:3}. {row['word']} — {row['status']}{extra}; {description}"))
+        if row.get("reason"):
+            output(display("     " + str(row["reason"]).replace("\n", " ")))
+        if _context(row):
+            output(display("     “" + _context(row) + "”"))
+
+
+def _sample_bounds(text, first, last):
+    """Bound a real source excerpt at words, preferring sentence boundaries."""
+    if len(text) <= _MAX_SAMPLE:
+        return 0, len(text)
+    boundaries = [0, *[match.end() for match in re.finditer(r"[.!?][\"'”’]?\s+", text)], len(text)]
+    before = max(value for value in boundaries if value <= first)
+    after = min(value for value in boundaries if value >= last)
+    if after - before <= _MAX_SAMPLE:
+        return before, after
+    before = max(0, first - 110)
+    if before:
+        space = re.search(r"\s+", text[before:first])
+        before = before + space.end() if space else first
+    after = min(len(text), before + _MAX_SAMPLE)
+    if after < last:
+        before, after = first, min(len(text), max(last, first + _MAX_SAMPLE))
+    if after < len(text):
+        boundary = text.rfind(" ", last, after)
+        after = boundary if boundary >= last else last
+    return before, after
+
+
+def _preview_audio(path):
+    """Reject physically empty/silent/corrupt audio, without judging wording."""
+    with wave.open(str(regular_file(path)), "rb") as source:
+        rate, frames = source.getframerate(), source.getnframes()
+        if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getcomptype() != "NONE":
+            raise ValueError("Pronunciation preview must be mono PCM16 audio")
+        if not rate or not 0 < frames <= rate * 120:
+            raise ValueError("Pronunciation preview duration is invalid")
+        pcm = source.readframes(frames)
+        if len(pcm) != frames * 2:
+            raise ValueError("Pronunciation preview audio is truncated")
+    samples = array("h")
+    samples.frombytes(pcm)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    rms = math.sqrt(sum(value * value for value in samples) / frames) / 32768
+    if rms < 10 ** (-60 / 20):
+        raise ValueError("Pronunciation preview is silent or too quiet to audition")
+    return {"frames": frames, "sample_rate": rate, "duration_seconds": frames / rate}
+
+
+def _remove_redundant_wavs(folder, state):
+    for name, field, hasher in (("raw.wav", "raw_sha256", file_hash),
+                                ("normalized.wav", "pcm_sha256", pcm_sha256)):
+        path = folder / name
+        if path.exists() or path.is_symlink():
+            if hasher(regular_file(path)) != state.get(field):
+                raise ValueError("Redundant pronunciation preview audio changed; it has been retained")
+            path.unlink()
+
+
+def _retry_rejected_take(folder, state, request):
+    """Discard only our hash-bound failed take after another explicit play."""
+    rejections = state.get("rejections", [])
+    if not rejections or not isinstance(rejections[-1], dict):
+        raise ValueError("Invalid pronunciation preview rejection audit")
+    rejected = rejections[-1]
+    audit = {key: value for key, value in rejected.items() if key != "sha256"}
+    if (rejected.get("sha256") != digest(audit) or rejected.get("request_sha256") != digest(request)
+            or rejected.get("take") != state.get("take")
+            or rejected.get("seed") != state.get("take_seed")
+            or rejected.get("raw_sha256") != state.get("raw_sha256")):
+        raise ValueError("Pronunciation preview rejection audit changed; audio has been retained")
+    removable = []
+    for name, field in (("raw.wav", "raw_sha256"), ("normalized.wav", "normalized_sha256")):
+        path = folder / name
+        if path.exists() or path.is_symlink():
+            if file_hash(regular_file(path)) != rejected.get(field):
+                raise ValueError("Rejected pronunciation preview changed; audio has been retained")
+            removable.append(path)
+    for path in removable:
+        path.unlink()
+    return {"format": _FORMAT, "request": request, "status": "pending",
+            "purpose": "unverified_pronunciation_listening_preview",
+            "take": state["take"] + 1, "take_seed": (state["take_seed"] + 1) % (2**32),
+            "rejections": rejections}
+
+
+def _reject_preview(folder, state, reason):
+    """Checkpoint a physical rejection without authorizing a retry loop."""
+    rejection = {"request_sha256": digest(state["request"]), "take": state["take"],
+                 "seed": state["take_seed"], "raw_sha256": state["raw_sha256"],
+                 "normalized_sha256": file_hash(regular_file(folder / "normalized.wav")),
+                 "reason": str(reason), "kind": "physically_invalid_audio"}
+    rejection["sha256"] = digest(rejection)
+    state.setdefault("rejections", []).append(rejection)
+    state["status"] = "rejected"
+    write_json(folder / "preview.json", state)
+    raise ValueError(f"{reason}. Play again to generate a new take; the rejection audit is saved in {folder / 'preview.json'}") from reason
+
+
+class PronunciationReviewSession:
+    def __init__(self, bundle, config, *, engine_factory=None, store=None, notify=print):
+        self.bundle, self.config = bundle, deepcopy(config)
+        self.notify = notify
+        self._engine_factory, self._engine, self._store = engine_factory, None, store
+        self._resolved = None
+
+    @property
+    def settings(self):
+        if self._resolved is None:
+            from .book_context import resolve_book_config
+            self._resolved = resolve_book_config(self.bundle, self.config)
+        return self._resolved
+
+    @property
+    def directory(self):
+        path = Path(self.settings["render"]["work_dir"]) / "pronunciations"
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("Pronunciation preview directories must not be symlinks")
+        return path
+
+    def _drafts(self):
+        path = self.directory / "drafts.json"
+        if not path.exists() and not path.is_symlink():
+            return {}
+        value = read_json(regular_file(path))
+        if (not isinstance(value, dict) or value.get("format") != _DRAFT_FORMAT or value.get("version") != 1
+                or value.get("book_id") != self.bundle["source"]["book"]["id"]
+                or not isinstance(value.get("entries"), dict) or value.get("sha256") != digest(value["entries"])):
+            raise ValueError("Invalid pronunciation audition drafts")
+        from ..pronunciations import validate_pronunciation, validate_word
+        for word, pronunciation in value["entries"].items():
+            validate_word(word)
+            validate_pronunciation(pronunciation)
+        return value["entries"]
+
+    def _write_draft(self, word, pronunciation):
+        from ..pronunciations import validate_pronunciation, validate_word
+        validate_word(word)
+        if pronunciation is not None:
+            pronunciation = validate_pronunciation(pronunciation)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        lock = acquire_directory_lock(self.directory / ".drafts.lock")
+        try:
+            entries = self._drafts()
+            if pronunciation is None:
+                entries.pop(word, None)
+            else:
+                entries[word] = pronunciation
+            write_json(self.directory / "drafts.json", {
+                "format": _DRAFT_FORMAT, "version": 1, "book_id": self.bundle["source"]["book"]["id"],
+                "entries": entries, "sha256": digest(entries)})
+        finally:
+            lock.rmdir()
+
+    def rows(self, word=None):
+        from ..pronunciations import load_pronunciations
+        rows = load_pronunciations(self.bundle["directory"])
+        drafts = self._drafts()
+        return [dict(row, **({"draft": drafts[row["word"]]} if row["word"] in drafts else {}))
+                for row in rows if word is None or row["word"] == word]
+
+    def edit(self, word, pronunciation):
+        if not self.rows(word):
+            raise ValueError("Choose a word from the pronunciation menu")
+        self._write_draft(word, pronunciation)
+
+    def confirm(self, row):
+        from ..pronunciations import set_pronunciation
+        pronunciation = row.get("draft") or row.get("pronunciation")
+        if pronunciation is None:
+            raise ValueError("Enter a correction first, or use I to keep the default pronunciation")
+        set_pronunciation(self.bundle["directory"], self.bundle, row["word"], pronunciation, status="confirmed")
+        self._write_draft(row["word"], None)
+
+    def ignore(self, word):
+        from ..pronunciations import set_pronunciation
+        set_pronunciation(self.bundle["directory"], self.bundle, word, status="ignored")
+        self._write_draft(word, None)
+
+    def reset(self, word):
+        from ..pronunciations import reset_pronunciation
+        reset_pronunciation(self.bundle["directory"], word)
+        self._write_draft(word, None)
+
+    def _sample(self, word):
+        from ..spoken_text import build_spoken
+        from .book_context import voice_store
+        from .pronunciation_runtime import merge_row_pronunciations
+        if self._store is None:
+            self._store = voice_store(self.bundle, self.settings)
+        entries = {word: {"word": word, "status": "confirmed",
+                          "pronunciation": {"alphabet": "respelling", "value": word}}}
+        candidates, selected_voices = [], {}
+        for chapter in self.bundle["chapters"]:
+            for row in chapter["rows"]:
+                # The shared mapper establishes exact source-to-spoken spans,
+                # including previously approved analyzer spelling edits.
+                record = merge_row_pronunciations(row, None, entries)
+                controls = [item for item in record["controls"] if item["kind"] == "pronunciation"] if record else []
+                if not controls:
+                    continue
+                text, _ = build_spoken(row)
+                from .speech_text import trim_speech_text
+                if not any(character.isalnum() for character in trim_speech_text(text)):
+                    continue
+                start, end = _sample_bounds(text, controls[0]["start"], controls[0]["end"])
+                # All pronunciation spans are atomic, including repeated words
+                # near the context boundary.
+                for item in controls:
+                    if item["start"] < start < item["end"]:
+                        start = item["start"]
+                    if item["start"] < end < item["end"]:
+                        end = item["end"]
+                speakers = row.get("simultaneous_speakers") or [{"voice_id": row.get("voice_id"), "role_id": row.get("role_id")}]
+                for speaker in speakers:
+                    voice_id = speaker.get("voice_id")
+                    if not voice_id:
+                        continue
+                    if voice_id not in selected_voices:
+                        selected_voices[voice_id] = self._store.load(voice_id)
+                    voice = selected_voices[voice_id]
+                    if voice is not None:
+                        candidates.append((abs(min(end - start, 240) - 160), len(candidates), {
+                            "row": row, "text": text, "start": start, "end": end,
+                            "voice": voice, "voice_id": voice_id, "role_id": speaker.get("role_id"),
+                            "chapter_title": chapter["entry"]["title"]}))
+        if not candidates:
+            raise ValueError("No spoken excerpt with an existing saved voice contains this word; cast its character first")
+        return min(candidates, key=lambda item: item[:2])[2]
+
+    def audition(self, word, pronunciation=None):
+        """Return a resumable FLAC preview; never create or modify a voice."""
+        from ..performance_plan import slice_performance
+        from ..pronunciations import validate_pronunciation, validate_word
+        from ..speech_traits import speech_traits
+        from .engines import create_engine
+        from .pronunciation_runtime import merge_row_pronunciations
+        from .speech_identity import voice_conditioning_identity
+        validate_word(word)
+        if pronunciation is not None:
+            pronunciation = validate_pronunciation(pronunciation)
+        sample = self._sample(word)
+        if self._engine is None:
+            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+        engine, voice = self._engine, sample["voice"]
+        binding = getattr(engine, "voice_binding_identity", engine.identity)
+        if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):
+            raise ValueError("Selected character voice is not bound to this synthesis engine")
+        record = None
+        if pronunciation is not None:
+            if engine.capabilities.get("structured_performance") is not True:
+                raise ValueError("This synthesis engine does not support structured pronunciation previews")
+            entries = {word: {"word": word, "status": "confirmed", "pronunciation": pronunciation}}
+            original = merge_row_pronunciations(sample["row"], None, entries)
+            record = slice_performance(original, sample["text"], sample["start"], sample["end"])
+        text = sample["text"][sample["start"]:sample["end"]]
+        profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
+        traits = speech_traits(profile)
+        if record is None:
+            from ..spoken_text import effective_delivery
+            direction = "; ".join(part for part in (traits, effective_delivery(sample["row"])) if part)
+            options = {"direction": direction}
+        else:
+            from ..spoken_text import effective_delivery
+            scene = deepcopy(sample["row"])
+            scene.pop("speech_normalization", None)
+            options = {"direction": effective_delivery(scene),
+                       "performance": record, "traits": traits}
+        request = {"version": 1, "engine_sha256": digest(engine.identity), "voice": voice_conditioning_identity(voice),
+                   "text": text, "word": word, "pronunciation": pronunciation, "options": options,
+                   "seed": self.settings["render"]["seed"], "sample_rate": self.settings["render"]["sample_rate"]}
+        key = digest(request)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        folder = self.directory / key
+        if folder.is_symlink():
+            raise ValueError("Pronunciation preview cache must not be a symlink")
+        folder.mkdir(exist_ok=True)
+        lock = acquire_directory_lock(folder / ".preview.lock")
+        try:
+            state_path, audio = folder / "preview.json", folder / "sample.flac"
+            state = read_json(regular_file(state_path)) if state_path.exists() or state_path.is_symlink() else None
+            if state is not None:
+                if not isinstance(state, dict) or state.get("format") != _FORMAT or state.get("request") != request:
+                    raise ValueError("Pronunciation preview request changed")
+                if state.get("status") == "ready":
+                    if file_hash(regular_file(audio)) != state.get("audio_sha256"):
+                        raise ValueError("Pronunciation preview changed; remove its cache entry to regenerate")
+                    _remove_redundant_wavs(folder, state)
+                    return dict(state, path=str(audio))
+                if state.get("status") == "rejected":
+                    state = _retry_rejected_take(folder, state, request)
+            state = state or {"format": _FORMAT, "request": request, "status": "pending",
+                              "purpose": "unverified_pronunciation_listening_preview"}
+            state.setdefault("take", 1)
+            state.setdefault("take_seed", request["seed"])
+            write_json(state_path, state)
+            raw, normalized = folder / "raw.wav", folder / "normalized.wav"
+            if state.get("raw_sha256") is None:
+                if raw.exists() or raw.is_symlink():
+                    regular_file(raw).unlink()
+                self.notify(display(f"Generating listening preview: {word} — {_description(pronunciation)}"))
+                engine.synthesize(text, voice, raw, seed=state["take_seed"], **options)
+                state.update(raw_sha256=file_hash(regular_file(raw)), status="generated")
+                write_json(state_path, state)
+            elif file_hash(regular_file(raw)) != state["raw_sha256"]:
+                raise ValueError("Generated pronunciation preview changed before compression")
+            from .assembly import normalize_clip
+            from .chapter_executor import _flac_master
+            if normalized.exists() or normalized.is_symlink():
+                regular_file(normalized).unlink()
+            normalize_clip(raw, normalized, sample_rate=request["sample_rate"], ffmpeg=self.settings["render"]["ffmpeg"])
+            try:
+                metrics = _preview_audio(normalized)
+            except (ValueError, wave.Error, EOFError) as exc:
+                _reject_preview(folder, state, exc)
+            if audio.exists() or audio.is_symlink():
+                regular_file(audio).unlink()
+            pcm_hash = _flac_master(normalized, audio, self.settings["render"]["ffmpeg"])
+            state.update(status="ready", audio_sha256=file_hash(audio), pcm_sha256=pcm_hash, metrics=metrics,
+                         context={"segment_id": sample["row"]["id"], "voice_id": sample["voice_id"],
+                                  "chapter_title": sample["chapter_title"], "spoken_start": sample["start"],
+                                  "spoken_end": sample["end"]})
+            write_json(state_path, state)
+            _remove_redundant_wavs(folder, state)
+            return dict(state, path=str(audio))
+        finally:
+            lock.rmdir()
+
+    def close(self):
+        if self._engine is not None:
+            close = getattr(self._engine, "close", None)
+            if callable(close):
+                close()
+
+
+def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=print,
+                             engine_factory=None, store=None, player=None, playback_fn=None):
+    """Dispatch model-free edits or a small keyboard-driven listening menu."""
+    from ..pronunciations import load_pronunciations, reset_pronunciation, set_pronunciation, validate_word
+    action = getattr(args, "action", "review")
+    word = getattr(args, "word", None)
+    correction = _pronunciation(getattr(args, "say_as", None), getattr(args, "phonemes", None))
+    if action in {"set", "ignore", "reset", "play"} and not word:
+        raise ValueError(f"--word is required for --action {action}")
+    if word is not None:
+        validate_word(word)
+    if correction is not None and action not in {"set", "play"}:
+        raise ValueError("--say-as and --phonemes are used with --action set or play")
+    if action == "list":
+        _show([entry for entry in load_pronunciations(bundle["directory"]) if word is None or entry["word"] == word], output)
+        return 0
+    if action == "set":
+        if correction is None:
+            raise ValueError("Provide --say-as or --phonemes; use --action ignore to keep the default")
+        set_pronunciation(bundle["directory"], bundle, word, correction, status="confirmed")
+        PronunciationReviewSession(bundle, config)._write_draft(word, None)
+        output(display(f"Confirmed {word}: {_description(correction)}. Existing audio is unchanged."))
+        return 0
+    if action == "ignore":
+        set_pronunciation(bundle["directory"], bundle, word, status="ignored")
+        PronunciationReviewSession(bundle, config)._write_draft(word, None)
+        output(display(f"Keeping the default pronunciation for {word}."))
+        return 0
+    if action == "reset":
+        reset_pronunciation(bundle["directory"], word)
+        PronunciationReviewSession(bundle, config)._write_draft(word, None)
+        output(display(f"Removed the local pronunciation decision for {word}; inherited decisions apply."))
+        return 0
+    if action not in {"review", "play"}:
+        raise ValueError("Unsupported pronunciation review action")
+    if input_fn is None:
+        from .terminal import enable_line_editing
+        enable_line_editing()
+        input_fn = input
+    if playback_fn is None:
+        from .terminal import play_sample
+        playback_fn = play_sample
+    session = PronunciationReviewSession(bundle, config, engine_factory=engine_factory, store=store, notify=output)
+    player = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
+
+    def say(value):
+        output(display(value))
+
+    def play(selected_word, proposed):
+        preview = session.audition(selected_word, proposed)
+        say("Listening preview — wording and pronunciation are for you to judge; this is not accepted book audio.")
+        say(f"{preview['context']['chapter_title']}: {preview['request']['text']}")
+        say("Press any key to stop.")
+        playback_fn(player, preview["path"])
+
+    last = None
+    try:
+        if action == "play":
+            current = session.rows(word)
+            proposed = correction if correction is not None else (
+                current[0].get("draft") or current[0].get("pronunciation") if current else None)
+            play(word, proposed)
+            return 0
+        while True:
+            rows = session.rows(word)
+            _show(rows, output)
+            if not rows:
+                say("No words are awaiting review. Use pronunciations --action discover to find candidates.")
+                return 0
+            say("Number: play proposal/default   B [number]: baseline   E [number]: edit respelling   P [number]: edit CMU phonemes   C [number]: confirm   I [number]: keep default   R [number]: reset   Q: quit")
+            command = input_fn("> ").strip()
+            if command.casefold() == "q":
+                return 0
+            try:
+                parts = command.split(maxsplit=2)
+                if not parts:
+                    continue
+                verb = "play" if parts[0].isdecimal() else parts[0].casefold()
+                selection = parts[0] if verb == "play" else (parts[1] if len(parts) > 1 else None)
+                if selection is None:
+                    row = next((item for item in rows if item["word"] == last), None)
+                    if row is None:
+                        raise ValueError("Enter a number from the pronunciation menu")
+                elif not selection.isdecimal() or not 1 <= int(selection) <= len(rows):
+                    raise ValueError("Enter a number from the pronunciation menu")
+                else:
+                    row = rows[int(selection) - 1]
+                last = row["word"]
+                if verb == "play":
+                    play(last, row.get("draft") or row.get("pronunciation"))
+                elif verb == "b":
+                    play(last, None)
+                elif verb in {"e", "p"}:
+                    prompt = ("Say it as (plain spelling; empty cancels): " if verb == "e" else
+                              "CMU phonemes (for example M AA1 R AH0; empty cancels): ")
+                    value = parts[2] if len(parts) > 2 else input_fn(prompt).strip()
+                    if not value:
+                        continue
+                    proposed = _pronunciation(value) if verb == "e" else _pronunciation(phonemes=value)
+                    session.edit(last, proposed)
+                    say("Draft saved for audition; C confirms it for future rendering.")
+                    play(last, proposed)
+                elif verb == "c":
+                    session.confirm(row)
+                    say("Pronunciation confirmed. Existing audio is unchanged.")
+                elif verb == "i":
+                    session.ignore(last)
+                    say("Default pronunciation selected.")
+                elif verb == "r":
+                    session.reset(last)
+                    say("Local decision and audition draft removed; inherited decisions apply.")
+                else:
+                    raise ValueError("Use a number, B, E, P, C, I, R, or Q")
+            except (ValueError, RuntimeError, OSError) as exc:
+                from .diagnostics import configured_secrets, safe_error_text
+                say("Action stopped: " + safe_error_text(exc, secrets=configured_secrets(config)))
+    except EOFError:
+        say("Pronunciation review closed; decisions and audition drafts are saved.")
+        return 0
+    finally:
+        player.stop()
+        session.close()
