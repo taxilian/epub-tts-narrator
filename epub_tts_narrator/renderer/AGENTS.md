@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 111 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 112 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -84,6 +84,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `common.py` has only 51 lines but 33 internal consumers; treat changes as high blast radius.
 - `render_lanes.py` owns bounded cancellable resource lanes: fixed declared worker pools, per-owner round-robin FIFO, submit-time context copies, stop checks at dequeue, `LaneFull` backpressure, and same-lane submit/close guards. Lanes never execute model work; callables keep delegating to `LocalRuntime`.
 - `render_pipeline.py` owns the shared logical clip scheduler: globally bounded transactions, non-borrowable per-chapter share, per-owner cancel, source-ordered collect; coordinators never run on it. `render_pipeline_config.py` owns validated `render_pool` scheduler controls (default `legacy`, `0` = automatic) and their effective values; they never enter `RENDER_CONTRACT`, `SAFE_RENDER_KEYS`, or any render identity, and pipeline remote projection drops the legacy `4*C` inflight override in favor of automatic admission.
+- `render_backlog.py` owns attempt-scoped untranscribed-audio backpressure: `BacklogBudget` (exact pending count from `synthesis_backlog`, soft byte high-water with half-mark resume), tickets released at primary-ASR return or earlier take exit, saved-unverified/joined audio adopting at the `validate_audio` boundary without spending generation budget; recovery assemblies reserve nothing pre-generation (children reserve; the joined take adopts).
 - `render_resources.py` owns the pipeline lane set owned by one `RenderPool` (legacy mode builds no runtime): TTS lane (one worker per declared slot), two-worker preparation lane, single recognition lane, `review_concurrency` HTTP leaves plus a `2*review_concurrency` coordination lane. Verification leaves submit from a fresh `Context` so a started take drains after owner loss; queued synthesis still stops at dequeue. `render_resource_context.py` owns `resource_scope`/`current_resources`/`current_owner` and the leaf helpers that call directly when no scope is active.
 - `workflow.py` is about 2,060 lines and the largest maintenance risk; keep changes local.
 - `workflow.render()` restores completed chapters when the context hash matches.

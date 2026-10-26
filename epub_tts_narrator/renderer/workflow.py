@@ -26,6 +26,7 @@ from .interrupts import stop_if_requested
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
 from .progress import (ChapterProgress, format_duration, generation_activity,
                        report_worker_activity, set_phase)
+from .render_backlog import BacklogCancelled, BacklogClosed, begin_attempt_ticket
 from .retry_budget import SpeechRetryBudget, generation_attempts, whole_strategy_allowance
 from .run_locks import acquire_directory_lock
 from .speech_text import trim_speech_text
@@ -502,6 +503,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                      request if seed_identity is None else seed_identity, attempt)
         report = None
         generation_ordinal = None
+        attempt_ticket = None
         metadata = {}
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
@@ -569,6 +571,14 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     # A running take finishes its quality checks and cache
                     # publication. Cancellation only prevents starting a new one.
                     stop_if_requested()
+                    # Attempt backlog reservation: acquired while the take
+                    # lock is owned, before the retry claim and synthesis.
+                    # A recovery assembly's generation recurses into child
+                    # takes, so it reserves nothing here; its joined audio
+                    # adopts a ticket at the ASR boundary after every child
+                    # ticket is gone.
+                    if "recovery" not in request:
+                        attempt_ticket = begin_attempt_ticket(True)
                     if fresh_speech:
                         generation_ordinal = retry_budget.claim(
                             directory, request_hash, attempts,
@@ -645,6 +655,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         "engine_metadata": metadata, "audio_file": wav.name,
                         "audio_sha256": file_hash(regular_file(wav)),
                     })
+                if attempt_ticket is not None:
+                    attempt_ticket.materialize(regular_file(wav).stat().st_size)
             report_worker_activity(notify, "source", metadata.get("render_worker"))
             if fresh_speech and generation_ordinal is None:
                 set_phase(notify, f"verifying saved take {attempt}")
@@ -663,6 +675,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 report = confirm_recovery_report(report, request, metadata, directory)
         except RenderBlocked:
             raise
+        except (BacklogCancelled, BacklogClosed):
+            raise
         except (ValueError, RuntimeError, OSError) as exc:
             error = safe_error_text(exc, secrets=secrets)
             report = {"passed": False, "reasons": ["generation_or_verification_error"],
@@ -677,6 +691,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # A new invocation may have repaired credentials/connectivity.
                 # Permanent HTTP errors still stop immediately within this run.
                 report["retry_on_resume"] = True
+        finally:
+            # Primary ASR returned or the take exited earlier: release the
+            # attempt slot and its bytes before any review, planner, or
+            # recursive child work, even when the wave file stays on disk.
+            if attempt_ticket is not None:
+                attempt_ticket.release()
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,

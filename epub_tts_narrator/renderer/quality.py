@@ -958,7 +958,30 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     Other nonexact transcripts reach JEV when enabled. Hard acoustic checks
     still apply; unusable optional word timing
     is omitted with a warning rather than causing speech regeneration.
+
+    This is the primary ASR boundary: when the pipeline backlog runtime is in
+    scope and no attempt ticket is already held, verifying saved-but-unverified
+    or joined audio adopts its own ticket here — without spending a generation
+    start — and releases it after recognition returns, before any caller-side
+    recovery or review work.
     """
+    from .render_backlog import begin_attempt_ticket
+
+    try:
+        materialized = Path(path).stat().st_size
+    except OSError:
+        materialized = 0  # the report below records the invalid_audio reason
+    ticket = begin_attempt_ticket(False, materialized)
+    try:
+        return _checked_audio_report(path, expected_text, verifier, policy,
+                                     purpose=purpose)
+    finally:
+        if ticket is not None:
+            ticket.release()
+
+
+def _checked_audio_report(path, expected_text: str, verifier,
+                          policy: dict | None = None, *, purpose: str = "speech") -> dict:
     purpose = _validate_purpose(purpose)
     settings = validate_policy(policy)
     if not isinstance(expected_text, str):

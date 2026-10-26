@@ -257,6 +257,7 @@ class RenderPool:
             synthesis_backlog=effective["synthesis_backlog"],
             review_concurrency=effective["review_concurrency"],
             max_inflight=self.max_inflight,
+            pending_audio_mb=effective["pending_audio_mb"],
         )
 
     @property

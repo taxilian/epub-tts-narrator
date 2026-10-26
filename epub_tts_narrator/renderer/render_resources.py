@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from contextvars import Context
 
+from .render_backlog import BacklogBudget
 from .render_lanes import ResourceLane
 from .render_resource_context import resource_scope
 
@@ -41,7 +42,7 @@ class RenderResources:
     """Declared resource lanes for one pooled render; lifetime: its RenderPool."""
 
     def __init__(self, *, tts_slots, synthesis_backlog, review_concurrency,
-                 max_inflight):
+                 max_inflight, pending_audio_mb=256):
         if type(tts_slots) is not int or tts_slots < 1:
             raise ValueError("tts_slots must be a positive integer")
         if type(synthesis_backlog) is not int or synthesis_backlog < 1:
@@ -50,6 +51,8 @@ class RenderResources:
             raise ValueError("review_concurrency must be a positive integer")
         if type(max_inflight) is not int or max_inflight < 1:
             raise ValueError("max_inflight must be a positive integer")
+        if type(pending_audio_mb) is not int or pending_audio_mb < 1:
+            raise ValueError("pending_audio_mb must be a positive integer")
         pending = max_inflight
         review_pending = max_inflight + _REVIEW_HEADROOM * review_concurrency
         self.tts = ResourceLane(name="render-tts", workers=tts_slots,
@@ -63,10 +66,17 @@ class RenderResources:
         self.review_coordination = ResourceLane(
             name="render-review-coordination", workers=2 * review_concurrency,
             stage="review_coordination", max_pending=review_pending)
+        # Attempt-scoped untranscribed-audio backpressure: the exact pending
+        # count follows the declared synthesis backlog and the soft byte
+        # high-water follows ``render_pool.pending_audio_mb``.
+        self.backlog = BacklogBudget(
+            max_pending=synthesis_backlog,
+            max_materialized_bytes=pending_audio_mb * 1024 * 1024)
         self._closed = False
 
     def close(self):
-        """Drain verification leaves, cancel queued synthesis, join all workers."""
+        """Wake backlog waiters, drain verification, cancel synthesis, join."""
+        self.backlog.close()
         for lane in (self.review_coordination, self.review, self.recognition,
                      self.preparation):
             lane.close(drain=True)
