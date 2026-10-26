@@ -344,6 +344,32 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(progress, ["Repairing validation 1/1: " + diagnostic])
         self.assertEqual(client.calls[1]["correction"]["validator_error"], diagnostic)
 
+    def test_spelling_repair_guidance_for_control_syntax_in_direction(self):
+        class RepairClient(FakeClient):
+            def complete(self, system, payload):
+                self.calls.append(deepcopy(payload))
+                if len(self.calls) == 1:
+                    return {"segments": [{"segment_id": "s1", "edits": [
+                        {"start": 0, "end": 2, "original": "No", "replacement": "No",
+                         "direction": "Shout, then <Slam> lands.", "reason": "beat"}]}]}
+                return {"segments": [{"segment_id": "s1", "edits": []}]}
+
+        payload = {"mode": "speech_spelling_scan", "target_segments": [{"segment_id": "s1"}]}
+
+        def validate(response):
+            if response["segments"][0]["edits"]:
+                raise ValueError("Speech delivery direction must be nonempty plain text without control syntax")
+            return response
+
+        client = RepairClient()
+        requests = CachedRequests(client, self.cache)
+        result = requests.run("Fixture system", payload, validate)
+        self.assertEqual(result["segments"][0]["edits"], [])
+        guidance = client.calls[1]["correction"]["guidance"]
+        self.assertTrue(any("plain words" in item and "<Slam>" in item for item in guidance))
+        spelling_guidance = [item for item in guidance if "plain words" in item]
+        self.assertEqual(len(spelling_guidance), 1)
+
     def test_analysis_forwards_validation_repair_progress(self):
         progress = []
         with self.assertRaisesRegex(ValueError, "Text changed"):

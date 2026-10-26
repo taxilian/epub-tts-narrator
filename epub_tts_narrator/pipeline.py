@@ -752,6 +752,12 @@ class CachedRequests:
                 "Omit edits whose original and replacement are identical or differ only in capitalization. "
                 "Do not invent a spelling change just to retain an edit; return edits=[] when no changes are needed.",
             ])
+            if "control syntax" in str(error):
+                guidance.append(
+                    "direction and replacement must be plain words only: no angle or square brackets and no markup. "
+                    "Bracketed cues in the source such as <Slam> are existing control markers, not speech; describe "
+                    "the audible effect in plain words (e.g. 'a hard slam lands after each word') without copying the markers."
+                )
             if payload.get("version") == 2:
                 correction["instruction"] = "Return all target segments in order under the original schema, correcting every validation error."
                 guidance = []
