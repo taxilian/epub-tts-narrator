@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 100 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 103 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -40,6 +40,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
 | Assemble and publish an audiobook | `assembly.py`, `publication.py`, `loudness.py`, `pacing.py` |
+| Optional output censorship | `censorship.py`, `censorship_runtime.py`, `censorship_alignment.py`; source-selected masks, original-audio alignment, reusable chapter assembly |
 | Operate Runpod workers | `runpod.py`, `runpod_api.py`, `runpod_config.py`; GPU selection policy in `runpod_gpu.py` |
 
 ## CONVENTIONS
@@ -49,6 +50,8 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - `prepare_synthesis` is shared by adapters and speech cache identity; edge trimming projects controls by retained code-point indices. Text-only rewrite/split recovery is disabled for expressive leaves until it can preserve those bindings; fallback to original paragraph turns retains each turn's controls.
 - `compare-performance` freezes selected references and source in its own directory. Its frozen voice store cannot create voices, and `_preflight` must use the supplied store directly rather than derive aliases again. Both modes use one engine instance, independent verified caches, source timing, and a local HTML listening report.
 - Intentional pauses excuse only measured silence at their exact ASR word boundary, within the requested bound. Inline vocal events are excluded from lexical expectations but are not acoustically certified. Neither event metadata nor text review can authorize silent or corrupt audio.
+- Censorship defaults off in global `[censorship]`; `render`/`assemble --censor` and `--no-censor` override it. Match whole original-source words and project approved spellings; never infer target indices from nonexact ASR word counts. Apply validated frame masks after original edge trimming, separately per simultaneous lane before mixing. Bind policy only to composition/publication identity, never speech acceptance or voice identity.
+- `assemble --chapters-only` can rebuild censorship from original accepted clips without TTS. Missing timing may lazily load MLX Whisper for cached, known-text attention alignment. Require independent ASR complete lexical coverage first; retained missing/different words or uncertain boundaries stop with originals intact. Reject target durations below 20 ms. Preserve actual frame count, full original verification, and per-lane censorship audits in sync. Downloaded remote chapter audio alone cannot rebuild a changed policy locally.
 - Heavy ML and HTTP imports stay inside functions, never at module scope.
 - Use the separate Python 3.12 uv environment and root `renderer.requirements.txt`.
 - FFmpeg and FFprobe are required; paths come from TOML configuration.

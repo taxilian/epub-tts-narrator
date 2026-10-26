@@ -1235,7 +1235,8 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
         "engine_config_hash": digest(engine_config),
         "verification_config_hash": digest(config["verification"]),
         "quality": config["quality"], "quality_version": QUALITY_VERSION,
-        "base_seed": config["render"]["seed"], "settings": chapter_settings(config["render"]),
+        "base_seed": config["render"]["seed"], "settings": chapter_settings(
+            config["render"], censorship_policy=config.get("censorship")),
     }
 
 
@@ -1863,7 +1864,9 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:
-        mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=notify)
+        censor_lanes = config.get("censorship", {}).get("enabled", False)
+        mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=notify,
+                                **({"preserve_lanes": True} if censor_lanes else {}))
         mix, speaker_lanes = mixed["mix"], mixed["speaker_lanes"]
         acceptance = {
             "chunk_id": chunk["chunk_id"], "audio_sha256": mix["audio_sha256"],
@@ -1871,7 +1874,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             "report": {"passed": True, "method": "independently_verified_simultaneous_lanes"},
             "speaker_lanes": speaker_lanes, "mix": mix}
         return dict(chunk, wav_path=mixed["wav_path"], mix=mix,
-                    speaker_lanes=[{key: lane[key] for key in LANE_FIELDS} for lane in speaker_lanes]), acceptance
+                    speaker_lanes=[{key: lane[key] for key in LANE_FIELDS} for lane in speaker_lanes],
+                    **({"censorship_lanes": mixed["censorship_lanes"]} if censor_lanes else {})), acceptance
     lane = lanes[0]
     acceptance = dict(chunk_id=chunk["chunk_id"], **{key: lane[key] for key in
         ("audio_sha256", "request_hash", "validation_key", "report")})
@@ -1946,7 +1950,14 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                 # Drain before render() can release book/cache locks, even on Ctrl-C.
                 executor.shutdown(wait=True, cancel_futures=True)
         stop_if_requested()
-        return [result[0] for result in results], [result[1] for result in results if result[1] is not None]
+        clips = [result[0] for result in results]
+        acceptance = [result[1] for result in results if result[1] is not None]
+        if config.get("censorship", {}).get("enabled", False):
+            from .censorship_runtime import prepare_chapter_censorship
+            clips = prepare_chapter_censorship(
+                clips, acceptance, config["censorship"], verifier=verifier,
+                cache_dir=Path(work) / "censorship-alignment", notify=notify)
+        return clips, acceptance
 
 
 def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
@@ -2103,7 +2114,9 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
             composed = prepare_chapter(
                 dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                 clips, work / "chapters", book=bundle["source"]["book"],
-                render_settings=config["render"], context=context, notify=notify)
+                render_settings=config["render"], context=context, notify=notify,
+                **({"censorship_policy": config["censorship"]}
+                   if config.get("censorship", {}).get("enabled", False) else {}))
             _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             return composed
 
@@ -2175,12 +2188,24 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         lock.rmdir()
 
 
-def assemble(bundle, config, *, notify=print):
-    """Package complete verified chapter checkpoints without importing any model."""
-    config, plan, store = _preflight(bundle, config)
+def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_verifier_factory=None):
+    """Recompose verified clips and publish without loading a synthesis model.
+
+    Censorship changes rebuild PCM from originals. Optional ASR alignment is
+    lazy and separate from speech acceptance; existing timing needs no model.
+    """
+    config, plan, store = _preflight(bundle, config, chapters_only=chapters_only)
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "assemble")
     book_lock = None
+    alignment_verifier = None
+    def get_alignment_verifier():
+        nonlocal alignment_verifier
+        if alignment_verifier is None:
+            if alignment_verifier_factory is None:
+                raise RenderBlocked("Censorship needs word alignment; rerun assemble through the CLI with a configured verifier. Original speech is retained.")
+            alignment_verifier = alignment_verifier_factory()
+        return alignment_verifier
     try:
         book_lock = _lock_book_audio(bundle)
         voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}
@@ -2230,26 +2255,60 @@ def assemble(bundle, config, *, notify=print):
             restore_context = deepcopy(context)
             for key in encoding_keys:
                 restore_context["settings"][key] = saved["settings"][key]
+            censorship_changed = context["settings"].get("censorship") != saved["settings"].get("censorship")
+            if "censorship" in saved["settings"]:
+                restore_context["settings"]["censorship"] = saved["settings"]["censorship"]
+            else:
+                restore_context["settings"].pop("censorship", None)
             composed, chapter_acceptance = _restore_chapter(
                 work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
-            if any(context["settings"][key] != saved["settings"][key]
+            if censorship_changed:
+                from .censorship_runtime import restore_verified_clips, prepare_chapter_censorship
+                clips = restore_verified_clips(chapter, chapter_acceptance, work,
+                                               sample_rate=config["render"]["sample_rate"], notify=notify)
+                clips = prepare_chapter_censorship(
+                    clips, chapter_acceptance, config.get("censorship"),
+                    cache_dir=work / "censorship-alignment", verifier_factory=get_alignment_verifier,
+                    notify=notify)
+                composed = prepare_chapter(
+                    dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+                    clips, work / "chapters", book=bundle["source"]["book"],
+                    render_settings=config["render"], context=context, notify=notify,
+                    **({"censorship_policy": config["censorship"]}
+                       if config.get("censorship", {}).get("enabled", False) else {}))
+                _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+            elif any(context["settings"][key] != saved["settings"][key]
                    for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
-                composed["encoded_path"] = None
-                composed["encoded_sha256"] = None
+                from .chapter_cache import reencode_chapter
+                composed = reencode_chapter(
+                    composed, work / "chapters", book=bundle["source"]["book"],
+                    render_settings=config["render"], context=context, notify=notify,
+                    censorship_policy=config.get("censorship"))
+                _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
             notify(f"Verified saved chapter {chapter['number']} / {len(bundle['chapters'])}: {chapter['title']}")
         if identities is None:
             raise RenderBlocked("No chapters selected for assembly")
-        result = _package(bundle, config, plan, store, voices, rendered, acceptance,
-                          *publication_provenance, notify=notify)
-        write_json(work / "status.json", {"status": "complete", "plan_hash": digest(plan),
-                                          "output": config["render"]["output_dir"]})
+        if chapters_only:
+            result = {"format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
+                      "partial_book": plan["partial_book"], "chapter_count": len(rendered),
+                      "chapters": [{"number": c["number"], "title": c["title"], "audio_file": c["encoded_path"],
+                                    "cache_directory": c["cache_directory"]} for c in rendered]}
+        else:
+            result = _package(bundle, config, plan, store, voices, rendered, acceptance,
+                              *publication_provenance, notify=notify)
+        write_json(work / "status.json", {"status": result["status"], "plan_hash": digest(plan),
+                                          "output": None if chapters_only else config["render"]["output_dir"]})
         return result
     except BaseException as exc:
         _failed_run(work, exc, notify)
         raise
     finally:
+        if alignment_verifier is not None:
+            close = getattr(alignment_verifier, "close", None)
+            if callable(close):
+                close()
         if book_lock is not None:
             book_lock.rmdir()
         lock.rmdir()

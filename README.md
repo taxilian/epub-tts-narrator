@@ -80,6 +80,8 @@ audiobook-render assemble book.audiobook    # package the .m4b
 
 `audiobook-render compare-performance BOOK --chapter N --directory COMPARISON --local` renders an isolated legacy/expressive chapter comparison using frozen copies of the same selected voices. Open its `index.html` to listen and inspect changed controls. Existing rendering remains unchanged; see [chapter comparison](RENDERER.md#compare-legacy-and-expressive-chapter-generation).
 
+Optional [audio censorship](RENDERER.md#optional-audio-censorship) preserves a short opening sound and silences the rest of configured vulgar words without changing the dialogue's timing. Use `render BOOK --censor` for new output, or `assemble BOOK --censor --chapters 13 --chapters-only` to rebuild a saved chapter from its original verified clips. `--no-censor` overrides the global setting for an uncensored output. The feature is off by default; saved speech and voices remain unchanged.
+
 ## What analysis produces
 
 The output directory is the renderer bundle: `manifest.json`, `cast.json`, `source.json`, `review.json`, per-chapter scripts in `scripts/chapter-NNNN.jsonl`, plus the full `analysis.json` and a cumulative `series-cast.json` for continuations. The exact contract is [FORMAT.md](FORMAT.md). Every character, role, voice, and passage attribution carries source evidence; unknown speakers stay explicitly unassigned rather than being guessed.

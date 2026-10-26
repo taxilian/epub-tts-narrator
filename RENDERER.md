@@ -25,7 +25,7 @@ Both original and prequantized Drama 3 models use this environment, with stable 
 
 A local MLX-Audio 0.6.1 compatibility pilot exercised Sogni reference cloning and scene voice design, MLX-Audio 4-bit cloning, Qwen3 voice design, Whisper, and Parakeet. Every accepted clip had zero normalized word errors; three first attempts were rejected and retried by the normal quality checks. The usual renderer environment also passed a first-attempt 4-bit generation using the current config. Audio and verification records are in `output/shared-runtime-pilot/`. These short checks establish runtime compatibility, not full-book or perceptual quality.
 
-When casting or rendering first needs a missing supported model, it shows the model and destination and asks before downloading the pinned files. Complete local models are reused. `doctor`, `plan`, listing voices, playback, and assembly do not download models. If a download is interrupted, rerun the same command to reuse its saved download progress.
+When casting or rendering first needs a missing supported model, it shows the model and destination and asks before downloading the pinned files. Complete local models are reused. `doctor`, `plan`, listing voices, playback, and ordinary assembly do not download models. Assembly with censorship can need the configured Whisper model to align saved speech when reliable word timing is unavailable; it follows the same model-download prompt. If a download is interrupted, rerun the same command to reuse its saved download progress.
 
 Existing Hugging Face cache snapshot paths are also recognized, such as `~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo/snapshots/<commit>`. Missing files or broken links are downloaded through that cache, keeping the repository and commit identified by the path. You do not need to rename the directory or change the config to a project-local model folder.
 
@@ -749,7 +749,7 @@ To generate the remaining chapters and package later:
   --epub /path/to/book-one.epub
 ```
 
-`assemble` uses the verified chapter checkpoints and loads neither TTS nor transcription models. Missing, changed, or incompatible checkpoints stop assembly with an explanation; use `render` to prepare them. Changing only chapter format or bitrate can re-encode from saved lossless PCM during assembly. Changes to text, voices, pauses, or loudness require `render` again; unchanged accepted speech is reused. Verification-policy changes alone do not invalidate accepted clips or chapters. Use the same `--work-dir` if it was overridden. To package a subset, pass the same `--chapters` selection to `assemble` and choose a separate `-o` directory, preserving the final output location for the full book. Assembly can update the same book's existing output using the same replacement checks as rendering.
+`assemble` uses the verified chapter checkpoints and never loads a TTS model. Ordinary assembly needs no transcription model; changing censorship can require a separate alignment pass using the configured Whisper model. Missing, changed, or incompatible checkpoints stop assembly with an explanation; use `render` to prepare them. Changing only chapter format or bitrate can re-encode from saved lossless PCM during assembly. Censorship changes rebuild from saved original clips, without synthesizing speech. Changes to text, voices, pauses, or loudness require `render` again; unchanged accepted speech is reused. Verification-policy changes alone do not invalidate accepted clips or chapters. Use the same `--work-dir` if it was overridden. To package a subset, pass the same `--chapters` selection to `assemble` and choose a separate `-o` directory, preserving the final output location for the full book. Assembly can update the same book's existing output using the same replacement checks as rendering.
 
 All pauses added during assembly are controlled in the global config's existing `[render]` table. Each value is an integer from 0 through 5000 milliseconds:
 
@@ -770,6 +770,50 @@ Changing pause settings rebuilds chapter audio from the accepted clips; it does 
 By default, completed chapters receive two-pass loudness normalization to -20 LUFS with a -1.5 dB true-peak ceiling. Normalization preserves the PCM frame count and timing data, and operates on the assembled chapter rather than flattening every short utterance to the same level. Voice references and verified speech clips remain unchanged. These controls are separate from casting playback: use `[render] normalize_loudness`, `target_lufs`, and `true_peak_db` for the audiobook. Empty chapters and chapters shorter than the loudness measurement window are explicitly recorded as skipped for normalization.
 
 `render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Without a worker pool, speech generation is sequential on the configured local model. With a pool, independent requests run across available workers; each local model and the coordinator's Whisper verifier remain serialized. Configured HTTP workers receive the requested passages and selected reference recordings.
+
+## Optional audio censorship
+
+Censorship is off by default. When enabled, the renderer generates and verifies the original words, then silences most of each selected word while composing chapter audio. It adds no replacement words or bleeps and removes no audio frames. Dialogue timing, source synchronization, saved reference voices, and original accepted clips remain unchanged. Simultaneous speakers are masked independently before their recordings are mixed.
+
+Use one global table in your existing configuration file:
+
+```toml
+[censorship]
+enabled = false
+preserve_ms = 45
+max_preserved_fraction = 0.2
+fade_ms = 5
+padding_ms = 15
+# Optional replacement for the complete built-in word list:
+# words = ["fuck", "fucks", "fucked", "fucking", "shit", "shits", "shitting", "bullshit"]
+```
+
+The built-in list contains explicit `fuck` and `shit` forms, including common inflections and compounds such as `motherfucker`, `bullshit`, and `shithead`. It is a limited list, not a general detector of offensive language. Supplying `words` replaces that entire list; spelling variants must be listed explicitly. Matching ignores case and joins internal apostrophes or hyphens, but requires a complete lexical token: `mother-fucker` matches `motherfucker`, while an innocent word containing similar letters does not match. A larger hyphenated compound such as `shit-eating` needs its own list entry; listing `shit` alone does not match it. It does not guess vulgarity from fuzzy spelling. Selection uses the original script and its approved source-to-spoken mapping, so a pronunciation respelling cannot silently hide an originally configured word. Ambiguous mappings stop instead of muting unrelated dialogue.
+
+`preserve_ms` is the maximum opening duration, also limited by `max_preserved_fraction` of the timed word. The preserved portion includes its fade to silence, so the fully audible opening is slightly shorter. Defaults retain at most 45 milliseconds or 20% of the word. Very short words can be muted completely. `padding_ms` extends the silence after the word only into the available gap, and the return fade stays outside the timed word. It never intentionally extends into the following timed word. Allowed ranges are 0–250 milliseconds for `preserve_ms`, 0–0.5 for `max_preserved_fraction`, 0–20 milliseconds for `fade_ms`, and 0–100 milliseconds for `padding_ms`. Set `preserve_ms = 0` for whole-word muting.
+
+Both `render` and `assemble` accept `--censor` and `--no-censor` as per-run overrides. For an already rendered chapter:
+
+```sh
+# Rebuild one playable chapter using saved verified speech, without TTS.
+audiobook-render assemble BOOK --censor --chapters 13 --chapters-only
+
+# Restore the uncensored chapter from those same original clips.
+audiobook-render assemble BOOK --no-censor --chapters 13 --chapters-only
+
+# Rebuild and package all saved chapters with censorship enabled.
+audiobook-render assemble BOOK --censor
+```
+
+Numbers select manifest entries, including front matter; use `plan BOOK` to find the desired chapter. The command prints the encoded chapter path. Reuse the original work directory: changed censorship needs the retained individual clips, including every original simultaneous speaker lane. Deleting the render cache removes this ability. `--chapters-only` updates chapter checkpoints without replacing a published full book. To keep separate published editions, use different `-o` output directories when packaging them.
+
+Reliable saved word timestamps are reused. If they are missing, ambiguous, overlapping, shorter than the supported 20-millisecond timing resolution, or cannot locate the target safely, a separate alignment pass reads the existing audio and known text. The current fallback uses local MLX Whisper and caches its results; it does not regenerate or re-accept speech. Before forcing the known text onto audio, independent ASR must confirm complete lexical coverage, allowing case, punctuation, and word-spacing differences. If the saved transcript cannot establish that, one audio-only recognition pass is saved and checked. Remaining missing or different words stop censorship instead of forcing an absent word onto neighboring speech. This can conservatively stop an accepted pronunciation variant without changing its original speech acceptance.
+
+Alignment may load the configured Whisper model even during `assemble`. If it cannot establish usable boundaries, the operation stops with the original audio intact. Rerunning can resume completed alignment work and reuse saved recognition evidence. Timing remains an estimate of word boundaries, not a phoneme guarantee; listen to the result when choosing how much opening sound to preserve.
+
+Censorship affects chapter composition and publication identities, not speech-generation or voice identities. `sync.json` records the policy, original audio checksum, matched text ranges, alignment method, and original/chapter/book frame intervals. Original verification reports still describe the uncensored accepted speech.
+
+Updated remote chapter workers can apply the same policy while assembling on the server. Changing the policy submits new chapter work, which can reuse the server's retained accepted speech. A client holding only downloaded chapter audio cannot change censorship locally: `assemble` packages matching downloaded chapters, and a changed policy requires rendering on the server again or access to the original individual clips. The MLX Whisper fallback is currently local to Apple Silicon; other workers can use reliable existing word timestamps but stop if additional unsupported alignment is needed.
 
 ## Audio storage and cleanup
 

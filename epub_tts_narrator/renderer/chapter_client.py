@@ -343,11 +343,16 @@ def _safe_render(settings):
 def _selection(bundle, chapter, config, bindings):
     used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
             for speaker in chunk_speakers(chunk)}
-    return {"version": 1, "book": bundle["source"]["book"],
+    result = {"version": 1, "book": bundle["source"]["book"],
             "source_fingerprint": bundle["manifest"]["source_fingerprint"],
             "chapter": chapter, "total_chapters": len(bundle["chapters"]),
             "voice_bindings": {key: bindings[key] for key in sorted(used)},
             "render": _safe_render(config["render"])}
+    from .censorship import validate_policy
+    policy = validate_policy(config.get("censorship"))
+    if policy["enabled"]:
+        result["censorship_policy"] = policy
+    return result
 
 
 def validate_remote_plan(bundle, config, plan):
@@ -656,6 +661,42 @@ def _validate_artifact_manifest(folder, spec, metadata, verification, artifacts)
             raise ChapterClientError("Chapter service artifact checksums differ from its manifest")
 
 
+def _validate_censorship_sources(metadata, spec, acceptance):
+    """An edition mask must cover the submitted words in the accepted audio."""
+    from .censorship import policy_identity, validate_mask_plan
+    from .censorship_runtime import censorship_targets
+    policy = spec.get("censorship_policy")
+    identity = policy_identity(policy) if policy is not None else None
+    accepted = {entry["chunk_id"]: entry for entry in acceptance}
+    for timing, chunk in zip(metadata["segments"], spec["chapter"]["chunks"]):
+        value = timing.get("censorship")
+        if identity is None or chunk["silent_control"]:
+            if "censorship" in timing:
+                raise ChapterClientError("Downloaded chapter contains unrequested censorship")
+            continue
+        if not isinstance(value, dict) or value.get("policy") != identity:
+            raise ChapterClientError("Downloaded chapter is missing its requested censorship policy")
+        source = accepted[chunk["chunk_id"]]
+        original_lanes = source.get("speaker_lanes")
+        lane_audits = value["lanes"]
+        if original_lanes is None:
+            original_lanes = [dict(source, voice_id=chunk["segment"].get("voice_id"))]
+        if (not isinstance(original_lanes, list) or len(original_lanes) != len(lane_audits)
+                or any(not isinstance(lane, dict) for lane in original_lanes)):
+            raise ChapterClientError("Downloaded censorship differs from its accepted speaker lanes")
+        try:
+            targets = censorship_targets(chunk, policy)
+            for original, masked in zip(original_lanes, lane_audits):
+                audit = masked["audit"]
+                if masked["voice_id"] != original["voice_id"]:
+                    raise ValueError("Censorship performer changed")
+                validate_mask_plan(audit, chunk["spoken_text"], policy,
+                                   sample_rate=metadata["sample_rate"], frames=audit["frames"],
+                                   audio_sha256=original["audio_sha256"], targets=targets)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ChapterClientError("Downloaded censorship differs from submitted words or verified audio") from exc
+
+
 def _validate_metadata(folder, record, *, artifacts=None):
     folder = Path(folder)
     metadata = read_json(regular_file(folder / "chapter.json"))
@@ -695,6 +736,7 @@ def _validate_metadata(folder, record, *, artifacts=None):
             or [entry.get("chunk_id") for entry in acceptance] != expected
             or any(entry.get("report", {}).get("passed") is not True for entry in acceptance)):
         raise ChapterClientError("Downloaded chapter lacks complete accepted speech verification")
+    _validate_censorship_sources(metadata, spec, acceptance)
     sync = read_json(regular_file(folder / "sync.json"))
     expected_sync = sync_record(
         book_id=spec["book"].get("id"), source_fingerprint=spec["source_fingerprint"],
@@ -1097,7 +1139,8 @@ def assemble_remote(bundle, config, *, notify=print):
             if descriptor is None:
                 descriptor = _migrate_legacy_job(folder, selection)
             if descriptor is None or not _cached_artifacts_present(folder, descriptor, require_masters=False):
-                raise ChapterClientError(f"Chapter {chapter['number']} is not downloaded; run render --chapters-only to download it")
+                raise ChapterClientError(f"Chapter {chapter['number']} is not downloaded for the requested render settings and censorship policy; "
+                                         "run render --chapters-only against the remote service with the same --censor or --no-censor choice to prepare and download that edition")
             if not _cached_artifacts_present(folder, descriptor):
                 if not config["remote_chapters"]["url"]:
                     raise ChapterClientError("Final assembly needs the remote service URL to download lossless chapter masters")

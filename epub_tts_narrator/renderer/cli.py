@@ -52,9 +52,10 @@ def parser():
         if name in {"render", "assemble"}:
             command.add_argument("--chapter-format", choices=("m4a", "mp3"),
                                  help="Individual chapter format (default: configured format, normally m4a)")
-        if name == "render":
+            command.add_argument("--censor", action=argparse.BooleanOptionalAction, default=None,
+                                 help="Override optional audio censorship for this output; saved speech and voices stay unchanged")
             command.add_argument("--chapters-only", action="store_true",
-                                 help="Generate and save chapter audio; assemble the M4B later")
+                                 help="Save chapter audio without packaging the M4B")
         if name == "cache-report":
             command.add_argument("--max-examples", type=int, default=10,
                                  help="Maximum cache-miss examples in the read-only JSON report (default: 10)")
@@ -249,7 +250,7 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command in {"refresh-metadata", "prepare-performance"}:
+        if args.command in {"refresh-metadata", "prepare-performance", "assemble"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -364,6 +365,8 @@ def main(argv=None):
             config["render"]["allow_review"] = args.allow_review
         if getattr(args, "chapter_format", None) is not None:
             config["render"]["chapter_format"] = args.chapter_format
+        if getattr(args, "censor", None) is not None:
+            config["censorship"]["enabled"] = args.censor
         if getattr(args, "performance_plan", None) is not None:
             config["render"].update(performance_plan=str(args.performance_plan.expanduser().resolve()),
                                    performance_mode="expressive")
@@ -437,11 +440,23 @@ def main(argv=None):
         if args.command == "assemble":
             from .chapter_client import assemble_remote, has_remote_chapters
             if has_remote_chapters(config):
+                if args.chapters_only:
+                    raise ValueError("Remote chapters are already individually downloadable; use assemble without --chapters-only to package them")
                 assemble_remote(bundle, config)
             else:
                 from .workflow import assemble
-                assemble(bundle, config)
-            print(f"Completed audiobook: {config['render']['output_dir']}")
+                def alignment_verifier():
+                    from .model_setup import ModelSetup
+                    from .verification import create_verifier
+                    ModelSetup(config).ensure("verification")
+                    return create_verifier(config["verification"], config.get("jev"), config.get("provider"))
+                result = assemble(bundle, config, chapters_only=args.chapters_only,
+                                  alignment_verifier_factory=alignment_verifier)
+                if args.chapters_only:
+                    for chapter in result["chapters"]:
+                        print(f"Completed chapter {chapter['number']}: {chapter.get('audio_file') or 'empty'}")
+            if not args.chapters_only:
+                print(f"Completed audiobook: {config['render']['output_dir']}")
             return 0
         if args.command == "render" and config.get("remote_chapters", {}).get("url"):
             from .chapter_client import render_remote

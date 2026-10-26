@@ -145,9 +145,13 @@ class ChapterExecutor:
         validate_spec(spec)
         config = deepcopy(self.config)
         config["render"].update(spec.get("render", {}))
+        from .censorship import DEFAULT_POLICY, validate_policy
+        # The client owns the edition policy. An absent key must preserve
+        # legacy behavior even if the worker's local config enables muting.
+        config["censorship"] = validate_policy(spec.get("censorship_policy", DEFAULT_POLICY))
         # Output names are part of the wire contract, independent of local CLI preferences.
         config["render"]["chapter_format"] = "m4a"
-        chapter_settings(config["render"])
+        chapter_settings(config["render"], censorship_policy=config["censorship"])
         return config
 
     def synthesize(self, spec, voices, work, notify=print, retry_budget=None):
@@ -192,7 +196,8 @@ class ChapterExecutor:
                    "voice_assets": {key: registered[key]["asset_hash"] for key in sorted(used)},
                    "engine": engine_identity, "verifier": verifier_identity,
                    "quality_version": QUALITY_VERSION, "quality": deepcopy(config["quality"]),
-                   "base_seed": config["render"]["seed"], "settings": chapter_settings(config["render"])}
+                   "base_seed": config["render"]["seed"], "settings": chapter_settings(
+                       config["render"], censorship_policy=config["censorship"])}
         prepared = {"version": 1, "spec_hash": digest(spec), "clips": clips,
                     "acceptance": acceptance, "context": context}
         return dict(prepared, record_sha256=digest(prepared))
@@ -237,7 +242,7 @@ class ChapterExecutor:
             composed = prepare_chapter(
                 dict(spec["chapter"], _ordinal=spec["chapter"]["number"], _total_chapters=spec["total_chapters"]),
                 clips, Path(temporary) / "chapters", book=spec["book"], render_settings=config["render"],
-                context=prepared["context"], notify=notify)
+                context=prepared["context"], notify=notify, censorship_policy=config["censorship"])
             stage = Path(temporary) / "ready"
             stage.mkdir()
             pcm_hash = None

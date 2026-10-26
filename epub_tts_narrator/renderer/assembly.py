@@ -166,11 +166,94 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
             "peak_amplitude": peak, "audio_sha256": _hash(target)}
 
 
+def _censorship_inputs(clip, policy, sample_rate, info):
+    """Validate original lane bindings before any censored PCM is published."""
+    from .censorship import validate_mask_plan
+    from .censorship_runtime import censorship_targets
+    targets = censorship_targets(clip, policy)
+    if "speaker_lanes" in clip:
+        lanes = clip.get("censorship_lanes")
+        if (not isinstance(lanes, list) or len(lanes) != len(clip["speaker_lanes"])
+                or any(not isinstance(lane, dict) for lane in lanes)):
+            raise ValueError("Censorship requires every original simultaneous speaker lane")
+        for lane, expected in zip(lanes, clip["speaker_lanes"]):
+            if any(lane.get(key) != value for key, value in expected.items()):
+                raise ValueError("Censorship speaker lane differs from its verified original")
+    else:
+        lanes = [dict(voice_id=clip["segment"].get("voice_id"), wav_path=clip["wav_path"],
+                      censorship=clip.get("censorship"))]
+    prepared = []
+    for lane in lanes:
+        path = Path(lane["wav_path"])
+        lane_info = _wave_info(path, sample_rate)
+        checksum = _hash(path)
+        if (not lane_info["frames"] or lane_info["frames"] > info["frames"]
+                or "speaker_lanes" in clip and
+                (checksum != lane.get("audio_sha256") or lane_info["frames"] != lane.get("end_frame"))):
+            raise ValueError("Original censorship speaker audio changed or has an invalid timeline")
+        audit = validate_mask_plan(lane.get("censorship"), clip["spoken_text"], policy,
+                                   sample_rate=sample_rate, frames=lane_info["frames"],
+                                   audio_sha256=checksum, targets=targets)
+        prepared.append(dict(voice_id=lane["voice_id"], wav_path=path,
+                             frames=lane_info["frames"], audit=audit))
+    return prepared
+
+
+def _masked_pcm(lanes, start, end):
+    """Yield masked PCM, averaging simultaneous lanes only after each mask."""
+    from .censorship import apply_masks
+    with ExitStack() as handles:
+        inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
+        for source, lane in zip(inputs, lanes):
+            source.setpos(min(start, lane["frames"]))
+        cursor = start
+        while cursor < end:
+            count = min(65536, end - cursor)
+            totals = [0] * count if len(lanes) > 1 else None
+            for source, lane in zip(inputs, lanes):
+                expected = max(0, min(count, lane["frames"] - cursor))
+                data = source.readframes(expected)
+                if len(data) != expected * 2:
+                    raise ValueError("Truncated original censorship PCM")
+                data = apply_masks(data, cursor, lane["audit"]["masks"])
+                if totals is None:
+                    yield data
+                else:
+                    samples = array("h")
+                    samples.frombytes(data)
+                    if sys.byteorder != "little":
+                        samples.byteswap()
+                    for index, value in enumerate(samples):
+                        totals[index] += value
+            if totals is not None:
+                mixed = array("h", (round(value / len(lanes)) for value in totals))
+                if sys.byteorder != "little":
+                    mixed.byteswap()
+                yield mixed.tobytes()
+            cursor += count
+    for lane in lanes:
+        if _hash(lane["wav_path"]) != lane["audit"]["audio_sha256"]:
+            raise ValueError("Original censorship audio changed during chapter composition")
+
+
+def _censorship_timing(lanes, policy, first_frame, edges):
+    from .censorship import policy_identity
+    return {"version": 1, "policy": policy_identity(policy), "lanes": [{
+        "voice_id": lane["voice_id"], "audit": deepcopy(lane["audit"]),
+        "chapter_masks": [{
+            "source_start": mask["source_start"], "source_end": mask["source_end"],
+            "chapter_start_frame": first_frame + max(mask["mute_start_frame"], edges["start"]) - edges["start"],
+            "chapter_end_frame": first_frame + min(mask["mute_end_frame"], edges["end"]) - edges["start"],
+        } for mask in lane["audit"]["masks"]
+            if mask["mute_end_frame"] > edges["start"] and mask["mute_start_frame"] < edges["end"]],
+    } for lane in lanes]}
+
+
 def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     sample_rate: int = 44100, paragraph_pause_ms: float = 400,
                     blank_pause_ms: float = 600, bracket_pause_ms: float = 120,
                     normalize_pauses: bool = True, sentence_pause_ms: float = 260,
-                    clause_pause_ms: float = 120) -> dict:
+                    clause_pause_ms: float = 120, censorship_policy=None) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for
@@ -185,6 +268,9 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     clause_frames = _pause_frames(clause_pause_ms, sample_rate)
     if type(normalize_pauses) is not bool:
         raise ValueError("normalize_pauses must be boolean")
+    from .censorship import policy_identity
+    censorship_enabled = (censorship_policy is not None
+                          and policy_identity(censorship_policy) is not None)
     target = Path(output_wav)
     if target.exists() or target.is_symlink():
         raise ValueError(f"Output already exists: {target}")
@@ -230,6 +316,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     pause_before = max(pause_before, bracket_frames)
                 pending_pause = max(pending_pause, pause_before)
                 edges = None
+                masked_lanes = None
                 if clip.get("wav_path") is not None:
                     source = Path(clip["wav_path"])
                     info = _wave_info(source, sample_rate)
@@ -243,6 +330,10 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     edges = (audio_edges(source, trim="speaker_lanes" not in clip, **outer_pauses)
                              if normalize_pauses else
                              dict(start=0, end=info["frames"], leading=0, trailing=0))
+                    # The trim is derived from the untouched take. Computing it
+                    # after masking would erase a censored first or final word.
+                    if censorship_enabled:
+                        masked_lanes = _censorship_inputs(clip, censorship_policy, sample_rate, info)
                     silence(max(0, max(pending_pause, pending_punctuation)
                                 - previous_tail - edges["leading"]))
                     pending_pause = 0
@@ -250,17 +341,22 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 first_frame = cursor
                 if clip.get("wav_path") is not None:
                     count = 0
-                    with wave.open(str(source), "rb") as audio:
-                        audio.setpos(edges["start"])
-                        remaining = edges["end"] - edges["start"]
-                        while remaining:
-                            requested = min(65536, remaining)
-                            chunk = audio.readframes(requested)
-                            if len(chunk) != requested * 2:
-                                raise ValueError(f"Truncated PCM frame: {source}")
-                            destination.writeframesraw(chunk)
-                            count += len(chunk) // 2
-                            remaining -= requested
+                    if masked_lanes is not None:
+                        for data in _masked_pcm(masked_lanes, edges["start"], edges["end"]):
+                            destination.writeframesraw(data)
+                            count += len(data) // 2
+                    else:
+                        with wave.open(str(source), "rb") as audio:
+                            audio.setpos(edges["start"])
+                            remaining = edges["end"] - edges["start"]
+                            while remaining:
+                                requested = min(65536, remaining)
+                                chunk = audio.readframes(requested)
+                                if len(chunk) != requested * 2:
+                                    raise ValueError(f"Truncated PCM frame: {source}")
+                                destination.writeframesraw(chunk)
+                                count += len(chunk) // 2
+                                remaining -= requested
                     cursor += count
                     previous_tail = edges["trailing"]
                 timing = {
@@ -277,6 +373,9 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 if edges is not None:
                     timing.update(source_audio_start_frame=edges["start"],
                                   source_audio_end_frame=edges["end"])
+                if masked_lanes is not None:
+                    timing["censorship"] = _censorship_timing(
+                        masked_lanes, censorship_policy, first_frame, edges)
                 if "paragraph_turns" in clip:
                     # A single continuous performance has paragraph timing. Do not
                     # invent word/speaker timestamps from unreliable ASR alignment.
@@ -552,6 +651,10 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
             for lane in timing.get("speaker_lanes", []):
                 lane["book_start_frame"] = cursor + lane["chapter_start_frame"]
                 lane["book_end_frame"] = cursor + lane["chapter_end_frame"]
+            for lane in timing.get("censorship", {}).get("lanes", []):
+                for mask in lane["chapter_masks"]:
+                    mask["book_start_frame"] = cursor + mask["chapter_start_frame"]
+                    mask["book_end_frame"] = cursor + mask["chapter_end_frame"]
             timings.append(timing)
         if info["frames"]:
             audio_chapters.append((chapter, record))

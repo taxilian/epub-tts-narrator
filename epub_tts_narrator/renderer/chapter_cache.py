@@ -18,7 +18,7 @@ from .config import RENDER_CONTRACT
 from .interrupts import run_subprocess
 
 
-def chapter_settings(render):
+def chapter_settings(render, *, censorship_policy=None):
     """Return only the settings that affect chapter composition or encoding."""
     settings = {"version": 2}
     for key, spec in RENDER_CONTRACT.items():
@@ -42,6 +42,11 @@ def chapter_settings(render):
             value = settings[key]
             if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
                 raise ValueError(f"Invalid chapter {key}")
+    if censorship_policy is not None:
+        from .censorship import policy_identity
+        policy = policy_identity(censorship_policy)
+        if policy is not None:
+            settings["censorship"] = policy
     return settings
 
 
@@ -160,7 +165,48 @@ def _timings(chapter):
                            or lane.get("chapter_end_frame") != start + lane["end_frame"] for lane in lanes)
                     or max(lane["chapter_end_frame"] for lane in lanes) != end):
                 raise ValueError("Cached simultaneous speaker timing is invalid")
+        if "censorship" in segment:
+            _censorship_timing(segment, chapter.get("sample_rate"))
         previous = end
+
+
+def _censorship_timing(segment, sample_rate):
+    """Check every exported mask against its original PCM and chapter offset."""
+    from .censorship import policy_identity, validate_mask_plan
+    value = segment["censorship"]
+    if (not isinstance(value, dict) or set(value) != {"version", "policy", "lanes"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or policy_identity(value["policy"]) != value["policy"]
+            or value["policy"] is None or not isinstance(value["lanes"], list)):
+        raise ValueError("Cached censorship timing is invalid")
+    expected_voices = ([lane["voice_id"] for lane in segment["speaker_lanes"]]
+                       if "speaker_lanes" in segment else [segment["voice_id"]])
+    if ([lane.get("voice_id") if isinstance(lane, dict) else None for lane in value["lanes"]]
+            != expected_voices):
+        raise ValueError("Cached censorship timing differs from its performers")
+    source_start, source_end = segment["source_audio_start_frame"], segment["source_audio_end_frame"]
+    chapter_start = segment["chapter_start_frame"]
+    for lane in value["lanes"]:
+        if set(lane) != {"voice_id", "audit", "chapter_masks"} or not isinstance(lane["audit"], dict):
+            raise ValueError("Cached censorship lane audit is invalid")
+        audit = lane["audit"]
+        validate_mask_plan(audit, segment["spoken_text"], value["policy"], sample_rate=sample_rate,
+                           frames=audit.get("frames"), audio_sha256=audit.get("audio_sha256"),
+                           targets=audit.get("targets"))
+        if "speaker_lanes" in segment:
+            source_lane = next(item for item in segment["speaker_lanes"] if item["voice_id"] == lane["voice_id"])
+            if (audit["frames"] != source_lane["end_frame"]
+                    or audit["audio_sha256"] != source_lane["audio_sha256"]):
+                raise ValueError("Cached censorship timing differs from its original speaker audio")
+        elif audit["frames"] < source_end:
+            raise ValueError("Cached censorship timing leaves its original audio")
+        expected = [{"source_start": mask["source_start"], "source_end": mask["source_end"],
+                     "chapter_start_frame": chapter_start + max(mask["mute_start_frame"], source_start) - source_start,
+                     "chapter_end_frame": chapter_start + min(mask["mute_end_frame"], source_end) - source_start}
+                    for mask in audit["masks"]
+                    if mask["mute_end_frame"] > source_start and mask["mute_start_frame"] < source_end]
+        if lane["chapter_masks"] != expected:
+            raise ValueError("Cached censorship frame mapping differs from its original audio")
 
 
 LANE_FIELDS = ("role_id", "voice_id", "audio_sha256", "request_hash", "validation_key",
@@ -179,7 +225,7 @@ def mixture_validation_key(lanes):
                              for lane in lanes]})
 
 
-def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print):
+def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preserve_lanes=False):
     """Cache a mix only after every lane has passed independent verification."""
     if not isinstance(lanes, list) or len(lanes) < 2:
         raise ValueError("Simultaneous speech requires at least two verified lanes")
@@ -221,9 +267,15 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print):
         mix = {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
                "frames": frames, "cache_key": key, "audio_sha256": record["audio_sha256"],
                "weight": 1 / len(prepared), "peak_amplitude": record["peak_amplitude"]}
-        return {"wav_path": str(wav.resolve()), "mix": mix,
+        result = {"wav_path": str(wav.resolve()), "mix": mix,
                 "speaker_lanes": [{key: value for key, value in lane.items() if key != "wav_path"}
                                   for lane in prepared]}
+        if preserve_lanes:
+            # These paths are private execution inputs, never voice assets or
+            # transport artifacts. Retain original lanes for post-verification
+            # masking before averaging, without changing the original mix key.
+            result["censorship_lanes"] = deepcopy(prepared)
+        return result
 
     if folder.exists() or folder.is_symlink():
         return load()
@@ -290,16 +342,25 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
         raise ValueError(f"Incomplete or invalid chapter cache: {folder}") from exc
 
 
-def prepare_chapter(chapter, clips, directory, *, book, render_settings, context, notify=print):
+def prepare_chapter(chapter, clips, directory, *, book, render_settings, context, notify=print,
+                    censorship_policy=None):
     """Compose, level, and encode once; leave a complete chapter after later failures."""
-    settings = chapter_settings(render_settings)
+    settings = chapter_settings(render_settings, censorship_policy=censorship_policy)
     directory = Path(directory)
     for candidate in (directory, directory.parent):
         if candidate.is_symlink():
             raise ValueError("Chapter cache directories must not be symlinks")
     clip_identity = []
     for clip in clips:
-        item = {key: deepcopy(value) for key, value in clip.items() if key != "wav_path"}
+        item = {key: deepcopy(value) for key, value in clip.items()
+                if key not in {"wav_path", "censorship", "censorship_lanes"}}
+        if "censorship" in settings:
+            if "censorship" in clip:
+                item["censorship"] = deepcopy(clip["censorship"])
+            if "censorship_lanes" in clip:
+                item["censorship_lanes"] = [
+                    {key: deepcopy(value) for key, value in lane.items() if key != "wav_path"}
+                    for lane in clip["censorship_lanes"]]
         item["audio_sha256"] = (file_hash(regular_file(clip["wav_path"]))
                                 if clip.get("wav_path") is not None else None)
         clip_identity.append(item)
@@ -326,7 +387,8 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             paragraph_pause_ms=settings["paragraph_pause_ms"],
             blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
             normalize_pauses=settings["normalize_pauses"],
-            sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"])
+            sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"],
+            censorship_policy=censorship_policy)
         composed.update(metadata)
         normalization = _normalize(stage / "chapter.wav", settings)
         encoded = None
@@ -359,3 +421,50 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     else:
         notify(f"Chapter {chapter_label} is empty; recorded as skipped")
     return result
+
+
+def reencode_chapter(chapter, directory, *, book, render_settings, context, notify=print,
+                     censorship_policy=None):
+    """Publish a new encoding checkpoint from existing, validated chapter PCM."""
+    settings = chapter_settings(render_settings, censorship_policy=censorship_policy)
+    source = load_chapter(chapter["cache_directory"], ffprobe=settings["ffprobe"])
+    encoding_keys = {"chapter_format", "aac_bitrate", "mp3_bitrate", "ffmpeg", "ffprobe"}
+    if ({key: value for key, value in source["settings"].items() if key not in encoding_keys}
+            != {key: value for key, value in settings.items() if key not in encoding_keys}):
+        raise ValueError("Re-encoding cannot change chapter PCM settings or censorship")
+    original = read_json(regular_file(Path(source["cache_directory"]) / "chapter.json"))
+    identity = deepcopy(original["identity"])
+    if identity["book"] != book:
+        raise ValueError("Re-encoding requires the original chapter book metadata")
+    identity.update(settings=settings, context=deepcopy(context))
+    directory = Path(directory)
+    if directory.is_symlink() or directory.parent.is_symlink():
+        raise ValueError("Chapter cache directories must not be symlinks")
+    folder = directory / digest(identity)
+    if folder.exists() or folder.is_symlink():
+        return load_chapter(folder, ffprobe=settings["ffprobe"])
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".chapter-", dir=directory) as temporary:
+        stage = Path(temporary) / "ready"
+        stage.mkdir()
+        wav = stage / "chapter.wav"
+        wav.hardlink_to(regular_file(source["wav_path"]))
+        encoded = None
+        if source["frames"]:
+            notify(f"Encoding chapter {source['number']} / {source['total_chapters']}: {source['title']}")
+            encoded = encode_chapter(
+                dict(source, wav_path=str(wav)), stage / f"chapter.{settings['chapter_format']}",
+                book=book, ordinal=identity["ordinal"], total_chapters=identity["total_chapters"],
+                chapter_format=settings["chapter_format"], aac_bitrate=settings["aac_bitrate"],
+                mp3_bitrate=settings["mp3_bitrate"], ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
+        if file_hash(wav) != original["pcm_sha256"]:
+            raise ValueError("Chapter PCM changed during re-encoding")
+        record = {key: deepcopy(value) for key, value in original.items() if key != "record_sha256"}
+        record.update(identity=identity, encoded_sha256=encoded["sha256"] if encoded else None)
+        write_json(stage / "chapter.json", dict(record, record_sha256=digest(record)))
+        try:
+            os.rename(stage, folder)
+        except OSError:
+            if not folder.exists():
+                raise
+    return load_chapter(folder, ffprobe=settings["ffprobe"])

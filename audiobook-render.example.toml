@@ -181,6 +181,21 @@ ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
 # Pass --epub /path/to/book.epub to render to extract its original cover.
 
+[censorship]
+# Optional output-only muting; saved voices and verified speech stay unchanged.
+# Override per run with --censor / --no-censor on render or assemble.
+enabled = false
+preserve_ms = 45             # Maximum opening duration, INCLUDING its fade to silence
+max_preserved_fraction = 0.2 # Also retain at most this fraction of the timed word
+fade_ms = 5
+padding_ms = 15              # Extend only into the gap after the word
+# Very short words can be muted entirely; timing is approximate, not phoneme-level.
+# Explicit whole-word forms/compounds only. Setting words REPLACES the default list.
+# words = ["fuck", "fucks", "fucked", "fucking", "shit", "shits", "shitting", "bullshit"]
+# Rebuild saved audio without TTS:
+# audiobook-render assemble BOOK --censor --chapters 13 --chapters-only
+# Missing/unsafe word timing can require local MLX Whisper alignment.
+
 [quality]
 max_wer = 0.0
 min_duration_seconds = 0.08

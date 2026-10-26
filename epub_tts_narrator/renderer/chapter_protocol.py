@@ -170,8 +170,14 @@ def _chunk_shape(chunk, identifiers, *, paragraph=False):
 def validate_spec(spec):
     """Validate the transport contract without trusting client-side preflight."""
     required = {"version", "book", "source_fingerprint", "chapter", "total_chapters", "voice_bindings", "render", "renderer_fingerprint"}
-    if not isinstance(spec, dict) or set(spec) != required or type(spec["version"]) is not int or spec["version"] != 1:
+    if (not isinstance(spec, dict) or set(spec) - required - {"censorship_policy"}
+            or required - set(spec) or type(spec["version"]) is not int or spec["version"] != 1):
         raise ValueError("Invalid chapter job specification")
+    if "censorship_policy" in spec:
+        from .censorship import validate_policy
+        policy = validate_policy(spec["censorship_policy"])
+        if not policy["enabled"] or policy != spec["censorship_policy"]:
+            raise ValueError("Remote censorship policy must be enabled and canonical")
     # Also rejects non-finite numbers and values that cannot cross the JSON wire.
     digest(spec)
     require_hash(spec["source_fingerprint"], "Source fingerprint")

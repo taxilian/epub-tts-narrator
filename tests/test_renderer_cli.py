@@ -42,6 +42,45 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(json.loads(output)["voices"], 2)
 
+    def test_censorship_is_optional_in_shared_config_and_validated(self):
+        from epub_tts_narrator.config import load_config as analyzer_config
+        original = self.config.read_text()
+        self.assertFalse(load_config(self.config)["censorship"]["enabled"])
+        self.config.write_text(original + '[censorship]\nenabled=true\nwords=["Shit", "fuck"]\npreserve_ms=30\n')
+        self.assertEqual(load_config(self.config)["censorship"]["words"], ["fuck", "shit"])
+        self.assertEqual(load_config(self.config)["censorship"]["preserve_ms"], 30)
+        analyzer_config(self.config)
+        for field, value in (("enabled", '"yes"'), ("preserve_ms", "-1"),
+                             ("max_preserved_fraction", "0.9"), ("words", '["two words"]')):
+            with self.subTest(field=field):
+                self.config.write_text(original + f'[censorship]\n{field}={value}\n')
+                with self.assertRaisesRegex(ValueError, "censorship"):
+                    load_config(self.config)
+
+    def test_assemble_censorship_flags_are_per_run_and_model_free_without_missing_alignment(self):
+        self.config.write_text(self.config.read_text() + '[censorship]\nenabled=true\n')
+        before = self.config.read_bytes()
+        result = {"chapters": [{"number": 1, "audio_file": "saved.m4a"}]}
+        for flag, expected in (("--censor", True), ("--no-censor", False)):
+            with self.subTest(flag=flag), \
+                 patch("epub_tts_narrator.renderer.workflow.assemble", return_value=result) as assemble, \
+                 patch("epub_tts_narrator.renderer.engines.create_engine", side_effect=AssertionError("No TTS")), \
+                 patch("epub_tts_narrator.renderer.verification.create_verifier", side_effect=AssertionError("No ASR")):
+                code, output, error = self.run_cli("assemble", self.bundle, "--config", self.config,
+                                                   flag, "--chapters-only", "--chapters", "1")
+            self.assertEqual(code, 0, error)
+            self.assertIn("Completed chapter 1: saved.m4a", output)
+            self.assertIs(assemble.call_args.args[1]["censorship"]["enabled"], expected)
+            self.assertTrue(assemble.call_args.kwargs["chapters_only"])
+            self.assertEqual(self.config.read_bytes(), before)
+
+    def test_assemble_censorship_does_not_require_synthesis_model_config(self):
+        self.config.write_text('[censorship]\nenabled=true\n')
+        with patch("epub_tts_narrator.renderer.workflow.assemble", return_value={"chapters": []}) as assemble:
+            code, _, error = self.run_cli("assemble", self.bundle, "--config", self.config, "--chapters-only")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(assemble.call_args.args[1]["censorship"]["enabled"])
+
     def test_chapter_server_maintenance_flag_is_explicit_and_defaults_off(self):
         for flags, expected in (([], False), (["--maintenance"], True)):
             with self.subTest(maintenance=expected), patch("epub_tts_narrator.renderer.chapter_server.serve") as serve:

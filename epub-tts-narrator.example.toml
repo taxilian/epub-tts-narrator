@@ -7,6 +7,18 @@
 # Values are literal strings; external variables are not interpolated.
 # Renderer model-download credentials use [huggingface] api_key in the same file.
 # That optional table is included in audiobook-render.example.toml; add it only once.
+# Optional renderer censorship also belongs in the same global file. The complete
+# [censorship] table is in audiobook-render.example.toml; add the table only once.
+# It is off by default and changes output audio, never analysis text or voices.
+# Per-run override: audiobook-render assemble BOOK --censor --chapters 13 --chapters-only
+# To configure it without appending the renderer example, uncomment this block:
+# [censorship]
+# enabled = false
+# preserve_ms = 45 # Includes the fade to silence; very short words may mute fully.
+# max_preserved_fraction = 0.2
+# fade_ms = 5
+# padding_ms = 15
+# words = ["fuck", "fucking", "shit", "bullshit"] # Replaces the entire default list.
 
 [provider]
 # Required for model calls. Choose a model available at your configured endpoint.

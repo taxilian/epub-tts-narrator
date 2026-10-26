@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from epub_tts_narrator.config_warnings import known_settings
 from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
+from .censorship import DEFAULT_POLICY as CENSORSHIP_DEFAULTS, validate_policy as validate_censorship
 
 
 # Shared Drama 3 sampling defaults. config.py owns the user-facing values;
@@ -72,6 +73,7 @@ def default_multi_speaker(protocol):
 
 
 DEFAULTS = {
+    "censorship": deepcopy(CENSORSHIP_DEFAULTS),
     "engine": {
         "type": "drama3_mlx", "model": DEFAULT_DRAMA3_MODEL, "checkpoint": None,
         "cache_model_alias": None, "options": {},
@@ -384,6 +386,7 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
             if result[section][key] is None:
                 result[section][key] = default
     result["quality"] = validate_policy(result["quality"])
+    result["censorship"] = validate_censorship(result["censorship"])
     result["jev"] = validate_jev_settings(result["jev"])
     if (not isinstance(result["verification"]["phonetic_fallback"], str)
             or result["verification"]["phonetic_fallback"] not in {"analysis", "off"}):

@@ -86,6 +86,10 @@ def _safe_settings(config):
               ("engine", "verification", "quality", "jev", "provider", "render", "render_pool")}
     for key in ("work_dir", "output_dir", "epub", "performance_plan", "performance_mode"):
         result["render"].pop(key, None)
+    from .censorship import policy_identity
+    policy = policy_identity(config.get("censorship"))
+    if policy is not None:
+        result["censorship"] = policy
     return result
 
 
