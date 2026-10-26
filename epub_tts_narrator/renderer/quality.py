@@ -354,7 +354,9 @@ def compare_reference_words(expected_text: str, actual_text: str, *,
 def _audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
     """Measure acoustic quality; route the DSP leaf to the preparation lane."""
     from .render_resource_context import run_preparation
-    return run_preparation(_measure_audio_metrics, path, policy, include_silences=include_silences)
+    if include_silences:
+        return run_preparation(_measure_audio_metrics, path, policy, include_silences=True)
+    return run_preparation(_measure_audio_metrics, path, policy)
 
 
 def _measure_audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
@@ -974,7 +976,7 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     ticket = begin_attempt_ticket(False, materialized)
     try:
         return _checked_audio_report(path, expected_text, verifier, policy,
-                                     purpose=purpose, ticket=ticket)
+                                     purpose=purpose, performance=performance, ticket=ticket)
     finally:
         if ticket is not None:
             ticket.release()
@@ -982,7 +984,7 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
 
 def _checked_audio_report(path, expected_text: str, verifier,
                           policy: dict | None = None, *, purpose: str = "speech",
-                          ticket=None) -> dict:
+                          performance=None, ticket=None) -> dict:
     purpose = _validate_purpose(purpose)
     settings = validate_policy(policy)
     if not isinstance(expected_text, str):
