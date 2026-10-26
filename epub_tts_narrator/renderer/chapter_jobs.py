@@ -157,6 +157,38 @@ class ChapterJobs:
                 jobs.append(entry)
             return jobs
 
+    def scheduling_status(self):
+        """Read-only numeric scheduling snapshot for progress observers.
+
+        Counts the current queue by state and adds the process scheduling
+        snapshot (stage gauges, backlog peaks, logical scheduler) from
+        already-initialized resources. Grants nothing: no session is bound
+        or renewed, no admission opens, nothing executes, and no registry
+        grows. Unknown executors report no engine section at all.
+        """
+        counts = dict.fromkeys(
+            ("queued", "generating", "assembling", "complete", "failed", "cancelled"), 0)
+        with self._condition, self._connect() as db:
+            for (state,) in db.execute("SELECT state FROM jobs"):
+                if state in counts:
+                    counts[state] += 1
+            active = self._active
+        from .render_schedule_status import scheduling_status
+        return {"jobs": counts, "active_workers": active,
+                "coordinators": self._parallel_chapters,
+                "take_identities": self._take_identities(),
+                "engine": scheduling_status()}
+
+    def _take_identities(self):
+        count = getattr(self.executor, "take_identity_count", None)
+        if not callable(count):
+            return 0
+        try:
+            return count()
+        except Exception:
+            # A broken executor probe must never fail an observation.
+            return 0
+
     def capabilities(self):
         return {"protocol": PROTOCOL, "engine": deepcopy(self.identity),
                 "renderer_fingerprint": self.fingerprint,
@@ -166,6 +198,7 @@ class ChapterJobs:
                 "submission_budget": True,
                 "client_sessions": 1, "session_ttl_seconds": self.sessions.ttl,
                 "ephemeral_runs": 1,
+                "scheduling_status": 1,
                 "warm_activation": 1,
                 "maintenance": self._maintenance,
                 "voice_format": "flac", "chapter_format": "m4a",

@@ -17,8 +17,8 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 ```
 epub-tts-narrator/
 ├── epub_tts_narrator/        # analyzer package: 56 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 113 flat modules, own CLI + AGENTS.md
-├── tests/                    # 287 flat unittest files + fixtures/ + shared helpers
+│   └── renderer/             # renderer subpackage: 115 flat modules, own CLI + AGENTS.md
+├── tests/                    # 291 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -48,11 +48,12 @@ epub-tts-narrator/
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
 | Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2317 ln) | Resumable, checkpointed, quality-gated |
 | Shared render scheduling | `renderer/render_lanes.py`, `renderer/render_pipeline.py`, `renderer/render_chapter_flow.py`, `renderer/render_resources.py`, `renderer/render_resource_context.py` | Bounded stage lanes; fair logical scheduler; chapter coordination (`collect_chapter`/`run_units`); runtime-only controls; pipeline leaf routing (`resource_scope`) |
+| Scheduling diagnostics | `renderer/render_schedule_status.py`, `renderer/chapter_jobs.py:scheduling_status`, `renderer/runpod_progress.py` | Passive read-only numeric snapshots (mode/basis, logical gauges, backlog with monotonic peaks, per-stage queued/active); observing never initializes resources or mutates state |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
 | Casting workflow | `epub_tts_narrator/renderer/casting.py` | `CastingSession` god-class (~37 methods, 20+ callers) |
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |
 | Deployment | `deploy/runpod/README.md`, `renderer/runpod.py` | Pinned inference contract; do not improvise versions |
-| Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one) | Standalone; live-model runs need `--config` |
+| Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one); `scripts/benchmark_chapter_pipeline.py` (prepare/run chapter-pipeline A/B with telemetry) | Standalone; live-model runs need `--config`; fake runs are permanently ineligible |
 | Commands/config reference | `README.md`, `ANALYSIS.md`, `RENDERER.md`, `REMOTE_RENDERING.md` | Docs are the automation surface — there is no CI |
 
 ## CODE MAP
@@ -148,3 +149,4 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - Series speech-trait backfills must be made in the originating voice definition, never silently discarded or added only to a descendant. Existing baseline traits may improve in later books; `_history` carries their latest value without mutating prior snapshots or reference voices.
 - `voice_profile_refresh.py` owns validated profile-only proposals and preserved evidence traits; `voice_profile_workflow.py` publishes them through `analysis_revision` scope="voice-profiles". It rebinds audition fingerprints, refreshes descendant links, and never changes segments, aliases, reference assets, or render caches. Update series books in order.
 - `voice_profile_state.py` invalidates all profiles before refresh and checkpoints input-bound proposals. `voice_profile_guard.py` blocks generation for pending books and descendants, coordinates refresh leases, and retains `.lease` ownership artifacts. Rerun `refresh-voice-profiles` to resume API or publication failures.
+- `render_schedule_status.py` and `render_backlog_context.py` are read-only/passive scheduling helpers: status observation registers the already-built engine in one slot, snapshots only existing locks' gauges (including monotonic backlog peaks), and never creates engines, models, sessions, leases, pods, or registries; unknown plugins and older servers degrade to absent sections, never invented values.

@@ -120,6 +120,13 @@ class LogicalClipScheduler:
         """Results in submission (source) order, not completion order."""
         return [future.result() for future in futures]
 
+    def snapshot(self):
+        """Read-only numeric scheduling gauges; no per-run history."""
+        with self._cond:
+            return {"pending": self._pending, "inflight": self._inflight,
+                    "owners": len(self._owners), "global_limit": self._limit,
+                    "chapter_share": self._share, "closed": self._closed}
+
     def cancel_owner(self, owner):
         """Cancel every queued transaction of one owner; started work drains.
 

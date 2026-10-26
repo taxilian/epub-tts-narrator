@@ -113,7 +113,22 @@ class ChapterExecutor:
                 from .pool import bind_engine_verifier
                 self._verifier = bind_engine_verifier(self._engine, self._verifier)
                 self._wrapped = True
+                # Passive read-only registration for scheduling diagnostics:
+                # the snapshot observes this engine, it never starts one.
+                from .render_pipeline_config import effective_scheduling
+                from .render_schedule_status import register_runtime
+                register_runtime(self._engine, effective_scheduling(self.config))
             return self._engine, self._verifier
+
+    @property
+    def initialized_engine(self):
+        """The engine if one was already built, without creating anything."""
+        return self._engine
+
+    def take_identity_count(self):
+        """Distinct request identities coalesced by shared take locks so far."""
+        with self._take_locks_guard:
+            return len(self._take_locks)
 
     @property
     def parallel_chapters(self):
@@ -292,6 +307,8 @@ class ChapterExecutor:
                 return
             self._closed = True
             try:
+                from .render_schedule_status import clear_runtime
+                clear_runtime(self._engine)
                 close = getattr(self._verifier, "close", None)
                 if callable(close):
                     close()

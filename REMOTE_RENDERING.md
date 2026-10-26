@@ -185,8 +185,11 @@ Keep `chapter_server.data_dir` on persistent storage. It contains:
 - Accepted paragraph checkpoints and compressed completed chapter exports.
 
 Run one service process per data directory. A process lease prevents competing
-services from recovering the same queue. Inference stays warm across jobs. A
-shared engine pool admits up to two chapters so the next chapter can generate
+services from recovering the same queue. Inference stays warm across jobs. The
+shared engine pool admits up to the effective
+`render_pool.chapter_concurrency` coordinators (2 by default in legacy mode,
+4 under the experimental pipeline scheduler, capped at 16) so the next chapter
+can generate
 while the previous chapter finishes CPU recognition or remote JEV verification.
 The pool still enforces its configured GPU concurrency and loads each local
 model once. Local MLX recognition shares the serialized local inference runtime.
@@ -205,6 +208,39 @@ wait for admission without loading their audio. Increasing the window absorbs
 verification delays but cannot make a persistently
 slower verifier keep up. Scheduling changes preserve accepted audio and cache
 identities. Cancellation stops waiting admissions while active takes finish.
+
+### Scheduling diagnostics (experimental pipeline opt-in)
+
+The chapter server projects the local `[render_pool]` scheduler controls to the
+worker unchanged (`project_pipeline_controls`); automatic values are resolved
+on the worker from its own configured slots. Under the experimental
+`render_pool.scheduler = "pipeline"`, the automatic `max_inflight` becomes a
+global transaction ceiling: `16` on a single-slot local worker and
+`min(256, max(64, 16 × slots))` remotely — at eight declared slots that is 128.
+The legacy window keeps its slots + 1 per-chapter meaning, so a legacy pool
+reporting `9` on eight slots and a pipeline pool reporting `128` are different
+quantities with different bases, never a plain 2-vs-16 comparison. Managed
+coordinators are additionally capped at 16 (`MAX_PARALLEL_CHAPTERS`), the
+assembly pool runs `chapter_server.assembly_workers` (default 2), and the
+dispatch semaphore admits `assembly_workers + coordinators` units at once.
+
+`GET /v1/jobs` carries an additive read-only `scheduling` object (advertised as
+`scheduling_status: 1` in capabilities; older servers simply omit it). It holds
+the queue counts per state, the active scheduler mode and capacity basis
+(`pipeline_global_transactions` or `legacy_per_chapter_window`), the logical
+scheduler's pending/inflight/owner gauges, the attempt backlog including its
+monotonic `peak_pending_count` and `peak_materialized_bytes` high-water marks,
+and the per-stage queued/active counts from the closed render-metrics stage
+set. Every value is a number, boolean, or one of those fixed labels — never
+book text, transcripts, URLs, keys, or job identifiers. Observing grants
+nothing: the endpoints never create or renew a session, open admission, start
+compute, or grow any registry, and peak gauges survive a drained queue so a
+finished burst stays visible. `runpod progress` renders this block as one
+`scheduling:` line. Interpretation: a job in `generating` whose synthesis
+stage shows `0` active, with `paused: no connected rendering client` absent,
+is real idle inference waiting on downstream work; a job reported `paused`
+with `owner_connected: false` is a stopped/disconnected render — the service
+holds no execution grant and will not resume until a client reconnects.
 
 Registered reference bytes and transcripts are reused. Model-specific reference
 encoding reuse depends on the configured inference backend; this registry does

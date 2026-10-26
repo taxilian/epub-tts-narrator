@@ -25,19 +25,24 @@ text, secrets, labels, or history.
 Pipeline glue: ``begin_attempt_ticket(new_generation, initial_bytes=0)``
 acquires from the runtime scoped by ``render_resource_context`` (None and
 the legacy direct path outside one; adopt mode also None when a ticket is
-already held, so an ASR boundary never double-counts). Blocked waits wake
-on render stop or runtime close, surfacing the canonical interrupt. The
-reservation context is single-use; its ContextVar token resets before the
-outer finally releases the captured ticket, so a nested attempt can never
-release another attempt's ticket. No file locks and no retry/identity
-policy: reservation order relative to take locks is the integrator's
-concern. Full hook map: ``.omo/evidence/.../task-5-api.md``.
+already held, so an ASR boundary never double-counts); the context-side
+acquisition and transfer glue lives in ``render_backlog_context``, which
+this module re-exports. Blocked waits wake on render stop or runtime
+close, surfacing the canonical interrupt. The reservation context is
+single-use; its ContextVar token resets before the outer finally releases
+the captured ticket, so a nested attempt can never release another
+attempt's ticket. No file locks and no retry/identity policy: reservation
+order relative to take locks is the integrator's concern. Full hook map:
+``.omo/evidence/.../task-5-api.md``.
 """
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from threading import Condition
+
+from .render_backlog_context import (
+    AttemptTicket, _current_ticket, begin_attempt_ticket, current_ticket,
+)
 
 DEFAULT_MAX_MATERIALIZED_BYTES = 256 * 1024 * 1024
 _WAKE_POLL_SECONDS = 0.05  # bound for noticing cancel/phase predicate flips
@@ -113,7 +118,13 @@ class BacklogTicket:
 
 
 class BacklogBudget:
-    """Exact pending-take bound with soft byte high-water and hysteresis."""
+    """Exact pending-take bound with soft byte high-water and hysteresis.
+
+    ``snapshot()`` also reports the monotonic ``peak_pending_count`` and
+    ``peak_materialized_bytes`` high-water gauges: they advance only when a
+    real reservation or materialization raises the current value, never on
+    release or sampling, so a released queue still shows its true peak.
+    """
 
     def __init__(self, *, max_pending,
                  max_materialized_bytes=DEFAULT_MAX_MATERIALIZED_BYTES):
@@ -129,6 +140,8 @@ class BacklogBudget:
         self._cond = Condition()
         self._pending = 0
         self._bytes = 0
+        self._peak_pending = 0
+        self._peak_bytes = 0
         self._blocked = False
         self._closed = False
         self._waiters = 0
@@ -152,6 +165,8 @@ class BacklogBudget:
             return {
                 "pending_count": self._pending,
                 "materialized_bytes": self._bytes,
+                "peak_pending_count": self._peak_pending,
+                "peak_materialized_bytes": self._peak_bytes,
                 "max_pending": self._max_pending,
                 "max_materialized_bytes": self._max_bytes,
                 "low_water_bytes": self._low_water,
@@ -169,6 +184,8 @@ class BacklogBudget:
     def _apply_bytes(self, delta):
         # The budget lock is held by every caller.
         self._bytes += delta
+        if self._bytes > self._peak_bytes:
+            self._peak_bytes = self._bytes
         if self._bytes >= self._max_bytes:
             self._blocked = True
         elif self._blocked and self._bytes < self._low_water:
@@ -189,6 +206,8 @@ class BacklogBudget:
                 if (self._pending < self._max_pending
                         and not (new_generation and self._blocked)):
                     self._pending += 1
+                    if self._pending > self._peak_pending:
+                        self._peak_pending = self._pending
                     self._apply_bytes(initial_bytes)
                     return BacklogTicket(self, initial_bytes)
                 self._waiters += 1
@@ -237,75 +256,3 @@ class _Reservation:
         # explicit primary-ASR release.
         self._ticket.release()
         return False
-
-
-_current_ticket: ContextVar = ContextVar(
-    "render_backlog_current_ticket", default=None)
-
-
-def current_ticket():
-    """The innermost live ticket in this context, or None (read-only)."""
-    return _current_ticket.get()
-
-
-def begin_attempt_ticket(new_generation, initial_bytes=0):
-    """Acquire one attempt ticket from the pipeline backlog in scope.
-
-    Returns None outside a pipeline transaction: the caller keeps the
-    legacy direct path with no budget. Adopt mode (``new_generation=False``)
-    also returns None when this context already holds an attempt ticket;
-    the held ticket already accounts this operation's bytes. A fresh
-    generation always acquires its own per-attempt ticket, nested safely.
-
-    A blocked wait wakes when the render stop controller requests a stop
-    or the runtime closes; a stop raises the canonical interrupt from
-    ``interrupts`` instead of ``BacklogCancelled``.
-    """
-    from .interrupts import stop_if_requested, stop_requested
-    from .render_resource_context import current_resources
-
-    resources = current_resources()
-    if resources is None:
-        return None
-    if not new_generation and _current_ticket.get() is not None:
-        return None
-    try:
-        ticket = resources.backlog.acquire(
-            new_generation=new_generation, initial_bytes=initial_bytes,
-            cancel=stop_requested)
-    except BacklogCancelled:
-        stop_if_requested()
-        raise
-    return AttemptTicket(ticket, _current_ticket.set(ticket))
-
-
-class AttemptTicket:
-    """Explicit transfer of one granted ticket plus its context binding.
-
-    The token resets in ``release`` on the acquiring thread (the caller's
-    outer primary-ASR finally); ticket release stays idempotent, any thread.
-    """
-
-    __slots__ = ("ticket", "_token")
-
-    def __init__(self, ticket, token):
-        self.ticket = ticket
-        self._token = token
-
-    def materialize(self, nbytes):
-        """Record the attempt's absolute materialized size in bytes."""
-        self.ticket.materialize(nbytes)
-
-    def update_bytes(self, nbytes):
-        """Re-record the absolute size after a join, trim, or rewrite."""
-        self.ticket.update_bytes(nbytes)
-
-    @property
-    def released(self):
-        return self.ticket.released
-
-    def release(self):
-        token, self._token = self._token, None
-        if token is not None:
-            _current_ticket.reset(token)
-        self.ticket.release()

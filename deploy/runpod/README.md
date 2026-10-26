@@ -92,7 +92,17 @@ To inspect chapter progress while Encode is attached, use a second terminal:
 
 Progress is read-only and works while Encode holds the deployment lock. It
 shows chapter counts, connected/paused state, and the latest completed-block
-counts when available. It never starts a Pod, creates a session, renews an
+counts when available. Workers running this revision also report a
+`scheduling:` line (and a `scheduling` object in `--json` mode): the queue
+counts per state, the active scheduler mode and capacity basis, the logical
+scheduler's pending/active/owner gauges, the attempt backlog with its
+monotonic peak pending-count and peak materialized-bytes high-water marks,
+and per-stage queued/active counts from the closed render-metrics stage set.
+Interpretation: a `generating` chapter whose synthesis stage shows zero active
+is intentional idle inference waiting on downstream recognition/review work;
+`paused` plus `owner_connected: false` means the rendering client is gone and
+nothing will execute until one reconnects. It never starts a Pod, creates a
+session, renews an
 execution lease, or resumes a job. Stop watching with Ctrl-C. After updating
 the worker, only jobs explicitly owned by a live rendering client can run;
 closing that client pauses unfinished work after in-flight cache writes drain.
@@ -335,6 +345,24 @@ runtime libraries are selected before the interpreter starts:
 The wrapper also accepts Python's `-m MODULE` form. It replaces itself with
 the application interpreter, preserving signals and exit status. It does not
 start inference, load models by itself, or stop paid compute.
+
+For the whole-chapter pipeline benchmark, use
+[benchmark_chapter_pipeline.py](../../scripts/benchmark_chapter_pipeline.py)
+with its `prepare` and `run` subcommands. `prepare` freezes a deterministic
+corpus from selected real chapters plus portable FLAC references before any
+measurement; `run` executes the production ChapterJobs/ChapterExecutor service
+with real HTTP/session/ACK behavior in a fresh namespaced cache and output
+root, using `--scheduler legacy|pipeline` for A/B. Keep both arms on the same
+transport and host: run the worker side through the same `worker.py
+run-application --` wrapper so recognition and GPU samples come from the
+production environment, and drive A/B over loopback on the host before
+qualifying the ordinary remote client. A run that used `--fake-engine`, a
+resumed/cached corpus, or any injected disconnect is labeled and excluded
+from speed comparisons automatically; benchmarks never modify the original
+book. The pipeline scheduler itself stays opt-in: default scheduling remains
+`legacy` until a recorded live A/B gate (at least 20% median accepted-source-
+audio throughput with unchanged acceptance rules) passes, and no speedup is
+claimed before that measurement exists.
 
 ## Manual worker commands and diagnostics
 

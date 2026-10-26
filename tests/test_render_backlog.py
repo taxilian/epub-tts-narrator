@@ -48,6 +48,8 @@ WORKER_WAIT = 10  # deadlock watchdog for every Event wait, join, and future
 GAUGE_KEYS = {
     "pending_count",
     "materialized_bytes",
+    "peak_pending_count",
+    "peak_materialized_bytes",
     "max_pending",
     "max_materialized_bytes",
     "low_water_bytes",
