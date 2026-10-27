@@ -10,6 +10,7 @@ audio, and render caches are never touched.
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 import unicodedata
 
 from .attribution_review import _bounded_map
@@ -30,7 +31,35 @@ def _plain_text(value, limit):
             and not any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value))
 
 
-def validate_profile_response(value):
+def _accent_traits(profile):
+    return [trait for trait in (profile or {}).get("traits", [])
+            if " ".join(trait["name"].casefold().split()).strip(" :;.,")
+            in {"accent", "accents", "dialect", "dialects"}]
+
+
+def _validate_inherited_accent(value, prior):
+    """Guard declared accent continuity, not semantic or acoustic equivalence."""
+    inherited = _accent_traits(prior)
+    if not inherited:
+        return
+    expected = sorted(trait["value"] for trait in inherited)
+    proposed = sorted(trait["value"] for trait in _accent_traits(value))
+    if proposed != expected:
+        raise ValueError("Inherited accent/dialect trait values must be repeated exactly from "
+                         "prior_series_voice; automatic profile refresh cannot replace or omit them. "
+                         "Return those values with casting basis and empty evidence; existing source "
+                         "evidence is preserved by the application. Other compatible traits may improve.")
+    for field in ("description", "speechTraits"):
+        direction = " ".join(value[field].casefold().split())
+        for accent in expected:
+            phrase = " ".join(accent.casefold().split())
+            if not re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", direction):
+                raise ValueError(f"Inherited accent wording is missing from {field}; include every "
+                                 "prior_series_voice accent/dialect trait value verbatim in this field. "
+                                 "Compatible cadence or delivery refinements may accompany it.")
+
+
+def validate_profile_response(value, *, prior_series_voice=None):
     """Enforce the refresh output contract: the three profile fields plus a reason."""
     from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
     if not isinstance(value, dict) or set(value) != {"description", "traits", "speechTraits", "reason"}:
@@ -62,8 +91,10 @@ def validate_profile_response(value):
             or len(reason) > 1000
             or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in reason)):
         raise ValueError("Voice profile refresh requires a brief plain-text reason of at most 1000 characters")
-    return {"description": description, "traits": deepcopy(traits),
-            "speechTraits": speech_traits, "reason": reason}
+    accepted = {"description": description, "traits": deepcopy(traits),
+                "speechTraits": speech_traits, "reason": reason}
+    _validate_inherited_accent(accepted, prior_series_voice)
+    return accepted
 
 
 def _profile_context(profile, blocks):
@@ -118,7 +149,10 @@ def refresh_voice_profiles(bundle, requests, *, voice_ids=None, workers=5,
         raise ValueError("Voice profile refresh needs the configured analysis model")
 
     def refresh(payload, cancelled):
-        value = requests.run(SYSTEM, payload, validate_profile_response, cancelled=cancelled)
+        def validate(response):
+            return validate_profile_response(response, prior_series_voice=payload["prior_series_voice"])
+
+        value = requests.run(SYSTEM, payload, validate, cancelled=cancelled)
         progress(f"Refreshed voice profile: {payload['voice']['id']}")
         return payload["voice"]["id"], value
 

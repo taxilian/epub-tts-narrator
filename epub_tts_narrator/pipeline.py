@@ -112,7 +112,7 @@ def seed_cast():
             "voices": [{"id": "voice_narrator_main",
                         "description": "A clear speaking voice with even and natural resonance, precise but relaxed articulation, "
                                        "and a steady conversational pace.",
-                        "speechTraits": "neutral General American accent; steady conversational pace",
+                        "speechTraits": "steady conversational pace",
                         "traits": [{"name": "resonance", "value": "even and natural",
                                     "basis": "casting", "evidence": []},
                                    {"name": "articulation", "value": "precise but relaxed",

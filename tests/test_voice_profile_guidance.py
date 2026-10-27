@@ -44,6 +44,12 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                 self.assertEqual(modes.count("discover"), 1)
                 self.assertEqual(modes.count("reconcile"), 2)
                 self.assertEqual(modes.count("voice_ensemble"), 1)
+                initial = next(payload for _, payload in client.calls if payload.get("mode") == "discover")
+                # No source evidence has been read when this cast is seeded.
+                # Neither discovery route should inherit an invented accent.
+                self.assertEqual(initial["known_cast"]["characters"], [])
+                self.assertEqual(initial["known_cast"]["voices"][0]["speechTraits"],
+                                 "steady conversational pace")
                 for system, payload in client.calls:
                     if payload.get("mode") in {"discover", "reconcile", "voice_ensemble"}:
                         self.assertEqual(system.count(VOICE_PROFILE_GUIDANCE), 1)
@@ -105,8 +111,7 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                             for trait in narrator["traits"]))
         self.assertFalse(any(word in narrator["description"].casefold()
                               for word in ("male", "female", "young", "elderly", "accent", "baritone")))
-        self.assertEqual(narrator["speechTraits"],
-                         "neutral General American accent; steady conversational pace")
+        self.assertEqual(narrator["speechTraits"], "steady conversational pace")
         self.assertIsNone(cast["roles"][0]["character_id"])
 
 

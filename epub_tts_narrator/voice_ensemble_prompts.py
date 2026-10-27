@@ -32,6 +32,13 @@ Obey these protections without exception:
   it never discovers source evidence.
 - You may coordinate casting-basis traits (no evidence entries), descriptions,
   and speechTraits of local voices, wholly replacing the previous values.
+- Reassess local automatic accent choices against each character's upbringing,
+  languages, and migration context even when contrast_findings is empty. Earlier
+  General American casting is not source evidence or user approval. Fluency in
+  English does not establish an American accent. A background-informed accent
+  remains basis=casting with evidence=[] unless already supported by a preserved
+  text trait. Keep its description, accent trait, and speechTraits consistent;
+  do not leave a contradictory old default in any of those fields.
 - Apply cue precedence: explicit vocal evidence, deliberate user choices, and
   established series profiles first; narrative characterization second; only
   when none of those settles an attribute may names, ethnicity, gender, or

@@ -29,7 +29,7 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v8
+VOICE PROFILE CONTRACT v9
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
@@ -54,6 +54,36 @@ cast or claim to have compared it. Characters who share scenes should differ
 clearly in at least two audible dimensions, such as register, texture, pace,
 and accent. Give major recurring characters the most distinctive voices; minor
 characters can be simpler but should not duplicate a major character's sound.
+Choose accents from the individual's established background and the cast's
+needs, respecting explicit vocal evidence, deliberate user choices, and inherited
+voice identity. Consider where and with whom the person grew up, languages used,
+age at migration, and time in the current setting together. Fluent, clear, or
+grammatical English does not imply General American pronunciation. Neither the
+language of the book nor the absence of a literal accent description makes
+General American a default. When the background supports a plausible language
+or regional influence, express it as a specific, restrained audible casting
+choice instead of automatically neutralizing it.
+For example, a student who moved from Japan or Mexico during adolescence and
+speaks fluent English can plausibly retain a light Japanese-influenced or Mexican
+Spanish-influenced English accent. This is an individual creative choice, not a
+rule for immigrants. A similarly named person raised in the United States may
+instead use the accent of their upbringing. Explicitly described General
+American speech, a deliberate user accent, or an established series accent takes
+precedence over either example. Names and ancestry alone never establish an
+accent as fact, and background never requires an exaggerated performance.
+A quotation establishing nationality or upbringing supports the background,
+not an unmentioned audible accent: label the inferred accent basis=casting with
+evidence=[]. Use basis=text only for an explicitly supported audible trait. Keep
+any explanation of that distinction in audit metadata, outside the description.
+When revising a local model-generated profile, reassess unsupported accent
+choices against this context. Repeated General American in earlier description,
+traits, and speechTraits is not independent evidence or proof of user approval.
+Preserve useful compatible timbre and delivery choices while correcting the
+unsupported accent consistently across all profile fields being returned.
+This reassessment applies only to local proposals. An established inherited
+accent remains protected even when its original trait has basis=casting. A
+prior_series_voice or series_casting_reuse origin establishes that continuity;
+do not relabel its accent as an unsupported local default to replace it.
 Use adult performers for these audiobook roles. For a youthful role, integrate
 one concise adult-actor portrayal into the description, then describe the
 audible performance: a lifted pitch, brighter forward resonance, or quicker
@@ -181,8 +211,12 @@ sound effects using the voice profile contract. Preserve supported stable traits
 and label creative choices as casting. Return complete voice upserts only when
 needed, preserving their IDs and character/role ownership. Do not redesign an
 established earlier-series voice merely because this book depicts new emotions
-or circumstances. A new or locally defined voice without speechTraits needs
-them: derive them from its description and traits[] and return a complete voice
+or circumstances, including newly described upbringing or migration. For local
+automatic profiles, reconsider casting-basis accents
+that ignore the character's background; an earlier default is not a protected
+user choice. A new or locally defined voice without speechTraits needs
+them: derive them from its context and the corrected description and traits[],
+rather than carrying forward an unsupported default, and return a complete voice
 upsert. For an inherited voice whose originating definition lacks speechTraits,
 do not backfill only this later book. Report that the defining book and voice
 must be updated first; continuation must fail until that definition is supplied.
