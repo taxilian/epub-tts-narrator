@@ -170,29 +170,199 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertTrue(text[start:end].startswith("Before"))
         self.assertFalse(text[end - 1].isspace())
 
-    def test_review_quits_without_loading_engine_and_stops_player(self):
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_review_prepares_cmu_and_both_previews_before_prompt_and_quit_stops_player(self):
         player = SimpleNamespace(stop=Mock())
-        self.command("review", input_fn=lambda _: "q", player=player)
-        self.factory.assert_not_called()
+        def quit_after_preparation(_):
+            self.assertEqual(len(self.engine.calls), 2)
+            self.assertEqual(self.session.rows()[0]["proposal"], self.proposal.return_value)
+            self.assertEqual(self.session.rows()[0]["status"], "pending")
+            self.assertNotIn("draft", self.session.rows()[0])
+            return "q"
+        self.command("review", input_fn=quit_after_preparation, player=player)
+        self.factory.assert_called_once()
+        self.assertTrue(self.engine.closed)
+        for path in self.session.directory.rglob("preview.json"):
+            self.assertNotIn("played", read_json(path))
         player.stop.assert_called_once()
 
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_readable_conversion_failure_keeps_the_previous_choice_and_menu_open(self):
         original = {"alphabet": "respelling", "value": "Mahrah"}
         set_pronunciation(self.bundle["directory"], self.bundle, "Mara", original)
         before = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
+        self.session.description(self.session.rows()[0], prepare=True)
         commands = iter(["e 1 Mairah", "q"])
         self.proposal.side_effect = ProviderError("proposal service unavailable")
         self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()))
         self.assertEqual(Path(self.bundle["directory"], "pronunciations.json").read_bytes(), before)
         self.assertNotIn("draft", self.session.rows()[0])
         self.assertTrue(any("Action stopped:" in line for line in self.output))
-        self.factory.assert_not_called()
+        self.factory.assert_called_once()
 
     def test_confirmed_respelling_is_preserved_without_proactive_conversion(self):
         original = {"alphabet": "respelling", "value": "Mahrah"}
         set_pronunciation(self.bundle["directory"], self.bundle, "Mara", original)
         self.assertEqual(self.session.selection(self.session.rows()[0]), original)
         self.proposal.assert_not_called()
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_preparation_covers_every_kind_without_approval_and_reuses_audio(self):
+        from epub_tts_narrator.pronunciations import KINDS, reset_pronunciation
+        for kind in sorted(KINDS):
+            with self.subTest(kind=kind):
+                reset_pronunciation(self.bundle["directory"], "Mara")
+                set_pronunciation(self.bundle["directory"], self.bundle, "Mara", status="pending")
+                self.candidate(kind=kind)
+                self.session.prepare_review()
+                row = self.session.rows()[0]
+                self.assertEqual(row["status"], "pending")
+                self.assertEqual(row["proposal"], self.proposal.return_value)
+                self.assertNotIn("draft", row)
+                self.assertIn("M AA1 R AH0", self.session.description(row))
+        self.assertEqual(self.proposal.call_count, len(KINDS))
+        self.assertEqual(len(self.engine.calls), 2)
+        self.factory.assert_called_once()
+        for path in self.session.directory.rglob("preview.json"):
+            self.assertNotIn("played", read_json(path))
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_preparation_preserves_confirmed_defaults_and_drafts_with_estimates_separate(self):
+        cmu = self.proposal.return_value
+        self.session.edit("Mara", cmu)
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lena", cmu)
+        set_pronunciation(self.bundle["directory"], self.bundle, "lantern", status="ignored")
+        set_pronunciation(self.bundle["directory"], self.bundle, "warm",
+                          {"alphabet": "respelling", "value": "worrm"})
+        registry = Path(self.bundle["directory"], "pronunciations.json")
+        drafts = self.session.directory / "drafts.json"
+        before = registry.read_bytes(), drafts.read_bytes()
+        self.session.prepare_review()
+        self.assertEqual((registry.read_bytes(), drafts.read_bytes()), before)
+        self.assertCountEqual([call.args for call in self.proposal.call_args_list],
+                              [("lantern", None), ("warm", "worrm")])
+        rows = {row["word"]: row for row in self.session.rows()}
+        self.assertEqual(self.session.selection(rows["lantern"]), None)
+        self.assertEqual(self.session.selection(rows["warm"]), {"alphabet": "respelling", "value": "worrm"})
+        self.assertEqual(self.session.description(rows["lantern"]),
+                         "default pronunciation: M AA1 R AH0 (CMU estimate)")
+        self.assertEqual(self.session.description(rows["warm"]), "say as worrm; CMU estimate: M AA1 R AH0")
+        self.assertEqual(len(self.engine.calls), 8)
+        resumed = PronunciationReviewSession(self.bundle, self.config, engine_factory=self.factory,
+                                            store=self.store, notify=self.output.append,
+                                            proposal_fn=Mock(side_effect=AssertionError("no requests")))
+        self.addCleanup(resumed.close)
+        resumed.prepare_review()
+        self.assertEqual(len(self.engine.calls), 8)
+        self.assertEqual((registry.read_bytes(), drafts.read_bytes()), before)
+
+    def test_default_estimate_never_changes_a_choice_and_baseline_uses_original_word(self):
+        choice = {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"}
+        set_pronunciation(self.bundle["directory"], self.bundle, "Mara", choice)
+        row = self.session.rows()[0]
+        registry = Path(self.bundle["directory"], "pronunciations.json")
+        before = registry.read_bytes()
+        self.assertEqual(self.session.description(row), "CMU phonemes M EH1 R AH0")
+        self.proposal.assert_not_called()
+        self.assertEqual(self.session.description(row, None, prepare=True),
+                         "default pronunciation: M AA1 R AH0 (CMU estimate)")
+        self.proposal.assert_called_once_with("Mara", None)
+        self.assertEqual(self.session.description(row), "CMU phonemes M EH1 R AH0")
+        self.assertEqual(registry.read_bytes(), before)
+        self.assertFalse((self.session.directory / "drafts.json").exists())
+        self.factory.assert_not_called()
+
+    def test_estimates_reject_changed_content_foreign_source_and_symlinks(self):
+        from epub_tts_narrator.renderer.common import write_json
+        row = self.session.rows()[0]
+        self.session.description(row, None, prepare=True)
+        path = self.session.directory / "cmu-estimates.json"
+        original = path.read_bytes()
+        for field, value in (("source_fingerprint", "f" * 64), ("book_id", "another-book"), ("sha256", "a" * 64)):
+            with self.subTest(field=field):
+                record = read_json(path)
+                record[field] = value
+                write_json(path, record)
+                with self.assertRaisesRegex(ValueError, "Invalid pronunciation CMU estimates"):
+                    self.session.description(row, None)
+                path.write_bytes(original)
+        target = path.with_name("saved-estimates.json")
+        path.rename(target)
+        path.symlink_to(target)
+        with self.assertRaises(ValueError):
+            self.session.description(row, None)
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_failed_preparation_resumes_completed_cmu_before_opening_menu(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lena", status="pending")
+        self.proposal.side_effect = [self.proposal.return_value, ProviderError("temporary failure")]
+        player = SimpleNamespace(stop=Mock())
+        prompt = Mock(return_value="q")
+        with self.assertRaises(ProviderError):
+            self.command("review", input_fn=prompt, player=player)
+        self.assertTrue(any("CMU preparation stopped at 2/2: Mara" in line and "rerun" in line
+                            for line in self.output))
+        prompt.assert_not_called()
+        self.factory.assert_not_called()
+        player.stop.assert_called_once()
+        rows = {row["word"]: row for row in self.session.rows()}
+        self.assertIn("proposal", rows["Lena"])
+        self.assertNotIn("proposal", rows["Mara"])
+        self.proposal.side_effect = None
+        self.command("review", input_fn=prompt, player=SimpleNamespace(stop=Mock()))
+        self.assertEqual(self.proposal.call_count, 3)
+        self.assertEqual(len(self.engine.calls), 4)
+        self.assertTrue(all(row["status"] == "pending" for row in self.session.rows()))
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_failed_excerpt_preparation_reuses_completed_isolated_audio_on_restart(self):
+        synthesize = self.engine.synthesize
+        attempts = []
+        def fail_second(*args, **kwargs):
+            attempts.append(args[0])
+            if len(attempts) == 2:
+                raise RuntimeError("temporary synthesis failure")
+            return synthesize(*args, **kwargs)
+        with patch.object(self.engine, "synthesize", side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError, "temporary synthesis"):
+                self.session.prepare_review()
+            self.assertEqual(len(self.engine.calls), 1)
+            self.session.prepare_review()
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(self.engine.calls), 2)
+        self.proposal.assert_called_once_with("Mara", None)
+        self.assertEqual(self.session.rows()[0]["status"], "pending")
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_unspoken_first_word_does_not_block_other_previews_or_editing_menu(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lena", status="pending")
+        original = deepcopy(self.bundle["chapters"])
+        for chapter in self.bundle["chapters"]:
+            chapter["rows"] = [row for row in chapter["rows"] if "Lena" not in row["text"]]
+        self.session.prepare_review()
+        rows = {row["word"]: row for row in self.session.rows()}
+        self.assertIn("existing saved voice", rows["Lena"]["preparation_error"])
+        self.assertNotIn("preparation_error", rows["Mara"])
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertTrue(all(row["status"] == "pending" for row in rows.values()))
+        self.assertTrue(any("1/2 audio ready; 1 unavailable" in line for line in self.output))
+        prompt = Mock(return_value="q")
+        self.command("review", input_fn=prompt, player=SimpleNamespace(stop=Mock()))
+        prompt.assert_called_once()
+        self.assertEqual(len(self.engine.calls), 2)
+        self.bundle["chapters"] = original
+        self.session.audition_isolated("Lena", rows["Lena"]["proposal"])
+        self.assertNotIn("preparation_error", self.session.rows("Lena")[0])
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_single_word_keep_default_survives_estimate_failure(self):
+        self.candidate(proposal=self.proposal.return_value)
+        self.proposal.side_effect = ProviderError("estimate temporarily unavailable")
+        commands = iter(["i 1", "q"])
+        self.command("review", word="Mara", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()))
+        self.assertEqual(self.session.rows()[0]["status"], "ignored")
+        self.assertTrue(any("CMU estimate unavailable" in line for line in self.output))
+        self.assertNotIn("draft", self.session.rows()[0])
 
     def test_missing_proposal_provider_never_falls_back_to_confirming_readable_guess(self):
         before = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
@@ -210,19 +380,20 @@ class PronunciationReviewTests(unittest.TestCase):
         self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
         self.assertTrue(any("guessed; not verified" in line for line in self.output))
         self.assertTrue(any("Play this exact pronunciation" in line for line in self.output))
-        self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(len(self.engine.calls), 2)
         self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[0]["compiled"])
         self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], proposed)
         self.proposal.assert_not_called()
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
-    def test_pending_name_without_proposal_is_guessed_once_on_number_play(self):
+    def test_pending_name_without_proposal_is_prepared_once_before_number_play(self):
         self.candidate()
         commands = iter(["1", "1", "q"])
         self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
         self.proposal.assert_called_once_with("Mara", None)
-        self.assertEqual(len(self.engine.calls), 1)
-        self.assertEqual(self.session.rows()[0]["draft"], self.proposal.return_value)
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertEqual(self.session.rows()[0]["proposal"], self.proposal.return_value)
+        self.assertNotIn("draft", self.session.rows()[0])
         self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["status"], "pending")
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
@@ -424,18 +595,19 @@ class PronunciationReviewTests(unittest.TestCase):
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_number_immediately_plays_edit_auditions_and_only_confirm_changes_registry(self):
+        self.candidate(proposal={"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"})
         commands = iter(["1", "e 1 Mahrah", "c 1", "b 1", "q"])
         player = SimpleNamespace(stop=Mock())
         played = []
         self.command("review", input_fn=lambda _: next(commands), player=player,
                      playback_fn=lambda _, path: played.append(path))
         self.assertEqual(len(played), 3)
-        self.assertEqual(played[0], played[2])
+        self.assertNotEqual(played[0], played[2])
         self.assertNotEqual(played[0], played[1])
-        self.assertEqual(len(self.engine.calls), 2)
+        self.assertEqual(len(self.engine.calls), 4)
         self.assertEqual(load_pronunciations(self.bundle["directory"])[0]["pronunciation"], self.proposal.return_value)
-        self.proposal.assert_called_once_with("Mara", "Mahrah")
-        self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[1]["compiled"])
+        self.assertEqual(self.proposal.call_args_list[0].args, ("Mara", "Mahrah"))
+        self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[2]["compiled"])
         self.assertTrue(self.engine.closed)
         player.stop.assert_called_once()
 

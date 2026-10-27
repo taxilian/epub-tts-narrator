@@ -16,7 +16,7 @@ import shutil
 import sys
 
 from .audition import display
-from .pronunciation_review import _description, _preferred, _pronunciation, _show
+from .pronunciation_review import _preferred, _pronunciation, _show
 from .pronunciation_review_state import ReviewState
 
 
@@ -68,8 +68,9 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                              "--action play/set instead")
 
     def play_excerpt(row, proposed):
+        description = session.description(row, proposed, prepare=True)
         preview = session.audition(row["word"], proposed)
-        say(f"Auditioning {row['word']}: {_description(proposed)}.")
+        say(f"Auditioning {row['word']}: {description}.")
         say("Listening preview — wording and pronunciation are for you to judge; this is not accepted book audio.")
         say(f"{preview['context']['chapter_title']}: {preview['request']['text']}")
         say("Press any key to stop.")
@@ -85,7 +86,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             set_pronunciation(bundle["directory"], bundle, row["word"], choice, status="confirmed")
             session._write_draft(row["word"], None)
         state.record(row["word"], choice, receipt, accepted=True)
-        draw(f"[{index + 1}/{total}] {row['word']} — accepted ({_description(choice)})")
+        draw(f"[{index + 1}/{total}] {row['word']} — accepted ({session.description(row, choice)})")
 
     def walk(start):
         nonlocal last
@@ -111,7 +112,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 state.save()
                 last = word
                 choice = session.selection(row)
-                description = _description(choice)
+                description = session.description(row, choice)
                 if choice is not None and row["status"] == "pending" and choice == row.get("proposal"):
                     description += " (guessed; not verified)"
                 draw(f"[{index + 1}/{len(rows)}] {word} — {description}")
@@ -144,7 +145,9 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         for position in range(first, index + 1):
             row = rows[position]
             say(f"  {position - first + 1}. [{position + 1}/{len(rows)}] {row['word']} — {row['status']}; "
-                f"{_description(_preferred(row))}")
+                f"{session.description(row)}")
+            if row.get("preparation_error"):
+                say("     Audio unavailable: " + row["preparation_error"])
         say(f"Enter resumes the queue at [{first + 1}/{len(rows)}] {rows[first]['word']}; "
             "E/P/B/C/I/R [N] adjusts a word by its list number (L); Q quits.")
 
@@ -170,16 +173,20 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
     def compact_list():
         rows = session.rows()
         if len(rows) <= 10:
-            _show(rows, output)
+            _show(rows, output, formatter=session.description)
             return
         items = []
         for index, row in enumerate(rows, 1):
             marker = "*" if state.queued(row) else " "
+            if row.get("preparation_error"):
+                marker += "!"
             items.append(display(f"{index:>3}{marker} {row['word']} — {row['status']}"))
         cell = max(2, min(width, max(len(item) for item in items) + 2))
         columns = max(1, width // cell)
         for offset in range(0, len(items), columns):
             say("".join(item[: cell - 2].ljust(cell) for item in items[offset:offset + columns]).rstrip()[:width])
+        if any(row.get("preparation_error") for row in rows):
+            say("! Audio unavailable; choose the entry number to retry its preview.")
 
     def queued_count():
         return sum(1 for row in session.rows() if state.queued(row))
@@ -197,6 +204,9 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             say("No pronunciation entries. Use pronunciations --action discover to find candidates.")
             return False
         say(f"{queued_count()} of {len(rows)} pronunciation entries await listening.")
+        unavailable = sum(bool(row.get("preparation_error")) for row in rows)
+        if unavailable:
+            say(f"{unavailable} audio preview(s) unavailable; edits remain available, and numbered playback retries.")
         say("S [N]: listen and auto-accept, starting at entry N (default: saved position or first queued word)")
         say("Number: play that entry's excerpt preview   L: compact list   O <all|N|N-M>: mark for re-listening")
         say("B/E/P/C/I/R [N]: baseline / readable hint / CMU phonemes / confirm / keep default / reset   Q: quit")
@@ -268,6 +278,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             elif verb == "b":
                 play_excerpt(row, None)
             elif verb in {"e", "p"}:
+                say(f"Current pronunciation for {word}: {session.description(row, prepare=True)}")
                 prompt = ("Say it as (plain spelling; empty cancels): " if verb == "e" else
                           "CMU phonemes (for example M AA1 R AH0; empty cancels): ")
                 value = parts[2] if len(parts) > 2 else input_fn(prompt).strip()
@@ -288,6 +299,10 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 session.ignore(word)
                 state.clear([word])
                 say("Default pronunciation selected.")
+                try:
+                    say(session.description(row, None, prepare=True))
+                except (ValueError, RuntimeError, OSError, ProviderError) as exc:
+                    say("CMU estimate unavailable; B retries it: " + safe_error_text(exc, secrets=secrets))
             elif verb == "r":
                 session.reset(word)
                 state.clear([word])

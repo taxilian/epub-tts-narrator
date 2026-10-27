@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 from epub_tts_narrator.analysis_directory import continuation_registry, fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.pipeline import fingerprint
-from epub_tts_narrator.pronunciations import load_pronunciations, set_pronunciation
+from epub_tts_narrator.pronunciations import load_pronunciations, save_proposal, set_pronunciation
 from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import read_json, write_json
@@ -186,6 +186,44 @@ class PronunciationReviewQueueTests(unittest.TestCase):
         state = read_json(self.state_path())
         self.assertEqual(state["resume_word"], self.words[0])
         self.assertEqual(state["entries"], {})
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
+    def test_interrupted_window_shows_prepared_cmu_for_non_name_word(self):
+        self.assertEqual(self.row("Qarm")["kind"], "other")
+        save_proposal(self.bundle["directory"], self.bundle, "Qarm", CMU_QARM)
+        index = self.words.index("Qarm") + 1
+        _, lines, _, _, _ = self.queue([f"s {index}"], playback=lambda count, path: False)
+        shown = next(line for line in lines if re.match(r"^  \d\. \[\d+/12\] Qarm — ", line))
+        self.assertIn(CMU_QARM["value"], shown)
+        self.assertIn("pending", shown)
+        self.assertEqual(self.row("Qarm")["status"], "pending")
+
+    def test_cmu_editor_displays_current_phones_before_asking_for_changes(self):
+        self.session.edit("Qarm", CMU_QARM)
+        index = self.words.index("Qarm") + 1
+        commands = iter([f"p {index}", "", "q"])
+
+        def inputs(prompt):
+            if prompt.startswith("CMU phonemes"):
+                self.assertIn(CMU_QARM["value"], self.output[-1])
+                self.assertIn("Current pronunciation for Qarm:", self.output[-1])
+            return next(commands)
+
+        run_pronunciation_queue(self.session, SimpleNamespace(stop=Mock()), Mock(),
+                                input_fn=inputs, output=self.output.append, interactive=False)
+        self.assertEqual(self.session.rows("Qarm")[0]["draft"], CMU_QARM)
+        self.assertEqual(self.row("Qarm")["status"], "pending")
+
+    def test_keep_default_survives_display_estimate_failure(self):
+        from epub_tts_narrator.provider import ProviderError
+        self.session.proposal_fn = Mock(side_effect=ProviderError("proposal service unavailable"))
+        self.session.edit("Qarm", CMU_QARM)
+        index = self.words.index("Qarm") + 1
+        _, lines, _, played, _ = self.queue([f"i {index}", "q"])
+        self.assertEqual(self.row("Qarm")["status"], "ignored")
+        self.assertNotIn("draft", self.session.rows("Qarm")[0])
+        self.assertEqual(played, [])
+        self.assertTrue(any("CMU estimate unavailable" in line for line in lines))
 
     @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
     def test_failed_playback_stops_queue_and_keeps_unheard_words_pending(self):

@@ -21,6 +21,8 @@ from .run_locks import acquire_directory_lock
 
 _FORMAT = "epub-tts-pronunciation-preview"
 _DRAFT_FORMAT = "epub-tts-pronunciation-drafts"
+_ESTIMATE_FORMAT = "epub-tts-pronunciation-cmu-estimates"
+_SELECTED = object()
 _MAX_SAMPLE = 360
 
 
@@ -54,12 +56,12 @@ def _context(entry):
     return ""
 
 
-def _show(rows, output):
+def _show(rows, output, formatter=None):
     output(display(f"\nPronunciations — {sum(row['status'] == 'pending' for row in rows)} pending / {len(rows)} total"))
     for index, row in enumerate(rows, 1):
         extra = " — inherited" if row.get("inherited") else ""
         draft = row.get("draft")
-        description = _description(_preferred(row))
+        description = formatter(row) if formatter is not None else _description(_preferred(row))
         if draft:
             description += " (draft; not applied to the book)"
         elif row["status"] == "pending" and row.get("proposal"):
@@ -68,6 +70,8 @@ def _show(rows, output):
                     row["proposal_origin_directory"] != row.get("origin_directory")):
                 description += " (inherited proposal)"
         output(display(f"{index:3}. {row['word']} — {row['status']}{extra}; {description}"))
+        if row.get("preparation_error"):
+            output(display("     Audio unavailable: " + row["preparation_error"]))
         if row.get("reason"):
             output(display("     " + str(row["reason"]).replace("\n", " ")))
         if _context(row):
@@ -213,6 +217,7 @@ class PronunciationReviewSession:
         self._engine_factory, self._engine, self._store = engine_factory, None, store
         self._resolved = None
         self.proposal_fn = proposal_fn
+        self.preparation_errors = {}
 
     @property
     def settings(self):
@@ -266,8 +271,144 @@ class PronunciationReviewSession:
         from ..pronunciations import load_pronunciations
         rows = load_pronunciations(self.bundle["directory"])
         drafts = self._drafts()
-        return [dict(row, **({"draft": drafts[row["word"]]} if row["word"] in drafts else {}))
+        return [dict(row, **({"draft": drafts[row["word"]]} if row["word"] in drafts else {}),
+                     **({"preparation_error": self.preparation_errors[row["word"]]}
+                        if row["word"] in self.preparation_errors else {}))
                 for row in rows if word is None or row["word"] == word]
+
+    def _estimates(self):
+        """Display-only CMU estimates never become pronunciation choices."""
+        from ..pronunciations import validate_proposal, validate_word
+        path = self.directory / "cmu-estimates.json"
+        if not path.exists() and not path.is_symlink():
+            return {}
+        value = read_json(regular_file(path))
+        if (not isinstance(value, dict) or value.get("format") != _ESTIMATE_FORMAT
+                or value.get("version") != 1 or value.get("book_id") != self.bundle["source"]["book"]["id"]
+                or value.get("source_fingerprint") != self.bundle["manifest"]["source_fingerprint"]
+                or not isinstance(value.get("entries"), dict)
+                or value.get("sha256") != digest(value["entries"])):
+            raise ValueError("Invalid pronunciation CMU estimates or estimates belong to different book/source")
+        for key, entry in value["entries"].items():
+            if not isinstance(entry, dict) or set(entry) != {"request", "pronunciation"}:
+                raise ValueError("Invalid pronunciation CMU estimate entry")
+            request = entry["request"]
+            if not isinstance(request, dict) or set(request) != {"word", "respelling"} or key != digest(request):
+                raise ValueError("Invalid pronunciation CMU estimate request")
+            validate_word(request["word"])
+            if request["respelling"] is not None:
+                validate_word(request["respelling"])
+            validate_proposal(entry["pronunciation"])
+        return value["entries"]
+
+    def _guess(self, word, respelling=None):
+        from ..pronunciations import validate_proposal
+        if self.proposal_fn is None:
+            raise ValueError("CMU pronunciation suggestions require the configured analysis model; "
+                             "use P or --phonemes to supply phones directly")
+        return validate_proposal(self.proposal_fn(word, respelling))
+
+    def _estimate(self, word, respelling=None, *, prepare=False):
+        from ..pronunciations import validate_word
+        validate_word(word)
+        if respelling is not None:
+            validate_word(respelling)
+        request = {"word": word, "respelling": respelling}
+        key = digest(request)
+        existing = self._estimates().get(key)
+        if existing is not None or not prepare:
+            return existing["pronunciation"] if existing is not None else None
+        pronunciation = self._guess(word, respelling)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        lock = acquire_directory_lock(self.directory / ".cmu-estimates.lock")
+        try:
+            entries = self._estimates()
+            entries.setdefault(key, {"request": request, "pronunciation": pronunciation})
+            write_json(self.directory / "cmu-estimates.json", {
+                "format": _ESTIMATE_FORMAT, "version": 1,
+                "book_id": self.bundle["source"]["book"]["id"],
+                "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
+                "entries": entries, "sha256": digest(entries)})
+            return entries[key]["pronunciation"]
+        finally:
+            lock.rmdir()
+
+    def description(self, row, choice=_SELECTED, *, prepare=False):
+        """Describe selected phones or a clearly labeled text-based estimate.
+
+        ``None`` explicitly means the engine's default, even when the row has
+        a correction. Estimates describe a plausible reading, not measured
+        engine output, and never change draft/approval or preview identity.
+        """
+        choice = _preferred(row) if choice is _SELECTED else choice
+        if choice is not None and choice["alphabet"] == "cmu_arpabet":
+            return _description(choice)
+        respelling = choice["value"] if choice is not None else None
+        estimate = self._estimate(row["word"], respelling, prepare=prepare)
+        phones = estimate["value"] if estimate is not None else "unavailable"
+        if choice is None:
+            return f"default pronunciation: {phones} (CMU estimate)"
+        return f"{_description(choice)}; CMU estimate: {phones}"
+
+    def prepare_review(self, word=None):
+        """Prepare pending CMU and both listening paths before opening the menu.
+
+        Each proposal, display estimate, and preview checkpoints independently;
+        rerunning reuses completed work. Preparation never plays or approves a
+        pronunciation, changes an explicit default, or creates a voice.
+        Unavailable individual previews remain editable in the menu; systemic
+        model/transport failures stop preparation with completed work intact.
+        """
+        from ..pronunciations import save_proposal
+        from .diagnostics import configured_secrets, safe_error_text
+        rows = self.rows(word)
+        total = len(rows)
+        if not total:
+            return
+        self.notify(f"Preparing pronunciation CMU 0/{total}; completed suggestions and audio are reused on restart.")
+        for index, row in enumerate(rows, 1):
+            self.notify(display(f"Preparing pronunciation CMU {index}/{total}: {row['word']}"))
+            try:
+                if row["status"] == "pending" and _preferred(row) is None:
+                    save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]))
+                    current = self.rows(row["word"])
+                    if not current:
+                        raise ValueError("Pronunciation entry changed during preparation; rerun to resume")
+                    row = current[0]
+                self.description(row, prepare=True)
+            except Exception:
+                self.notify(display(f"CMU preparation stopped at {index}/{total}: {row['word']}. "
+                                    "Completed work is retained; rerun the same command to resume."))
+                raise
+        rows = self.rows(word)
+        total = len(rows)
+        self.notify(f"Preparing pronunciation audio 0/{total}")
+        ready, failed = 0, 0
+        for index, row in enumerate(rows, 1):
+            choice = _preferred(row)
+            self.notify(display(f"Preparing pronunciation audio {index}/{total}: {row['word']}"))
+            try:
+                self.audition_isolated(row["word"], choice)
+                self.audition(row["word"], choice)
+                self.preparation_errors.pop(row["word"], None)
+                ready += 1
+            except ValueError as exc:
+                reason = safe_error_text(exc, secrets=configured_secrets(self.config))
+                self.preparation_errors[row["word"]] = reason
+                failed += 1
+                self.notify(display(f"Audio unavailable for {row['word']}: {reason}"))
+            except Exception:
+                self.notify(display(f"Audio preparation stopped at {index}/{total}: {row['word']}. "
+                                    "Completed work is retained; rerun the same command to resume."))
+                raise
+        self.notify(f"Pronunciation preparation complete: {ready}/{total} audio ready; {failed} unavailable. "
+                    "No pronunciations were accepted during preparation.")
+
+    def _clear_preparation_error(self, word, pronunciation):
+        if word in self.preparation_errors:
+            current = self.rows(word)
+            if current and _preferred(current[0]) == pronunciation:
+                self.preparation_errors.pop(word, None)
 
     def edit(self, word, pronunciation):
         if not self.rows(word):
@@ -294,9 +435,12 @@ class PronunciationReviewSession:
 
     def selection(self, row):
         proposed = _preferred(row)
-        if (proposed is None and row.get("status") == "pending" and row.get("kind") in {"name", "place"}
+        if (proposed is None and row.get("status") == "pending"
                 and self.proposal_fn is not None):
-            return self.propose(row["word"])
+            from ..pronunciations import save_proposal
+            save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]))
+            current = self.rows(row["word"])
+            return _preferred(current[0]) if current else None
         return proposed
 
     def confirm(self, row):
@@ -544,6 +688,7 @@ class PronunciationReviewSession:
                     if file_hash(regular_file(audio)) != state.get("audio_sha256"):
                         raise ValueError("Pronunciation preview changed; remove its cache entry to regenerate")
                     _remove_redundant_wavs(folder, state)
+                    self._clear_preparation_error(word, pronunciation)
                     return dict(state, path=str(audio))
                 if cached_only:
                     raise ValueError("Play this exact pronunciation with the current voice before confirming it")
@@ -582,6 +727,7 @@ class PronunciationReviewSession:
                           context=context)
             write_json(state_path, state)
             _remove_redundant_wavs(folder, state)
+            self._clear_preparation_error(word, pronunciation)
             return dict(state, path=str(audio))
         finally:
             lock.rmdir()
@@ -669,7 +815,8 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
 
     def play(selected_word, proposed):
         preview = session.audition(selected_word, proposed)
-        say(f"Auditioning {selected_word}: {_description(proposed)}.")
+        row = {"word": selected_word}
+        say(f"Auditioning {selected_word}: {session.description(row, proposed, prepare=action == 'review')}.")
         say("Listening preview — wording and pronunciation are for you to judge; this is not accepted book audio.")
         say(f"{preview['context']['chapter_title']}: {preview['request']['text']}")
         say("Press any key to stop.")
@@ -688,6 +835,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
             if correction is not None and correction["alphabet"] == "respelling":
                 say("CMU draft auditioned; open pronunciation review and use C to confirm it. Existing decisions are unchanged.")
             return 0
+        session.prepare_review(word)
         if word is None:
             from .pronunciation_review_queue import run_pronunciation_queue
             return run_pronunciation_queue(
@@ -695,7 +843,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                 interactive=sys.stdin.isatty() and sys.stdout.isatty())
         while True:
             rows = session.rows(word)
-            _show(rows, output)
+            _show(rows, output, session.description)
             if not rows:
                 say("No words are awaiting review. Use pronunciations --action discover to find candidates.")
                 return 0
@@ -723,6 +871,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                 elif verb == "b":
                     play(last, None)
                 elif verb in {"e", "p"}:
+                    say(f"Current pronunciation for {last}: {session.description(row)}")
                     prompt = ("Say it as (plain spelling; empty cancels): " if verb == "e" else
                               "CMU phonemes (for example M AA1 R AH0; empty cancels): ")
                     value = parts[2] if len(parts) > 2 else input_fn(prompt).strip()
@@ -741,6 +890,10 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                 elif verb == "i":
                     session.ignore(last)
                     say("Default pronunciation selected.")
+                    try:
+                        say(session.description(row, None, prepare=True))
+                    except (ValueError, RuntimeError, OSError, ProviderError):
+                        say("CMU estimate unavailable; B can retry it. The default choice is saved.")
                 elif verb == "r":
                     session.reset(last)
                     say("Local decision and audition draft removed; inherited decisions apply.")
