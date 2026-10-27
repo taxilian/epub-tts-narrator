@@ -2,16 +2,22 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from pathlib import Path
 from threading import Event, Timer, get_ident
 from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.jev import JevTranscriptJudge
+from epub_tts_narrator.renderer.chapter_verification import FasterWhisperVerifier
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.phonetic_review import PronunciationReviewer
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.recovery_client import RecoveryModelClient
+from epub_tts_narrator.renderer.render_resource_context import (
+    current_owner, current_resources, resource_scope,
+)
 from epub_tts_narrator.renderer.verification import (
     RecurringSpeechVerifier, ReferenceCorroboratingVerifier, ReferenceTextJudgingVerifier,
 )
@@ -279,6 +285,89 @@ class VerifierSchedulingTests(unittest.TestCase):
                     runtime.run(self.wrapped.close)
         self.assertFalse(self.wrapped._closing)
         self.assertEqual(self.wrapped.transcribe("unused"), {"text": "words"})
+
+
+class PipelineModelThreadRoutingTests(unittest.TestCase):
+    """Pipeline scheduling: model-affine execution must not re-enter its own lane."""
+
+    def setUp(self):
+        config = deepcopy(DEFAULTS)
+        config["render_pool"] = {"workers": [{"name": "local", "type": "local"}],
+                                 "scheduler": "pipeline"}
+        self.pool = RenderPool(config)
+        self.addCleanup(self.pool.close)
+        self.events = []
+        events = self.events
+
+        class Engine:
+            identity = {"engine": "fixture"}
+            def synthesize(self, *args, **kwargs):
+                return {}
+            def close(self):
+                events.append(("engine_close", get_ident()))
+
+        self.pool._workers[0]._engine = Engine()
+
+    def verifier(self, folder):
+        model = Path(folder) / "model"
+        model.mkdir()
+        for name in ("config.json", "model.bin", "tokenizer.json"):
+            (model / name).write_bytes(b"fixture")
+        return FasterWhisperVerifier(model)
+
+    def test_nested_reference_corroboration_from_the_model_thread_does_not_deadlock_its_lane(self):
+        resources = self.pool._resources
+        # The exact live-F3 precondition: one serialized recognition worker.
+        self.assertEqual(len(resources.recognition._threads), 1)
+        with tempfile.TemporaryDirectory() as folder:
+            verifier = self.verifier(folder)
+            observed = []
+
+            def transcribe(path, timed):
+                # current_resources/current_owner stay readable for tickets
+                # and metrics even while lane routing is suppressed.
+                observed.append((current_resources() is resources, current_owner(),
+                                 get_ident()))
+                return {"text": "words"}
+
+            wrapped = self.pool.wrap_verifier(ReferenceCorroboratingVerifier(verifier, verifier))
+            captured = []
+            original_submit = resources.recognition.submit
+
+            def capture(function, *args, **kwargs):
+                future = original_submit(function, *args, **kwargs)
+                captured.append(future)
+                return future
+
+            def scoped(call):
+                def run():
+                    with resource_scope(resources, ("run", 1)):
+                        return call()
+                return run
+
+            with patch.object(resources.recognition, "submit", side_effect=capture), \
+                 patch.object(verifier, "_transcribe", side_effect=transcribe):
+                with ThreadPoolExecutor(max_workers=1) as callers:
+                    try:
+                        primary = callers.submit(
+                            scoped(lambda: wrapped.transcribe("unused"))).result(5)
+                        reference = callers.submit(
+                            scoped(lambda: wrapped.corroborate_reference("unused"))).result(5)
+                    except TimeoutError:
+                        # Unwind the lane-vs-model-thread wait cycle so the
+                        # suite exits cleanly; the stall itself is the failure.
+                        for future in captured:
+                            future.cancel()
+                        self.fail("nested corroboration deadlocked the single recognition lane")
+        self.assertEqual(primary, {"text": "words"})
+        self.assertEqual(reference, {"text": "words"})
+        model_thread = self.pool._local_runtime.run(get_ident)
+        self.assertEqual([entry[2] for entry in observed], [model_thread, model_thread],
+                         "nested corroboration leaves must run inline on the model thread")
+        self.assertEqual([entry[:2] for entry in observed],
+                         [(True, ("run", 1)), (True, ("run", 1))])
+        self.assertEqual(len(captured), 2,
+                         "exactly one outer submission per call; nested leaves never re-enter")
 
 
 if __name__ == "__main__":

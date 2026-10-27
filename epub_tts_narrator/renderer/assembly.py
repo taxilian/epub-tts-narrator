@@ -80,8 +80,17 @@ def normalize_clip(input_path: str | Path, output_path: str | Path, *,
     """Decode one engine result into the renderer's common PCM format.
 
     Silence/content checks must run on this normalized result, before assembly.
-    Existing files are never overwritten.
+    Existing files are never overwritten. Under a pipeline scheduling scope
+    the FFmpeg leaf runs on the bounded preparation lane; otherwise it runs
+    directly on the caller, as before.
     """
+    from .render_resource_context import run_preparation
+    return run_preparation(_normalize_clip, input_path, output_path,
+                           sample_rate=sample_rate, ffmpeg=ffmpeg)
+
+
+def _normalize_clip(input_path: str | Path, output_path: str | Path, *,
+                    sample_rate: int = 44100, ffmpeg: str = "ffmpeg") -> dict:
     _rate(sample_rate)
     source, target = Path(input_path).resolve(), Path(output_path)
     if target.exists() or target.is_symlink():

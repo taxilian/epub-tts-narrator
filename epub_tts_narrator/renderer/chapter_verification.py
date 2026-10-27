@@ -93,10 +93,13 @@ class FasterWhisperVerifier:
                     "language": info.language, "segments": result}
 
     def transcribe(self, path):
-        return self._transcribe(path, True)
+        """Consume the whole lazy segment iterator on the recognition lane."""
+        from .render_resource_context import run_recognition
+        return run_recognition(self._transcribe, path, True)
 
     def transcribe_reference(self, path):
-        return self._transcribe(path, False)
+        from .render_resource_context import run_recognition
+        return run_recognition(self._transcribe, path, False)
 
     def close(self):
         with self._lock:

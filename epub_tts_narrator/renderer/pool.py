@@ -7,16 +7,21 @@ from copy import deepcopy
 from functools import wraps
 from queue import Queue
 from threading import BoundedSemaphore, Condition, RLock, get_ident
-from time import monotonic
+from time import monotonic, sleep
 
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 from .progress import generation_notifier, report_worker_activity
+from .render_metrics import METRICS
+from .render_resource_context import current_owner
 
 
 _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
+
+# Bounded backpressure poll while the synthesis lane's declared backlog is full.
+_LANE_RETRY_SECONDS = 0.005
 
 
 def pool_sampling(config):
@@ -51,11 +56,12 @@ def _text_review_method(name, method):
 class _SerializedVerifier:
     """Keep recognition model-affine while known text reviews use their own lane."""
 
-    def __init__(self, verifier, lock, runtime, review_runtime):
+    def __init__(self, verifier, lock, runtime, review_runtime, resources=None):
         self._verifier = verifier
         self._lock = lock
         self._runtime = runtime
         self._review_runtime = review_runtime
+        self._resources = resources
         self._state = Condition(RLock())
         self._active = 0
         self._closing = self._closed = False
@@ -67,14 +73,30 @@ class _SerializedVerifier:
             self._active += 1
         try:
             if _text_review_method(name, method):
+                if self._resources is not None:
+                    # A parent review routine never executes on the HTTP lane
+                    # it waits on; its leaf requests use the shared review lane.
+                    return self._resources.run_review_parent(
+                        method, *args, owner=current_owner())
                 # Keep the reusable HTTP clients serialized, but do not occupy
                 # the inference thread or its lock during a network request.
-                return self._review_runtime.run(method, *args, **kwargs)
+                with METRICS.active("review"):
+                    return self._review_runtime.run(method, *args, **kwargs)
+
+            if self._resources is not None:
+                def recognized():
+                    with self._lock:
+                        return method(*args, **kwargs)
+                return self._resources.run_recognition(
+                    lambda: self._runtime.run(recognized,
+                                              initialize_mlx=requires_mlx(self._verifier)),
+                    owner=current_owner())
 
             def run():
                 with self._lock:
                     return method(*args, **kwargs)
-            return self._runtime.run(run, initialize_mlx=requires_mlx(self._verifier))
+            with METRICS.active("recognition"):
+                return self._runtime.run(run, initialize_mlx=requires_mlx(self._verifier))
         finally:
             with self._state:
                 self._active -= 1
@@ -182,7 +204,7 @@ class RenderPool:
         selected = get_drama3_model(config["engine"].get("model", DEFAULT_DRAMA3_MODEL))
         self.sampling = pool_sampling(config)
         self.local_lock = RLock()
-        self._local_runtime = LocalRuntime()
+        self._local_runtime = LocalRuntime(metrics_stage="model_thread")
         self._review_runtime = LocalRuntime(name="audiobook-text-review")
         self._closed = False
         self._workers = [_Worker(worker, config["engine"], self.sampling)
@@ -194,10 +216,26 @@ class RenderPool:
             for _ in range(worker.settings.get("concurrency", 1)):
                 self._slots.put(worker)
         self.max_parallel = self._slots.qsize()
+        from .render_pipeline_config import effective_scheduling
+        self._effective = effective_scheduling(config)
         # Automatic mode retains the original per-chapter window. An explicit
         # window is shared by every chapter using this pool, including review.
         self.max_inflight = max_inflight or self.max_parallel + 1
+        if self._effective["scheduler"] == "pipeline":
+            # Every pipeline runtime view reports the same whole-transaction
+            # cap the logical scheduler admits; the legacy window keeps its
+            # own slots+1 automatic meaning for legacy pools.
+            self.max_inflight = self._effective["max_inflight"]
         self._admission = BoundedSemaphore(max_inflight) if max_inflight else None
+        self._resources = self._build_resources(config)
+        self._logical = None
+        if self._resources is not None:
+            # One shared, chapter-fair logical clip scheduler for this pool's
+            # whole lifetime; a warm server keeps it across books.
+            from .render_pipeline import LogicalClipScheduler
+            self._logical = LogicalClipScheduler(
+                self._effective["max_inflight"], self._effective["chapter_concurrency"],
+                name="render-pool-logical")
         self._identity = {
             "engine": "fish_tts_pool", "model": selected.repo, "contract_version": 1,
             "model_revision": settings.get("model_revision", selected.revision),
@@ -221,6 +259,36 @@ class RenderPool:
     def identity(self):
         return deepcopy(self._identity)
 
+    def _build_resources(self, config):
+        """Pipeline lanes when configured; None keeps the legacy serial paths.
+
+        Lane pending bounds follow the SAME effective max_inflight the
+        logical scheduler admits, so a saturated lane backpressures
+        transaction runners instead of failing leaves with LaneFull; the
+        legacy ``max_inflight`` attribute keeps its per-chapter meaning.
+        """
+        from .render_resources import RenderResources
+
+        if self._effective["scheduler"] != "pipeline":
+            return None
+        return RenderResources(
+            tts_slots=self.max_parallel,
+            synthesis_backlog=self._effective["synthesis_backlog"],
+            review_concurrency=self._effective["review_concurrency"],
+            max_inflight=self._effective["max_inflight"],
+            pending_audio_mb=self._effective["pending_audio_mb"],
+        )
+
+    @property
+    def resources(self):
+        """The pipeline resource runtime, or None in legacy scheduling mode."""
+        return self._resources
+
+    @property
+    def logical(self):
+        """The shared logical clip scheduler, or None in legacy mode."""
+        return self._logical
+
     @property
     def voice_design_identity(self):
         worker = next((worker for worker in self._workers if worker.local), None)
@@ -235,7 +303,8 @@ class RenderPool:
     def wrap_verifier(self, verifier):
         if isinstance(verifier, _SerializedVerifier) and verifier._lock is self.local_lock:
             return verifier
-        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime, self._review_runtime)
+        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime,
+                                   self._review_runtime, self._resources)
 
     @contextmanager
     def admit_chunk(self):
@@ -243,6 +312,8 @@ class RenderPool:
 
         Retries and recovery parts use the parent's admission. Acquiring again
         inside synthesis could deadlock a full window of retrying chunks.
+        Pipeline scheduling owns admission through the shared logical clip
+        scheduler, so the legacy whole-transaction window does not double-cap it.
         """
         from .interrupts import stop_if_requested
 
@@ -251,16 +322,21 @@ class RenderPool:
             if self._closed:
                 raise EngineError("The render pool is closed")
 
+        if self._logical is not None:
+            check()
+            yield
+            return
         if self._admission is None:
             check()
             yield
             return
         acquired = False
         try:
-            while not acquired:
+            with METRICS.waiting("admission"):
+                while not acquired:
+                    check()
+                    acquired = self._admission.acquire(timeout=0.1)
                 check()
-                acquired = self._admission.acquire(timeout=0.1)
-            check()
             yield
         finally:
             if acquired:
@@ -271,9 +347,12 @@ class RenderPool:
         stop_if_requested()
         if self._closed:
             raise EngineError("The render pool is closed")
+        if self._resources is not None:
+            return self._execute_on_lane(method, args, kwargs)
         notify = generation_notifier()
         report_worker_activity(notify, "waiting")
-        worker = self._slots.get()
+        with METRICS.waiting("synthesis_slot"):
+            worker = self._slots.get()
         try:
             name = worker.settings["name"]
             report_worker_activity(notify, "assigned", name)
@@ -283,19 +362,20 @@ class RenderPool:
                 stop_if_requested()
                 started = monotonic()
                 report_worker_activity(notify, "started", name)
-                try:
-                    engine = worker.engine()
-                    if worker.local and requires_mlx(engine):
-                        self._local_runtime.initialize_mlx()
-                    metadata = getattr(engine, method)(*args, **kwargs)
-                    if not isinstance(metadata, dict):
-                        raise EngineError("TTS worker returned invalid generation metadata")
-                    result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
-                except BaseException:
-                    report_worker_activity(notify, "failed", name, monotonic() - started)
-                    raise
-                report_worker_activity(notify, "completed", name, monotonic() - started)
-                return result
+                with METRICS.active("synthesis"):
+                    try:
+                        engine = worker.engine()
+                        if worker.local and requires_mlx(engine):
+                            self._local_runtime.initialize_mlx()
+                        metadata = getattr(engine, method)(*args, **kwargs)
+                        if not isinstance(metadata, dict):
+                            raise EngineError("TTS worker returned invalid generation metadata")
+                        result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                    except BaseException:
+                        report_worker_activity(notify, "failed", name, monotonic() - started)
+                        raise
+                    report_worker_activity(notify, "completed", name, monotonic() - started)
+                    return result
             if worker.local:
                 # All model loading, arrays and default streams belong to one
                 # persistent thread, shared with local speech verification.
@@ -306,6 +386,70 @@ class RenderPool:
             return run()
         finally:
             self._slots.put(worker)
+
+    def _execute_on_lane(self, method, args, kwargs):
+        """Pipeline mode: one bounded lane job per declared endpoint slot.
+
+        The lane owns the synthesis stage gauges, so the job does not wrap
+        them again. Worker selection stays inside the job: a queued
+        transaction must never hold an endpoint slot while it waits for a
+        lane thread. A full declared synthesis backlog makes the caller wait
+        here instead of hiding an unbounded work queue.
+        """
+        from .interrupts import stop_if_requested
+        from .render_lanes import LaneFull
+
+        notify = generation_notifier()
+        owner = current_owner()
+
+        def run_on_lane():
+            report_worker_activity(notify, "waiting")
+            with METRICS.waiting("synthesis_slot"):
+                worker = self._slots.get()
+            try:
+                name = worker.settings["name"]
+                report_worker_activity(notify, "assigned", name)
+                def run():
+                    # A job may have waited for the endpoint slot or the local
+                    # model thread. Do not start it after cancellation;
+                    # already-running jobs drain.
+                    stop_if_requested()
+                    started = monotonic()
+                    report_worker_activity(notify, "started", name)
+                    try:
+                        engine = worker.engine()
+                        if worker.local and requires_mlx(engine):
+                            self._local_runtime.initialize_mlx()
+                        metadata = getattr(engine, method)(*args, **kwargs)
+                        if not isinstance(metadata, dict):
+                            raise EngineError("TTS worker returned invalid generation metadata")
+                        result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                    except BaseException:
+                        report_worker_activity(notify, "failed", name, monotonic() - started)
+                        raise
+                    report_worker_activity(notify, "completed", name, monotonic() - started)
+                    return result
+                if worker.local:
+                    def local_run():
+                        with self.local_lock:
+                            return run()
+                    return self._local_runtime.run(local_run)
+                return run()
+            finally:
+                self._slots.put(worker)
+
+        while True:
+            try:
+                future = self._resources.tts.submit(run_on_lane, owner=owner)
+            except LaneFull:
+                # Queue-overflow backpressure only: the job was never queued,
+                # so a retry cannot rerun started synthesis.
+                stop_if_requested()
+                if self._closed:
+                    raise EngineError("The render pool is closed") from None
+                sleep(_LANE_RETRY_SECONDS)
+                continue
+            return future.result()
 
     def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
         options = {"performance": performance, "traits": traits} if performance is not None else {}
@@ -339,26 +483,38 @@ class RenderPool:
         if self._closed:
             return
         self._closed = True
-        # Text reviewers never enter the model lane. Drain them before closing
-        # engine resources or the shared model runtime, including during error
-        # cleanup after a render coordinator has stopped dispatching work.
-        def close_local():
-            with self.local_lock:
-                for worker in self._workers:
-                    if worker.local:
-                        worker.close()
         try:
-            # Shutdown runs off the calling thread so an interrupted wait is
-            # drained by LocalRuntime before engine resources are released.
-            self._local_runtime.run(self._review_runtime.close)
+            if self._logical is not None:
+                # Stop logical admission, cancel queued transactions, and let
+                # started takes finish while every lane and model they may
+                # wait on is still open.
+                self._logical.close()
         finally:
+            # Text reviewers never enter the model lane. Drain them before closing
+            # engine resources or the shared model runtime, including during error
+            # cleanup after a render coordinator has stopped dispatching work.
+            def close_local():
+                with self.local_lock:
+                    for worker in self._workers:
+                        if worker.local:
+                            worker.close()
             try:
-                self._local_runtime.run(close_local)
-                for worker in self._workers:
-                    if not worker.local:
-                        worker.close()
+                # Shutdown runs off the calling thread so an interrupted wait is
+                # drained by LocalRuntime before engine resources are released.
+                self._local_runtime.run(self._review_runtime.close)
             finally:
-                self._local_runtime.close()
+                try:
+                    if self._resources is not None:
+                        # Drains started-take verification leaves, cancels queued
+                        # synthesis, and joins every lane worker before the
+                        # engines they may still be using are released.
+                        self._resources.close()
+                    self._local_runtime.run(close_local)
+                    for worker in self._workers:
+                        if not worker.local:
+                            worker.close()
+                finally:
+                    self._local_runtime.close()
 
 
 def create_render_engine(config, *, shared_inference=False):

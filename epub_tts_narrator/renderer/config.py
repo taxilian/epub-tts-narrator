@@ -13,6 +13,7 @@ from epub_tts_narrator.config_warnings import known_settings
 from epub_tts_narrator.jev import DEFAULTS as JEV_DEFAULTS, validate_settings as validate_jev_settings
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .censorship import DEFAULT_POLICY as CENSORSHIP_DEFAULTS, validate_policy as validate_censorship
+from .render_pipeline_config import PIPELINE_RENDER_POOL_DEFAULTS, validate_pipeline_settings
 
 
 # Shared Drama 3 sampling defaults. config.py owns the user-facing values;
@@ -105,6 +106,7 @@ DEFAULTS = {
         "workers": [],
         "max_inflight": 0,
         "model_revision": get_drama3_model(DEFAULT_DRAMA3_MODEL).revision,
+        **PIPELINE_RENDER_POOL_DEFAULTS,
     },
     "server": {
         "host": "127.0.0.1", "port": 8080, "api_key": "",
@@ -294,6 +296,7 @@ def validate_distributed_settings(config):
         raise ValueError("Renderer worker concurrency must total at most 32")
     if max_inflight and max_inflight < capacity:
         raise ValueError("render_pool.max_inflight must be at least the total worker concurrency")
+    validate_pipeline_settings(pool, capacity)
     if normalized and config["engine"]["type"] != "drama3_mlx":
         raise ValueError("The render pool currently requires engine.type = drama3_mlx")
     if normalized:

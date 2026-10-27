@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 105 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 115 Python modules plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -20,7 +20,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 ## STRUCTURE
 
-1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, recovery identity.
+1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, payload-free render metrics, recovery identity.
 2. Speech verification/recovery: `quality.py`, `verification.py`, `speech_resolver.py`, `verification_prompts.py`, `speech_identity.py`, `ordinal_words.py`, coverage, cache, recovery, text, phonetic, ASR, retry modules.
 3. Chapter/distributed pipeline: `bundle.py`, `chapter_jobs.py`, `chapter_sessions.py`, `chapter_protocol.py`, `chapter_records.py`, `chapter_executor.py`, `chapter_client.py`, servers, cache, storage, verification, pool.
 4. Casting/voice design: `casting.py`, `audition.py`, `voices.py`, `voice_design.py`, provider design modules, prompts, bindings, samples, letter names.
@@ -33,6 +33,9 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Task | Module |
 | --- | --- |
 | Render chapters and resume work | `workflow.py`, especially `render()` |
+| Run a stage on a bounded resource lane | `render_lanes.py` | Declared worker counts, owner fairness, payload-free stage gauges |
+| Share one fair logical scheduler across chapters | `render_chapter_flow.py`, `render_pipeline.py`, `render_pipeline_config.py` | `collect_chapter`/`run_units` coordination, global logical bound, per-chapter share, validated runtime-only settings |
+| Route pipeline leaves onto bounded lanes | `render_resources.py`, `render_resource_context.py` | One `RenderResources` per pipeline `RenderPool`; `resource_scope` routes preparation/recognition/review leaves; fresh-context verification drains past owner loss |
 | Inspect acceptance or transcript failures | `quality.py`, `verification.py`, `chapter_verification.py` |
 | Resolve recurring speech failures | `speech_resolver.py`, `recurring_resolution.py`, `delivery_recovery.py` |
 | Configure engines or add a plugin | `engines.py`, `ENGINE_NOTES.md` |
@@ -77,8 +80,15 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 ## NOTES
 
+- `render_metrics.py` owns payload-free bounded stage metrics: closed `STAGES` set, fixed histogram buckets, completed/failed/cancelled outcome counters. Instrument resource entry/exit only; snapshots never carry text, URLs, keys, or user labels, and `gpu_telemetry` is a constant until a collector exists.
 - `common.py` has only 51 lines but 33 internal consumers; treat changes as high blast radius.
-- `workflow.py` is about 2,060 lines and the largest maintenance risk; keep changes local.
+- `render_lanes.py` owns bounded cancellable resource lanes: fixed declared worker pools, per-owner round-robin FIFO, submit-time context copies, stop checks at dequeue, `LaneFull` backpressure, and same-lane submit/close guards. Lanes never execute model work; callables keep delegating to `LocalRuntime`.
+- `render_pipeline.py` owns the shared logical clip scheduler: globally bounded transactions, non-borrowable per-chapter share, per-owner cancel, source-ordered collect; coordinators never run on it. A failed transaction closes its owner's admission inside the worker's locked section (queued siblings popped before any pump, cancelled after), submits to a closed owner raise `AdmissionClosed` until `retire_owner` reopens a fresh generation. `render_pipeline_config.py` owns validated `render_pool` scheduler controls (default `legacy`, `0` = automatic) and their effective values; they never enter `RENDER_CONTRACT`, `SAFE_RENDER_KEYS`, or any render identity, and pipeline remote projection drops the legacy `4*C` inflight override in favor of automatic admission.
+- `render_chapter_flow.py` owns chapter coordination on that scheduler: `collect_chapter` (share-bounded submissions, source-ordered results, fail-fast drain) collects via per-future done-callbacks + a Condition — never `concurrent.futures.wait`, which CPython 3.11 never wakes for scheduler-cancelled raw futures; cancelled drain outcomes never mask the original failure. `run_units` bounds book-level coordinators and closes run admission on first failure. Pipeline pools report one `max_inflight` everywhere (effective 16 local / `min(256, max(64, 16*slots))` remote; legacy keeps slots+1 and builds no runtime), and chapter_jobs passes `(job_id, epoch)` as `scheduler_owner` only to executors that name the parameter.
+- `render_backlog.py` owns attempt-scoped untranscribed-audio backpressure: `BacklogBudget` (exact pending count from `synthesis_backlog`, soft byte high-water with half-mark resume, monotonic `peak_pending_count`/`peak_materialized_bytes` gauges that survive release), tickets released at primary-ASR return or earlier take exit, saved-unverified/joined audio adopting at the `validate_audio` boundary without spending generation budget; recovery assemblies reserve nothing pre-generation (children reserve; the joined take adopts). `render_backlog_context.py` owns the context-side half — `begin_attempt_ticket` acquisition, `AttemptTicket` transfer, `current_ticket` — re-exported unchanged by `render_backlog`.
+- `render_schedule_status.py` owns read-only scheduling diagnostics: one passively registered runtime slot (`register_runtime`/`clear_runtime`, wired by `chapter_executor` only after an engine already exists), conservative numeric snapshots of scheduler mode/capacity basis, logical gauges, backlog peaks, and per-stage queued/active; `chapter_jobs.scheduling_status` wraps it for `GET /v1/jobs` (additive `scheduling` block, advertised as `scheduling_status: 1`), `progress.py` renders a `sched` line segment, and `runpod_progress.py` projects fixed numeric keys only. Observing never initializes models, opens sessions, renews leases, starts inference, or grows registries; unknown executors/servers report nothing rather than invented values.
+- `render_resources.py` owns the pipeline lane set owned by one `RenderPool` (legacy mode builds no runtime): TTS lane (one worker per declared slot), two-worker preparation lane, single recognition lane, `review_concurrency` HTTP leaves plus a `2*review_concurrency` coordination lane; every pending bound follows the same effective `max_inflight` the logical scheduler admits. `ResourceLane.run` blocks for pending capacity (stop/closed wake) instead of raising `LaneFull`, so saturated lanes backpressure runners and a submitted function never runs twice. Verification leaves submit from a fresh `Context` so a started take drains after owner loss; queued synthesis still stops at dequeue. `render_resource_context.py` owns `resource_scope`/`current_resources`/`current_owner` and the leaf helpers that call directly when no scope is active. `LocalRuntime` model-affine execution runs inside `suppress_resource_routing`: nested leaves direct-call on the model thread (scope values stay readable for tickets/metrics) because lanes block on that thread and a nested re-route would deadlock its own lane; ordinary coordination parents keep routing.
+- `workflow.py` is about 2,317 lines and the largest maintenance risk; keep changes local.
 - `workflow.render()` restores completed chapters when the context hash matches.
 - It writes `status.json` and `plan.json` under `work_dir`, with directory locks from `run_locks.acquire_directory_lock`.
 - See `ENGINE_NOTES.md` for engine-specific details.

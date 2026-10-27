@@ -352,6 +352,14 @@ def compare_reference_words(expected_text: str, actual_text: str, *,
 
 
 def _audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
+    """Measure acoustic quality; route the DSP leaf to the preparation lane."""
+    from .render_resource_context import run_preparation
+    if include_silences:
+        return run_preparation(_measure_audio_metrics, path, policy, include_silences=True)
+    return run_preparation(_measure_audio_metrics, path, policy)
+
+
+def _measure_audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
     with wave.open(str(path), "rb") as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (
             1, 2, _SAMPLE_RATE, "NONE"
@@ -952,7 +960,31 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     Other nonexact transcripts reach JEV when enabled. Hard acoustic checks
     still apply; unusable optional word timing
     is omitted with a warning rather than causing speech regeneration.
+
+    This is the primary ASR boundary: when the pipeline backlog runtime is in
+    scope and no attempt ticket is already held, verifying saved-but-unverified
+    or joined audio adopts its own ticket here — without spending a generation
+    start — and releases it after recognition returns, before any caller-side
+    recovery or review work.
     """
+    from .render_backlog import begin_attempt_ticket
+
+    try:
+        materialized = Path(path).stat().st_size
+    except OSError:
+        materialized = 0  # the report below records the invalid_audio reason
+    ticket = begin_attempt_ticket(False, materialized)
+    try:
+        return _checked_audio_report(path, expected_text, verifier, policy,
+                                     purpose=purpose, performance=performance, ticket=ticket)
+    finally:
+        if ticket is not None:
+            ticket.release()
+
+
+def _checked_audio_report(path, expected_text: str, verifier,
+                          policy: dict | None = None, *, purpose: str = "speech",
+                          performance=None, ticket=None) -> dict:
     purpose = _validate_purpose(purpose)
     settings = validate_policy(policy)
     if not isinstance(expected_text, str):
@@ -997,7 +1029,20 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         transcribe = getattr(verifier, "transcribe_reference", None) if purpose == "reference" else None
         if not callable(transcribe):
             transcribe = verifier.transcribe
-        result = transcribe(Path(path))
+        try:
+            result = transcribe(Path(path))
+        finally:
+            # Primary ASR returned: free the attempt slot and its bytes
+            # before any comparison, JEV judge, review, or caller-side
+            # recovery work. When this verification adopted its own ticket
+            # it is released here; when a generation attempt already held
+            # one, the innermost held ticket is released instead — count
+            # and bytes only, because the ContextVar token reset belongs to
+            # the acquiring thread's outer finally.
+            from .render_backlog import current_ticket
+            held = ticket if ticket is not None else current_ticket()
+            if held is not None:
+                held.release()
         if isinstance(result, dict) and isinstance(result.get("text"), str):
             # Keep useful evidence even if an alignment/schema check fails;
             # this unvalidated text never substitutes for a passed transcript.

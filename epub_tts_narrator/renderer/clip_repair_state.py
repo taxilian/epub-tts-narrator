@@ -7,6 +7,7 @@ from ..provider import ProviderError
 from .common import digest, read_json, regular_file, write_json
 from .clip_repair_contract import approved, parse_plan, policy, review_payload
 from .clip_repair_prompts import PLAN, REVIEW
+from .render_resource_context import current_owner
 
 
 class ClipRecoveryUnavailable(RuntimeError):
@@ -71,7 +72,9 @@ class ClipRepairState:
             self.save()
             return None
         missing = [number for number in (1, 2) if audit['reviews'][number - 1] is None]
-        self.state['pending_reviews'] = missing
+        # A copy: completing votes remove from pending_reviews while the
+        # submissions below iterate `missing` on another thread.
+        self.state['pending_reviews'] = list(missing)
         self.save()
         errors = []
 
@@ -83,13 +86,27 @@ class ClipRepairState:
                 self.state['pending_reviews'].remove(number)
                 self.save()
 
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix='clip-repair-review') as pool:
-            futures = [pool.submit(review, number) for number in missing]
+        resources = self._review_capacity()
+        executor = None
+        if resources is not None:
+            # Both blind votes run on the shared review-coordination capacity.
+            # ResourceLane copies the caller's scoped context into each vote,
+            # so an owner lost while votes wait never starts new vote work.
+            futures = [resources.review_coordination.submit(review, number,
+                                                            owner=current_owner())
+                       for number in missing]
+        else:
+            executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='clip-repair-review')
+            futures = [executor.submit(review, number) for number in missing]
+        try:
             for future in as_completed(futures):
                 try:
                     future.result()
                 except ClipRecoveryUnavailable as exc:
                     errors.append(exc)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
         if errors:
             raise errors[0]
         try:
@@ -101,3 +118,9 @@ class ClipRepairState:
         self.state['phase'] = 'approved'
         self.save()
         return plan
+
+    @staticmethod
+    def _review_capacity():
+        """Pipeline coordination capacity, or None for the legacy executor."""
+        from .render_resource_context import current_resources
+        return current_resources()

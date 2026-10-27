@@ -10,6 +10,64 @@ import sys
 import threading
 import time
 
+from .render_metrics import METRICS, STAGES, classify_outcome
+from .render_schedule_status import scheduling_status
+
+
+# Fixed stage abbreviations for the compact status line; stage names come
+# only from the closed render_metrics.STAGES set. The chapter window's own
+# bookkeeping gauges (chapter, chapter_clips, clip) are excluded: the line
+# already reports this chapter's blocks, and the segment stays about the
+# shared cross-chapter resources.
+_DISPLAY_STAGES = STAGES - {"chapter", "chapter_clips", "clip"}
+
+_STAGE_SHORT = {
+    "admission": "admit", "synthesis_slot": "slot", "synthesis": "gen",
+    "recognition": "asr", "review": "review", "preparation": "prep",
+    "review_coordination": "revcoord", "model_thread": "model",
+}
+
+
+def _scheduling_segment():
+    """One numeric ``sched`` segment for the status line, or empty.
+
+    Read-only: observing never creates or starts anything. A broken or
+    absent scheduling runtime leaves the status line unchanged, and the
+    segment carries only fixed labels and numbers.
+    """
+    try:
+        status = scheduling_status()
+    except Exception:
+        return ""
+    if not status:
+        return ""
+    parts = []
+    for stage, gauges in sorted((status.get("stages") or {}).items()):
+        if stage not in _DISPLAY_STAGES:
+            continue
+        parts.append(f"{_STAGE_SHORT.get(stage, stage)} "
+                     f"{gauges.get('queued_now', 0)}q/{gauges.get('active_now', 0)}a")
+    logical = status.get("logical")
+    if logical and ("inflight" in logical or "pending" in logical):
+        parts.append(f"logical {logical.get('pending', 0)}/{logical.get('global_limit', 0)}"
+                     f" active {logical.get('inflight', 0)} owners {logical.get('owners', 0)}")
+    backlog = status.get("backlog")
+    if backlog:
+        parts.append(f"backlog {backlog.get('pending_count', 0)} pend"
+                     f" (peak {backlog.get('peak_pending_count', 0)})")
+        if "materialized_bytes" in backlog:
+            mib = 1024 * 1024
+            parts.append(f"audio {backlog['materialized_bytes'] / mib:.1f}"
+                         f"/{backlog.get('max_materialized_bytes', 0) / mib:.1f} MiB"
+                         f" (peak {backlog.get('peak_materialized_bytes', 0) / mib:.1f})")
+        if backlog.get("waiters"):
+            parts.append(f"wait {backlog['waiters']}")
+        if backlog.get("new_generation_blocked"):
+            parts.append("blocked")
+    if not parts:
+        return ""
+    return "sched " + " ".join(parts)
+
 
 def format_duration(seconds):
     """Format a monotonic duration, including hours for long book renders."""
@@ -140,6 +198,7 @@ class ChapterProgress:
         self._active = {}
         self._done = set()
         self._generated_samples = []
+        self._clip_operation = None
 
     def __enter__(self):
         with self._lock:
@@ -151,6 +210,10 @@ class ChapterProgress:
                 self._thread = threading.Thread(target=self._tick,
                                                 name="audiobook-progress", daemon=True)
                 self._thread.start()
+            # Started last so nothing after it can fail inside __enter__ and
+            # leak the chapter-clips gauges.
+            self._clip_operation = METRICS.operation("chapter_clips")
+            self._clip_operation.start()
         return self
 
     def __exit__(self, exc_type, exc, traceback):
@@ -163,6 +226,9 @@ class ChapterProgress:
             self._clear_line()
             state = "complete" if exc_type is None and len(self._done) == len(self._weights) else "stopped"
             self._emit(self._status(final=state))
+            operation, self._clip_operation = self._clip_operation, None
+        if operation is not None:
+            operation.end(classify_outcome(exc))
         return False
 
     def __call__(self, message):
@@ -224,13 +290,13 @@ class ChapterProgress:
             self._active[index] = _Task("checking saved audio", self._clock())
             if self._tty:
                 self._show(force=True)
-        try:
-            yield _TaskNotifier(self, index)
-        except BaseException:
-            with self._lock:
-                self._active.pop(index, None)
-            raise
-        else:
+        with METRICS.active("clip"):
+            try:
+                yield _TaskNotifier(self, index)
+            except BaseException:
+                with self._lock:
+                    self._active.pop(index, None)
+                raise
             with self._lock:
                 task = self._active.pop(index)
                 self._done.add(index)
@@ -313,9 +379,13 @@ class ChapterProgress:
                 else:
                     label = "cache" if "saved" in task.phase else "ready"
                 active.append(f"{label} #{index + 1}")
-            return (f"Ch {self.number}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active)
-                    + f" | {len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)"
-                    + f" | {elapsed} elapsed")
+            parts = [f"Ch {self.number}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active),
+                     f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
+                     f"{elapsed} elapsed"]
+            segment = _scheduling_segment()
+            if segment:
+                parts.append(segment)
+            return " | ".join(parts)
         if compact:
             parts = [f"Ch {self.number}/{self.total_chapters} ({book_percent}%)",
                      f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
@@ -356,6 +426,10 @@ class ChapterProgress:
                         active[-1] += f" +{len(self._active) - 1}"
                     break
             parts.append("; ".join(active))
+        if final is None:
+            segment = _scheduling_segment()
+            if segment:
+                parts.append(segment)
         if not compact and remaining is not None:
             parts.append(f"approx speech left {format_duration(math.ceil(remaining))}")
         return " | ".join(parts)

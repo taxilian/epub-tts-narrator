@@ -305,7 +305,12 @@ def create_app(jobs, settings=None, *, shutdown_callback=None):
             parsed = int(limit)
         except (TypeError, ValueError) as exc:
             raise ValueError("Job list limit must be an integer from 1 through 256") from exc
-        return {"jobs": await call(jobs.list_jobs, parsed)}
+        jobs_list = await call(jobs.list_jobs, parsed)
+        # Additive, conservative: a jobs-like service without the scheduling
+        # snapshot simply omits the block, exactly like an older server.
+        scheduling = (await call(jobs.scheduling_status)
+                      if callable(getattr(jobs, "scheduling_status", None)) else None)
+        return {"jobs": jobs_list, "scheduling": scheduling}
 
     @app.post("/v1/jobs", status_code=202)
     async def submit_job(request: Request):

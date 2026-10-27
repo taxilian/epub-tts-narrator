@@ -7,6 +7,133 @@ import re
 import time
 
 from .chapter_client import ChapterClient, ChapterClientError
+from .render_metrics import STAGES
+
+_SCHEDULE_INT_KEYS = {
+    "jobs": ("queued", "generating", "assembling", "complete", "failed", "cancelled"),
+    "capacity": ("tts_slots", "max_inflight", "pipeline_projection_max_inflight",
+                 "chapter_concurrency", "review_concurrency", "synthesis_backlog",
+                 "pending_audio_mb"),
+    "logical": ("pending", "inflight", "owners", "global_limit", "chapter_share"),
+    "backlog": ("pending_count", "peak_pending_count", "materialized_bytes",
+                "peak_materialized_bytes", "max_materialized_bytes",
+                "low_water_bytes", "waiters"),
+}
+_SCHEDULE_MODES = {"pipeline", "legacy"}
+_SCHEDULE_BASES = {"pipeline_global_transactions", "legacy_per_chapter_window"}
+
+
+def _public_scheduling(value):
+    """Project the server's scheduling block onto fixed numeric keys.
+
+    The chapter-service wrapper nests the engine snapshot under
+    ``engine``; a direct engine block is accepted too. Unknown keys,
+    stages, modes, and non-numeric values are dropped, so a broken or
+    future server can never push arbitrary labels into observer output.
+    Anything unusable becomes absent rather than invented.
+    """
+    if not isinstance(value, dict):
+        return None
+    # Queue counts live on the wrapper; engine gauges live on the nested
+    # engine block (or directly on the block when served without one).
+    jobs_source = value
+    engine = value.get("engine")
+    if isinstance(engine, dict):
+        jobs_source, value = value, engine
+    public = {}
+    mode = value.get("mode")
+    if mode in _SCHEDULE_MODES:
+        public["mode"] = mode
+    jobs = jobs_source.get("jobs")
+    if isinstance(jobs, dict):
+        projected = {key: jobs[key] for key in _SCHEDULE_INT_KEYS["jobs"]
+                     if type(jobs.get(key)) is int}
+        if projected:
+            public["jobs"] = projected
+    capacity = value.get("capacity")
+    if isinstance(capacity, dict):
+        projected = {key: capacity[key] for key in _SCHEDULE_INT_KEYS["capacity"]
+                     if type(capacity.get(key)) is int}
+        basis = capacity.get("inflight_basis")
+        if basis in _SCHEDULE_BASES:
+            projected["inflight_basis"] = basis
+        if projected:
+            public["capacity"] = projected
+    logical = value.get("logical")
+    if isinstance(logical, dict):
+        projected = {key: logical[key] for key in _SCHEDULE_INT_KEYS["logical"]
+                     if type(logical.get(key)) is int}
+        closed = logical.get("closed")
+        if isinstance(closed, bool):
+            projected["closed"] = closed
+        if projected:
+            public["logical"] = projected
+    backlog = value.get("backlog")
+    if isinstance(backlog, dict):
+        projected = {key: backlog[key] for key in _SCHEDULE_INT_KEYS["backlog"]
+                     if type(backlog.get(key)) is int}
+        blocked = backlog.get("new_generation_blocked")
+        if isinstance(blocked, bool):
+            projected["new_generation_blocked"] = blocked
+        if projected:
+            public["backlog"] = projected
+    stages = value.get("stages")
+    if isinstance(stages, dict):
+        projected = {}
+        for stage, gauges in stages.items():
+            if stage not in STAGES or not isinstance(gauges, dict):
+                continue
+            queued, active = gauges.get("queued_now"), gauges.get("active_now")
+            if type(queued) is int or type(active) is int:
+                projected[stage] = {"queued_now": queued if type(queued) is int else 0,
+                                    "active_now": active if type(active) is int else 0}
+        if projected:
+            public["stages"] = projected
+    return public or None
+
+
+def _mib(count):
+    return count / (1024 * 1024)
+
+
+def _scheduling_line(scheduling):
+    """One fixed-label text line; numbers only, no free-form server text."""
+    parts = [scheduling.get("mode") or "unknown-mode"]
+    jobs = scheduling.get("jobs")
+    if jobs:
+        parts.append("jobs " + " ".join(f"{key} {jobs[key]}" for key in
+                                        _SCHEDULE_INT_KEYS["jobs"] if key in jobs))
+    capacity = scheduling.get("capacity")
+    if capacity:
+        detail = []
+        if "tts_slots" in capacity:
+            detail.append(f"slots {capacity['tts_slots']}")
+        if "max_inflight" in capacity:
+            basis = capacity.get("inflight_basis", "")
+            detail.append(f"inflight {capacity['max_inflight']}"
+                          + (f" ({basis})" if basis else ""))
+        if detail:
+            parts.append(", ".join(detail))
+    logical = scheduling.get("logical")
+    if logical and ("inflight" in logical or "pending" in logical):
+        parts.append(f"logical {logical.get('pending', 0)}/{logical.get('global_limit', 0)}"
+                     f" active {logical.get('inflight', 0)} owners {logical.get('owners', 0)}")
+    backlog = scheduling.get("backlog")
+    if backlog:
+        detail = f"backlog {backlog.get('pending_count', 0)} pend (peak {backlog.get('peak_pending_count', 0)})"
+        if "materialized_bytes" in backlog:
+            detail += (f", {_mib(backlog['materialized_bytes']):.1f} MiB"
+                       f" (peak {_mib(backlog.get('peak_materialized_bytes', 0)):.1f} MiB)")
+        if backlog.get("waiters"):
+            detail += f", wait {backlog['waiters']}"
+        if backlog.get("new_generation_blocked"):
+            detail += ", BLOCKED above soft high-water"
+        parts.append(detail)
+    stages = scheduling.get("stages")
+    if stages:
+        parts.append(" ".join(f"{stage} {gauges['queued_now']}q/{gauges['active_now']}a"
+                              for stage, gauges in sorted(stages.items())))
+    return "scheduling: " + "; ".join(parts)
 
 
 def run_progress(settings, args):
@@ -77,11 +204,20 @@ def run_progress(settings, args):
                                                   "elapsed": match[5]}
                             break
                 public.append(record)
+            scheduling = _public_scheduling(response.get("scheduling"))
             if args.json:
-                print(json.dumps({"jobs": public}), flush=True)
+                print(json.dumps({"jobs": public,
+                                  **({"scheduling": scheduling} if scheduling else {})}), flush=True)
             elif not jobs:
                 print("No saved chapter jobs.", flush=True)
+                if scheduling:
+                    print(_scheduling_line(scheduling), flush=True)
             else:
+                if scheduling:
+                    line = _scheduling_line(scheduling)
+                    if cursors.get("scheduling") != line:
+                        cursors["scheduling"] = line
+                        print(line, flush=True)
                 for job in public:
                     identifier = job.get("id")
                     signature = (job.get("state"), job.get("paused"), job.get("last_event"))

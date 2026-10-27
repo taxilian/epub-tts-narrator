@@ -26,6 +26,7 @@ from .interrupts import stop_if_requested
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
 from .progress import (ChapterProgress, format_duration, generation_activity,
                        report_worker_activity, set_phase)
+from .render_backlog import BacklogCancelled, BacklogClosed, begin_attempt_ticket
 from .retry_budget import SpeechRetryBudget, generation_attempts, whole_strategy_allowance
 from .run_locks import acquire_directory_lock
 from .speech_text import trim_speech_text
@@ -502,6 +503,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                      request if seed_identity is None else seed_identity, attempt)
         report = None
         generation_ordinal = None
+        attempt_ticket = None
         metadata = {}
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
@@ -569,6 +571,14 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     # A running take finishes its quality checks and cache
                     # publication. Cancellation only prevents starting a new one.
                     stop_if_requested()
+                    # Attempt backlog reservation: acquired while the take
+                    # lock is owned, before the retry claim and synthesis.
+                    # A recovery assembly's generation recurses into child
+                    # takes, so it reserves nothing here; its joined audio
+                    # adopts a ticket at the ASR boundary after every child
+                    # ticket is gone.
+                    if "recovery" not in request:
+                        attempt_ticket = begin_attempt_ticket(True)
                     if fresh_speech:
                         generation_ordinal = retry_budget.claim(
                             directory, request_hash, attempts,
@@ -619,6 +629,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                             metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
                         else:
                             metadata = generate(raw, seed)
+                    if attempt_ticket is not None:
+                        # The raw candidate is materialized untranscribed
+                        # audio the moment generation returns, before any
+                        # queued normalization starts.
+                        attempt_ticket.materialize(regular_file(raw).stat().st_size)
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
                                       "seed": seed, "raw_file": raw.name,
@@ -645,6 +660,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         "engine_metadata": metadata, "audio_file": wav.name,
                         "audio_sha256": file_hash(regular_file(wav)),
                     })
+                if attempt_ticket is not None:
+                    attempt_ticket.materialize(regular_file(wav).stat().st_size)
             report_worker_activity(notify, "source", metadata.get("render_worker"))
             if fresh_speech and generation_ordinal is None:
                 set_phase(notify, f"verifying saved take {attempt}")
@@ -663,6 +680,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 report = confirm_recovery_report(report, request, metadata, directory)
         except RenderBlocked:
             raise
+        except (BacklogCancelled, BacklogClosed):
+            raise
         except (ValueError, RuntimeError, OSError) as exc:
             error = safe_error_text(exc, secrets=secrets)
             report = {"passed": False, "reasons": ["generation_or_verification_error"],
@@ -677,6 +696,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # A new invocation may have repaired credentials/connectivity.
                 # Permanent HTTP errors still stop immediately within this run.
                 report["retry_on_resume"] = True
+        finally:
+            # Primary ASR returned or the take exited earlier: release the
+            # attempt slot and its bytes before any review, planner, or
+            # recursive child work, even when the wave file stays on disk.
+            if attempt_ticket is not None:
+                attempt_ticket.release()
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -1889,7 +1914,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
 def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, config, work, *, notify,
                            total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None,
-                           speech_cache=None, paragraph_split_available=False):
+                           speech_cache=None, paragraph_split_available=False, scheduler_owner=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
     if retry_budget is None:
@@ -1906,17 +1931,43 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     parallel = getattr(engine, "max_inflight", getattr(engine, "max_parallel", 1))
     if type(parallel) is not int or parallel < 1:
         raise RenderBlocked("Render worker concurrency must be a positive integer")
+    scheduler = getattr(engine, "logical", None)
+    resources = getattr(engine, "resources", None)
+    owner = scheduler_owner or (None, chapter.get("number", 1))
 
     with ChapterProgress(chapter.get("number", 1), total_chapters or chapter.get("number", 1), chunks,
                          notify=notify, parallel=getattr(engine, "max_parallel", parallel)) as progress:
         def run(index):
             stop_if_requested()
-            admit = getattr(engine, "admit_chunk", None)
-            with (admit() if callable(admit) else nullcontext()), progress.task(index) as task_notify:
-                return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
-                                     engine_identity, verifier, config, work, take_locks,
-                                     take_locks_guard, notify=task_notify, retry_budget=retry_budget,
-                                     speech_cache=speech_cache, paragraph_split_available=paragraph_split_available)
+            def transaction():
+                admit = getattr(engine, "admit_chunk", None)
+                with (admit() if callable(admit) else nullcontext()), progress.task(index) as task_notify:
+                    return _render_chunk(chunks[index], index + 1, len(chunks), voices, engine,
+                                         engine_identity, verifier, config, work, take_locks,
+                                         take_locks_guard, notify=task_notify, retry_budget=retry_budget,
+                                         speech_cache=speech_cache,
+                                         paragraph_split_available=paragraph_split_available)
+            if resources is not None:
+                # Every logical runner carries its chapter's resource scope
+                # before any take-lock work, so leaf operations route to the
+                # pipeline lanes under the shared owner key.
+                from .render_resource_context import resource_scope
+                with resource_scope(resources, owner):
+                    return transaction()
+            return transaction()
+
+        if scheduler is not None:
+            # One shared, chapter-fair scheduler replaces the per-chapter clip
+            # executor: submissions are bounded to this chapter's reserved
+            # share, results return in source order, and the first terminal
+            # failure closes the chapter's admission before new work starts.
+            from .render_chapter_flow import collect_chapter, retire_owner
+            try:
+                results = collect_chapter(scheduler, owner, len(chunks), run)
+            finally:
+                retire_owner(scheduler, owner)
+            stop_if_requested()
+            return [result[0] for result in results], [result[1] for result in results if result[1] is not None]
 
         if parallel == 1:
             results = [run(index) for index in range(len(chunks))]
@@ -1966,7 +2017,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
 
 
 def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
-                                verifier, config, work, *, notify, retry_budget=None, speech_cache=None):
+                                verifier, config, work, *, notify, retry_budget=None, speech_cache=None,
+                                take_locks=None, take_locks_guard=None, scheduler_owner=None):
     """Split only exhausted paragraph performances, retaining verified work."""
     from .paragraph_recovery import record_paragraph_fallback
 
@@ -1981,7 +2033,9 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             clips, acceptance = _render_chapter_chunks(
                 chapter, voices, engine, engine_identity, verifier, config, work,
                 notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget,
-                speech_cache=speech_cache, paragraph_split_available=True)
+                speech_cache=speech_cache, paragraph_split_available=True,
+                take_locks=take_locks, take_locks_guard=take_locks_guard,
+                scheduler_owner=scheduler_owner)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
             stop_if_requested()
@@ -2098,22 +2152,36 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
         engine_identity, verifier_identity = engine.identity, verifier.identity
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
-        assembly_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audiobook-assemble")
-        pending_assembly = None
+        scheduler = getattr(engine, "logical", None)
+        chapter_limit = 1
+        if scheduler is not None:
+            from .render_pipeline_config import effective_scheduling
+            chapter_limit = effective_scheduling(config)["chapter_concurrency"]
+        assembly_executor = ThreadPoolExecutor(
+            max_workers=2 if scheduler is not None else 1, thread_name_prefix="audiobook-assemble")
+        pending_assembly = {}  # manifest index -> (future, acceptance, label, started)
+        composed_records = {}  # manifest index -> (composed, chapter_acceptance)
+        plan_lock = Lock()
+        # Take locks are shared across every chapter of this run, local and
+        # remote alike, so duplicate work coordinates instead of racing.
+        take_locks, take_locks_guard = {}, Lock()
+        run_key = digest(plan)[:12]
 
-        def completed(composed, chapter_acceptance, chapter_label, chapter_started):
-            rendered.append(composed)
-            acceptance.extend(chapter_acceptance)
+        def completed(index, composed, chapter_acceptance, chapter_label, chapter_started):
+            composed_records[index] = (composed, chapter_acceptance)
             notify(f"=== Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
-                   f"({len(rendered)} / {len(plan['chapters'])} selected chapters ready). ===")
+                   f"({len(composed_records)} / {len(plan['chapters'])} selected chapters ready). ===")
 
-        def finish_pending():
-            nonlocal pending_assembly
-            if pending_assembly is not None:
-                future, chapter_acceptance, chapter_label, chapter_started = pending_assembly
-                completed(future.result(), chapter_acceptance, chapter_label, chapter_started)
-                pending_assembly = None
+        def finish_completed(final=False):
+            # Publication, notification, and checkpoint bookkeeping stay in
+            # manifest order even when chapters complete out of order.
+            for index in sorted(pending_assembly):
+                future, chapter_acceptance, chapter_label, chapter_started = pending_assembly[index]
+                if not final and not future.done():
+                    continue
+                del pending_assembly[index]
+                completed(index, future.result(), chapter_acceptance, chapter_label, chapter_started)
 
         def compose(chapter, clips, context, chapter_acceptance):
             composed = prepare_chapter(
@@ -2122,13 +2190,13 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                 render_settings=config["render"], context=context, notify=notify,
                 **({"censorship_policy": config["censorship"]}
                    if config.get("censorship", {}).get("enabled", False) else {}))
-            _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+            with plan_lock:
+                _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             return composed
 
-        for chapter_index, chapter in enumerate(plan["chapters"]):
+        def process(chapter_index):
+            chapter = plan["chapters"][chapter_index]
             stop_if_requested()
-            if pending_assembly is not None and pending_assembly[0].done():
-                finish_pending()
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
@@ -2147,21 +2215,43 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                     notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             if composed is None:
                 notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
-                chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
+                rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                     bundle, chapter, voices, engine, engine_identity, verifier, config, work,
-                    notify=notify, retry_budget=retry_budget, speech_cache=speech_cache)
-                if chapter != plan["chapters"][chapter_index]:
-                    plan["chapters"][chapter_index] = chapter
-                    write_json(work / "runs" / digest(plan) / "plan.json", plan)
+                    notify=notify, retry_budget=retry_budget, speech_cache=speech_cache,
+                    take_locks=take_locks, take_locks_guard=take_locks_guard,
+                    scheduler_owner=(run_key, chapter["number"]))
+                if rendered_chapter != chapter:
+                    with plan_lock:
+                        plan["chapters"][chapter_index] = rendered_chapter
+                        write_json(work / "runs" / digest(plan) / "plan.json", plan)
+                chapter = rendered_chapter
                 context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
                 stop_if_requested()
-                finish_pending()
-                future = assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance)
-                pending_assembly = (future, chapter_acceptance, chapter_label, chapter_started)
+                if scheduler is None:
+                    # Legacy keeps exactly one outstanding assembly, in order.
+                    finish_completed(final=True)
+                pending_assembly[chapter_index] = (
+                    assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance),
+                    chapter_acceptance, chapter_label, chapter_started)
             else:
-                finish_pending()
-                completed(composed, chapter_acceptance, chapter_label, chapter_started)
-        finish_pending()
+                completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started)
+
+        if scheduler is None:
+            for chapter_index in range(len(plan["chapters"])):
+                stop_if_requested()
+                finish_completed()
+                process(chapter_index)
+        else:
+            # Bounded chapter coordinators share one logical scheduler; the
+            # first book-terminal failure closes the run's admission while
+            # started chapters drain.
+            from .render_chapter_flow import ChapterRunAdmission, run_units
+            run_units([lambda index: process(index) for index in range(len(plan["chapters"]))],
+                      chapter_limit, ChapterRunAdmission())
+        finish_completed(final=True)
+        rendered = [composed_records[index][0] for index in sorted(composed_records)]
+        acceptance = [record for index in sorted(composed_records)
+                      for record in composed_records[index][1]]
         stop_if_requested()
         if chapters_only:
             result = {

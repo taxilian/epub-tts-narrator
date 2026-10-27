@@ -95,3 +95,17 @@ letters = "Use the letter author's role if identified; otherwise flag for review
 nested_quotations = "Keep the currently speaking character's performed voice."
 headings_and_nonstory_text = "Use the applicable narrator role."
 bracketed_text = "Give this bracketed text a slight, audible change in delivery while keeping the surrounding sentence natural. Keep the selected speaker's voice."
+
+# Renderer scheduling controls (optional; defaults keep today's behavior).
+# The pipeline scheduler is an explicit opt-in experiment: the default remains
+# "legacy" until the measured live benchmark gate passes. These settings only
+# change how clip work is scheduled — never what is synthesized or accepted —
+# and switching schedulers reuses all already accepted audio.
+# [render_pool]
+# scheduler = "legacy"        # "legacy" (default) or experimental "pipeline"
+# chapter_concurrency = 0     # 0 = automatic: 4 under pipeline, 2 effective legacy
+# max_inflight = 0            # 0 = automatic; pipeline: 16 local, 64-256 remote;
+#                             # legacy: per-chapter window of total slots + 1
+# synthesis_backlog = 0       # 0 = automatic: min(256, 4 x total TTS slots)
+# pending_audio_mb = 256      # soft high-water for untranscribed saved audio
+# review_concurrency = 2      # parallel text-review HTTP calls (1-8)
