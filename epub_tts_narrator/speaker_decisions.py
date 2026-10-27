@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from contextlib import ExitStack
 from pathlib import Path
+import json
 import os
 import re
 import shlex
@@ -13,7 +14,7 @@ import textwrap
 import uuid
 
 from .contracts import has_assigned_speakers, readiness, validate_document
-from .pipeline import fingerprint
+from .pipeline import fingerprint, write_json
 from .speaker_completion import ATTRIBUTION_ISSUE_KINDS, unassigned_segments
 from .speaker_suggestions import rank_speakers
 from .narration_identity import author_narrator_name
@@ -150,8 +151,50 @@ def _create_voice_records(document, name, description):
     return character, voice, role
 
 
+DECISION_CHECKPOINT_VERSION = 1
+
+
+def _decision_checkpoint_scope(document):
+    return {"source_fingerprint": fingerprint(document["source"]),
+            "cast_fingerprint": fingerprint(document["cast"]),
+            "input_script_fingerprint": fingerprint(document["segments"])}
+
+
+def decision_checkpoint_key(document):
+    """Fingerprint the pre-prompt state a speaker-decisions journal applies to."""
+    return fingerprint({"scope": "speaker-decisions", "version": DECISION_CHECKPOINT_VERSION,
+                        **_decision_checkpoint_scope(document)})
+
+
+def _decision_checkpoint_path(cache_dir, key):
+    return Path(cache_dir) / "speaker-decisions" / f"{key}.json"
+
+
+def _load_decision_checkpoint(cache_dir, key):
+    """Return a stored decisions journal, or None when absent, malformed, or foreign."""
+    try:
+        record = json.loads(_decision_checkpoint_path(cache_dir, key).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("scope") != "speaker-decisions":
+        return None
+    if record.get("version") != DECISION_CHECKPOINT_VERSION or not isinstance(record.get("decisions"), list):
+        return None
+    return record
+
+
+def _save_decision_checkpoint(cache_dir, document, decisions, status):
+    """Durably checkpoint decisions so an interrupted run resumes instead of re-asking."""
+    record = {"scope": "speaker-decisions", "version": DECISION_CHECKPOINT_VERSION,
+              **_decision_checkpoint_scope(document), "status": status,
+              "decisions": deepcopy(decisions)}
+    path = _decision_checkpoint_path(cache_dir, decision_checkpoint_key(document))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, record, overwrite=True)
+
+
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,
-                            jev_client=None):
+                             jev_client=None, decisions_cache=None):
     """Ask for every remaining speaker, preserving progress if input ends.
 
     This function is deliberately called only by the CLI after automatic review.
@@ -199,10 +242,6 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                                     subsequent_indent=indent, replace_whitespace=False)
             for line in wrapped.splitlines() or [""]:
                 say(line, style=style)
-    if not getattr(input_stream, "isatty", lambda: False)():
-        say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
-        say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
-        return result
 
     characters = {row["id"]: row for row in result["cast"]["characters"]}
     roles = result["cast"]["roles"]
@@ -276,11 +315,82 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         roles_by_id[role["id"]] = role
         labels[role["id"]] = name
         say(f"Defined new voice: {name}.")
-        return role
+        return character, voice, role
 
-    prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
-    prose("Enter accepts the best guess. O shows all voices. N defines a new voice. Q saves progress and stops.")
-    prose("Comma-separated numbers mean those characters speak these SAME words together.")
+    def save_journal(status):
+        if decisions_cache is not None:
+            _save_decision_checkpoint(decisions_cache, document, decisions, status)
+
+    def replay_journal(journal):
+        """Reapply saved decisions through the same assign path; False leaves state untouched."""
+        available = set(roles_by_id)
+        seen = set()
+        for entry in journal["decisions"]:
+            if not isinstance(entry, dict):
+                return False
+            segment = next((row for row in result["segments"] if row["id"] == entry.get("segment_id")), None)
+            selected = entry.get("selected_roles")
+            if (segment is None or segment["id"] in seen or has_assigned_speakers(segment)
+                    or not isinstance(selected, list) or not selected):
+                return False
+            if (segment["block_id"] != entry.get("block_id") or segment["start"] != entry.get("start")
+                    or segment["end"] != entry.get("end")
+                    or fingerprint(segment["text"]) != entry.get("text_fingerprint")):
+                return False
+            seen.add(segment["id"])
+            defined = entry.get("defined_voice")
+            if defined is not None:
+                created = defined.get("created")
+                name = defined.get("name")
+                if not isinstance(created, dict) or not isinstance(name, str):
+                    return False
+                character, voice, role = created.get("character"), created.get("voice"), created.get("role")
+                if not all(isinstance(row, dict) for row in (character, voice, role)):
+                    return False
+                if _mint_series_ids(result, name)[0] != character.get("id") or role.get("id") in available:
+                    return False
+                available.add(role["id"])
+            if not all(role_id in available for role_id in selected):
+                return False
+        for entry in journal["decisions"]:
+            segment = next(row for row in result["segments"] if row["id"] == entry["segment_id"])
+            defined = entry.get("defined_voice")
+            if defined is not None:
+                created = defined["created"]
+                character, voice, role = (deepcopy(created["character"]), deepcopy(created["voice"]),
+                                          deepcopy(created["role"]))
+                result["cast"]["characters"].append(character)
+                result["cast"]["voices"].append(voice)
+                result["cast"]["roles"].append(role)
+                characters[character["id"]] = character
+                roles_by_id[role["id"]] = role
+                labels[role["id"]] = defined["name"]
+            assign(segment, [roles_by_id[role_id] for role_id in entry["selected_roles"]])
+            if defined is not None:
+                decisions[-1]["defined_voice"] = deepcopy(defined)
+        return True
+
+    if decisions_cache is not None:
+        journal = _load_decision_checkpoint(decisions_cache, decision_checkpoint_key(document))
+        if journal is not None:
+            if replay_journal(journal):
+                say(f"Replaying {len(decisions)} saved speaker decision(s) from the interrupted run.")
+            else:
+                result = deepcopy(document)
+                characters = {row["id"]: row for row in result["cast"]["characters"]}
+                roles = result["cast"]["roles"]
+                roles_by_id = {role["id"]: role for role in roles}
+                labels = _role_labels(roles, characters, result["source"]["book"])
+                decisions = []
+            pending = unassigned_segments(result)
+    if pending and not getattr(input_stream, "isatty", lambda: False)():
+        say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
+        say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
+        return result
+    if pending:
+        prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
+        prose("Enter accepts the best guess. O shows all voices. N defines a new voice. Q saves progress and stops.")
+        prose("Comma-separated numbers mean those characters speak these SAME words together.")
     for number, item in enumerate(pending, 1):
         position = positions[item["block_id"]]
         block = blocks[position]
@@ -364,13 +474,18 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 show_menu()
                 continue
             if answer in {"n", "new"}:
-                role = define_new_voice()
-                if role is None:
+                created = define_new_voice()
+                if created is None:
                     continue
+                character, voice, role = created
                 assign(item, [role])
                 decisions[-1]["defined_voice"] = {"character_id": role["character_id"],
                                                   "voice_id": role["voice_id"],
-                                                  "name": characters[role["character_id"]]["name"]}
+                                                  "name": characters[role["character_id"]]["name"],
+                                                  "created": {"character": deepcopy(character),
+                                                              "voice": deepcopy(voice),
+                                                              "role": deepcopy(role)}}
+                save_journal("running")
                 break
             visible_roles = roles if expanded else shortlist
             if answer == "" and not expanded and shortlist:
@@ -391,11 +506,13 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 say("Simultaneous speech requires distinct dialogue roles with distinct voices; narration cannot be a group member.")
                 continue
             assign(item, choices)
+            save_journal("running")
             break
         if stop:
             break
 
     remaining = unassigned_segments(result)
+    save_journal("complete" if not remaining else "interrupted")
     if decisions:
         covered = {row["segment_id"] for row in decisions}
         covered.update(row["block_id"] for row in decisions

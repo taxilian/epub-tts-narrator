@@ -375,6 +375,7 @@ def main(argv=None):
         if hashes[str(directory)] != original_manifest_hash:
             raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
         settings = config["analysis"]
+        decisions_cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
         targets = automatic_completion_targets(revised, retry_exhausted=True) if remaining else []
         requests = None
         if targets:
@@ -397,7 +398,8 @@ def main(argv=None):
                                         target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
             revised = repair_narration_boundaries(revised, progress=print)
-        revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config))
+        revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config),
+                                           decisions_cache=decisions_cache)
         revised = normalize_document_speech(revised, requests,
             workers=min(5, settings["attribution_workers"]),
             progress=lambda message: print(message, file=sys.stderr))
@@ -461,9 +463,10 @@ def main(argv=None):
                     progress=lambda message: print(message, file=sys.stderr))
                 revised[directory] = repair_narration_boundaries(revised[directory], progress=print)
             judge = _speaker_judge(config)
+            decisions_cache = Path(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache").resolve()
             for directory in revised:
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory,
-                                                             jev_client=judge)
+                                                              jev_client=judge, decisions_cache=decisions_cache)
             changed = {path: document for path, document in revised.items() if document != documents[path]}
             if changed:
                 result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes)
@@ -647,7 +650,8 @@ def main(argv=None):
             document = prepare_document_samples(document, sample_requests,
                 workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
                 progress=lambda message: print(message, file=sys.stderr))
-            document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config))
+            document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config),
+                                                decisions_cache=model_cache)
             document = normalize_document_speech(document, sample_requests,
                 workers=min(5, settings["attribution_workers"]),
                 progress=lambda message: print(message, file=sys.stderr))

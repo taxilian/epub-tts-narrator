@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from io import StringIO
 import os
 import re
+import tempfile
 from pathlib import Path
 from unittest.mock import call, patch
 import unittest
@@ -95,7 +96,9 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertEqual(selected["voice_id"], voice["id"])
         self.assertEqual(selected["attribution"]["basis"], "user")
         audit = result["provenance"]["speaker_decisions"]
-        self.assertEqual(audit["decisions"][0]["defined_voice"]["name"], "Kessa")
+        defined = audit["decisions"][0]["defined_voice"]
+        self.assertEqual(defined["name"], "Kessa")
+        self.assertEqual(defined["created"], {"character": character, "voice": voice, "role": role})
         self.assertIn("N. New voice — define a new character", output)
         self.assertIn("Defined new voice: Kessa.", output)
         self.assertTrue(result["readiness"]["ready"])
@@ -549,8 +552,10 @@ class SpeakerDecisionTests(unittest.TestCase):
     def analyze_with_input(self, document, input_stream, expected_status=0):
         """Exercise analyze's actual prompt and handoff without model or disk work."""
         from epub_tts_narrator.cli import main
+        cache_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(cache_dir.cleanup)
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
-                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
+                  "analysis": {"series_registry": None, "cache_dir": cache_dir.name, "chunk_chars": 1000,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
                                "attribution_workers": 5, "identity_consensus": True, "attribution_review": True,
                                "attribution_review_chunk_chars": 1000, "attribution_review_notes": None,
