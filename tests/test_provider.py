@@ -8,6 +8,7 @@ import ssl
 from email.message import Message
 from http.client import HTTPException, IncompleteRead, RemoteDisconnected
 from threading import get_ident
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
@@ -37,6 +38,56 @@ class FakeResponse(io.BytesIO):
 def completion(content='{"characters": []}', finish_reason="stop", **message_fields):
     message = {"role": "assistant", "content": content, **message_fields}
     return {"choices": [{"message": message, "finish_reason": finish_reason}]}
+
+
+def sse(*events):
+    """Serialize server-sent events; dicts become data chunks, bytes pass through raw."""
+    parts = []
+    for event in events:
+        if isinstance(event, bytes):
+            parts.append(event)
+        elif event == "[DONE]":
+            parts.append(b"data: [DONE]\n\n")
+        else:
+            parts.append(b"data: " + json.dumps(event).encode("utf-8") + b"\n\n")
+    return b"".join(parts)
+
+
+def delta(content="", **delta_fields):
+    return {"choices": [{"delta": {"content": content, **delta_fields}, "finish_reason": None}]}
+
+
+def delta_end(finish_reason):
+    return {"choices": [{"delta": {}, "finish_reason": finish_reason}]}
+
+
+class StalledStream(FakeResponse):
+    def __init__(self, data, stall_after):
+        super().__init__(data)
+        self.stall_after = stall_after
+        self.line_reads = 0
+
+    def readline(self, size=-1):
+        self.line_reads += 1
+        if self.line_reads > self.stall_after:
+            raise TimeoutError("private-stalled-connection")
+        return super().readline(size)
+
+
+class RecordingSocket(socket.socket):
+    def __init__(self):
+        super().__init__(socket.AF_INET, socket.SOCK_STREAM)
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+
+class SocketBackedResponse(FakeResponse):
+    def __init__(self, data):
+        super().__init__(data)
+        self.sock = RecordingSocket()
+        self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=self.sock))
 
 
 class ProviderTests(unittest.TestCase):
@@ -165,6 +216,10 @@ class ProviderTests(unittest.TestCase):
             {"retry_initial_delay": 0}, {"retry_max_delay": 61}, {"retry_initial_delay": True},
             {"retry_initial_delay": float("nan")}, {"retry_max_delay": float("inf")},
             {"retry_initial_delay": 30, "retry_max_delay": 5},
+            {"stall_timeout": 0}, {"stall_timeout": -1}, {"stall_timeout": True},
+            {"stall_timeout": float("nan")}, {"stall_timeout": float("inf")},
+            {"stall_timeout": "120"},
+            {"progress_callback": 12},
         ):
             with self.subTest(options=options), self.assertRaises(ProviderError):
                 OpenAICompatibleClient(**{"model": "model", **options})
@@ -488,6 +543,185 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(system=system, payload=payload), self.assertRaises(ProviderError):
                 OpenAICompatibleClient("model").complete(system, payload)
         self.opener.open.assert_not_called()
+
+    def test_streaming_sets_stream_flag_without_changing_cache_identity(self):
+        legacy_identity = {
+            "model": "model", "base_url": "https://api.openai.com/v1",
+            "json_mode": True, "max_output_tokens": None,
+            "token_limit_field": "max_completion_tokens",
+        }
+        for client in (
+            OpenAICompatibleClient("model"),
+            OpenAICompatibleClient("model", stall_timeout=30),
+            OpenAICompatibleClient("model", progress_callback=lambda count: None),
+            OpenAICompatibleClient("model", api_key="secret-key"),
+        ):
+            self.assertEqual(client.identity, legacy_identity)
+        self.respond(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]"))
+        OpenAICompatibleClient("model").complete("System", {"text": "Café"})
+        body = json.loads(self.opener.open.call_args.args[0].data)
+        self.assertIs(body.pop("stream"), True)
+        self.assertEqual(sorted(body), ["messages", "model", "response_format"])
+        self.assertEqual(body["model"], "model")
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][1], {"role": "user", "content": '{"text":"Café"}'})
+
+    def test_streamed_multi_chunk_response_accumulates_the_exact_content(self):
+        self.respond(sse(
+            {"choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": None}]},
+            delta('{"char'), delta('acters'), delta('": []}'),
+            delta_end("stop"), "[DONE]",
+        ))
+        self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {"text": "Café"}), {"characters": []})
+
+    def test_reasoning_deltas_never_become_content(self):
+        self.respond(sse(delta("", reasoning_content="secret chain"), delta("", reasoning="secret too"),
+                         delta('{"characters": []}'), delta_end("stop"), "[DONE]"))
+        self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {}), {"characters": []})
+        self.respond(sse(delta("", reasoning_content="secret chain"), delta_end("stop"), "[DONE]"))
+        with self.assertRaisesRegex(ProviderError, "no text content"):
+            OpenAICompatibleClient("model").complete("Analyze", {})
+
+    def test_done_terminates_stream_and_ignores_later_lines(self):
+        self.respond(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]", b"data: garbage after done\n\n"))
+        self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {}), {"characters": []})
+
+    def test_multiline_data_events_and_comments_are_handled(self):
+        self.respond(b': keepalive\n\nevent: completion\ndata: {"choices": [{"delta":\n'
+                     b'data: {"content": "{\\"characters\\": []}"}}]}\n\n'
+                     b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n')
+        self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {}), {"characters": []})
+
+    def test_streamed_finish_reasons_are_validated_like_nonstreamed(self):
+        for reason, pattern in (
+            ("length", "truncated"), ("content_filter", "content filter"),
+            ("tool_calls", "completed text"), (None, "completed text"),
+        ):
+            self.opener.open.reset_mock()
+            events = [delta('{"characters": []}')]
+            if reason is not None:
+                events.append(delta_end(reason))
+            self.respond(sse(*events, "[DONE]"))
+            with self.subTest(reason=reason), self.assertRaisesRegex(ProviderError, pattern) as caught:
+                OpenAICompatibleClient("model").complete("Analyze", {})
+            self.assertNotIn("secret", str(caught.exception))
+        self.opener.open.reset_mock()
+        self.respond(sse(delta('{"characters": []}'), delta_end("length"), "[DONE]"))
+        with self.assertRaises(OutputTruncatedError):
+            OpenAICompatibleClient("model").complete("Analyze", {})
+
+    def test_streamed_refusal_and_invalid_role_are_rejected_like_nonstreamed(self):
+        self.respond(sse(delta("", refusal="secret refusal detail"), delta_end("stop"), "[DONE]"))
+        with self.assertRaisesRegex(ProviderError, "refused") as caught:
+            OpenAICompatibleClient("model").complete("Analyze", {})
+        self.assertNotIn("secret", str(caught.exception))
+        self.respond(sse(delta("{}", role="user"), delta_end("stop"), "[DONE]"))
+        with self.assertRaisesRegex(ProviderError, "role"):
+            OpenAICompatibleClient("model").complete("Analyze", {})
+
+    def test_midstream_error_chunk_is_classified_like_http_failures(self):
+        error_event = {"error": {"code": "concurrent_budget_exceeded", "retryable": True, "message": "private server detail"}}
+        self.opener.open.side_effect = [
+            FakeResponse(sse(error_event)),
+            FakeResponse(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]")),
+        ]
+        client = OpenAICompatibleClient("model", api_key="private-key", max_retries=1)
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider") as logs:
+            self.assertEqual(client.complete("private-source", {}), {"characters": []})
+        self.assertEqual(self.opener.open.call_count, 2)
+        sleep.assert_called_once_with(5.0)
+        self.assertNotIn("private", " ".join(logs.output))
+        self.opener.open.reset_mock()
+        self.opener.open.side_effect = [FakeResponse(sse({"error": {"code": "insufficient_quota", "retryable": True}}))]
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, self.assertRaises(ProviderError) as caught:
+            OpenAICompatibleClient("model", max_retries=5).complete("Analyze", {})
+        self.opener.open.assert_called_once()
+        sleep.assert_not_called()
+        self.assertFalse(caught.exception.retryable)
+
+    def test_stream_ending_before_done_is_retried_then_reported(self):
+        self.opener.open.side_effect = [
+            FakeResponse(sse(delta('{"cha'))),
+            FakeResponse(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]")),
+        ]
+        with patch("epub_tts_narrator.provider.time.sleep"), patch("epub_tts_narrator.provider.random.uniform", return_value=0):
+            self.assertEqual(OpenAICompatibleClient("model", max_retries=1).complete("Analyze", {}), {"characters": []})
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.opener.open.reset_mock()
+        self.opener.open.side_effect = [FakeResponse(sse(delta('{"cha')))]
+        with self.assertRaises(ProviderError) as caught:
+            OpenAICompatibleClient("model").complete("Analyze", {})
+        self.assertTrue(caught.exception.retryable)
+        self.assertIn("ended before", str(caught.exception))
+
+    def test_stalled_stream_is_detected_and_retried_fast(self):
+        partial = sse(delta('{"cha'))
+        self.opener.open.side_effect = [
+            StalledStream(partial, stall_after=1),
+            FakeResponse(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]")),
+        ]
+        client = OpenAICompatibleClient("model", max_retries=1)
+        with patch("epub_tts_narrator.provider.time.sleep") as sleep, patch("epub_tts_narrator.provider.random.uniform", return_value=0), self.assertLogs("epub_tts_narrator.provider"):
+            self.assertEqual(client.complete("Analyze", {}), {"characters": []})
+        self.assertEqual(self.opener.open.call_count, 2)
+        sleep.assert_called_once_with(5.0)
+        self.opener.open.reset_mock()
+        self.opener.open.side_effect = [StalledStream(partial, stall_after=0)]
+        with self.assertRaises(ProviderError) as caught:
+            OpenAICompatibleClient("model").complete("Analyze", {})
+        self.assertIn("stalled", str(caught.exception))
+        self.assertTrue(caught.exception.retryable)
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_stream_reads_tighten_socket_timeouts_for_stall_detection(self):
+        stream = SocketBackedResponse(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]"))
+        self.addCleanup(stream.sock.close)
+        self.opener.open.return_value = stream
+        client = OpenAICompatibleClient("model", timeout=900, stall_timeout=100)
+        self.assertEqual(client.first_byte_timeout, 500.0)
+        self.assertEqual(client.complete("Analyze", {}), {"characters": []})
+        self.assertEqual(stream.sock.timeouts, [500.0, 100.0])
+        self.assertEqual(OpenAICompatibleClient("model").first_byte_timeout, 120.0)
+
+    def test_stream_socket_detection_requires_a_real_socket(self):
+        server, client_socket = socket.socketpair()
+        try:
+            stream = SimpleNamespace(fp=SimpleNamespace(raw=SimpleNamespace(_sock=client_socket)))
+            self.assertIs(OpenAICompatibleClient._stream_socket(stream), client_socket)
+        finally:
+            server.close()
+            client_socket.close()
+        self.assertIsNone(OpenAICompatibleClient._stream_socket(FakeResponse(b"")))
+
+    def test_progress_callback_reports_increasing_counts_only(self):
+        seen = []
+        client = OpenAICompatibleClient("model", progress_callback=seen.append)
+        self.respond(sse(delta('{"cha'), delta('racters": []}'), delta_end("stop"), "[DONE]"))
+        self.assertEqual(client.complete("Analyze", {}), {"characters": []})
+        self.assertTrue(seen)
+        self.assertEqual(seen, sorted(seen))
+        self.assertTrue(all(isinstance(count, int) for count in seen))
+        self.assertGreater(seen[-1], 0)
+
+    def test_non_sse_and_malformed_streams_fail_clean_without_retry(self):
+        for body, pattern in (
+            (b"hello world\n", "not valid JSON"),
+            (b"data: not json\n\n", "not valid JSON"),
+            (b'data: {"x": 1}\n\noops: broken\n\n', "server-sent event"),
+            (b"data: \xff\n\n", "UTF-8"),
+        ):
+            self.opener.open.reset_mock()
+            self.respond(body)
+            with self.subTest(body=body), self.assertRaisesRegex(ProviderError, pattern) as caught:
+                OpenAICompatibleClient("model", max_retries=3).complete("Analyze", {})
+            self.opener.open.assert_called_once()
+            self.assertNotIn("private", str(caught.exception))
+
+    def test_streamed_bytes_are_bounded(self):
+        self.respond(sse(delta('{"char'), delta('acters": []}'), "[DONE]"))
+        with patch("epub_tts_narrator.provider.MAX_RESPONSE_BYTES", 32), self.assertRaisesRegex(ProviderError, "16 MiB"):
+            OpenAICompatibleClient("model").complete("Analyze", {})
 
 
 if __name__ == "__main__":

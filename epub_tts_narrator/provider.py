@@ -20,6 +20,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BYTES = 64 * 1024
+_MAX_STREAM_LINE_BYTES = 1024 * 1024
 _TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 _TRANSIENT_CONNECTION_ERRNOS = {
     errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED,
@@ -143,9 +144,12 @@ def _transient_transport(error: BaseException) -> bool:
 class OpenAICompatibleClient:
     """Send completions with bounded request retries; callers cache and resume work.
 
-    Credentials are deliberately excluded from ``identity``. An omitted key is
-    supported for local inference servers. This module does not read environment
-    variables or choose a default model.
+    Requests stream (server-sent events) so a stalled connection is detected
+    within ``stall_timeout`` instead of waiting out the full request timeout,
+    while ``identity`` — and therefore every request-cache key — stays
+    unchanged. Credentials are deliberately excluded from ``identity``. An
+    omitted key is supported for local inference servers. This module does not
+    read environment variables or choose a default model.
     """
 
     def __init__(
@@ -161,6 +165,8 @@ class OpenAICompatibleClient:
         max_retries: int = 0,
         retry_initial_delay: float = 5.0,
         retry_max_delay: float = 60.0,
+        stall_timeout: float = 120.0,
+        progress_callback=None,
     ):
         if not isinstance(model, str) or not model.strip():
             raise ProviderError("A nonempty model name is required.")
@@ -191,6 +197,16 @@ class OpenAICompatibleClient:
                 raise ProviderError("API retry delays must be numbers from 1 to 60 seconds.")
         if retry_initial_delay > retry_max_delay:
             raise ProviderError("The initial API retry delay must not exceed the maximum delay.")
+        if isinstance(stall_timeout, bool) or not isinstance(stall_timeout, (int, float)):
+            raise ProviderError("The API stall timeout must be a positive, finite number.")
+        try:
+            valid_stall = math.isfinite(stall_timeout) and stall_timeout > 0
+        except OverflowError:
+            valid_stall = False
+        if not valid_stall:
+            raise ProviderError("The API stall timeout must be a positive, finite number.")
+        if progress_callback is not None and not callable(progress_callback):
+            raise ProviderError("The stream progress callback must be callable or None.")
         if api_key is not None:
             if not isinstance(api_key, str) or any(
                 ord(char) < 32 or ord(char) > 126 for char in api_key
@@ -207,6 +223,12 @@ class OpenAICompatibleClient:
         self.max_retries = max_retries
         self.retry_initial_delay = float(retry_initial_delay)
         self.retry_max_delay = float(retry_max_delay)
+        self.stall_timeout = float(stall_timeout)
+        self.progress_callback = progress_callback
+        # Reasoning models may pause minutes before the first stream byte, so
+        # initial silence gets a longer allowance than inter-chunk gaps, and
+        # never beyond the overall request timeout.
+        self.first_byte_timeout = min(self.timeout, self.stall_timeout * 5.0)
         self._api_key = api_key
         self._opener = build_opener(_NoRedirect())
 
@@ -244,6 +266,9 @@ class OpenAICompatibleClient:
                 body[self.token_limit_field] = self.max_output_tokens
             if self.reasoning_effort is not None:
                 body["reasoning_effort"] = self.reasoning_effort
+            # Streaming changes only the wire transport; identity and the
+            # request-cache inputs never see it.
+            body["stream"] = True
             encoded = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (ValueError, TypeError, OverflowError, RecursionError):
             raise ProviderError("The completion payload cannot be encoded as JSON.") from None
@@ -260,6 +285,7 @@ class OpenAICompatibleClient:
         except UnicodeDecodeError:
             raise ProviderError("The API response is not valid UTF-8 JSON.") from None
         result = _json_object(text, "The API response")
+
         if result.get("error") is not None:
             raise ProviderError("The API returned an error response.")
         choices = result.get("choices")
@@ -298,12 +324,17 @@ class OpenAICompatibleClient:
                     if not 200 <= response.status < 300:
                         failure = self._http_failure(response.status, getattr(response, "headers", {}), response)
                     else:
-                        return response.read(MAX_RESPONSE_BYTES + 1)
+                        return self._read_response(response)
             except HTTPError as error:
                 try:
                     failure = self._http_failure(error.code, error.headers, error)
                 finally:
                     error.close()
+            except ProviderError as error:
+                # Streamed reads classify their own failures (stall and early
+                # end are retryable; malformed bodies are not), so they share
+                # the same bounded retry budget as transport failures.
+                failure = error
             except (TimeoutError, URLError, OSError, HTTPException, ValueError) as error:
                 # Only typed transient failures may retry. Never surface raw
                 # reasons, URLs, partial response bodies, or TLS diagnostics.
@@ -332,6 +363,128 @@ class OpenAICompatibleClient:
                                 attempt + 1, self.max_retries, delay)
             time.sleep(delay)
         raise AssertionError("Unreachable retry state")
+
+    def _read_response(self, response) -> bytes:
+        """Return one 200 response body as raw completion-envelope bytes.
+
+        Bodies are either a server-sent event stream or a legacy JSON object
+        from a server that ignored ``stream``; bytes are bounded by
+        MAX_RESPONSE_BYTES on both paths.
+        """
+        sock = self._stream_socket(response)
+        if sock is not None:
+            sock.settimeout(self.first_byte_timeout)
+        first = self._guarded_readline(response)
+        if first.lstrip().startswith((b"data:", b"event:", b"id:", b"retry:", b":")):
+            return self._read_stream(response, first, sock)
+        body = first + response.read(MAX_RESPONSE_BYTES + 1)
+        self._progress(len(body))
+        return body
+
+    def _read_stream(self, response, first: bytes, sock) -> bytes:
+        """Assemble a completion SSE stream into the raw completion-envelope bytes."""
+        content_parts: list[str] = []
+        role = None
+        refusal = None
+        finish_reason = None
+        data_lines: list[str] = []
+        received = 0
+        saw_done = False
+        raw = first
+        while raw:
+            received += len(raw)
+            if received > MAX_RESPONSE_BYTES:
+                raise ProviderError("The API response exceeds the 16 MiB limit.")
+            self._progress(received)
+            if sock is not None:
+                # Bytes are flowing; silence from here on is an inter-chunk
+                # stall, bounded by the overall request timeout.
+                sock.settimeout(min(self.stall_timeout, self.timeout))
+                sock = None
+            try:
+                line = raw.decode("utf-8").rstrip("\r\n")
+            except UnicodeDecodeError:
+                raise ProviderError("The API response stream is not valid UTF-8.") from None
+            if line:
+                if line.startswith(":"):
+                    pass
+                else:
+                    field, sep, value = line.partition(":")
+                    if field == "data" and sep:
+                        data_lines.append(value[1:] if value.startswith(" ") else value)
+                    elif field in {"event", "id", "retry"} and sep:
+                        pass
+                    else:
+                        raise ProviderError("The API response stream is not a valid server-sent event stream.")
+            elif data_lines:
+                payload = "\n".join(data_lines)
+                data_lines = []
+                if payload.strip() == "[DONE]":
+                    saw_done = True
+                    break
+                if not payload.strip():
+                    continue
+                chunk = _json_object(payload, "The API response stream")
+                if chunk.get("error") is not None:
+                    raise self._stream_error(chunk["error"])
+                choices = chunk.get("choices")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    choice = choices[0]
+                    if choice.get("finish_reason") is not None:
+                        finish_reason = choice["finish_reason"]
+                    stream_delta = choice.get("delta")
+                    if isinstance(stream_delta, dict):
+                        piece = stream_delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            content_parts.append(piece)
+                        piece = stream_delta.get("role")
+                        if isinstance(piece, str) and piece:
+                            role = piece
+                        piece = stream_delta.get("refusal")
+                        if isinstance(piece, str) and piece:
+                            refusal = piece
+                        # delta.reasoning_content / delta.reasoning carry thinking
+                        # tokens, not content, and are deliberately not accumulated.
+            raw = self._guarded_readline(response)
+        if not saw_done:
+            raise ProviderError("The API response stream ended before the model finished.", retryable=True)
+        message = {"role": role or "assistant", "content": "".join(content_parts)}
+        if refusal is not None:
+            message["refusal"] = refusal
+        envelope = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+        return json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+    def _guarded_readline(self, response) -> bytes:
+        try:
+            return response.readline(_MAX_STREAM_LINE_BYTES)
+        except TimeoutError:
+            # The per-read socket timeout is the stall detector: bytes stopped
+            # arriving. This is a retryable transport failure, never a partial
+            # success.
+            raise ProviderError("The API stream stalled and stopped delivering data.", retryable=True) from None
+
+    @staticmethod
+    def _stream_socket(response):
+        # urllib keeps the per-read socket timeout chosen at open() time; reach
+        # the socket to tighten it for stream reads. This is the http.client
+        # layout; other response types keep the original timeout as backstop.
+        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        return sock if isinstance(sock, socket.socket) else None
+
+    @staticmethod
+    def _stream_error(details) -> ProviderError:
+        # Mid-stream error chunks classify like HTTP error envelopes: only
+        # known safe codes are exposed, and an explicit nonretryable verdict
+        # from the provider always wins.
+        details = details if isinstance(details, dict) else {}
+        raw_code = details.get("code")
+        code = raw_code if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES else None
+        retryable = details.get("retryable") is not False and code not in _NONRETRYABLE_CODES
+        return ProviderError("The API returned an error response.", code=code, retryable=retryable)
+
+    def _progress(self, received: int) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(received)
 
     @classmethod
     def _http_failure(cls, status: int, headers, response) -> ProviderError:
