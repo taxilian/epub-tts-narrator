@@ -51,6 +51,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 ## CONVENTIONS
 
 - Renderer imports are direct submodule imports; `__init__.py` exports nothing.
+- `voice_prompts.py` validates descriptions without adding age, actor, or context prefixes. The LLM authors relevant portrayal context once in its prose. Recognize historical application wrappers only for stripping old drafts and comparing recovery provenance; never rewrite saved requests or selected voices merely to remove a wrapper.
 - Expressive plans bind approved spoken text, never replace canonical source or voice identity. Compile only validated structured metadata; raw book markup stays untrusted. Keep legacy request/cache identities unchanged when no plan is supplied.
 - `prepare_synthesis` is shared by adapters and speech cache identity; edge trimming projects controls by retained code-point indices. Text-only rewrite/split recovery is disabled for expressive leaves until it can preserve those bindings; fallback to original paragraph turns retains each turn's controls.
 - `compare-performance` freezes selected references and source in its own directory. Its frozen voice store cannot create voices, and `_preflight` must use the supplied store directly rather than derive aliases again. Both modes use one engine instance, independent verified caches, source timing, and a local HTML listening report.

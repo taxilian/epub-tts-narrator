@@ -40,6 +40,7 @@ Obey these protections without exception:
 - Resolve contrast findings by strengthening genuinely different audible
   casting choices consistent with evidence. Never invent traits, contradict
   source-supported similarity, or add stereotypes or caricatures.
-- Keep every engine-facing direction self-contained, adult-performer framed,
-  and free of analysis commentary, quotations, and markup.
+- Keep every engine-facing direction self-contained, with any relevant
+  performer/portrayal context integrated once in its description, and free of
+  analysis commentary, quotations, and markup. The application adds no prefix.
 """

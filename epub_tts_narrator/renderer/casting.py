@@ -171,6 +171,9 @@ class CastingSession:
 
     def _sample_draft(self, prompt, text, source, voice_id):
         from .samples import sample_word_count
+        # Present old drafts without application framing; stored requests and
+        # selected recordings retain their original provenance unchanged.
+        prompt = voice_prompt_description(prompt)
         # A user-entered script or an established book excerpt survives later
         # books. Legacy defaults and short automatic scripts acquire a fuller
         # audition. This never edits a saved audio transcript or cloning audio.
@@ -230,8 +233,19 @@ class CastingSession:
         }
         record = {**payload, "sha256": digest(payload)}
         path = self._draft_path(voice_id)
-        if path.exists() and read_json(path) == record:
-            return False
+        if path.exists():
+            previous = read_json(path)
+            if previous == record:
+                return False
+            # Reading or generating from a legacy draft removes its wrapper in
+            # memory. That presentation-only change must not rewrite the file.
+            if (isinstance(previous, dict) and isinstance(previous.get("prompt"), str)
+                    and previous.get("sha256") == digest({
+                        key: value for key, value in previous.items() if key != "sha256"})
+                    and {key: value for key, value in previous.items() if key not in {"prompt", "sha256"}}
+                    == {key: value for key, value in record.items() if key not in {"prompt", "sha256"}}
+                    and voice_prompt_description(previous["prompt"]) == record["prompt"]):
+                return False
         write_json(path, record)
         return True
 
@@ -275,7 +289,7 @@ class CastingSession:
                     # _draft validates an existing record before selecting a
                     # replacement sample. Missing speech must not discard an
                     # independently useful edited voice direction.
-                    current_prompts[canonical] = (
+                    current_prompts[canonical] = voice_prompt_description(
                         read_json(path)["prompt"] if path.exists() else
                         (saved or {}).get("creation", {}).get("requested_description")
                         or _default_voice_prompt(profile))
@@ -340,7 +354,8 @@ class CastingSession:
                 # and cannot synthesize an unprepared placeholder.
                 creation = selected.get("creation", {}) if selected else {}
                 draft = {
-                    "prompt": creation.get("requested_description", _default_voice_prompt(self._profile(voice_id))),
+                    "prompt": voice_prompt_description(creation.get(
+                        "requested_description", _default_voice_prompt(self._profile(voice_id)))),
                     "reference_text": selected["reference_text"] if selected else "",
                     "sample_source": {"kind": "unprepared", "reason": str(exc)},
                 }

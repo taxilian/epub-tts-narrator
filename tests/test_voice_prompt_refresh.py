@@ -13,7 +13,7 @@ from epub_tts_narrator.prompts import COMMON, VOICE_PROFILE_GUIDANCE
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.voice_prompt_refresh import refresh_bundle_prompts, refresh_voice_descriptions, validate_description
 from epub_tts_narrator.voice_refresh_prompts import SYSTEM
-from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, MAX_PROMPT_CHARACTERS
+from epub_tts_narrator.renderer.voice_prompts import MAX_PROMPT_CHARACTERS
 from test_audition_scripts import bundle
 
 
@@ -198,7 +198,7 @@ class VoicePromptRefreshTests(unittest.TestCase):
     def test_empty_selection_requires_no_model_and_writes_nothing(self):
         self.assertEqual(refresh_voice_descriptions(bundle(), None, voice_ids=[])["prompts"], {})
 
-    def test_invalid_response_shape_plain_text_and_final_prefix_limit_are_rejected(self):
+    def test_invalid_response_shape_plain_text_and_actual_description_limit_are_rejected(self):
         for value in ({"description": DESCRIPTION}, {**RESPONSE, "voice_id": "changed"},
                       {**RESPONSE, "description": ""}, {**RESPONSE, "description": "123"},
                       {**RESPONSE, "description": "[whisper] A voice."},
@@ -209,7 +209,7 @@ class VoicePromptRefreshTests(unittest.TestCase):
                       {**RESPONSE, "reason": ""}, {**RESPONSE, "reason": "x" * 1001}):
             with self.subTest(value=str(value)[:100]), self.assertRaises(ValueError):
                 validate_description(value)
-        valid = dict(RESPONSE, description="x" * (MAX_PROMPT_CHARACTERS - len(AUDIOBOOK_VOICE_CONTEXT) - 1))
+        valid = dict(RESPONSE, description="x" * MAX_PROMPT_CHARACTERS)
         self.assertEqual(validate_description(valid), valid)
         with self.assertRaises(ValueError):
             validate_description(dict(valid, description=valid["description"] + "x"))

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.common import read_json
-from epub_tts_narrator.renderer.voice_prompts import audiobook_voice_prompt
+from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
 from epub_tts_narrator.renderer.samples import MissingSampleScript
 from epub_tts_narrator.provider import ProviderError
 import test_renderer_sample_drafts as drafts_fixture
@@ -79,7 +79,7 @@ class PromptRefreshTests(unittest.TestCase):
                 if existing_draft:
                     expected = "My precise correction: a deep gravelly male voice."
                     self.session._save_draft(self.voice_id, {
-                        "prompt": expected, "reference_text": "Too short.",
+                        "prompt": AUDIOBOOK_VOICE_CONTEXT + " " + expected, "reference_text": "Too short.",
                         "sample_source": {"kind": "book_excerpt"}})
                 self.helpers()
                 with patch.object(self.session, "_sample_default", side_effect=MissingSampleScript("No script")), \

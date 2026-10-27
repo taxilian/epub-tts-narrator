@@ -1,4 +1,4 @@
-"""Audiobook context belongs in design prompts, never the spoken script."""
+"""Authored descriptions pass through unchanged, without automatic context."""
 
 import unittest
 
@@ -9,6 +9,7 @@ from epub_tts_narrator.renderer.voice_prompts import (
 
 
 LEGACY_PREFIXES = (
+    AUDIOBOOK_VOICE_CONTEXT + " ",
     "Adult audiobook narrator portraying a character in a book. "
     "Create an adult performer's imitation of the following vocal qualities: ",
     "audiobook narrator portraying a character in a book: ",
@@ -17,55 +18,75 @@ LEGACY_PREFIXES = (
 
 
 class AudiobookVoicePromptTests(unittest.TestCase):
-    def test_context_is_explicit_and_custom_direction_is_preserved_exactly(self):
+    def test_custom_direction_is_preserved_exactly_without_auto_context(self):
         direction = "  A thin, high rasp.\nKeep the character's urgent cadence.  "
         self.assertEqual(
             audiobook_voice_prompt(direction),
-            AUDIOBOOK_VOICE_CONTEXT + " " + direction,
+            direction,
         )
 
-    def test_youthful_character_uses_audiobook_context_and_preserves_description(self):
+    def test_youthful_character_description_does_not_trigger_added_context(self):
         description = "A young girl's light, bright tone with crisp consonants and lively phrasing."
         prompt = default_voice_prompt({"description": description})
-        self.assertTrue(prompt.startswith("Adult voice mimicking a character that sounds like "))
-        self.assertTrue(prompt.endswith(description))
+        self.assertEqual(prompt, description)
 
-    def test_old_context_is_upgraded_once_and_still_matches_its_description(self):
+    def test_redundant_user_example_keeps_only_the_authored_adult_portrayal(self):
+        description = (
+            "An adult woman voice actor portraying a teenage girl through voice acting, "
+            "with a bright forward mid-high tone, crisp consonants, and a quick, sardonic "
+            "matter-of-fact cadence that drips playful disdain; General American with a "
+            "light Southern rounding."
+        )
+        prompt = AUDIOBOOK_VOICE_CONTEXT + " " + description
+        self.assertEqual(audiobook_voice_prompt(prompt), description)
+        self.assertEqual(audiobook_voice_prompt(description), description)
+        self.assertEqual(default_voice_prompt({"description": prompt}), description)
+
+    def test_old_context_is_removed_once_and_still_matches_its_description(self):
         description = "A bright, youthful character with light resonance."
         for prefix in LEGACY_PREFIXES:
             with self.subTest(prefix=prefix):
                 old = prefix + description
                 new = audiobook_voice_prompt(old)
-                self.assertTrue(new.startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+                self.assertEqual(new, description)
                 self.assertEqual(new, audiobook_voice_prompt(description))
                 self.assertEqual(voice_prompt_description(old), description)
                 self.assertEqual(voice_prompt_description(new), description)
                 self.assertEqual(audiobook_voice_prompt(new), new)
 
-    def test_default_prompt_recognizes_wrappers_before_normalizing_prose(self):
+    def test_default_prompt_strips_historical_wrappers_without_normalizing_prose(self):
         description = "A clear,\n measured voice."
-        expected = AUDIOBOOK_VOICE_CONTEXT + " A clear, measured voice."
-        for prefix in ("", AUDIOBOOK_VOICE_CONTEXT + " ", *LEGACY_PREFIXES):
+        for prefix in ("", *LEGACY_PREFIXES):
             with self.subTest(prefix=prefix):
                 first = default_voice_prompt({"description": prefix + description})
-                self.assertEqual(first, expected)
-                self.assertEqual(default_voice_prompt({"description": first}), expected)
-                self.assertEqual(first.count(AUDIOBOOK_VOICE_CONTEXT), 1)
+                self.assertEqual(first, description)
+                self.assertEqual(default_voice_prompt({"description": first}), description)
+
+    def test_stacked_historical_wrappers_are_removed_in_one_idempotent_pass(self):
+        description = "An adult performer with a light, dry rasp.\nPreserve  this spacing.  "
+        for first in LEGACY_PREFIXES:
+            for second in LEGACY_PREFIXES:
+                with self.subTest(first=first, second=second):
+                    wrapped = first + second + description
+                    self.assertEqual(voice_prompt_description(wrapped), description)
+                    self.assertEqual(audiobook_voice_prompt(wrapped), description)
+                    self.assertEqual(default_voice_prompt({"description": wrapped}), description)
+                    self.assertEqual(audiobook_voice_prompt(audiobook_voice_prompt(wrapped)), description)
 
     def test_known_wrappers_preserve_custom_description_bytes_without_broad_stripping(self):
         description = "A thin, high rasp.\nKeep this  spacing.  "
-        for prefix in (AUDIOBOOK_VOICE_CONTEXT + " ", *LEGACY_PREFIXES):
+        for prefix in LEGACY_PREFIXES:
             with self.subTest(prefix=prefix):
                 self.assertEqual(voice_prompt_description(prefix + description), description)
-                self.assertEqual(audiobook_voice_prompt(prefix + description),
-                                 AUDIOBOOK_VOICE_CONTEXT + " " + description)
+                self.assertEqual(audiobook_voice_prompt(prefix + description), description)
         # Longer custom whitespace is not mistaken for the exact historical
         # double-space separator, and new custom input remains byte-exact.
         for leading in ("  ", "\t", "\n"):
             custom = leading + description
-            wrapped = audiobook_voice_prompt(custom)
+            wrapped = AUDIOBOOK_VOICE_CONTEXT + " " + custom
             self.assertEqual(voice_prompt_description(wrapped), custom)
-            self.assertEqual(audiobook_voice_prompt(wrapped), wrapped)
+            self.assertEqual(audiobook_voice_prompt(wrapped), custom)
+            self.assertEqual(audiobook_voice_prompt(custom), custom)
 
     def test_gemini_recovery_matches_all_known_wrappers_without_changing_saved_requests(self):
         from copy import deepcopy
@@ -86,34 +107,43 @@ class AudiobookVoicePromptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonempty"):
             audiobook_voice_prompt(AUDIOBOOK_VOICE_CONTEXT + " ")
 
-    def test_reapplying_context_does_not_duplicate_it(self):
-        prompt = AUDIOBOOK_VOICE_CONTEXT + " A clear, measured voice."
-        self.assertEqual(audiobook_voice_prompt(prompt), prompt)
-        self.assertEqual(audiobook_voice_prompt(audiobook_voice_prompt(prompt)), prompt)
+    def test_authored_context_is_not_removed_or_rewritten(self):
+        for description in (
+                "An adult actor portraying a young character with light resonance.",
+                "Adult voice, bright and clear, with precise diction.",
+                "A fictional creature with a sharp, reedy voice.",
+                "The voice sounds like an adult audiobook narrator portraying a character."):
+            with self.subTest(description=description):
+                self.assertEqual(audiobook_voice_prompt(description), description)
+                self.assertEqual(audiobook_voice_prompt(audiobook_voice_prompt(description)), description)
 
-    def test_default_context_excludes_trait_fields_and_source_evidence(self):
+    def test_default_description_excludes_trait_fields_and_source_evidence(self):
         prompt = default_voice_prompt({
             "description": " A clear\n voice. ",
             "traits": [{"name": "pitch", "value": "medium-low",
                         "evidence": [{"quote": "This is a source quotation."}]}],
         })
-        self.assertEqual(prompt, AUDIOBOOK_VOICE_CONTEXT + " A clear voice.")
+        self.assertEqual(prompt, " A clear\n voice. ")
         self.assertNotIn("source quotation", prompt)
         self.assertEqual(audiobook_voice_prompt(prompt), prompt)
 
-    def test_maximum_custom_direction_fits_with_context(self):
-        direction = "x" * (MAX_PROMPT_CHARACTERS - len(AUDIOBOOK_VOICE_CONTEXT) - 1)
+    def test_maximum_custom_direction_uses_the_complete_description_budget(self):
+        direction = "x" * MAX_PROMPT_CHARACTERS
         prompt = audiobook_voice_prompt(direction)
         self.assertEqual(len(prompt), MAX_PROMPT_CHARACTERS)
-        self.assertTrue(prompt.endswith(direction))
+        self.assertEqual(prompt, direction)
         self.assertEqual(audiobook_voice_prompt(prompt), prompt)
+        self.assertEqual(default_voice_prompt({"description": direction}), direction)
+        for prefix in LEGACY_PREFIXES:
+            with self.subTest(prefix=prefix):
+                self.assertEqual(audiobook_voice_prompt(prefix + direction), direction)
 
     def test_overlong_custom_direction_is_rejected_instead_of_trimmed(self):
-        direction = "x" * (MAX_PROMPT_CHARACTERS - len(AUDIOBOOK_VOICE_CONTEXT))
+        direction = "x" * (MAX_PROMPT_CHARACTERS + 1)
         with self.assertRaisesRegex(ValueError, "4000"):
             audiobook_voice_prompt(direction)
         with self.assertRaisesRegex(ValueError, "4000"):
-            audiobook_voice_prompt(AUDIOBOOK_VOICE_CONTEXT + " " + "x" * 4000)
+            audiobook_voice_prompt(AUDIOBOOK_VOICE_CONTEXT + " " + direction)
 
     def test_complete_description_avoids_repeating_traits_and_keeps_harsh_identity(self):
         description = ("An elderly fictional creature with a thin, reedy tone and a harsh dry rasp. "

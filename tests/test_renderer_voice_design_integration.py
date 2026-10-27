@@ -168,7 +168,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
         session.update_prompt(self.voice_id, prompt, text)
         selected = session.regenerate(self.voice_id)
         self.assertEqual(len(self.designer.calls), 1)
-        self.assertEqual(self.designer.calls[0]["prompt"], audiobook_voice_prompt(prompt))
+        self.assertEqual(self.designer.calls[0]["prompt"], prompt)
         self.assertEqual(self.designer.calls[0]["text"], text)
         self.assertEqual(self.engine.calls, [])
         self.assertEqual(self.factory_calls, [self.config["voice_design"]])
@@ -214,7 +214,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
             session.store, self.voice_id, profile, self.engine, self.verifier,
             self.config, self.config["render"]["work_dir"], designer=self.designer,
             notify=lambda _: None)
-        expected = audiobook_voice_prompt(description)
+        expected = description
         self.assertEqual(self.designer.calls[0]["prompt"], expected)
         self.assertEqual(selected["creation"]["requested_description"], expected)
 
@@ -225,7 +225,7 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
             {"name": "timbre", "value": "slightly husky",
              "basis": "casting", "evidence": [{"quote": "Do not speak this evidence."}]},
         ])
-        expected = audiobook_voice_prompt("A reserved speaker.")
+        expected = "A reserved speaker."
         selected = ensure_voice(
             session.store, self.voice_id, profile, self.engine, self.verifier,
             self.config, self.config["render"]["work_dir"], designer=self.designer,
@@ -244,6 +244,20 @@ class VoiceDesignIntegrationTests(unittest.TestCase):
             notify=lambda _: None)
         self.assertEqual(retained["asset_hash"], selected["asset_hash"])
         self.assertEqual(len(self.designer.calls), 1)
+
+    def test_automatic_creation_strips_old_wrapper_but_keeps_authored_context_and_spacing(self):
+        session = self.new_session()
+        profile = deepcopy(self.bundle["cast"]["voices"][0])
+        description = "An adult actor portraying a young character.\nKeep the light  resonance.  "
+        profile["description"] = "Adult voice mimicking a character that sounds like " + description
+        original = deepcopy(profile)
+        selected = ensure_voice(
+            session.store, self.voice_id, profile, self.engine, self.verifier,
+            self.config, self.config["render"]["work_dir"], designer=self.designer,
+            notify=lambda _: None)
+        self.assertEqual(self.designer.calls[0]["prompt"], description)
+        self.assertEqual(selected["creation"]["requested_description"], description)
+        self.assertEqual(profile, original)
 
     def test_designer_failure_cannot_fall_back_to_random_casting(self):
         session = self.new_session()

@@ -151,7 +151,7 @@ class CastingTests(unittest.TestCase):
         ]
         session = self.new_session()
         self.addCleanup(session.close)
-        expected = audiobook_voice_prompt("A calm young man.")
+        expected = "A calm young man."
         self.assertEqual(session.rows()[0]["prompt"], expected)
         session.generate(self.voice_id)
         self.assertEqual(self.engine.calls[0]["prompt"], expected)
@@ -181,7 +181,7 @@ class CastingTests(unittest.TestCase):
         request = read_json(requests[0])["request"]
         self.assertEqual(request["prompt"], audiobook_voice_prompt(custom))
         self.assertEqual(request["text"], script)
-        self.assertEqual(request["prompt"].count(AUDIOBOOK_VOICE_CONTEXT), 1)
+        self.assertEqual(request["prompt"], custom)
 
     def test_established_creation_prompt_is_preserved_without_a_draft(self):
         custom = "  Established voice.\nKeep this wording.  "
@@ -189,6 +189,43 @@ class CastingTests(unittest.TestCase):
                     "reference_text": "An established sample."}
         draft = self.session._draft(self.voice_id, selected)
         self.assertEqual(draft["prompt"], custom)
+
+    def test_historical_draft_wrapper_is_hidden_without_rewriting_saved_draft(self):
+        description = "An adult woman portraying a girl with a light, bright tone.\nKeep this  spacing."
+        legacy = AUDIOBOOK_VOICE_CONTEXT + " " + description
+        self.session.update_prompt(self.voice_id, legacy)
+        path = self.session._draft_path(self.voice_id)
+        original = path.read_bytes()
+        self.assertEqual(self.session.rows()[0]["prompt"], description)
+        self.assertEqual(path.read_bytes(), original)
+        selected = self.session.generate(self.voice_id)
+        self.assertEqual(self.engine.calls[-1]["prompt"], description)
+        self.assertEqual(selected["creation"]["requested_description"], description)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_historical_selected_description_is_hidden_without_changing_provenance(self):
+        description = "An adult woman portraying a girl with a light, bright tone."
+        legacy = AUDIOBOOK_VOICE_CONTEXT + " " + description
+        selected = {"creation": {"requested_description": legacy},
+                    "reference_text": "An established sample."}
+        before = deepcopy(selected)
+        self.assertEqual(self.session._draft(self.voice_id, selected)["prompt"], description)
+        self.assertEqual(selected, before)
+
+    def test_missing_script_listing_removes_legacy_context_without_editing_selected_voice(self):
+        from epub_tts_narrator.renderer.samples import MissingSampleScript
+        description = "An adult performer with clear diction and warm resonance."
+        selected = {"creation": {"requested_description": AUDIOBOOK_VOICE_CONTEXT + " " + description,
+                                 "sample_source": {"kind": "book_excerpt"}},
+                    "reference_text": "Too short."}
+        before = deepcopy(selected)
+        with patch.object(self.session.store, "load", return_value=selected), \
+                patch.object(self.session, "_sample_default", side_effect=MissingSampleScript("No script")):
+            row = self.session.rows()[0]
+        self.assertEqual(row["prompt"], description)
+        self.assertEqual(row["sample_source"]["kind"], "unprepared")
+        self.assertEqual(selected, before)
+        self.assertEqual(self.engine_factories, [])
 
     def test_overlong_default_stops_before_loading_engine_or_creating_draft(self):
         self.bundle["cast"]["voices"][0]["description"] = "A rounded resonant voice. " * 500
@@ -210,7 +247,7 @@ class CastingTests(unittest.TestCase):
         self.addCleanup(session.close)
         script = session.rows()[0]["reference_text"]
         selected = session.generate(self.voice_id)
-        expected = audiobook_voice_prompt(description)
+        expected = description
         self.assertEqual(self.engine.calls[0]["prompt"], expected)
         self.assertEqual(self.engine.calls[0]["text"], script)
         self.assertEqual(selected["creation"]["requested_description"], expected)
@@ -297,16 +334,14 @@ class CastingTests(unittest.TestCase):
                     self.session.update_prompt(self.voice_id, **fields)
         self.assertFalse((self.root / "voices").exists())
 
-    def test_context_length_limit_stops_generation_without_trimming_custom_draft(self):
+    def test_complete_description_budget_reaches_generation_without_trimming_custom_draft(self):
         prompt = "x" * MAX_PROMPT_CHARACTERS
         self.session.update_prompt(self.voice_id, prompt)
         before = self.session._draft_path(self.voice_id).read_bytes()
-        with self.assertRaisesRegex(ValueError, "4000"):
-            self.session.generate(self.voice_id)
-        self.assertEqual(self.engine.calls, [])
+        candidate = self.session.generate(self.voice_id)
+        self.assertEqual(self.engine.calls[0]["prompt"], prompt)
+        self.assertEqual(candidate["creation"]["requested_description"], prompt)
         self.assertIsNone(self.session.store.load(self.voice_id))
-        self.assertEqual(self.engine_factories, [])
-        self.assertEqual(self.verifier_factories, [])
         self.assertEqual(self.session._draft_path(self.voice_id).read_bytes(), before)
         self.assertEqual(self.session.rows()[0]["prompt"], prompt)
 

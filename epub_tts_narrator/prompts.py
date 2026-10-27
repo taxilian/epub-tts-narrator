@@ -29,10 +29,15 @@ Keep persistent vocal identity separate from a passage's local delivery.
 """
 
 VOICE_PROFILE_GUIDANCE = """
-VOICE PROFILE CONTRACT v7
+VOICE PROFILE CONTRACT v8
 Write voice.description as a complete voice-creation prompt in one or two
 concise sentences. Describe concrete, audible characteristics: typical pitch,
 resonance, vocal weight, texture, accent, articulation, and natural cadence.
+The application never adds a context or adult-performer prefix. Write any
+relevant performer age, gender presentation, and portrayal context naturally
+in the description itself, once. Choose wording for this particular voice;
+do not stack introductions or repeat the same idea as actor, imitation, and
+portrayal boilerplate.
 The system interpreting this prompt knows nothing about the book. Make each
 description self-contained: never rely on familiarity with character names,
 species names, fictional places, lore, or book-specific terminology to convey
@@ -49,25 +54,16 @@ cast or claim to have compared it. Characters who share scenes should differ
 clearly in at least two audible dimensions, such as register, texture, pace,
 and accent. Give major recurring characters the most distinctive voices; minor
 characters can be simpler but should not duplicate a major character's sound.
-Every voice is performed by an adult voice actor, and every description makes
-that adult its subject. The character's age describes the portrayal, not the
-performer. If wording could be interpreted as requesting a young-sounding voice,
-make unmistakably clear that the performer is an adult using voice acting to
-portray a younger character, not an actual child performer or an independent
-child voice. Certain wording can help make that distinction, but no phrase
-guarantees that an engine will accept or follow the request. Keep the adult
-actor as the subject and tie words such as child-like, youthful, or boyish to
-that actor's performed imitation rather than describing a child voice on its
-own. Describe the imitation through techniques an adult actor uses
-(pitch lifted within their natural range, a brighter, more forward tone,
-quicker, bouncier phrasing, wider intonation) rather than an exact childhood
-age. For example: 'An adult woman voice actor portraying a younger character
-through voice acting, lifting pitch within her adult range, with a bright,
-forward tone and quick, bouncy phrasing.' Preserve the character's age in character metadata and source
-evidence; this framing does not change the character's identity or story facts.
-Mature and elderly roles keep their intended vocal qualities within the same
-adult-performer framing. Include gender presentation and fictional context when
-they help establish the intended sound. Translate personality into vocal choices: precise consonants
+Use adult performers for these audiobook roles. For a youthful role, integrate
+one concise adult-actor portrayal into the description, then describe the
+audible performance: a lifted pitch, brighter forward resonance, or quicker
+phrasing. For example: 'An adult woman portraying a teenage character with a
+bright forward mid-high tone, crisp consonants, and a quick, dry cadence.'
+For other roles, mention adult performance only where it clarifies the intended
+sound or creative context; no stock opening is required. Preserve mature,
+elderly, and unusual vocal qualities. Keep the character's actual age and
+source evidence intact in metadata. No phrasing guarantees engine acceptance.
+Translate personality into vocal choices: precise consonants
 and measured phrasing for a meticulous character, or a thin, reedy tone and dry
 rasp for an abrasive creature. Preserve unusual or harsh qualities when they are
 essential to the character. Include only story details that help define sound.

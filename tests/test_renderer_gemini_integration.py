@@ -21,7 +21,7 @@ from epub_tts_narrator.renderer.common import read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS, load_config, select_voice_designer, resolve_voice_design
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voice_prompts import (
-    AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt, voice_prompt_description,
+    audiobook_voice_prompt, voice_prompt_description,
 )
 from epub_tts_narrator.renderer.gemini_voice_design import GeminiVoiceDesigner, _RequestFailure
 from epub_tts_narrator.cli import export_bundle
@@ -224,7 +224,7 @@ class GeminiContextUpgradeRecoveryTests(unittest.TestCase):
         self.assertEqual(Path(reused["reference_audio"]).read_bytes(), original_audio)
         self.assertEqual(len(fixture.designer.calls), 1)
 
-    def test_explicit_regeneration_upgrades_old_context_and_creates_a_new_candidate(self):
+    def test_explicit_regeneration_removes_old_context_and_creates_a_new_candidate(self):
         fixture = self.fixture
         with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
             path, record = fixture.pending()
@@ -233,10 +233,10 @@ class GeminiContextUpgradeRecoveryTests(unittest.TestCase):
         selected = fixture.run(fixture.new_session(), "regenerate")
         self.assertEqual(len(fixture.designer.calls), 2)
         self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
-        self.assertTrue(fixture.designer.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertEqual(fixture.designer.calls[-1][0], voice_prompt_description(record["request"]["prompt"]))
         self.assertEqual(path.read_bytes(), previous)
 
-    def test_non_gemini_pending_verification_uses_new_context_for_new_design(self):
+    def test_non_gemini_pending_verification_uses_unwrapped_description_for_new_design(self):
         from test_renderer_jev_casting_recovery import Fixture
         fixture = Fixture(self, gemini=False)
         with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
@@ -245,12 +245,12 @@ class GeminiContextUpgradeRecoveryTests(unittest.TestCase):
         fixture.verdict = "passed"
         selected = fixture.run(fixture.new_session())
         self.assertEqual(len(fixture.engine.calls), 2)
-        self.assertTrue(fixture.engine.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertEqual(fixture.engine.calls[-1][0], voice_prompt_description(record["request"]["prompt"]))
         self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
         self.assertEqual(selected["creation"]["requested_description"], fixture.engine.calls[-1][0])
         self.assertEqual(path.read_bytes(), previous)
 
-    def test_old_context_without_remote_state_starts_new_design_with_current_context(self):
+    def test_old_context_without_remote_state_starts_new_design_with_unwrapped_description(self):
         fixture = self.fixture
         with patch("epub_tts_narrator.renderer.casting.audiobook_voice_prompt", side_effect=legacy_voice_prompt):
             path, record = fixture.pending()
@@ -259,7 +259,7 @@ class GeminiContextUpgradeRecoveryTests(unittest.TestCase):
         fixture.verdict = "passed"
         selected = fixture.run(fixture.new_session())
         self.assertEqual(len(fixture.designer.calls), 2)
-        self.assertTrue(fixture.designer.calls[-1][0].startswith(AUDIOBOOK_VOICE_CONTEXT + " "))
+        self.assertEqual(fixture.designer.calls[-1][0], voice_prompt_description(record["request"]["prompt"]))
         self.assertNotEqual(selected["candidate_id"], record["request"]["nonce"])
         self.assertEqual(path.read_bytes(), original)
 
@@ -327,7 +327,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         session.update_prompt("voice_mara", prompt, text)
         selected = session.regenerate("voice_mara")
         self.assertEqual(len(self.designer.calls), 1)
-        self.assertEqual(self.designer.calls[0]["prompt"], audiobook_voice_prompt(prompt))
+        self.assertEqual(self.designer.calls[0]["prompt"], prompt)
         self.assertEqual(self.designer.calls[0]["text"], text)
         self.assertEqual(self.factory_calls, [self.config["voice_design"]])
         self.assertEqual(self.engine.calls, [])
@@ -416,19 +416,18 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         return paths[0], calls
 
-    def test_context_is_sent_in_voice_creation_but_not_in_spoken_sample(self):
+    def test_authored_description_is_sent_without_auto_context_or_spoken_sample_changes(self):
         calls = []
         designer = self.remote_designer([{"id": "voice_context_fixture"}], calls)
         session = self.session(designer_factory=lambda _: designer)
-        prompt = "A thin, high rasp with a rapid, urgent pace."
+        prompt = "An adult actor portraying a creature with a thin, high rasp and clipped diction."
         script = "I will meet you at the gate."
         session.update_prompt("voice_mara", prompt, script)
         selected = session.regenerate("voice_mara")
         self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
-        self.assertEqual(calls[0][1]["voice"]["prompted"]["input"],
-                         AUDIOBOOK_VOICE_CONTEXT + " " + prompt)
+        self.assertEqual(calls[0][1]["voice"]["prompted"]["input"], prompt)
         self.assertEqual(calls[1][1]["input"][0]["content"][0]["text"], script)
-        self.assertEqual(selected["creation"]["requested_description"], audiobook_voice_prompt(prompt))
+        self.assertEqual(selected["creation"]["requested_description"], prompt)
         self.assertEqual(selected["reference_text"], script)
         self.assertEqual(session.rows()[0]["prompt"], prompt)
 
