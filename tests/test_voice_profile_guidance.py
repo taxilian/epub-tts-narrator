@@ -11,7 +11,7 @@ import unittest
 
 from epub_tts_narrator.identity import audit_identities
 from epub_tts_narrator.pipeline import analyze, check_cast, make_units, seed_cast
-from epub_tts_narrator.prompts import VOICE_PROFILE_GUIDANCE, VOICE_PROFILE_RECONCILIATION
+from epub_tts_narrator.prompts import DISCOVER, VOICE_PROFILE_GUIDANCE, VOICE_PROFILE_RECONCILIATION
 from test_contracts import valid_document
 from test_identity import Requests, case, fixture, split_patch
 from test_pipeline import FakeClient
@@ -29,9 +29,14 @@ class CapturedIdentityRequests(Requests):
 
 
 class VoiceProfileGuidanceTests(unittest.TestCase):
-    def test_discovery_and_every_reconciliation_route_share_acoustic_contract(self):
-        # Bounded discovery and whole-book reconciliation construct different
-        # request suffixes. Later cumulative rounds must keep the contract too.
+    def test_voice_profile_authoring_routes_only_to_the_ensemble_pass(self):
+        # Discovery and reconciliation gather the cast; the ensemble pass owns
+        # the acoustic design, so the expensive profile guidance ships only there.
+        self.assertNotIn(VOICE_PROFILE_GUIDANCE, DISCOVER)
+        self.assertNotIn(VOICE_PROFILE_RECONCILIATION, DISCOVER)
+        self.assertNotIn("speechTraits", DISCOVER)
+        self.assertIn('"voices": [{"id":"ID", "description":"brief initial audible voice direction"}]', DISCOVER)
+        self.assertNotIn("pitch/timbre", DISCOVER)
         for whole_book in (False, True):
             with self.subTest(whole_book=whole_book), tempfile.TemporaryDirectory() as root:
                 client = FakeClient()
@@ -51,9 +56,12 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                 self.assertEqual(initial["known_cast"]["voices"][0]["speechTraits"],
                                  "steady conversational pace")
                 for system, payload in client.calls:
-                    if payload.get("mode") in {"discover", "reconcile", "voice_ensemble"}:
+                    if payload.get("mode") == "voice_ensemble":
                         self.assertEqual(system.count(VOICE_PROFILE_GUIDANCE), 1)
                         self.assertEqual(system.count(VOICE_PROFILE_RECONCILIATION), 1)
+                    elif payload.get("mode") in {"discover", "reconcile"}:
+                        self.assertNotIn(VOICE_PROFILE_GUIDANCE, system)
+                        self.assertNotIn(VOICE_PROFILE_RECONCILIATION, system)
                     else:
                         # Acoustic rewriting is not an attribution task.
                         self.assertNotIn(VOICE_PROFILE_GUIDANCE, system)

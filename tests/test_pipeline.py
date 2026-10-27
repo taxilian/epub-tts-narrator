@@ -9,7 +9,7 @@ import unittest
 
 from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import (
-    CachedRequests, DEFAULT_POLICY, align_units, analyze, apply_edits, fingerprint, make_units, merge_patch, seed_cast,
+    CachedRequests, DEFAULT_POLICY, align_units, analyze, apply_edits, check_cast, fingerprint, make_units, merge_patch, seed_cast,
 )
 from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
@@ -180,6 +180,33 @@ class ConcurrentFakeClient(FakeClient):
                 self.second_finished.set()
 
 
+class SlimDiscoveryClient(FakeClient):
+    """Discovery returns id+description voices; the ensemble authors the profiles."""
+
+    def discover(self, payload):
+        response = super().discover(payload)
+        response["voices"] = [{"id": voice["id"], "description": voice["description"]}
+                              for voice in response["voices"]]
+        return response
+
+    def complete(self, system, payload):
+        if payload.get("mode") == "voice_ensemble":
+            self.calls.append((system, deepcopy(payload)))
+            upserts = []
+            for voice in payload["cast"]["voices"]:
+                if "speechTraits" in voice:
+                    continue
+                upserts.append({"id": voice["id"],
+                                "description": "A light, reserved voice with an even, unhurried cadence.",
+                                "speechTraits": "light reserved cadence",
+                                "traits": [{"name": "pace", "value": "reserved, even cadence",
+                                            "basis": "casting", "evidence": []}]})
+            return {"voices": upserts,
+                    "reasons": {upsert["id"]: "Slim cast voice needed a complete profile."
+                                for upsert in upserts}}
+        return super().complete(system, payload)
+
+
 class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -214,6 +241,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(client.calls[1][1]["scene_summaries"]), 1)
         final_cast_sent = client.calls[3][1]["final_cast"]
         self.assertEqual(final_cast_sent, document["cast"])
+
+    def test_slim_discovery_gathers_cast_and_ensemble_authors_the_published_profiles(self):
+        client = SlimDiscoveryClient()
+        document = self.run_analysis(client)
+        self.assertEqual([payload.get("mode", "attribute") for _, payload in client.calls],
+                         ["discover", "reconcile", "voice_ensemble", "attribute"])
+        self.assertEqual(validate_document(document), [])
+        self.assertTrue(document["readiness"]["ready"])
+        ensemble_payloads = [payload for _, payload in client.calls if payload.get("mode") == "voice_ensemble"]
+        self.assertEqual(len(ensemble_payloads), 1)
+        slim = next(voice for voice in ensemble_payloads[0]["cast"]["voices"]
+                    if voice["id"] != "voice_narrator_main")
+        self.assertNotIn("speechTraits", slim)
+        self.assertEqual(slim["traits"], [])
+        final = {voice["id"]: voice for voice in document["cast"]["voices"]}
+        self.assertEqual(final[slim["id"]]["speechTraits"], "light reserved cadence")
+        self.assertEqual([trait["name"] for trait in final[slim["id"]]["traits"]], ["pace"])
+        self.assertEqual(final[slim["id"]]["description"],
+                         "A light, reserved voice with an even, unhurried cadence.")
+        self.assertEqual(final["voice_narrator_main"]["speechTraits"], "steady conversational pace")
+        self.assertEqual(next(payload for _, payload in client.calls if "mode" not in payload)["final_cast"],
+                         document["cast"])
 
     def test_mixed_narration_and_dialogue_preserve_every_character(self):
         document = self.run_analysis()
@@ -1271,6 +1320,31 @@ class PipelineTests(unittest.TestCase):
             repeated = self.run_analysis(client)
             self.assertEqual(repeated, original)
             self.assertEqual(client.calls, [])
+
+    def test_slim_voice_upserts_keep_stored_profiles_and_default_empty_traits(self):
+        available = {"characters": ["c1"], "roles": ["r1"], "voices": ["v_new"]}
+        slim = {"id": "voice_narrator_main", "description": "Refined narrator direction."}
+        new_voice = {"id": "v_new", "description": "Brief initial voice direction."}
+        response = {"characters": [], "roles": [], "voices": [slim, new_voice],
+                    "merges": [], "issues": [], "summary": "ok"}
+        updated, _, _ = merge_patch(self.source, seed_cast(), response, available)
+        voices = {voice["id"]: voice for voice in updated["voices"]}
+        self.assertEqual(voices["voice_narrator_main"]["speechTraits"], "steady conversational pace")
+        self.assertEqual([trait["name"] for trait in voices["voice_narrator_main"]["traits"]],
+                         ["resonance", "articulation", "pace"])
+        self.assertNotIn("speechTraits", voices["v_new"])
+        self.assertEqual(voices["v_new"]["traits"], [])
+        check_cast(self.source, updated)
+        self.assertEqual(response["voices"][0], slim)
+        full = {"id": "v_new", "description": "Full record.", "speechTraits": "measured pace",
+                "traits": [{"name": "pace", "value": "measured", "basis": "casting", "evidence": []}]}
+        followup = {"characters": [], "roles": [], "voices": [full],
+                    "merges": [], "issues": [], "summary": "ok"}
+        reapplied, _, _ = merge_patch(self.source, updated, followup, available)
+        reapplied_voices = {voice["id"]: voice for voice in reapplied["voices"]}
+        self.assertEqual(reapplied_voices["v_new"]["speechTraits"], "measured pace")
+        self.assertEqual(reapplied_voices["v_new"]["traits"], full["traits"])
+        check_cast(self.source, reapplied)
 
     def test_merge_preserves_separate_narration_voice_but_redirects_shared_voice(self):
         client = FakeClient(duplicate=True)

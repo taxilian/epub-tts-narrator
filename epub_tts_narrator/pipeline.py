@@ -260,7 +260,16 @@ def merge_patch(source, cast, response, available, *, defer_merges=False, protec
                                  "omit their upserts and submit the merge proposal with source evidence only")
             # Merges below modify records. Keep the raw response unchanged so
             # replaying its cached patch cannot apply a merge twice to evidence.
-            existing[item["id"]] = copy.deepcopy(item)
+            record = copy.deepcopy(item)
+            if collection == "voices":
+                # Discovery gathers the cast only; the later ensemble pass owns
+                # voice profiles. A slim upsert keeps stored profile fields, and
+                # a new voice starts with an empty trait array for validation.
+                for field in ("speechTraits", "traits"):
+                    if field not in record and old is not None and field in old:
+                        record[field] = copy.deepcopy(old[field])
+                record.setdefault("traits", [])
+            existing[item["id"]] = record
         updated[collection] = list(existing.values())
     issues = response.get("issues")
     if not isinstance(issues, list) or not isinstance(merges, list):

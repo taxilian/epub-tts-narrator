@@ -61,7 +61,7 @@ class VoiceAccentGuidanceTests(unittest.TestCase):
                     self.assertIn("A quotation establishing nationality or upbringing supports the background, not an unmentioned audible accent", normalized)
                     self.assertIn("not independent evidence or proof of user approval", normalized)
 
-    def test_discovery_receives_background_in_source_and_the_same_accent_contract(self):
+    def test_discovery_receives_background_in_source_without_voice_profile_authoring(self):
         class Requests:
             def run(self, system, payload, validate):
                 self.system, self.payload = system, deepcopy(payload)
@@ -71,7 +71,8 @@ class VoiceAccentGuidanceTests(unittest.TestCase):
         requests = Requests()
         evaluation.run_case("japanese_immigrant", "discovery", requests)
         self.assertEqual(requests.system, DISCOVER)
-        self.assertIn(VOICE_PROFILE_GUIDANCE, requests.system)
+        # Accent/profile authoring belongs to the ensemble pass, not discovery.
+        self.assertNotIn(VOICE_PROFILE_GUIDANCE, requests.system)
         self.assertEqual(requests.payload["target_units"][0]["text"], evaluation.CASES["japanese_immigrant"]["text"])
         self.assertNotIn("General American", json.dumps(requests.payload["known_cast"]))
 

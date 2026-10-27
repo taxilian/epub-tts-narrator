@@ -243,7 +243,12 @@ must also be respected. This performance distinction does not change identity
 or authorize changing voice assignments.
 """
 
-DISCOVER = COMMON + PERFORMANCE_POLICY_GUIDANCE + VOICE_PROFILE_GUIDANCE + VOICE_PROFILE_RECONCILIATION + """
+# Voice profiles moved out of discovery into the ensemble pass; slimming
+# DISCOVER is an intentional prompt change. Request cache keys include the
+# system bytes, so older discovery entries simply miss. PROMPT_VERSION is
+# deliberately unchanged so unrelated stage caches and pending-analysis
+# resumes stay valid.
+DISCOVER = COMMON + PERFORMANCE_POLICY_GUIDANCE + """
 Discover characters, narration roles, and voice descriptions. In discovery mode
 process target_units with context_units and known_cast. In reconciliation mode
 reconcile the accumulated cast using its evidence and the scene summaries.
@@ -253,10 +258,7 @@ Return EXACTLY these top-level keys:
    "description":"brief character description", "evidence":[], "voice_id":"ID"}],
  "roles": [{"id":"ID", "kind":"narration or dialogue", "character_id":null,
    "voice_id":"ID", "description":"role and scope"}],
- "voices": [{"id":"ID", "description":"actionable audible voice direction",
-   "speechTraits":"stable accent, pace, rhythm, intonation, pronunciation habits",
-   "traits":[{"name":"pitch/timbre/accent/pace/etc", "value":"description",
-     "basis":"text or casting", "evidence":[]}]}],
+ "voices": [{"id":"ID", "description":"brief initial audible voice direction"}],
  "merges": [{"from_character_id":"ID", "into_character_id":"ID", "evidence":[]}],
  "issues": [{"kind":"identity/narrator/casting/etc", "target":"ID", "reason":"uncertainty"}],
  "summary":"brief scene/identity/narrator summary, at most 1200 characters"
@@ -297,9 +299,11 @@ A dialogue role must use its character's voice. Never delete records. Propose me
 with nonempty exact textual evidence of the same identity; same names alone are
 insufficient. Merges are reviewed by the user. Each merge removes the source
 character and redirects its roles to the target character. Do not merge voices
-of distinct characters. Textual 'low and rough' is a stable voice trait;
-'whispered this line' is local delivery. Propose distinctive casting directions
-for voices lacking explicit traits and label those choices. Keep uncertainty visible
+of distinct characters. Voice entries gather the cast only: keep each one to its
+ID and a brief initial audible direction, because a separate whole-cast ensemble
+pass later designs the complete voice profiles. Textual 'low and rough' is a
+stable voice trait; 'whispered this line' is local delivery, so keep one scene's
+behavior out of a voice description. Keep uncertainty visible
 in issues rather than asserting unsupported facts. The summary and cast must be
 concise. Do not quote unnecessary passages in summaries.
 """
