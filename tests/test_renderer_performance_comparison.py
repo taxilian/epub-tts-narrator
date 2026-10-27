@@ -72,6 +72,19 @@ class PerformanceComparisonTests(unittest.TestCase):
     def prepare(self, config=None):
         return prepare_comparison(self.bundle, config or self.config, 1, self.directory)
 
+    def test_manual_traits_are_frozen_and_later_changes_require_a_new_comparison(self):
+        from epub_tts_narrator.renderer.speech_traits import save_speech_traits, speech_trait_overrides
+        voice_id = self.bundle["cast"]["voices"][0]["id"]
+        traits = "Light Japanese-influenced English; careful consonants"
+        save_speech_traits(self.bundle, self.resolved, voice_id, traits)
+        prepared = self.prepare()
+        self.assertEqual(speech_trait_overrides(prepared["bundle"], prepared["config"]), {voice_id: traits})
+        self.assertIn("snapshot/voice-traits.json", prepared["manifest"]["snapshot_files"])
+        save_speech_traits(self.bundle, self.resolved, voice_id, "Different deliberate traits")
+        self.assertEqual(speech_trait_overrides(prepared["bundle"], prepared["config"]), {voice_id: traits})
+        with self.assertRaisesRegex(ValueError, "inputs changed"):
+            self.prepare()
+
     def render_fixture(self, bundle, config, engine, verifier, *, chapters_only, voice_store_override, notify):
         mode = config["render"]["performance_mode"]
         self.calls.append(mode)

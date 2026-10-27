@@ -465,11 +465,13 @@ These are playback copies in the current book's `render-work/voice-previews` dir
   --action normalize-samples
 ```
 
-There is one menu. Type a number or command and press Enter:
+There is one menu, arranged in as many columns as the terminal width allows. Long names wrap instead of disappearing, and numbering stays stable. Type a number or command and press Enter:
 
 | Input | Action |
 | --- | --- |
 | A voice number | Play immediately. Any key stops playback and returns to the menu; no Enter is needed to stop. The menu also returns when the sample finishes. |
+| `E 5` or `E5` | Edit voice 5's description, sample script, and vocal traits without generating audio. `E` uses the last selected voice. |
+| `D 5 2` | Mark voice 5 as using voice 2's saved voice. `D 5` asks for the target; `D` uses the last selected source. |
 | `G` | Edit and regenerate the last voice played locally. If none has been played, asks for a voice number. |
 | `G 5` or `G5` | Edit and regenerate voice 5 with the local speech engine. |
 | `GG 5` or `GG5` | Edit and regenerate voice 5 with Gemini. No command-line flag is needed. |
@@ -478,7 +480,11 @@ There is one menu. Type a number or command and press Enter:
 | `G11` | Use ElevenLabs for the last voice played, or ask for a voice number. |
 | `Q` | Quit. |
 
-All regeneration commands offer two fields: the voice prompt and the spoken sample script. Press Enter to keep either value. The new voice is verified, saved, selected, and played immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` chooses the local speech engine, `GG` chooses Gemini, and `G11` chooses ElevenLabs for that action; none changes the session's startup setting or global configuration. Use `G 11` with a space to regenerate voice 11 locally, since `G11` is the ElevenLabs command.
+All edit and regeneration commands offer three fields: the voice description, the spoken sample script, and vocal traits (accent, articulation, cadence, and other stable speech behavior). Press Enter to keep a value, or enter `-` in the traits field to clear it. `E` saves without generating. Description/script edits take effect when a sample is regenerated; traits condition the next render and do not change the saved sample. Keep the accent in the description and vocal traits consistent when editing both.
+
+Regeneration verifies, saves, selects, and plays the new voice immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` chooses the local speech engine, `GG` chooses Gemini, and `G11` chooses ElevenLabs for that action; none changes the session's startup setting or global configuration. Use `G 11` with a space to regenerate voice 11 locally, since `G11` is the ElevenLabs command.
+
+`D` saves a book-local `voice-aliases.json` mapping. Character identities remain distinct; no recordings are deleted or generated. Existing roles linked to the source also follow its new target. Description/script edits and recasting operate on the shared voice; vocal traits remain separate for each logical voice/role. Descendants inherit aliases at lookup time, while earlier books and sibling branches stay unchanged. To remove a local duplicate choice, use `voice-aliases BOOK --remove SOURCE_VOICE_ID`; the original recordings remain available, and any inherited mapping resumes.
 
 Menu and text entry use the terminal's standard line editor: arrow keys,
 Ctrl+A/E, Ctrl+K/U, and session history follow your readline/libedit bindings.
@@ -496,7 +502,9 @@ The optional voice-profile `speechTraits` field serves a different purpose: it r
 
 For example, `speechTraits: "Light Glaswegian Scottish accent; clipped consonants and brisk, even phrasing."` combines with a passage direction such as `"speaking quietly"` in the engine's nonspoken style control. Traits apply to each speaker's turn, not to an entire multi-voice paragraph indiscriminately. Ordinary neutral delivery retains persistent traits. A separately audited broad clip-repair plan may override trait conditioning for that clip after two parallel approvals, without changing the global profile. The field accepts at most 400 characters of nonempty, single-line plain text without engine markup. Actual accent compliance still requires listening: transcript and acoustic verification do not certify it.
 
-Changing speech traits requires a new performance for affected clips, even when their words and reference audio are unchanged. Rerun `render` to prepare those clips and chapters; model-free `assemble` cannot manufacture the new conditioning from old audio. Existing valid reference voices do not need to be regenerated. Edit bundle profiles only through the normal validated analysis/corrections and export workflow, not by changing checksum-bound files in place.
+Use `E` in casting to override these traits, or `cast BOOK --action edit --voice-id ID --speech-traits "Light Mexican Spanish-influenced English; relaxed cadence"`. An empty CLI value clears traits. These explicit edits live in the book's `voice-traits.json`, separate from checksum-bound analysis. Lookup uses the current book, then its parent recursively; a local choice (including an explicit clear) overrides an earlier choice. No global config edits or reanalysis are needed. Each render snapshots the choices for recovery and sends them with remote chapter jobs. Pronunciation previews and frozen comparison snapshots use the same choices.
+
+Changing speech traits requires a new performance for affected clips, even when their words and reference audio are unchanged. Rerun `render` to prepare those clips and chapters; unaffected speech remains reusable, and model-free `assemble` cannot manufacture the new conditioning from old audio. Existing valid reference voices do not need to be regenerated. Structured analysis `traits[]` and their evidence are not rewritten by the casting editor; changing those records still uses the validated analysis/corrections workflow.
 
 The adapters place this prose differently: Gemini receives it as the voice-design input, following its [one- or two-sentence prompting guidance](https://ai.google.dev/gemini-api/docs/generate-content/voice-design#prompting-best-practices-for-voice-design), while Drama 3 receives it as a character description in the [scene prompt's system message](https://arxiv.org/html/2610.18010v1#A2). Neither adapter sends our trait array as separate model controls. This does not establish that a trait list could never help a particular model; the generated voice still needs listening and evaluation.
 

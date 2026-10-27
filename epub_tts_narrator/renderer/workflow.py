@@ -1101,8 +1101,11 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                 plan, requests, completed=completed_chunks(work, plan["chapters"]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
-    from .speech_traits import bind_plan_speech_traits
-    plan = bind_plan_speech_traits(plan, bundle["cast"])
+    from .speech_traits import bind_plan_speech_traits, speech_trait_overrides
+    traits = config.get("_speech_traits_snapshot")
+    if traits is None:
+        traits = speech_trait_overrides(bundle, config)
+    plan = bind_plan_speech_traits(plan, bundle["cast"], overrides=traits)
     from .performance_runtime import bind_traits
     plan = bind_traits(plan)
     if (not (multi_speaker or single_speaker_paragraph)
@@ -1152,6 +1155,8 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
     # invocation uses this private snapshot, including remote resubmissions.
     # Only controls actually used by a chunk enter synthesis/cache identities.
     config["_pronunciation_snapshot"] = confirmed_pronunciations(bundle["directory"])
+    from .speech_traits import speech_trait_overrides
+    config["_speech_traits_snapshot"] = speech_trait_overrides(bundle, config)
     plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
                             single_speaker_paragraph=single_speaker_paragraph)
     if plan["errors"]:

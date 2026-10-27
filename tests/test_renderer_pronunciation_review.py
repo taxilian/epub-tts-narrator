@@ -93,6 +93,24 @@ class PronunciationReviewTests(unittest.TestCase):
             entry["proposal"] = proposal
         save_candidates(self.bundle["directory"], self.bundle, [entry])
 
+    def test_manual_traits_reach_excerpt_and_isolated_previews_and_their_cache_requests(self):
+        from epub_tts_narrator.renderer.speech_traits import save_speech_traits
+        sample = self.session._sample("Mara")
+        traits = "Light Japanese-influenced English; deliberate articulation"
+        for pronunciation in (None, {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"}):
+            for method in (self.session.audition, self.session.audition_isolated):
+                with self.subTest(pronunciation=pronunciation, method=method.__name__):
+                    save_speech_traits(self.bundle, self.resolved, sample["voice_id"], "")
+                    with patch.object(self.session, "_preview_cache") as preview:
+                        method("Mara", pronunciation)
+                        before = deepcopy(preview.call_args.args[4])
+                        save_speech_traits(self.bundle, self.resolved, sample["voice_id"], traits)
+                        method("Mara", pronunciation)
+                        options, request = preview.call_args.args[3:5]
+                    self.assertIn(traits, options.get("traits", "") + options.get("direction", ""))
+                    self.assertNotEqual(before, request)
+                    self.assertEqual(before["voice"], request["voice"])
+
     def test_listing_and_authoritative_edits_never_initialize_an_engine(self):
         self.command()
         self.assertTrue(any("Mara" in line and "pending" in line for line in self.output))

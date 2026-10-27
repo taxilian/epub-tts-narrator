@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 56 flat modules, stdlib-only
-│   └── renderer/             # renderer subpackage: 115 flat modules, own CLI + AGENTS.md
-├── tests/                    # 294 flat unittest files + fixtures/ + shared helpers
+├── epub_tts_narrator/        # analyzer package: 57 Python files, stdlib-only
+│   └── renderer/             # renderer subpackage: 117 Python files, own CLI + AGENTS.md
+├── tests/                    # 301 flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -147,6 +147,7 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - LLM prompts live in per-domain modules: `prompts.py` (shared contracts, discovery/reconciliation guidance), `identity_prompts.py`, `attribution_review_prompts.py`, `speaker_completion_prompts.py`, `audition_prompts.py`, `voice_refresh_prompts.py`, `voice_ensemble_prompts.py`, `jev_prompts.py`, and `renderer/verification_prompts.py`. Prompt bytes are cache/policy identity; changes must be intentional.
 - `speech_word_review.py` separates ordered word coverage from spelling heuristics. Unfamiliar aligned pairs require explicit contextual jury evidence; only proposal/provenance metadata changes, never the six-field applied edit schema.
 - `speech_traits.py` validates optional voice-profile `speechTraits`; analysis proposes mood-independent, explicit-accent performance traits separately from creation descriptions. Renderer binding/composition lives in `renderer/speech_traits.py`; absent fields retain legacy conditioning.
+- Casting `E` edits description/script and book-local vocal traits; `D` reuses another voice through `voice-aliases.json`. `renderer/speech_traits.py` owns manual `voice-traits.json` choices, recursive nearest-book lookup, and render snapshots; these never rewrite analysis evidence or reference recordings. Menus adapt to terminal width in `renderer/audition.py`.
 - Series speech-trait backfills must be made in the originating voice definition, never silently discarded or added only to a descendant. Existing baseline traits may improve in later books; `_history` carries their latest value without mutating prior snapshots or reference voices.
 - `voice_profile_refresh.py` owns validated profile-only proposals and preserved evidence traits; `voice_profile_workflow.py` publishes them through `analysis_revision` scope="voice-profiles". It rebinds audition fingerprints, refreshes descendant links, and never changes segments, aliases, reference assets, or render caches. Update series books in order.
 - `voice_profile_state.py` invalidates all profiles before refresh and checkpoints input-bound proposals. `voice_profile_guard.py` blocks generation for pending books and descendants, coordinates refresh leases, and retains `.lease` ownership artifacts. Rerun `refresh-voice-profiles` to resume API or publication failures.

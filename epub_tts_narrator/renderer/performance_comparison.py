@@ -185,6 +185,10 @@ def prepare_comparison(bundle, config, chapter_number, directory):
         inputs = {"bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
                   "chapter_number": chapter_number, "series_id": plan["series_id"],
                   "voices": voices, "settings": _safe_settings(config)}
+        from .speech_traits import speech_trait_overrides
+        trait_overrides = speech_trait_overrides(bundle, config)
+        if trait_overrides:
+            inputs["speech_traits"] = trait_overrides
         state = _read_state(root)
         if state is not None and state.get("input_sha256") != digest(inputs):
             raise ValueError("Comparison inputs changed (source, voices, chapter, or settings); use a new comparison directory")
@@ -205,6 +209,17 @@ def prepare_comparison(bundle, config, chapter_number, directory):
         else:
             write_json(manifest_path, manifest)
         inventory["snapshot/manifest.json"] = file_hash(manifest_path)
+        if trait_overrides:
+            traits_path = snapshot / "voice-traits.json"
+            traits_record = {"format": "audiobook-book-voice-traits", "version": 1,
+                             "series_id": plan["series_id"], "book_id": bundle["source"]["book"]["id"],
+                             "speech_traits": trait_overrides}
+            if traits_path.exists() or traits_path.is_symlink():
+                if read_json(regular_file(traits_path)) != traits_record:
+                    raise ValueError("Frozen comparison voice traits changed")
+            else:
+                write_json(traits_path, traits_record)
+            inventory["snapshot/voice-traits.json"] = file_hash(traits_path)
         store = VoiceStore(snapshot / "voices", config["voices"]["series_id"])
         copied = set()
         for item in selected.values():
@@ -232,6 +247,8 @@ def prepare_comparison(bundle, config, chapter_number, directory):
             raise ValueError("Selected voices changed during comparison preparation; retry in a new directory")
         if digest(read_json(regular_file(original / "manifest.json"))) != bundle["bundle_hash"]:
             raise ValueError("Book analysis changed during comparison preparation")
+        if speech_trait_overrides(bundle, config) != trait_overrides:
+            raise ValueError("Voice traits changed during comparison preparation; retry in a new directory")
         if state["snapshot_files"] and inventory != state["snapshot_files"]:
             raise ValueError("Frozen comparison input inventory changed")
         state["snapshot_files"] = inventory

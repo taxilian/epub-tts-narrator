@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 from .workflow import VerificationUnavailable
 from .model_setup import ModelSetup, ModelSetupError
@@ -91,6 +92,110 @@ def _label(row):
     return ", ".join(names) if names else ", ".join(row["roles"]) or row["voice_id"]
 
 
+def _cell_width(text):
+    return sum(0 if unicodedata.combining(character) else
+               2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+               for character in text)
+
+
+def _wrap_menu_text(text, width, *, prefix="", indent=""):
+    """Wrap complete sanitized text by terminal cells, including long names."""
+    lines, line = [], prefix
+    for word in display(text).split():
+        addition = ("" if line.endswith(" ") else " ") + word
+        if line.strip() and _cell_width(line + addition) <= width:
+            line += addition
+            continue
+        if line.strip() and line != prefix:
+            lines.append(line.rstrip())
+            line = indent
+        while _cell_width(line + word) > width:
+            available = max(1, width - _cell_width(line))
+            end, used = 0, 0
+            for character in word:
+                cells = _cell_width(character)
+                if end and used + cells > available:
+                    break
+                used += cells
+                end += 1
+            lines.append(line + word[:end])
+            word, line = word[end:], indent
+        line += word
+    if line.strip():
+        lines.append(line.rstrip())
+    return lines
+
+
+def _menu_lines(rows, width):
+    """Use available columns without truncating labels or changing numbering."""
+    if not rows:
+        return []
+    width = max(8, width)
+    labels = {row["voice_id"]: _label(row) for row in rows}
+    entries = []
+    for index, row in enumerate(rows, 1):
+        status = "" if row["selected"] else " — no sample"
+        regeneration = row.get("regeneration")
+        if regeneration:
+            status = (" — FAILED — no active voice" if regeneration["state"] == "failed"
+                      else " — needs regeneration — no active voice")
+            if regeneration.get("inherited"):
+                status += " — inherited"
+        if row["selected"] and row["selected"].get("inherited"):
+            status += " — inherited"
+        canonical = row.get("canonical_voice_id", row["voice_id"])
+        if canonical != row["voice_id"] and canonical in labels:
+            status += " — shares " + labels[canonical]
+        entries.append((index, _label(row) + status, (regeneration or {}).get("error")))
+    number_width = max(3, len(str(len(rows))))
+    preferred = max(24, min(36, max(_cell_width(display(text)) + number_width + 2
+                                  for _, text, _ in entries)))
+    gap = 3
+    columns = max(1, min(len(rows), (width + gap) // (preferred + gap)))
+    cell_width = (width - gap * (columns - 1)) // columns
+    height = (len(rows) + columns - 1) // columns
+    cells = []
+    for index, text, error in entries:
+        prefix = f"{index:{number_width}}. "
+        indent = " " * min(len(prefix), cell_width // 2)
+        lines = _wrap_menu_text(text, cell_width, prefix=prefix, indent=indent)
+        cells.append(lines)
+    output = []
+    for row_index in range(height):
+        row_cells = [cells[row_index + column * height]
+                     for column in range(columns) if row_index + column * height < len(cells)]
+        for line_index in range(max(map(len, row_cells))):
+            parts = [cell[line_index] if line_index < len(cell) else "" for cell in row_cells]
+            output.append((" " * gap).join(
+                part + " " * max(0, cell_width - _cell_width(part))
+                for part in parts).rstrip())
+    for index, _, error in entries:
+        if error:
+            output.extend(_wrap_menu_text(
+                f"{index}. {_label(rows[index - 1])}: {error}", width, prefix="  ", indent="  "))
+    return output
+
+
+def _menu_help_lines(width):
+    commands = (
+        "Number: play", "E [number]: edit", "D [source] [target]: share target's voice",
+        "G [number]: regenerate locally", "GG [number]: regenerate with Gemini",
+        "G11 [number]: regenerate with ElevenLabs", "Q: quit",
+    )
+    lines, line = [], ""
+    for command in commands:
+        combined = line + "   " + command if line else command
+        if _cell_width(combined) <= width:
+            line = combined
+        else:
+            if line:
+                lines.append(line)
+            wrapped = _wrap_menu_text(command, width)
+            lines.extend(wrapped[:-1])
+            line = wrapped[-1]
+    return lines + ([line] if line else [])
+
+
 def _prepare_playback_samples(player, rows, output, *, include_candidates=False):
     """Warm reusable playback copies, deduplicating aliases and active takes."""
     prepare = getattr(player, "prepare", None)
@@ -153,7 +258,7 @@ def _warn_regenerate_all(rows, *, book_local=False):
 
 
 def run_casting(session, player, *, input_fn=None, output=print, playback_fn=None):
-    """One menu: a number plays; G, GG, and G11 choose a designer; Q quits."""
+    """One menu for playback, editing, sharing, and choosing a voice designer."""
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -176,6 +281,45 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
     def play(row, voice):
         say(f"Playing {_label(row)}. Press any key to stop.")
         playback_fn(player, voice["reference_audio"])
+
+    def selected_row(rows, value):
+        if value:
+            return choose(rows, value)
+        if last_voice_id is not None:
+            last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
+            if last is not None:
+                return last
+        value = ask("Voice number (empty cancels): ")
+        return choose(rows, value) if value else None
+
+    def linked_roles(rows, row):
+        canonical = row.get("canonical_voice_id", row["voice_id"])
+        return [other for other in rows
+                if other["voice_id"] != row["voice_id"]
+                and other.get("canonical_voice_id", other["voice_id"]) == canonical]
+
+    def edit(row):
+        say("Voice prompt: " + row["prompt"])
+        prompt = ask("New prompt (Enter keeps current): ")
+        say("Sample script: " + row["reference_text"])
+        source = row.get("sample_source", {})
+        if source.get("kind") == "book_excerpt":
+            say("From: " + str(source.get("chapter_title") or "book text"))
+        elif source.get("kind") == "fallback":
+            say("Fallback script: no suitable passage long enough for a voice reference.")
+        script = ask("New script (Enter keeps current): ")
+        say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
+        traits = ask("New vocal traits (Enter keeps current; - clears): ")
+        edits = {}
+        if prompt:
+            edits["prompt"] = prompt
+        if script:
+            edits["reference_text"] = script
+        if traits:
+            edits["speech_traits"] = "" if traits == "-" else traits
+        if edits:
+            session.update_prompt(row["voice_id"], **edits)
+        return edits
 
     last_voice_id = None
     try:
@@ -207,35 +351,59 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             rows = session.rows()
             ready = sum(row["selected"] is not None for row in rows)
             say(f"\nVoice casting — {ready}/{len(rows)} ready")
-            for index, row in enumerate(rows, 1):
-                status = "" if row["selected"] else " — no sample"
-                regeneration = row.get("regeneration")
-                if regeneration:
-                    status = (" — FAILED — no active voice" if regeneration["state"] == "failed"
-                              else " — needs regeneration — no active voice")
-                    if regeneration.get("inherited"):
-                        status += " — inherited"
-                if row["selected"] and row["selected"].get("inherited"):
-                    status += " — inherited"
-                canonical = row.get("canonical_voice_id", row["voice_id"])
-                if canonical != row["voice_id"]:
-                    shared = next((r for r in rows if r["voice_id"] == canonical), None)
-                    if shared:
-                        status += " — shares " + _label(shared)
-                say(f"{index:3}. {_label(row)}{status}")
-                if regeneration and regeneration.get("error"):
-                    for line in regeneration["error"].splitlines():
-                        say("     " + line)
-            say("Number: play   G [number]: regenerate locally   GG [number]: regenerate with Gemini   G11 [number]: regenerate with ElevenLabs   Q: quit")
+            width = shutil.get_terminal_size(fallback=(80, 24)).columns
+            for line in _menu_lines(rows, width):
+                say(line)
+            for line in _menu_help_lines(max(8, width)):
+                say(line)
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
                 if last:
-                    say(f"Without a number, G, GG, and G11 regenerate {_label(last)}.")
+                    say(f"Without a number, E, D, G, GG, and G11 use {_label(last)}.")
             action = ask("> ").lower()
             try:
                 if action == "q":
                     return
-                if action.startswith("g"):
+                if action.startswith("d"):
+                    numbers = action[1:].split()
+                    if len(numbers) > 2:
+                        raise ValueError("Use D source-number target-number to share the target's voice")
+                    row = selected_row(rows, numbers[0] if numbers else "")
+                    if row is None:
+                        continue
+                    value = numbers[1] if len(numbers) == 2 else ask(
+                        f"Use which voice for {_label(row)}? Target number (empty cancels): ")
+                    if not value:
+                        continue
+                    target = choose(rows, value)
+                    if row["voice_id"] == target["voice_id"]:
+                        raise ValueError("Choose a different target voice")
+                    shared = session.share_voice(row["voice_id"], target["voice_id"])
+                    last_voice_id = row["voice_id"]
+                    say(f"{_label(row)} now shares {_label(target)}'s voice; no new sample was generated.")
+                    affected = (shared or {}).get("affected_voice_ids", [])
+                    others = [_label(other) for other in rows
+                              if other["voice_id"] in affected and other["voice_id"] != row["voice_id"]]
+                    if others:
+                        say("Also updated linked roles: " + "; ".join(others) + ".")
+                elif action.startswith("e"):
+                    row = selected_row(rows, action[1:].strip())
+                    if row is None:
+                        continue
+                    say(f"\nEdit {_label(row)}")
+                    linked = linked_roles(rows, row)
+                    if linked or row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]:
+                        say("Description and script edits affect the shared voice" +
+                            (" used by " + "; ".join(_label(other) for other in linked) if linked else "") +
+                            ". Vocal traits apply only to this character.")
+                    edits = edit(row)
+                    last_voice_id = row["voice_id"]
+                    if edits:
+                        say("Edits saved. The saved sample is unchanged; vocal traits apply to the next render. "
+                            "Description and script edits apply when you regenerate.")
+                    else:
+                        say("No changes saved.")
+                elif action.startswith("g"):
                     # G11 is a provider command, not the compact local G 11.
                     if action.startswith("g11"):
                         voice_designer, prefix, location = "elevenlabs", 3, "with ElevenLabs"
@@ -243,38 +411,17 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                         voice_designer, prefix, location = "gemini", 2, "with Gemini"
                     else:
                         voice_designer, prefix, location = "local", 1, "locally"
-                    value = action[prefix:].strip()
-                    if value:
-                        row = choose(rows, value)
-                    elif last_voice_id is not None:
-                        row = next(row for row in rows if row["voice_id"] == last_voice_id)
-                    else:
-                        value = ask("Voice number (empty cancels): ")
-                        if not value:
-                            continue
-                        row = choose(rows, value)
+                    row = selected_row(rows, action[prefix:].strip())
+                    if row is None:
+                        continue
                     say(f"\nRegenerate {_label(row)} {location}")
                     if voice_designer == "elevenlabs":
                         say("ElevenLabs receives this voice prompt and sample script; the verified preview is saved locally for cloning.")
                         say("ElevenLabs requires a 20–1000 character voice description and a 100–1000 character sample script.")
-                    if row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]:
-                        say("This role shares its character's voice. Regeneration updates every linked role.")
-                    say("Voice prompt: " + row["prompt"])
-                    prompt = ask("New prompt (Enter keeps current): ")
-                    say("Sample script: " + row["reference_text"])
-                    source = row.get("sample_source", {})
-                    if source.get("kind") == "book_excerpt":
-                        say("From: " + str(source.get("chapter_title") or "book text"))
-                    elif source.get("kind") == "fallback":
-                        say("Fallback script: no suitable passage long enough for a voice reference.")
-                    script = ask("New script (Enter keeps current): ")
-                    edits = {}
-                    if prompt:
-                        edits["prompt"] = prompt
-                    if script:
-                        edits["reference_text"] = script
-                    if edits:
-                        session.update_prompt(row["voice_id"], **edits)
+                    if (linked_roles(rows, row)
+                            or row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]):
+                        say("This voice is shared. Regeneration updates every linked role.")
+                    edit(row)
                     say(f"Generating and verifying {_label(row)}…")
                     voice = session.regenerate(row["voice_id"], voice_designer=voice_designer)
                     last_voice_id = row["voice_id"]
@@ -302,6 +449,7 @@ def casting_command(args, bundle, config):
     attempt_file = getattr(args, "attempt_file", None)
     keep_unselected = getattr(args, "keep_unselected", False)
     include_inherited = getattr(args, "include_inherited", False)
+    speech_traits = getattr(args, "speech_traits", None)
     if include_inherited and action != "regenerate-all":
         raise ValueError("--include-inherited is used with --action regenerate-all")
     if action in {"generate", "edit", "play", "accept", "recover"} and not args.voice_id:
@@ -312,8 +460,10 @@ def casting_command(args, bundle, config):
         raise ValueError("--candidate-id is required for --action accept")
     if (args.prompt_file or args.text_file) and action not in {"generate", "edit"}:
         raise ValueError("--prompt-file and --text-file are used with --action generate or edit")
-    if action == "edit" and not (args.prompt_file or args.text_file):
-        raise ValueError("Provide --prompt-file or --text-file to save casting edits")
+    if speech_traits is not None and action not in {"generate", "edit"}:
+        raise ValueError("--speech-traits is used with --action generate or edit")
+    if action == "edit" and not (args.prompt_file or args.text_file or speech_traits is not None):
+        raise ValueError("Provide --prompt-file, --text-file, or --speech-traits to save casting edits")
     if args.voice_id and action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "normalize-samples"}:
         raise ValueError("--voice-id is not used with this action")
     if action == "recover" and not attempt_file:
@@ -359,12 +509,15 @@ def casting_command(args, bundle, config):
         row = next((r for r in rows if r["voice_id"] == args.voice_id), None)
         if args.voice_id and row is None:
             raise ValueError("Voice ID is not in the bundle cast")
-        if args.prompt_file or args.text_file:
-            session.update_prompt(
-                args.voice_id,
-                prompt=args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else None,
-                reference_text=args.text_file.read_text(encoding="utf-8") if args.text_file else None,
-            )
+        if args.prompt_file or args.text_file or speech_traits is not None:
+            edits = {}
+            if args.prompt_file:
+                edits["prompt"] = args.prompt_file.read_text(encoding="utf-8")
+            if args.text_file:
+                edits["reference_text"] = args.text_file.read_text(encoding="utf-8")
+            if speech_traits is not None:
+                edits["speech_traits"] = speech_traits
+            session.update_prompt(args.voice_id, **edits)
         if action == "interactive":
             run_casting(session, player)
         elif action == "list":
@@ -422,7 +575,8 @@ def casting_command(args, bundle, config):
                 )
             print(f"Regenerated {len(seen)} shared character voices.")
         elif action == "edit":
-            print("Casting prompt saved for the next generation.")
+            print("Casting edits saved. Vocal traits apply to the next render; "
+                  "the voice description and script apply to the next generation.")
         elif action == "accept":
             candidate = session.accept(args.voice_id, args.candidate_id)
             print(f"Accepted {candidate['candidate_id']} for {args.voice_id} in this series.")

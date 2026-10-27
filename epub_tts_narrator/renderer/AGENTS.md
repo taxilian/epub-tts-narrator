@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 115 Python modules plus `ENGINE_NOTES.md`.
+Flat renderer subpackage: 117 Python files plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -52,6 +52,8 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 
 - Renderer imports are direct submodule imports; `__init__.py` exports nothing.
 - `voice_prompts.py` validates descriptions without adding age, actor, or context prefixes. The LLM authors relevant portrayal context once in its prose. Recognize historical application wrappers only for stripping old drafts and comparing recovery provenance; never rewrite saved requests or selected voices merely to remove a wrapper.
+- `audition.py` lays out cast rows in adaptive columns; `E` edits without generation, `D` links a source row to a target through book-local aliases, and regeneration also edits speech traits. `CastingSession.share_voice` never merges characters or deletes recordings. Description/script drafts belong to the canonical reference; manual traits belong to the logical voice and remain distinct across audio aliases.
+- `speech_traits.py` reads/writes identity-checked `voice-traits.json` overrides, nearest book first. Empty values deliberately clear traits and shadow ancestors. `_preflight` snapshots effective overrides for local/remote recovery; only affected chunk conditioning changes cache identity. Pronunciation previews and comparison snapshots preserve effective traits. Parent lookups check manifest/cast metadata without reparsing chapter scripts on menu redraw. Never edit checksum-bound cast files through the casting UI.
 - Expressive plans bind approved spoken text, never replace canonical source or voice identity. Compile only validated structured metadata; raw book markup stays untrusted. Keep legacy request/cache identities unchanged when no plan is supplied.
 - `prepare_synthesis` is shared by adapters and speech cache identity; edge trimming projects controls by retained code-point indices. Text-only rewrite/split recovery is disabled for expressive leaves until it can preserve those bindings; fallback to original paragraph turns retains each turn's controls.
 - `compare-performance` freezes selected references and source in its own directory. Its frozen voice store cannot create voices, and `_preflight` must use the supplied store directly rather than derive aliases again. Both modes use one engine instance, independent verified caches, source timing, and a local HTML listening report.

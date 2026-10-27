@@ -339,10 +339,13 @@ class CastingSession:
 
     def rows(self):
         from epub_tts_narrator.narration_identity import author_narrator_name
+        from ..speech_traits import speech_traits
+        from .speech_traits import speech_trait_overrides
         from .samples import MissingSampleScript
         self._validate_paths()
         cast = self.bundle["cast"]
         character_names = {character["id"]: character["name"] for character in cast["characters"]}
+        trait_overrides = speech_trait_overrides(self.bundle, self.config)
         rows = []
         for voice_id, profile in self._profiles.items():
             selected = self.store.load(voice_id)
@@ -388,6 +391,8 @@ class CastingSession:
                 "characters": characters,
                 "roles": [role["id"] for role in roles],
                 "description": profile["description"],
+                "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
+                                  else speech_traits(profile)),
                 **draft,
                 "selected": selected,
                 "regeneration": self.store.regeneration_status(voice_id),
@@ -396,13 +401,51 @@ class CastingSession:
             })
         return rows
 
-    def update_prompt(self, voice_id, prompt=None, reference_text=None):
+    def share_voice(self, voice_id, target_voice_id):
+        """Use another row's voice through book-local policy, preserving both casts.
+
+        Link the requested IDs rather than their canonical roots: repointing an
+        existing alias must not redirect its former target and unrelated rows.
+        Existing dependents of the source do follow its new target. Recordings,
+        drafts, and character identities remain intact for explicit reversal.
+        """
+        from .book_aliases import edit_book_aliases
+        from ..voice_profile_guard import require_valid_profiles
+
+        self._validate_paths()
         self._profile(voice_id)
+        self._profile(target_voice_id)
+        if voice_id == target_voice_id:
+            raise ValueError("Choose a different voice to share")
+        before = {item: self.store.canonical_id(item) for item in self._profiles}
+        if before[voice_id] == before[target_voice_id]:
+            raise ValueError("These entries already share the same voice; reversing the link could create a cycle")
+        require_valid_profiles(self.bundle["directory"])
+        # This operation acquires the book-policy and local voice-store locks
+        # itself. Wrapping it in _locked would attempt the same lock twice.
+        result = edit_book_aliases(self.bundle, self.config,
+                                   assignments=((voice_id, target_voice_id),))
+        self._samples.clear()
+        after = {item: self.store.canonical_id(item) for item in self._profiles}
+        return {**result, "voice_id": voice_id, "target_voice_id": target_voice_id,
+                "canonical_voice_id": after[voice_id],
+                "affected_voice_ids": [item for item in self._profiles if before[item] != after[item]]}
+
+    def update_prompt(self, voice_id, prompt=None, reference_text=None, speech_traits=None):
+        self._profile(voice_id)
+        requested_id = voice_id
+        if speech_traits is not None and speech_traits != "":
+            from ..speech_traits import validate_speech_traits
+            validate_speech_traits(speech_traits)
         if prompt is not None:
             _validate_text(prompt, "Voice prompt", MAX_PROMPT_CHARACTERS)
         if reference_text is not None:
             _validate_text(reference_text, "Sample text", MAX_REFERENCE_CHARACTERS)
         with self._locked():
+            from .speech_traits import save_speech_traits
+            if prompt is None and reference_text is None and speech_traits is not None:
+                save_speech_traits(self.bundle, self.config, requested_id, speech_traits)
+                return {"speech_traits": speech_traits}
             draft = self._draft(voice_id, self.store.load(voice_id))
             voice_id = self.store.canonical_id(voice_id)
             if prompt is not None:
@@ -412,8 +455,23 @@ class CastingSession:
                 draft["sample_source"] = {"kind": "user"}
             _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)
             _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
-            self._save_draft(voice_id, draft)
-        return deepcopy(draft)
+            path = self._draft_path(voice_id)
+            previous = path.read_bytes() if path.exists() else None
+            changed = self._save_draft(voice_id, draft)
+            try:
+                if speech_traits is not None:
+                    save_speech_traits(self.bundle, self.config, requested_id, speech_traits)
+            except BaseException:
+                # A locked/invalid trait sidecar must not leave a half-saved
+                # interactive edit. The voice-store lock protects this draft.
+                if changed:
+                    if previous is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        from .common import write_private
+                        write_private(path, previous.decode("utf-8"))
+                raise
+        return {**deepcopy(draft), **({"speech_traits": speech_traits} if speech_traits is not None else {})}
 
     def prepare_models(self, *, generation=False):
         """CLI-only setup happens before changing selections or calling a designer."""

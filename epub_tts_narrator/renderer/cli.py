@@ -94,6 +94,7 @@ def parser():
             command.add_argument("--candidate-id")
             command.add_argument("--prompt-file", type=Path, help="UTF-8 voice description for the next generation")
             command.add_argument("--text-file", type=Path, help="UTF-8 spoken sample text for the next generation")
+            command.add_argument("--speech-traits", help="Book-local accent/cadence traits for passages; empty text clears them (--action edit or generate)")
             command.add_argument("--attempt-file", type=Path,
                                  help="Saved attempt JSON to recheck without resynthesis (--action recover)")
             command.add_argument("--keep-unselected", action="store_true",

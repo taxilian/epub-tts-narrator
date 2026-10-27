@@ -421,7 +421,9 @@ class PronunciationReviewSession:
             else:
                 text = sample["text"][sample["start"]:sample["end"]]
             profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
-            traits = speech_traits(profile)
+            from .speech_traits import speech_trait_overrides
+            overrides = speech_trait_overrides(self.bundle, self.settings)
+            traits = overrides[sample["voice_id"]] if sample["voice_id"] in overrides else speech_traits(profile)
             if record is None:
                 from ..spoken_text import effective_delivery
                 direction = "; ".join(part for part in (traits, effective_delivery(sample["row"])) if part)
@@ -505,6 +507,13 @@ class PronunciationReviewSession:
         record = validate_performance({"version": PERFORMANCE_VERSION, "text_sha256": text_sha256(word),
                                        "controls": controls}, word)
         options = {"performance": record} if controls else {"direction": ""}
+        from ..speech_traits import speech_traits
+        from .speech_traits import speech_trait_overrides
+        overrides = speech_trait_overrides(self.bundle, self.settings)
+        profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
+        traits = overrides[sample["voice_id"]] if sample["voice_id"] in overrides else speech_traits(profile)
+        if traits:
+            options["traits" if controls else "direction"] = traits
         request = {"version": 1, "engine_sha256": digest(engine.identity), "voice": voice_conditioning_identity(voice),
                    "text": word, "word": word, "pronunciation": pronunciation, "options": options,
                    "isolated": True,

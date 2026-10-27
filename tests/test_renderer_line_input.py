@@ -148,6 +148,8 @@ class CastingLineInputTests(unittest.TestCase):
         self.type(prompt)
         self.wait_for(b"New script (Enter keeps current): ")
         self.type(script)
+        self.wait_for(b"New vocal traits (Enter keeps current; - clears): ")
+        self.type(b"\r")
         self.wait_for(b"PLAYBACK_READY")
 
     def stop_playback(self):
