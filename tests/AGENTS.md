@@ -5,7 +5,7 @@ Tests protect failure, resume, recovery, validation, and boundary behavior.
 Keep this file current: when suite conventions, helpers, or the run environment change, update it in the same commit.
 
 # LAYOUT
-Flat directory: 301 `test_*.py` files plus shared helper modules.
+Flat directory: 302 `test_*.py` files plus shared helper modules.
 `audition_fixtures.py` holds bundle/script helpers; `shared_fixtures.py` holds cross-cutting helpers (Terminal, snapshot, pcm_hash, make_epub, timed_transcript, FakeEntryPoints, PARENTHESIS_TRIM_CASES, renderer_config). Neither starts with `test_`, so discovery ignores them; add new shared helpers there, not inline copies.
 `fixtures/` contains five JSON contracts: attribution semantics and speech rewrite policies v1 through v4.
 `test_<module>.py` usually maps to `epub_tts_narrator/<module>.py`.
@@ -18,6 +18,7 @@ Censorship tests keep whole-word source matching, mask validation, PCM fades, pe
 Pronunciation tests keep registry inheritance, source evidence, request caching, CLI publication/resume, chunk projection, and preview compression real. Replace only LLM/TTS/playback boundaries. Prove proactive cast-name coverage, independently resumable CMU proposals, exact audition-to-approval binding, confirmed-only application, late parent decisions, exact-name separation, one affected take regenerated, unchanged cache reuse, and source/voice preservation. Syntax validation and synthetic test audio do not prove a live model's pronunciation quality.
 Casting menu tests cover width-aware full labels, shared-reference edits, duplicate mappings, and the third edit field through real PTY line input. Casting trait tests keep per-book persistence, recursive inheritance, failed-edit rollback, render snapshots, and cache-bound conditioning real; no TTS or model calls are needed for editing.
 Pronunciation review startup prepares every pending word kind plus both preview formats before the first menu prompt. Tests must preserve default/confirmed decisions and prove generated previews are not heard/approved; display-only CMU estimates cannot affect the selected pronunciation or audio identity.
+Capitalization tests preserve exact on-disk IDs and evidence while grouping ordinary source variants in review and rendering. Cover conflicting legacy choices/drafts, conservative capitonym/initialism guards, late ancestor choices with different current spelling, variant-aware queue resume/reopen, and unchanged source/cache identities. Never relabel an old audio receipt as a different exact preview.
 
 # CONVENTIONS
 Use stdlib `unittest` and `unittest.TestCase`; no pytest fixtures, markers, or conftest files.

@@ -203,7 +203,7 @@ class PronunciationsTests(unittest.TestCase):
             self.assertFalse(preparation_pending(second, second_doc))
             self.assertEqual((second / "pronunciations.json").read_bytes(), before)
 
-    def test_proposal_for_one_case_does_not_fill_another_name(self):
+    def test_proposal_is_shared_by_case_variants_but_not_another_spelling(self):
         directory = self.root / "minimal"
         directory.mkdir()
         document = {"source": {"book": {"id": "case-test"}, "blocks": [{"id": "b1", "text": "Mara mara Marah"}]}, "cast": {}}
@@ -212,7 +212,9 @@ class PronunciationsTests(unittest.TestCase):
         save_proposal(directory, document, "Mara", CMU_MARA)
         entries = {entry["word"]: entry for entry in load_pronunciations(directory)}
         self.assertEqual(entries["Mara"]["proposal"], CMU_MARA)
-        self.assertNotIn("proposal", entries["mara"])
+        self.assertEqual(entries["Mara"]["variants"], ["Mara", "mara"])
+        exact = {entry["word"]: entry for entry in load_pronunciations(directory, group_cases=False)}
+        self.assertNotIn("proposal", exact["mara"])
         self.assertNotIn("proposal", entries["Marah"])
         self.assertTrue(preparation_pending(directory, document))
 
@@ -323,7 +325,7 @@ class PronunciationsTests(unittest.TestCase):
         reset_pronunciation(directory, "Mara")
         self.assertEqual([entry["word"] for entry in load_pronunciations(directory)], ["They"])
 
-    def test_exact_case_variants_remain_independent_entries(self):
+    def test_case_variants_share_decisions_while_exact_storage_and_similar_names_remain_distinct(self):
         directory = self.root / "minimal"
         directory.mkdir()
         document = {"source": {"book": {"id": "case-test"}, "blocks": [{"id": "b1", "text": "Mara mara Marah"}]}, "cast": {}}
@@ -331,7 +333,9 @@ class PronunciationsTests(unittest.TestCase):
         write_json(directory / "manifest.json", {"source_fingerprint": fingerprint(document["source"])})
         save_candidates(directory, document, [candidate(word) for word in ("Mara", "mara", "Marah")])
         set_pronunciation(directory, document, "Mara", status="ignored")
-        self.assertEqual({entry["word"]: entry["status"] for entry in load_pronunciations(directory)}, {"Mara": "ignored", "mara": "pending", "Marah": "pending"})
+        self.assertEqual({entry["word"]: entry["status"] for entry in load_pronunciations(directory)}, {"Mara": "ignored", "Marah": "pending"})
+        self.assertEqual({entry["word"]: entry["status"] for entry in load_pronunciations(directory, group_cases=False)},
+                         {"Mara": "ignored", "mara": "ignored", "Marah": "pending"})
 
 
 if __name__ == "__main__":

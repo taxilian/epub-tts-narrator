@@ -14,6 +14,7 @@ import re
 import sys
 import wave
 
+from ..pronunciation_groups import entry_words, family_words, find_pronunciation, natural_spelling
 from .audition import AudioPlayer, display
 from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json
 from .run_locks import acquire_directory_lock
@@ -60,6 +61,8 @@ def _show(rows, output, formatter=None):
     output(display(f"\nPronunciations — {sum(row['status'] == 'pending' for row in rows)} pending / {len(rows)} total"))
     for index, row in enumerate(rows, 1):
         extra = " — inherited" if row.get("inherited") else ""
+        if row.get("case_conflict"):
+            extra += " — conflicting capitalization choices"
         draft = row.get("draft")
         description = formatter(row) if formatter is not None else _description(_preferred(row))
         if draft:
@@ -248,8 +251,8 @@ class PronunciationReviewSession:
             validate_pronunciation(pronunciation)
         return value["entries"]
 
-    def _write_draft(self, word, pronunciation):
-        from ..pronunciations import validate_pronunciation, validate_word
+    def _write_draft(self, word, pronunciation, *, variants=()):
+        from ..pronunciations import load_pronunciations, validate_pronunciation, validate_word
         validate_word(word)
         if pronunciation is not None:
             pronunciation = validate_pronunciation(pronunciation)
@@ -257,9 +260,11 @@ class PronunciationReviewSession:
         lock = acquire_directory_lock(self.directory / ".drafts.lock")
         try:
             entries = self._drafts()
-            if pronunciation is None:
-                entries.pop(word, None)
-            else:
+            rows = load_pronunciations(self.bundle["directory"])
+            members = family_words(word, rows, {*entries, word, *variants})
+            for member in {*members, *variants}:
+                entries.pop(member, None)
+            if pronunciation is not None:
                 entries[word] = pronunciation
             write_json(self.directory / "drafts.json", {
                 "format": _DRAFT_FORMAT, "version": 1, "book_id": self.bundle["source"]["book"]["id"],
@@ -267,14 +272,48 @@ class PronunciationReviewSession:
         finally:
             lock.rmdir()
 
+    def clear_drafts(self, row):
+        self._write_draft(row["word"], None, variants=entry_words(row))
+
     def rows(self, word=None):
-        from ..pronunciations import load_pronunciations
+        from ..pronunciations import load_pronunciations, word_id
         rows = load_pronunciations(self.bundle["directory"])
         drafts = self._drafts()
-        return [dict(row, **({"draft": drafts[row["word"]]} if row["word"] in drafts else {}),
-                     **({"preparation_error": self.preparation_errors[row["word"]]}
-                        if row["word"] in self.preparation_errors else {}))
-                for row in rows if word is None or row["word"] == word]
+        result = []
+        for row in rows:
+            # Retain the exact spelling used by a saved draft so its existing
+            # preview/played receipt remains valid. Conflicting legacy drafts
+            # stay visible until the listener explicitly chooses one.
+            choices = {}
+            for variant in entry_words(row):
+                if variant in drafts:
+                    choice = drafts[variant]
+                    choices.setdefault((choice["alphabet"], choice["value"]), []).append(variant)
+            if len(choices) <= 1:
+                partitions = [(list(entry_words(row)), next(iter(choices.values()), []))]
+            else:
+                partitions = [(members, members) for members in choices.values()]
+                remaining = [variant for variant in entry_words(row) if variant not in drafts]
+                if remaining:
+                    partitions.append((remaining, []))
+            for variants, drafted in partitions:
+                preferred = drafted or variants
+                spelling = row["word"] if row["word"] in preferred else min(preferred, key=natural_spelling)
+                selected = dict(row, word=spelling, id=word_id(spelling), variants=variants)
+                if spelling != row["word"]:
+                    selected.setdefault("origin_word", row["word"])
+                if drafted:
+                    selected["draft"] = drafts[spelling]
+                if len(choices) > 1:
+                    selected["case_conflict"] = True
+                if spelling in self.preparation_errors:
+                    selected["preparation_error"] = self.preparation_errors[spelling]
+                result.append(selected)
+        result.sort(key=lambda row: (row["word"].lower(), row["word"]))
+        if word is None:
+            return result
+        selected = find_pronunciation(result, word)
+        return [selected] if selected is not None else []
 
     def _estimates(self):
         """Display-only CMU estimates never become pronunciation choices."""
@@ -454,17 +493,19 @@ class PronunciationReviewSession:
                                      "audio_sha256": preview["audio_sha256"]}:
             raise ValueError("Play this exact pronunciation with the current voice before confirming it")
         set_pronunciation(self.bundle["directory"], self.bundle, row["word"], pronunciation, status="confirmed")
-        self._write_draft(row["word"], None)
+        self.clear_drafts(current[0])
 
     def ignore(self, word):
         from ..pronunciations import set_pronunciation
+        current = self.rows(word)
         set_pronunciation(self.bundle["directory"], self.bundle, word, status="ignored")
-        self._write_draft(word, None)
+        self.clear_drafts(current[0] if current else {"word": word})
 
     def reset(self, word):
         from ..pronunciations import reset_pronunciation
+        current = self.rows(word)
         reset_pronunciation(self.bundle["directory"], word)
-        self._write_draft(word, None)
+        self.clear_drafts(current[0] if current else {"word": word})
 
     def _occurrences(self, word):
         """Saved-voice candidates where the exact whole word occurs, best first.
@@ -765,7 +806,7 @@ class PronunciationReviewSession:
 def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=print,
                              engine_factory=None, store=None, player=None, playback_fn=None, proposal_fn=None):
     """Dispatch explicit edits or a keyboard-driven proposal/listening menu."""
-    from ..pronunciations import load_pronunciations, reset_pronunciation, set_pronunciation, validate_word
+    from ..pronunciations import load_pronunciations, set_pronunciation, validate_word
     from ..provider import ProviderError
     action = getattr(args, "action", "review")
     word = getattr(args, "word", None)
@@ -777,7 +818,9 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
     if correction is not None and action not in {"set", "play"}:
         raise ValueError("--say-as and --phonemes are used with --action set or play")
     if action == "list":
-        _show([entry for entry in load_pronunciations(bundle["directory"]) if word is None or entry["word"] == word], output)
+        rows = load_pronunciations(bundle["directory"])
+        selected = find_pronunciation(rows, word) if word is not None else None
+        _show(rows if word is None else ([selected] if selected is not None else []), output)
         return 0
     if action == "set":
         if correction is None:
@@ -788,13 +831,11 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
             output(display(f"Confirmed {word}: {_description(correction)}. Existing audio is unchanged."))
             return 0
     if action == "ignore":
-        set_pronunciation(bundle["directory"], bundle, word, status="ignored")
-        PronunciationReviewSession(bundle, config)._write_draft(word, None)
+        PronunciationReviewSession(bundle, config).ignore(word)
         output(display(f"Keeping the default pronunciation for {word}."))
         return 0
     if action == "reset":
-        reset_pronunciation(bundle["directory"], word)
-        PronunciationReviewSession(bundle, config)._write_draft(word, None)
+        PronunciationReviewSession(bundle, config).reset(word)
         output(display(f"Removed the local pronunciation decision for {word}; inherited decisions apply."))
         return 0
     if action not in {"review", "play", "set"}:
@@ -858,7 +899,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
                 verb = "play" if parts[0].isdecimal() else parts[0].casefold()
                 selection = parts[0] if verb == "play" else (parts[1] if len(parts) > 1 else None)
                 if selection is None:
-                    row = next((item for item in rows if item["word"] == last), None)
+                    row = find_pronunciation(rows, last)
                     if row is None:
                         raise ValueError("Enter a number from the pronunciation menu")
                 elif not selection.isdecimal() or not 1 <= int(selection) <= len(rows):

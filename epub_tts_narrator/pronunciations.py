@@ -9,6 +9,7 @@ import unicodedata
 
 from .performance_plan import validate_phonemes
 from .pipeline import fingerprint, write_json
+from .pronunciation_groups import find_pronunciation
 
 
 FORMAT = "epub-tts-pronunciations"
@@ -28,7 +29,7 @@ def validate_word(word):
 
 
 def word_id(word):
-    """Case and exact spelling are meaningful; similar names never collapse."""
+    """Stored IDs preserve exact spelling; effective case families are separate."""
     return "pron_" + hashlib.sha256(validate_word(word).encode("utf-8")).hexdigest()
 
 
@@ -176,7 +177,7 @@ def _document_source(directory, document):
     return source
 
 
-def load_pronunciations(directory):
+def load_pronunciations(directory, *, group_cases=True):
     """Return effective decisions, rereading ancestors so late approvals are visible."""
     directory = _directory(directory)
     manifest_path = directory / "manifest.json"
@@ -195,6 +196,12 @@ def load_pronunciations(directory):
                 if "proposal" in visible:
                     visible["proposal_origin_directory"] = str(owner)
                 found.append(visible)
+    if not found:
+        return []
+    current_words = {match.group() for block in _source(directory)["blocks"] for match in WORD_PATTERN.finditer(block["text"])}
+    if group_cases:
+        from .pronunciation_groups import group_pronunciations
+        return group_pronunciations(found, current_words)
     effective = {}
     # An unresolved descendant proposal must never shadow a resolved ancestor.
     for status_group in (("confirmed", "ignored"), ("pending",)):
@@ -207,7 +214,6 @@ def load_pronunciations(directory):
                     selected["proposal_origin_directory"] = entry["proposal_origin_directory"]
     if not effective:
         return []
-    current_words = {match.group() for block in _source(directory)["blocks"] for match in WORD_PATTERN.finditer(block["text"])}
     return sorted((entry for entry in effective.values() if entry["word"] in current_words),
                   key=lambda entry: (entry["word"].casefold(), entry["word"]))
 
@@ -278,7 +284,7 @@ def save_candidates(directory, document, candidates):
 
 
 def save_proposal(directory, document, word, proposal):
-    """Checkpoint a CMU guess only while its exact word remains unresolved.
+    """Checkpoint one CMU guess while its capitalization family is unresolved.
 
     Re-read under the local registry lock: a slow model response must not undo
     a concurrent human choice or replace a proposal already checkpointed by
@@ -287,19 +293,21 @@ def save_proposal(directory, document, word, proposal):
     """
     directory = _directory(directory)
     source = _document_source(directory, document)
-    identity = word_id(word)
+    validate_word(word)
     proposal = validate_proposal(proposal)
     def update():
         record = _load_local(directory, source)
-        effective = next((entry for entry in load_pronunciations(directory) if entry["id"] == identity), None)
+        effective = find_pronunciation(load_pronunciations(directory), word)
         if effective is None or effective["status"] != "pending" or "proposal" in effective:
             return None
+        target = effective["word"]
+        identity = word_id(target)
         entries = {entry["id"]: entry for entry in record["entries"]}
         if identity in entries:
             entry = deepcopy(entries[identity])
         else:
-            evidence = next({"block_id": block["id"], "quote": word}
-                            for block in source["blocks"] if _word_in(word, block["text"]))
+            evidence = next({"block_id": block["id"], "quote": target}
+                            for block in source["blocks"] if _word_in(target, block["text"]))
             entry = {key: deepcopy(effective[key]) for key in ("id", "word", "status", "kind", "reason")}
             entry["evidence"] = [evidence]
         entry["proposal"] = proposal
@@ -307,7 +315,13 @@ def save_proposal(directory, document, word, proposal):
         record["entries"] = sorted(entries.values(), key=lambda item: item["word"])
         return record
     _mutate(directory, update)
-    return next((entry for entry in load_pronunciations(directory) if entry["id"] == identity), None)
+    return find_pronunciation(load_pronunciations(directory), word)
+
+
+def _family(directory, record, source, word):
+    from .pronunciation_groups import family_words
+    current = {match.group() for block in source["blocks"] for match in WORD_PATTERN.finditer(block["text"])}
+    return family_words(word, [*record["entries"], *load_pronunciations(directory)], current)
 
 
 def set_pronunciation(directory, document, word, pronunciation=None, status="confirmed"):
@@ -326,31 +340,37 @@ def set_pronunciation(directory, document, word, pronunciation=None, status="con
     def update():
         record = _load_local(directory, source)
         entries = {entry["id"]: entry for entry in record["entries"]}
-        entry = deepcopy(entries.get(word_id(word), {"id": word_id(word), "word": word, "kind": "other",
-                                                   "reason": "Manually selected for pronunciation review.", "evidence": [evidence]}))
-        entry["status"] = status
-        entry.pop("pronunciation", None)
-        if status != "pending":
-            entry.pop("proposal", None)
-        if pronunciation is not None:
-            entry["pronunciation"] = pronunciation
-        entries[entry["id"]] = validate_entry(entry, source)
+        effective = find_pronunciation(load_pronunciations(directory), word)
+        for variant in _family(directory, record, source, word):
+            citation = next({"block_id": block["id"], "quote": variant}
+                            for block in source["blocks"] if _word_in(variant, block["text"]))
+            entry = deepcopy(entries.get(word_id(variant), {
+                "id": word_id(variant), "word": variant, "kind": effective["kind"] if effective else "other",
+                "reason": "Manually selected for pronunciation review.", "evidence": [citation]}))
+            entry["status"] = status
+            entry.pop("pronunciation", None)
+            if status != "pending":
+                entry.pop("proposal", None)
+            if pronunciation is not None:
+                entry["pronunciation"] = pronunciation
+            entries[entry["id"]] = validate_entry(entry, source)
         record["entries"] = sorted(entries.values(), key=lambda item: item["word"])
         return record
     _mutate(directory, update)
-    return next(entry for entry in load_pronunciations(directory) if entry["id"] == word_id(word))
+    return find_pronunciation(load_pronunciations(directory), word)
 
 
 def reset_pronunciation(directory, word):
-    """Remove only this book's entry, exposing the nearest ancestor decision."""
+    """Remove this book's capitalization family, exposing ancestor decisions."""
     directory = _directory(directory)
-    identity = word_id(word)
+    validate_word(word)
     if not (directory / FILENAME).exists() and not (directory / FILENAME).is_symlink():
         return load_pronunciations(directory)
     source = _source(directory)
     def update():
         record = _load_local(directory, source)
-        record["entries"] = [entry for entry in record["entries"] if entry["id"] != identity]
+        variants = set(_family(directory, record, source, word))
+        record["entries"] = [entry for entry in record["entries"] if entry["word"] not in variants]
         return record
     _mutate(directory, update)
     return load_pronunciations(directory)

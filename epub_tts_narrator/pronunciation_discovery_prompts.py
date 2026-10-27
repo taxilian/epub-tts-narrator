@@ -23,8 +23,12 @@ Return exactly {"candidates":[{"word":"exact single source word",
 "reason":"brief reason for name review or pronunciation uncertainty",
 "evidence":[{"block_id":"visible source block ID","quote":"short exact quotation containing that whole word"}]}]}.
 An empty candidates array is correct when no names or uncertainties occur. Emit each exact
-spelling once in this response. Preserve case and typography: similarly spelled
-names and differently capitalized words are separate entries. A word may contain
+spelling once in this response. For ordinary capitalization variants of the same
+word (Quiet/quiet or a shouted STELL/Stell), nominate one observed natural-case
+spelling with exact evidence; capitalization alone does not require another
+pronunciation. Preserve genuinely different case-sensitive readings such as
+Polish/polish or the initialism US versus the pronoun us. Never merge similarly
+spelled names or normalize spelling, accents, apostrophes, or hyphens. A word may contain
 internal hyphens or apostrophes but must be one lexical word; split multiword
 names into their proper-name words, even familiar ones. Never invent a word or evidence. Copy
 each evidence quote verbatim from that block's visible text window, with no

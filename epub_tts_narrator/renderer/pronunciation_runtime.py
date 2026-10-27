@@ -8,10 +8,22 @@ from ..spoken_text import build_spoken
 
 
 def confirmed_pronunciations(directory):
-    """Read effective series overrides once for a render plan; ignore proposals."""
+    """Snapshot approved choices for every exact source spelling in each group.
+
+    Grouping/inheritance decides which case variants share a choice. Binding
+    below still matches those complete source spellings exactly, preserving
+    offsets and leaving similar names and possessives independent.
+    """
     from ..pronunciations import load_pronunciations
-    return {entry["word"]: entry for entry in load_pronunciations(directory)
-            if entry["status"] == "confirmed"}
+    result = {}
+    for entry in load_pronunciations(directory):
+        if entry["status"] != "confirmed":
+            continue
+        for word in entry.get("variants", [entry["word"]]):
+            if word in result and result[word]["pronunciation"] != entry["pronunciation"]:
+                raise ValueError("Conflicting confirmed pronunciation choices for one exact source spelling")
+            result[word] = entry
+    return result
 
 
 def _mapped_word(row, match, mapping):

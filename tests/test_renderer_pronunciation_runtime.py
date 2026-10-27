@@ -13,7 +13,7 @@ from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
 from epub_tts_narrator.renderer.chapter_protocol import _chunk_shape, _leaf
 from epub_tts_narrator.renderer.engines import prepare_synthesis
 from epub_tts_narrator.renderer.performance_runtime import require_engine_support
-from epub_tts_narrator.renderer.pronunciation_runtime import merge_row_pronunciations
+from epub_tts_narrator.renderer.pronunciation_runtime import confirmed_pronunciations, merge_row_pronunciations
 from epub_tts_narrator.renderer.speech_identity import generation_identity
 from epub_tts_narrator.renderer.workflow import make_render_plan, render
 from epub_tts_narrator.spoken_text import build_spoken
@@ -318,3 +318,129 @@ class PronunciationInheritancePlanTests(unittest.TestCase):
             self.assertEqual(make_plan(child, config), baseline)
             reset_pronunciation(second, "Mara")
             self.assertEqual(set(replacements(make_plan(child, config))), {"MAR-ah"})
+
+
+class PronunciationCapitalizationPlanTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.document = valid_document()
+        text = "mara and MARA greeted Maran and Mara's sister."
+        self.document["source"]["blocks"][1]["text"] = text
+        self.document["segments"][2].update(text=text, end=len(text))
+        self.directory = self.root / "book"
+        export_bundle(self.document, self.directory, allow_review=True)
+        self.bundle = load_bundle(self.directory)
+        self.config = renderer_config(self.root, series_id="case-pronunciation", paragraph_synthesis=False)
+        self.choice = {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"}
+
+    def test_real_case_group_applies_to_exact_variants_and_preserves_other_words_and_source(self):
+        from epub_tts_narrator.pronunciations import set_pronunciation
+        source_path = self.directory / "source.json"
+        source_bytes = source_path.read_bytes()
+        original_bundle = deepcopy(self.bundle)
+        set_pronunciation(self.directory, self.document, "Mara", self.choice)
+        entries = confirmed_pronunciations(self.directory)
+        self.assertEqual(set(entries), {"Mara", "mara", "MARA"})
+        self.assertTrue(all(item["pronunciation"] == self.choice for item in entries.values()))
+        source = self.bundle["chapters"][0]["rows"][2]
+        result = merge_row_pronunciations(source, None, entries)
+        controls = result["controls"]
+        self.assertEqual([(item["start"], item["end"], item["text"]) for item in controls],
+                         [(0, 4, "mara"), (9, 13, "MARA")])
+        _, compiled, metadata = prepare_synthesis(source["text"], performance=result)
+        self.assertEqual(compiled.count("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>"), 2)
+        self.assertIn("Maran and Mara's sister", compiled)
+        self.assertEqual(metadata["expressive_performance"]["expected_text"], source["text"])
+        self.assertEqual(self.bundle, original_bundle)
+        self.assertEqual(source_path.read_bytes(), source_bytes)
+
+    def test_new_case_variants_change_only_affected_chunks_and_keep_existing_exact_chunk_identity(self):
+        from epub_tts_narrator.pronunciations import set_pronunciation
+        exact = entry(value=self.choice["value"], alphabet="cmu_arpabet")
+        old_config = dict(self.config, _pronunciation_snapshot={"Mara": exact})
+        old = make_render_plan(self.bundle, old_config, multi_speaker=False)
+        set_pronunciation(self.directory, self.document, "Mara", self.choice)
+        new = make_render_plan(self.bundle, self.config, multi_speaker=False)
+        old_chunks, new_chunks = old["chapters"][0]["chunks"], new["chapters"][0]["chunks"]
+        self.assertEqual(old_chunks[:2], new_chunks[:2])
+        self.assertNotEqual(old_chunks[2], new_chunks[2])
+        for old_chunk, new_chunk in zip(old_chunks, new_chunks):
+            for key in ("spoken_text", "source_ranges", "chunk_id", "segment"):
+                self.assertEqual(old_chunk[key], new_chunk[key])
+            voice = reference(old_chunk["segment"]["voice_id"])
+            old_identity, new_identity = [generation_identity(speech_request(voice, chunk=chunk),
+                                                               {voice["asset_hash"]: voice})
+                                          for chunk in (old_chunk, new_chunk)]
+            if old_chunk["segment"]["block_id"] == "b1":
+                self.assertEqual(old_identity, new_identity)
+            else:
+                self.assertNotEqual(old_identity, new_identity)
+
+    def test_conflicting_legacy_explicit_case_choices_keep_separate_runtime_bindings(self):
+        from epub_tts_narrator.pipeline import write_json
+        from epub_tts_narrator.pronunciations import set_pronunciation
+        import json
+        set_pronunciation(self.directory, self.document, "Mara", self.choice)
+        path = self.directory / "pronunciations.json"
+        saved = json.loads(path.read_text())
+        for item in saved["entries"]:
+            if item["word"] == "mara":
+                item["pronunciation"] = {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"}
+            elif item["word"] == "MARA":
+                item["status"] = "ignored"
+                item.pop("pronunciation")
+        write_json(path, saved, overwrite=True)
+        before = path.read_bytes()
+        entries = confirmed_pronunciations(self.directory)
+        self.assertEqual(set(entries), {"Mara", "mara"})
+        self.assertEqual(entries["Mara"]["pronunciation"], self.choice)
+        self.assertEqual(entries["mara"]["pronunciation"]["value"], "M EH1 R AH0")
+        source = self.bundle["chapters"][0]["rows"][2]
+        controls = merge_row_pronunciations(source, None, entries)["controls"]
+        self.assertEqual([(item["text"], item["phonemes"]) for item in controls], [("mara", "M EH1 R AH0")])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pending_and_ignored_case_families_never_become_render_controls(self):
+        from epub_tts_narrator.pronunciations import set_pronunciation
+        baseline = make_plan(self.bundle, self.config)
+        for status in ("pending", "ignored"):
+            with self.subTest(status=status):
+                set_pronunciation(self.directory, self.document, "Mara", status=status)
+                self.assertEqual(confirmed_pronunciations(self.directory), {})
+                self.assertEqual(make_plan(self.bundle, self.config), baseline)
+
+    def test_late_ancestor_choice_reaches_changed_case_without_rewriting_either_book(self):
+        from epub_tts_narrator.analysis_directory import continuation_registry, publish_directory
+        from epub_tts_narrator.pronunciations import set_pronunciation
+        from epub_tts_narrator.series import link_analysis
+        from epub_tts_narrator.renderer.config import DEFAULTS
+        from shared_fixtures import snapshot
+        from test_pronunciations import PronunciationsTests
+        from test_series import fixture, propose
+        fixture_books = PronunciationsTests()
+        fixture_books.root = self.root
+        parent, parent_doc = fixture_books.book("parent")
+        child_doc = fixture(sequel=True)
+        child_doc["source"]["book"].update(id="child", title="Lowercase sequel")
+        block = child_doc["source"]["blocks"][0]
+        block["text"] = block["text"].replace("Mara", "mara")
+        child_doc["segments"][0]["text"] = block["text"]
+        child_doc["cast"]["characters"][0]["evidence"][0]["quote"] = "mara Vale"
+        registry = continuation_registry(parent, child_doc["source"])
+        propose(child_doc, parent_doc["cast"]["characters"][0]["id"])
+        child_doc = link_analysis(child_doc, registry)
+        child = self.root / "child"
+        publish_directory(child_doc, registry, child, export_bundle, continue_from=parent)
+        bundle = load_bundle(child)
+        set_pronunciation(parent, parent_doc, "Mara", self.choice)
+        before = snapshot(parent), snapshot(child)
+        choices = confirmed_pronunciations(child)
+        self.assertEqual(set(choices), {"mara"})
+        self.assertEqual(choices["mara"]["origin_word"], "Mara")
+        plan = make_plan(bundle, deepcopy(DEFAULTS))
+        controls = [control for chapter in plan["chapters"] for chunk in chapter["chunks"]
+                    for control in chunk.get("expressive_performance", {}).get("controls", [])]
+        self.assertEqual([(item["text"], item["phonemes"]) for item in controls], [("mara", self.choice["value"])])
+        self.assertEqual((snapshot(parent), snapshot(child)), before)

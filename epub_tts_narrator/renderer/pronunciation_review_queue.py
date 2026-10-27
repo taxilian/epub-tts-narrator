@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 
+from ..pronunciation_groups import entry_words, family_words, find_pronunciation
 from .audition import display
 from .pronunciation_review import _preferred, _pronunciation, _show
 from .pronunciation_review_state import ReviewState
@@ -78,14 +79,26 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         session.mark_played(preview)
         return preview
 
+    def decision_words(row):
+        """An explicit decision resolves its family, including old sidecar keys.
+
+        Reopening remains restricted to the displayed group; an actual new
+        decision can resolve previously conflicting capitalization choices.
+        """
+        rows = [row, *session.rows()]
+        spellings = set(state.entries)
+        for item in rows:
+            spellings.update(entry_words(item))
+        return family_words(row["word"], rows, spellings)
+
     def autoaccept(row, choice, receipt, index, total):
         """Apply a completed, receipt-verified pair; the receipt binds this exact audio."""
         if choice is None:
             session.ignore(row["word"])
         else:
             set_pronunciation(bundle["directory"], bundle, row["word"], choice, status="confirmed")
-            session._write_draft(row["word"], None)
-        state.record(row["word"], choice, receipt, accepted=True)
+            session.clear_drafts(row)
+        state.record(row["word"], choice, receipt, accepted=True, variants=decision_words(row))
         draw(f"[{index + 1}/{total}] {row['word']} — accepted ({session.description(row, choice)})")
 
     def walk(start):
@@ -113,6 +126,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 last = word
                 choice = session.selection(row)
                 description = session.description(row, choice)
+                if row.get("case_conflict"):
+                    description += " (conflicting capitalization choices)"
                 if choice is not None and row["status"] == "pending" and choice == row.get("proposal"):
                     description += " (guessed; not verified)"
                 draw(f"[{index + 1}/{len(rows)}] {word} — {description}")
@@ -130,7 +145,14 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 except (ValueError, RuntimeError, OSError, ProviderError, KeyboardInterrupt):
                     stop_draw()
                     raise
-                index += 1
+                # Accepting a capitalization choice may collapse earlier
+                # conflicting rows. Resume after the accepted group in the
+                # fresh list, rather than skipping its new next neighbour.
+                current = session.rows()
+                accepted = find_pronunciation(current, word)
+                if accepted is None:
+                    raise ValueError("Pronunciation entries changed during playback; reopen the queue to resume")
+                index = current.index(accepted) + 1
         finally:
             session.notify = previous_notify
 
@@ -146,6 +168,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             row = rows[position]
             say(f"  {position - first + 1}. [{position + 1}/{len(rows)}] {row['word']} — {row['status']}; "
                 f"{session.description(row)}")
+            if row.get("case_conflict"):
+                say("     Conflicting capitalization choices remain separate until you choose a pronunciation.")
             if row.get("preparation_error"):
                 say("     Audio unavailable: " + row["preparation_error"])
         say(f"Enter resumes the queue at [{first + 1}/{len(rows)}] {rows[first]['word']}; "
@@ -166,7 +190,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 raise ValueError(f"Reopen range must stay within 1..{len(rows)}")
             chosen = rows[first - 1:final]
         for row in chosen:
-            state.mark_reopened(row["word"], _preferred(row))
+            state.mark_reopened(row["word"], _preferred(row), variants=entry_words(row))
         say(f"Marked {len(chosen)} entr{'y' if len(chosen) == 1 else 'ies'} for re-listening; "
             "registry decisions are unchanged, including inherited ones.")
 
@@ -180,6 +204,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             marker = "*" if state.queued(row) else " "
             if row.get("preparation_error"):
                 marker += "!"
+            if row.get("case_conflict"):
+                marker += "?"
             items.append(display(f"{index:>3}{marker} {row['word']} — {row['status']}"))
         cell = max(2, min(width, max(len(item) for item in items) + 2))
         columns = max(1, width // cell)
@@ -187,15 +213,17 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             say("".join(item[: cell - 2].ljust(cell) for item in items[offset:offset + columns]).rstrip()[:width])
         if any(row.get("preparation_error") for row in rows):
             say("! Audio unavailable; choose the entry number to retry its preview.")
+        if any(row.get("case_conflict") for row in rows):
+            say("? Conflicting capitalization choices remain separate until you choose a pronunciation.")
 
     def queued_count():
         return sum(1 for row in session.rows() if state.queued(row))
 
     def resume_index(rows):
         if state.resume_word is not None:
-            found = next((index for index, row in enumerate(rows) if row["word"] == state.resume_word), None)
-            if found is not None:
-                return found
+            selected = find_pronunciation(rows, state.resume_word)
+            if selected is not None:
+                return rows.index(selected)
         return next((index for index, row in enumerate(rows) if state.queued(row)), None)
 
     def help_text():
@@ -265,7 +293,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             selection = parts[0] if verb == "play" else (parts[1] if len(parts) > 1 else None)
             if selection is None:
                 selected_word = last or state.resume_word
-                row = next((item for item in rows if item["word"] == selected_word), None) if selected_word else None
+                row = find_pronunciation(rows, selected_word) if selected_word else None
                 if row is None:
                     raise ValueError("Enter a number from the pronunciation list (L), or S to start the queue")
             elif not selection.isdecimal() or not 1 <= int(selection) <= len(rows):
@@ -293,11 +321,11 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 play_excerpt(row, proposed)
             elif verb == "c":
                 session.confirm(row)
-                state.clear([word])
+                state.clear(decision_words(row))
                 say("Pronunciation confirmed. Existing audio is unchanged.")
             elif verb == "i":
                 session.ignore(word)
-                state.clear([word])
+                state.clear(decision_words(row))
                 say("Default pronunciation selected.")
                 try:
                     say(session.description(row, None, prepare=True))
@@ -305,7 +333,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                     say("CMU estimate unavailable; B retries it: " + safe_error_text(exc, secrets=secrets))
             elif verb == "r":
                 session.reset(word)
-                state.clear([word])
+                state.clear(decision_words(row))
                 say("Local decision and audition draft removed; inherited decisions apply.")
             else:
                 raise ValueError("Use S, L, O, a number, B, E, P, C, I, R, or Q")

@@ -13,6 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 import re
 
+from ..pronunciation_groups import entry_words
 from .common import digest, read_json, regular_file, write_json
 from .pronunciation_review import _preferred
 from .run_locks import acquire_directory_lock
@@ -93,11 +94,15 @@ class ReviewState:
             lock.rmdir()
 
     def accepted(self, row):
-        """The stored acceptance, or None when the choice changed or none exists."""
-        entry = self.entries.get(row["word"])
-        if entry is None or not entry["accepted"] or entry["choice"] != _preferred(row):
-            return None
-        return entry
+        """Reuse a group member's acceptance only for the same selected choice.
+
+        Receipts retain their original request/audio hashes; grouping does not
+        manufacture a played receipt for the displayed spelling's preview.
+        """
+        choice = _preferred(row)
+        return next((self.entries[word] for word in entry_words(row)
+                     if word in self.entries and self.entries[word]["accepted"]
+                     and self.entries[word]["choice"] == choice), None)
 
     def queued(self, row):
         """Whether the walk should (re-)listen to this row.
@@ -107,24 +112,28 @@ class ReviewState:
         (for example a new draft on a confirmed word); reopened rows queue
         regardless of status, including inherited decisions.
         """
-        entry = self.entries.get(row["word"])
-        if entry is not None and entry["reopened"]:
+        if any(self.entries.get(word, {}).get("reopened") for word in entry_words(row)):
             return True
         choice = _preferred(row)
         if row["status"] == "pending":
-            return not (entry is not None and entry["accepted"] and entry["choice"] == choice)
+            return self.accepted(row) is None
         return choice is not None and choice != row.get("pronunciation")
 
-    def record(self, word, choice, receipt, *, accepted):
-        self.entries[word] = {"choice": deepcopy(choice), "receipt": _validate_receipt(receipt),
-                              "accepted": bool(accepted), "reopened": False}
+    def record(self, word, choice, receipt, *, accepted, variants=()):
+        entry = {"choice": deepcopy(choice), "receipt": _validate_receipt(receipt),
+                 "accepted": bool(accepted), "reopened": False}
+        for member in (word, *variants):
+            self.entries.pop(member, None)
+        self.entries[word] = entry
         self.save()
 
-    def mark_reopened(self, word, choice):
+    def mark_reopened(self, word, choice, *, variants=()):
         """Queue a row for re-listening without changing the pronunciation registry."""
         prior = self.entries.get(word, {})
+        for member in (word, *variants):
+            self.entries.pop(member, None)
         self.entries[word] = {"choice": deepcopy(choice),
-                              "receipt": prior.get("receipt"),
+                              "receipt": prior.get("receipt") if prior.get("choice") == choice else None,
                               "accepted": False, "reopened": True}
         self.save()
 

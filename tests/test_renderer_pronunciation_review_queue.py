@@ -59,7 +59,7 @@ class PronunciationReviewQueueTests(unittest.TestCase):
         directory = self.root / "book"
         source_path = directory / "source.json"
         source = json.loads(source_path.read_text(encoding="utf-8"))
-        addition = " " + " ".join(EXTRA_WORDS) + "."
+        addition = " " + " ".join(EXTRA_WORDS) + ". qarm QARM."
         source["blocks"][1]["text"] += addition
         source_path.write_text(json.dumps(source, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         script_path = directory / "scripts/chapter-0001.jsonl"
@@ -453,6 +453,144 @@ class PronunciationReviewQueueTests(unittest.TestCase):
         self.assertIsNone(reloaded.accepted(changed))
         reloaded.clear(["Qarm"])
         self.assertFalse(read_json(self.state_path())["entries"])
+
+    def test_old_variant_acceptance_is_reused_only_for_matching_choice_without_relabeling(self):
+        self.session.edit("Qarm", CMU_QARM)
+        row = self.session.rows("Qarm")[0]
+        self.assertEqual(set(row["variants"]), {"Qarm", "qarm", "QARM"})
+        receipt = {"request_sha256": "a" * 64, "audio_sha256": "b" * 64}
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.record("QARM", CMU_QARM, receipt, accepted=True)
+        before = self.state_path().read_bytes()
+        self.assertEqual(state.accepted(row)["receipt"], receipt)
+        self.assertFalse(state.queued(row))
+        self.assertEqual(self.state_path().read_bytes(), before)
+        self.assertEqual(set(state.entries), {"QARM"})
+        changed = dict(row, draft=CMU_XYLO)
+        self.assertIsNone(state.accepted(changed))
+        self.assertTrue(state.queued(changed))
+
+    def test_hidden_reopen_requeues_group_and_completed_pair_clears_obsolete_variant_state(self):
+        row = self.session.rows("Qarm")[0]
+        receipt = {"request_sha256": "a" * 64, "audio_sha256": "b" * 64}
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.record("Qarm", None, receipt, accepted=True)
+        state.mark_reopened("QARM", None)
+        self.assertTrue(state.queued(row))
+        state.record("Qarm", None, receipt, accepted=True, variants=row["variants"])
+        self.assertFalse(state.queued(row))
+        self.assertEqual(set(state.entries), {"Qarm"})
+        restarted = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        self.assertFalse(restarted.queued(row))
+
+    def test_reopen_collapses_group_state_without_relabeling_hidden_audio_receipts(self):
+        row = self.session.rows("Qarm")[0]
+        receipt = {"request_sha256": "a" * 64, "audio_sha256": "b" * 64}
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.record("QARM", None, receipt, accepted=True)
+        state.mark_reopened("qarm", None)
+        state.mark_reopened("Qarm", None, variants=row["variants"])
+        self.assertEqual(set(state.entries), {"Qarm"})
+        self.assertTrue(state.entries["Qarm"]["reopened"])
+        self.assertIsNone(state.entries["Qarm"]["receipt"])
+        self.assertTrue(state.queued(row))
+        state.clear(row["variants"])
+        self.assertEqual(read_json(self.state_path())["entries"], {})
+
+    def test_conflicting_variant_group_does_not_reuse_or_clear_another_groups_state(self):
+        receipt = {"request_sha256": "a" * 64, "audio_sha256": "b" * 64}
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        row = dict(self.session.rows("Qarm")[0], variants=["Qarm", "qarm"], proposal=CMU_QARM)
+        separate = dict(row, word="QARM", variants=["QARM"], proposal=CMU_XYLO)
+        state.record("QARM", CMU_XYLO, receipt, accepted=True)
+        self.assertIsNone(state.accepted(row))
+        self.assertTrue(state.queued(row))
+        self.assertFalse(state.queued(separate))
+        state.mark_reopened("Qarm", CMU_QARM, variants=row["variants"])
+        self.assertFalse(state.queued(separate))
+        state.clear(row["variants"])
+        self.assertEqual(set(state.entries), {"QARM"})
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
+    def test_saved_hidden_variant_resumes_at_group_without_replaying_earlier_words(self):
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.resume_word = "QARM"
+        state.save()
+        _, lines, _, played, _ = self.queue([""], playback=lambda count, path: False)
+        self.assertEqual(len(played), 1)
+        self.assertEqual(self.engine.calls[0]["text"], "Qarm")
+        self.assertTrue(any("Interrupted at word 8/12: Qarm" in line for line in lines))
+        self.assertTrue(all(row["status"] == "pending" for row in self.rows()))
+
+    def test_editor_without_number_resolves_saved_hidden_variant_to_visible_group(self):
+        self.session.edit("Qarm", CMU_QARM)
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.resume_word = "QARM"
+        state.save()
+        _, lines, _, played, _ = self.queue(["p", "", "q"])
+        self.assertTrue(any("Current pronunciation for Qarm:" in line for line in lines))
+        self.assertFalse(any("Action stopped:" in line for line in lines))
+        self.assertEqual(played, [])
+
+    def test_explicit_default_clears_all_hidden_family_reopen_flags(self):
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.mark_reopened("qarm", CMU_QARM)
+        state.mark_reopened("QARM", CMU_XYLO)
+        state.mark_reopened("Qarm", None)
+        index = self.words.index("Qarm") + 1
+        self.queue([f"i {index}", "q"])
+        self.assertEqual(self.row("Qarm")["status"], "ignored")
+        self.assertEqual(read_json(self.state_path())["entries"], {})
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
+    def test_hidden_variant_receipt_does_not_confirm_unplayed_current_excerpt(self):
+        self.session.edit("Qarm", CMU_QARM)
+        state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])
+        state.record("QARM", CMU_QARM, {"request_sha256": "a" * 64, "audio_sha256": "b" * 64},
+                     accepted=True)
+        self.session.audition("Qarm", CMU_QARM)
+        index = self.words.index("Qarm") + 1
+        _, lines, _, played, _ = self.queue([f"c {index}", "q"])
+        self.assertEqual(self.row("Qarm")["status"], "pending")
+        self.assertEqual(played, [])
+        self.assertTrue(any("Play this exact pronunciation" in line for line in lines))
+        self.assertEqual(set(read_json(self.state_path())["entries"]), {"QARM"})
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
+    def test_accepting_second_legacy_conflict_does_not_skip_next_word_when_rows_collapse(self):
+        from epub_tts_narrator.renderer.common import digest
+        self.session.edit("Qarm", CMU_QARM)
+        path = self.session.directory / "drafts.json"
+        legacy = read_json(path)
+        legacy["entries"]["QARM"] = CMU_XYLO
+        legacy["sha256"] = digest(legacy["entries"])
+        write_json(path, legacy)
+        before = self.session.rows()
+        start = next(index for index, row in enumerate(before) if row["word"] == "Qarm")
+        self.assertEqual(before[start - 1]["word"], "QARM")
+        self.assertTrue(before[start]["case_conflict"])
+        self.queue([f"s {start + 1}"])
+        self.assertEqual(self.row("Qarm")["pronunciation"], CMU_QARM)
+        self.assertEqual(len(self.rows()), len(self.words))
+        self.assertEqual(self.row("Sella")["status"], "ignored")
+        self.assertTrue(all(self.row(word)["status"] == "ignored" for word in self.words
+                            if word.lower() > "qarm"))
+        self.assertTrue(all(self.row(word)["status"] == "pending" for word in self.words
+                            if word.lower() < "qarm"))
+        self.assertEqual(read_json(path)["entries"], {})
+
+    def test_compact_list_marks_legacy_capitalization_conflicts(self):
+        from epub_tts_narrator.renderer.common import digest
+        self.session.edit("Qarm", CMU_QARM)
+        path = self.session.directory / "drafts.json"
+        legacy = read_json(path)
+        legacy["entries"]["QARM"] = CMU_XYLO
+        legacy["sha256"] = digest(legacy["entries"])
+        write_json(path, legacy)
+        _, lines, _, played, _ = self.queue(["l", "q"])
+        self.assertTrue(any("*? QARM" in line for line in lines))
+        self.assertTrue(any("? Conflicting capitalization choices" in line for line in lines))
+        self.assertEqual(played, [])
 
     def test_corrupted_or_foreign_review_state_fails_closed(self):
         state = ReviewState(self.session.directory, self.bundle["source"]["book"]["id"])

@@ -30,7 +30,7 @@ def create_pronunciation_proposer(directory, config_path=None, *, progress=print
     """
     from .config import load_config
     from .pronunciation_proposals import propose_pronunciation
-    from .pronunciations import WORD_PATTERN, load_pronunciations, validate_word
+    from .pronunciations import WORD_PATTERN, find_pronunciation, load_pronunciations, validate_word
 
     directory = Path(directory).resolve()
     requests = None
@@ -44,9 +44,8 @@ def create_pronunciation_proposer(directory, config_path=None, *, progress=print
                          if any(token.group() == word for token in WORD_PATTERN.finditer(block["text"]))), None)
         if evidence is None:
             raise ValueError("Pronunciation word must occur exactly in this book's source")
-        entry = next((item for item in load_pronunciations(directory) if item["word"] == word),
-                     {"word": word, "kind": "other", "reason": "Manually selected for pronunciation review.",
-                      "evidence": [evidence]})
+        entry = find_pronunciation(load_pronunciations(directory), word) or {
+            "word": word, "kind": "other", "reason": "Manually selected for pronunciation review.", "evidence": [evidence]}
         if requests is None:
             requests = _requests(directory, load_config(config_path), progress)
         return propose_pronunciation(document, entry, requests, respelling=respelling)

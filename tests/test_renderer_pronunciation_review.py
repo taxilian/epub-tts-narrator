@@ -13,7 +13,7 @@ from epub_tts_narrator.pronunciations import load_pronunciations, save_candidate
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
 from epub_tts_narrator.renderer.bundle import load_bundle
-from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from epub_tts_narrator.renderer.engines import prepare_synthesis
 from epub_tts_narrator.renderer.pronunciation_review import (
     PronunciationReviewSession, _sample_bounds, run_pronunciation_review,
@@ -85,13 +85,84 @@ class PronunciationReviewTests(unittest.TestCase):
                                         proposal_fn=kwargs.pop("proposal_fn", self.proposal), **kwargs)
 
     def candidate(self, *, proposal=None, kind="name"):
-        entry = {key: value for key, value in load_pronunciations(self.bundle["directory"])[0].items()
+        entry = {key: value for key, value in load_pronunciations(self.bundle["directory"], group_cases=False)[0].items()
                  if key not in {"origin_directory", "inherited", "proposal_origin_directory"}}
         entry.update(kind=kind, status="pending")
         entry.pop("pronunciation", None)
         if proposal is not None:
             entry["proposal"] = proposal
         save_candidates(self.bundle["directory"], self.bundle, [entry])
+
+    def legacy_drafts(self, entries):
+        self.session.directory.mkdir(parents=True, exist_ok=True)
+        write_json(self.session.directory / "drafts.json", {
+            "format": "epub-tts-pronunciation-drafts", "version": 1,
+            "book_id": self.bundle["source"]["book"]["id"],
+            "entries": entries, "sha256": digest(entries)})
+
+    def test_capitalization_variants_share_a_review_row_and_cli_word_filter(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lantern", status="pending")
+        before = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
+        upper, lower = self.session.rows("Lantern"), self.session.rows("lantern")
+        self.assertEqual(upper, lower)
+        self.assertEqual(set(upper[0]["variants"]), {"Lantern", "lantern"})
+        self.command("list", word="lantern")
+        self.assertTrue(any("1 pending / 1 total" in line for line in self.output))
+        self.assertEqual(Path(self.bundle["directory"], "pronunciations.json").read_bytes(), before)
+        self.factory.assert_not_called()
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_preparation_generates_one_suggestion_and_preview_pair_per_capitalization_group(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lantern", status="pending")
+        self.session.prepare_review()
+        self.assertEqual(self.proposal.call_count, 2)  # Lantern family and Mara
+        self.assertEqual(len(self.engine.calls), 4)
+        self.session.prepare_review()
+        self.assertEqual(self.proposal.call_count, 2)
+        self.assertEqual(len(self.engine.calls), 4)
+        self.assertEqual(len(self.session.rows()), 2)
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_hidden_variant_draft_preserves_exact_preview_and_confirmation_receipt(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lantern", status="pending")
+        choice = {"alphabet": "cmu_arpabet", "value": "L AE1 N T ER0 N"}
+        self.legacy_drafts({"lantern": choice})
+        preview = self.session.audition("lantern", choice)
+        self.session.mark_played(preview)
+        row = self.session.rows("Lantern")[0]
+        self.assertEqual(row["word"], "lantern")
+        self.assertEqual(row["draft"], choice)
+        self.session.confirm(row)
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertEqual(self.session._drafts(), {})
+        for spelling in ("Lantern", "lantern"):
+            self.assertEqual(self.session.rows(spelling)[0]["pronunciation"], choice)
+
+    def test_conflicting_legacy_drafts_remain_visible_until_an_explicit_choice(self):
+        set_pronunciation(self.bundle["directory"], self.bundle, "Lantern", status="pending")
+        first = {"alphabet": "cmu_arpabet", "value": "L AE1 N T ER0 N"}
+        second = {"alphabet": "cmu_arpabet", "value": "L AA1 N T ER0 N"}
+        self.legacy_drafts({"Lantern": first, "lantern": second})
+        rows = [row for row in self.session.rows() if row["word"].lower() == "lantern"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["case_conflict"] for row in rows))
+        self.assertEqual(self.session.rows("Lantern")[0]["draft"], first)
+        self.assertEqual(self.session.rows("lantern")[0]["draft"], second)
+        self.session.edit("Lantern", second)
+        rows = self.session.rows("lantern")
+        self.assertEqual(rows[0]["draft"], second)
+        self.assertEqual(set(rows[0]["variants"]), {"Lantern", "lantern"})
+        self.assertEqual(self.session._drafts(), {"Lantern": second})
+
+    def test_explicit_cli_decisions_clear_all_variant_drafts(self):
+        choice = {"alphabet": "cmu_arpabet", "value": "L AE1 N T ER0 N"}
+        for action in ("set", "ignore", "reset"):
+            with self.subTest(action=action):
+                set_pronunciation(self.bundle["directory"], self.bundle, "Lantern", status="pending")
+                self.legacy_drafts({"lantern": choice})
+                self.command(action, word="Lantern", **({"phonemes": choice["value"]} if action == "set" else {}))
+                self.assertEqual(self.session._drafts(), {})
+        self.factory.assert_not_called()
 
     def test_manual_traits_reach_excerpt_and_isolated_previews_and_their_cache_requests(self):
         from epub_tts_narrator.renderer.speech_traits import save_speech_traits
@@ -240,11 +311,11 @@ class PronunciationReviewTests(unittest.TestCase):
         self.session.prepare_review()
         self.assertEqual((registry.read_bytes(), drafts.read_bytes()), before)
         self.assertCountEqual([call.args for call in self.proposal.call_args_list],
-                              [("lantern", None), ("warm", "worrm")])
+                              [("Lantern", None), ("warm", "worrm")])
         rows = {row["word"]: row for row in self.session.rows()}
-        self.assertEqual(self.session.selection(rows["lantern"]), None)
+        self.assertEqual(self.session.selection(rows["Lantern"]), None)
         self.assertEqual(self.session.selection(rows["warm"]), {"alphabet": "respelling", "value": "worrm"})
-        self.assertEqual(self.session.description(rows["lantern"]),
+        self.assertEqual(self.session.description(rows["Lantern"]),
                          "default pronunciation: M AA1 R AH0 (CMU estimate)")
         self.assertEqual(self.session.description(rows["warm"]), "say as worrm; CMU estimate: M AA1 R AH0")
         self.assertEqual(len(self.engine.calls), 8)

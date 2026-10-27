@@ -14,6 +14,7 @@ Subcommands: `plan`, `cache-report`, `render`, `assemble`, `refresh-metadata`, `
 More commands: `cast`, `voice-aliases`, `doctor`, `serve`, `serve-chapters`, `runpod`.
 Performance commands: `prepare-performance`, `compare-performance`; legacy rendering remains the default.
 Pronunciation command: `pronunciations` with review/list/discover/set/ignore/reset/play actions. Default `review` runs the listening queue (`pronunciation_review_queue.py`, state sidecar in `pronunciation_review_state.py`): count-only menu, `S [N]` start, each queued word spoken isolated twice with interruptible one-second gaps, uninterrupted pairs auto-accept durably, any key shows the last five words and resumes at the first of them. Proposed CMU name readings, readable-hint conversion, and explicit CMU Arpabet; saved character voices only.
+Ordinary capitalization variants share review/preparation and confirmed runtime choices via `pronunciation_groups.py`; preserve exact v1 registry IDs, source offsets, and preview receipts. Queue state and drafts resolve group variants, while conflicting explicit choices/drafts stay visible until resolved and known capitonyms/short initialisms remain separate.
 `serve` exposes a Fish-compatible `/v1/tts` service through `server.py`.
 `serve-chapters` runs the resumable job server in `chapter_server.py`.
 Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publish.
