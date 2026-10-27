@@ -10,12 +10,15 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.analysis_directory import (
-    continuation_registry, default_output, fresh_registry, publish_directory, validate_output,
+    _completed_directory, continuation_registry, default_output, fresh_registry, publish_directory,
+    validate_output,
 )
+from epub_tts_narrator.analysis_progress import PENDING_DIRNAME, create_pending, inspect_pending, is_pending_directory
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.series import link_analysis, load_registry
 from shared_fixtures import snapshot
+from test_analysis_progress import run_identity
 from test_series import fixture, propose
 
 
@@ -338,6 +341,115 @@ class AnalysisDirectoryTests(unittest.TestCase):
                 publish_directory(document, registry, output, export_bundle)
         self.assertFalse(output.exists())
         self.assertFalse(list(self.root.glob(".audiobook-analysis-*")))
+
+    def make_pending(self, name):
+        output = self.root / name
+        fresh = fresh_registry(output)
+        create_pending(output, run_identity()).close()
+        self.assertTrue(is_pending_directory(output))
+        return output, fresh
+
+    def test_validate_output_rejects_existing_directory_unless_it_holds_only_pending_state(self):
+        pending, _ = self.make_pending("pending")
+        with self.assertRaises(FileExistsError):
+            validate_output(pending)
+        self.assertEqual(validate_output(pending, allow_pending=True), pending.resolve())
+        self.assertTrue(is_pending_directory(pending))
+        mixed = self.root / "mixed"
+        mixed.mkdir()
+        (mixed / PENDING_DIRNAME).mkdir()
+        (mixed / "keep").write_text("another process")
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        (foreign / "keep").write_text("another process")
+        manifest_only = self.root / "manifest-only"
+        manifest_only.mkdir()
+        (manifest_only / "manifest.json").write_text("{}")
+        empty = self.root / "empty"
+        empty.mkdir()
+        cases = {"pending with foreign content": mixed, "plain directory": foreign,
+                 "directory with a manifest": manifest_only, "empty directory": empty}
+        for label, path in cases.items():
+            with self.subTest(case=label), self.assertRaises(FileExistsError):
+                validate_output(path, allow_pending=True)
+        self.assertEqual((mixed / "keep").read_text(), "another process")
+        self.assertEqual((foreign / "keep").read_text(), "another process")
+        self.assertEqual((manifest_only / "manifest.json").read_text(), "{}")
+
+    def test_pending_publication_finalizes_in_place_and_discards_pending_before_manifest(self):
+        output, registry = self.make_pending("ordered-pending")
+        document = link_analysis(fixture(), registry)
+        original_link = os.link
+        published = []
+
+        def observe(source, destination):
+            destination = Path(destination)
+            if destination.is_relative_to(output):
+                published.append(str(destination.relative_to(output)))
+                if destination.name == "manifest.json":
+                    self.assertTrue((output / "analysis.json").is_file())
+                    self.assertTrue((output / "scripts/chapter-0001.jsonl").is_file())
+                    self.assertFalse((output / PENDING_DIRNAME).exists())
+            return original_link(source, destination)
+
+        with patch("epub_tts_narrator.analysis_directory.os.link", side_effect=observe):
+            publish_directory(document, registry, output, export_bundle)
+        self.assertEqual(published[-1], "manifest.json")
+        self.assertNotIn(PENDING_DIRNAME, published)
+        completed, _, _ = _completed_directory(output)
+        self.assertEqual(completed, document)
+        self.assertFalse((output / PENDING_DIRNAME).exists())
+        self.assertFalse(list(self.root.glob(".audiobook-analysis-*")))
+
+    def test_pending_publication_failure_preserves_checkpoints_then_retry_publishes(self):
+        for failure in (OSError("disk failure"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                output, registry = self.make_pending(f"pending-{type(failure).__name__}")
+                document = link_analysis(fixture(), registry)
+                original_link = os.link
+
+                def fail(source, destination):
+                    if Path(destination) == output / "scripts/chapter-0001.jsonl":
+                        raise failure
+                    return original_link(source, destination)
+
+                with patch("epub_tts_narrator.analysis_directory.os.link", side_effect=fail):
+                    with self.assertRaises(type(failure)):
+                        publish_directory(document, registry, output, export_bundle)
+                self.assertEqual({path.name for path in output.iterdir()}, {PENDING_DIRNAME})
+                record = inspect_pending(output)
+                self.assertIsNotNone(record)
+                self.assertFalse(list(self.root.glob(".audiobook-analysis-*")))
+                publish_directory(document, registry, output, export_bundle)
+                self.assertTrue((output / "manifest.json").is_file())
+                self.assertFalse((output / PENDING_DIRNAME).exists())
+
+    def test_pending_publication_refuses_output_with_foreign_content_untouched(self):
+        output = self.root / "race-pending"
+        registry = fresh_registry(output)
+        document = link_analysis(fixture(), registry)
+        output.mkdir()
+        (output / "keep").write_text("another process")
+        with self.assertRaises(FileExistsError):
+            publish_directory(document, registry, output, export_bundle)
+        self.assertEqual({path.name for path in output.iterdir()}, {"keep"})
+        self.assertEqual((output / "keep").read_text(), "another process")
+
+    def test_foreign_content_appearing_during_staging_fails_pending_publication(self):
+        output = self.root / "midrace-pending"
+        registry = fresh_registry(output)
+        document = link_analysis(fixture(), registry)
+        create_pending(output, run_identity()).close()
+
+        def race_exporter(*args, **kwargs):
+            state = export_bundle(*args, **kwargs)
+            (output / "keep").write_text("another process")
+            return state
+
+        with self.assertRaises(FileExistsError):
+            publish_directory(document, registry, output, race_exporter)
+        self.assertEqual({path.name for path in output.iterdir()}, {PENDING_DIRNAME, "keep"})
+        self.assertEqual((output / "keep").read_text(), "another process")
 
 
 if __name__ == "__main__":

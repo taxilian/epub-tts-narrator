@@ -11,6 +11,7 @@ import shutil
 import stat
 import tempfile
 
+from .analysis_progress import PENDING_DIRNAME, is_pending_directory
 from .contracts import readiness, review_items, validate_document
 from .pipeline import fingerprint, write_json
 from .series import load_registry, save_registry, validate_registry
@@ -20,11 +21,17 @@ def default_output(input_path):
     return Path.cwd() / f"{Path(input_path).stem}.audiobook"
 
 
-def validate_output(output):
-    """Check a new destination without creating it or changing existing files."""
+def validate_output(output, *, allow_pending=False):
+    """Check a new destination without creating it or changing existing files.
+
+    With ``allow_pending`` an existing directory is accepted only when it is a
+    pending analysis directory (solely ``.analysis-pending/`` state); any other
+    existing path is still refused.
+    """
     output = Path(output)
     if output.exists() or output.is_symlink():
-        raise FileExistsError(f"Output directory already exists: {output}; choose another directory")
+        if not (allow_pending and is_pending_directory(output)):
+            raise FileExistsError(f"Output directory already exists: {output}; choose another directory")
     resolved = output.resolve()
     for parent in resolved.parents:
         if parent.exists():
@@ -270,8 +277,14 @@ def _rollback(output, owned_directories, expected_files):
 
 
 def publish_directory(document, registry, output, exporter, *, continue_from=None, source_epub=None):
-    """Commit an analysis, cumulative cast, and chapter bundle without clobbering."""
-    output = validate_output(output)
+    """Commit an analysis, cumulative cast, and chapter bundle without clobbering.
+
+    A pending analysis directory (``.analysis-pending/`` checkpoints from an
+    interrupted run) is finalized in place: bundle content is linked first, the
+    pending state is removed only after every content link succeeded, and
+    ``manifest.json`` is linked last as the completeness signal.
+    """
+    output = validate_output(output, allow_pending=True)
     continuation = None
     if continue_from is not None:
         previous = Path(continue_from).resolve()
@@ -310,13 +323,27 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
             hint_names.append(SOURCE_EPUB_HINT)
         names = ["analysis.json", "series-cast.json", *bundle_names, *hint_names, "manifest.json"]
         expected_files = {output / name: _identity(bundle / name) for name in names}
-        output.mkdir()
+        # Re-checked at link time: content added after validation (even new
+        # pending state) makes the destination foreign again, and mkdir then
+        # fails closed instead of publishing alongside it.
+        pending = is_pending_directory(output)
+        if not pending:
+            output.mkdir()
         owned_directories[output] = _identity(output)
         scripts = output / "scripts"
         scripts.mkdir()
         owned_directories[scripts] = _identity(scripts)
-        for name in names:
+        for name in names[:-1]:
             os.link(bundle / name, output / name)
+        if pending:
+            # Every content link succeeded, so the analyzer-owned pending
+            # checkpoints are removed before manifest.json restores the
+            # completeness signal. A failure above this point leaves the
+            # checkpoints intact for a publish-only rerun, and _rollback never
+            # registers or removes them. discard_pending cannot be used here:
+            # it refuses a directory that already holds linked bundle files.
+            shutil.rmtree(output / PENDING_DIRNAME)
+        os.link(bundle / "manifest.json", output / "manifest.json")
         return state
     except BaseException:
         _rollback(output, owned_directories, expected_files)
