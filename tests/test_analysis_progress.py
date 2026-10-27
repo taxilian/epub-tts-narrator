@@ -9,8 +9,9 @@ import unittest
 from pathlib import Path
 
 from epub_tts_narrator.analysis_progress import (
-    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, create_pending, discard_pending,
-    inspect_pending, is_pending_directory, pending_identity, resume_document)
+    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, analysis_options_fingerprint,
+    create_pending, discard_pending, inspect_pending, is_pending_directory,
+    pending_identity, resume_document)
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import fingerprint, write_json
 from test_contracts import valid_document
@@ -325,6 +326,33 @@ class AnalysisProgressTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     pending_identity(*args[:3])
                 self.assertIn(args[3], str(raised.exception))
+
+    def test_analysis_options_fingerprint_separates_every_analyze_affecting_input(self):
+        settings = {"chunk_chars": 2400, "repair_attempts": 1, "max_request_chars": 8000,
+                    "whole_book_discovery": False, "attribution_workers": 5,
+                    "identity_consensus": True, "attribution_review": False,
+                    "attribution_review_chunk_chars": 4000, "attribution_review_notes": None,
+                    "cast_review_notes": "clue", "cast_reconciliation_rounds": 1,
+                    "cast_reconciliation_notes": ["a"]}
+        policy = {"kind": "standard"}
+        base = analysis_options_fingerprint(settings, policy)
+        self.assertEqual(base, analysis_options_fingerprint(dict(settings), dict(policy)))
+        alternates = {"chunk_chars": 1200, "repair_attempts": 2, "max_request_chars": 4000,
+                      "whole_book_discovery": True, "attribution_workers": 1,
+                      "identity_consensus": False, "attribution_review": True,
+                      "attribution_review_chunk_chars": 2000, "attribution_review_notes": "note",
+                      "cast_review_notes": None, "cast_reconciliation_rounds": 2,
+                      "cast_reconciliation_notes": []}
+        for field, alternate in alternates.items():
+            with self.subTest(field=field):
+                changed = dict(settings, **{field: alternate})
+                self.assertNotEqual(base, analysis_options_fingerprint(changed, policy))
+        self.assertNotEqual(base, analysis_options_fingerprint(settings, {"kind": "expressive"}))
+        self.assertNotEqual(base, analysis_options_fingerprint(settings, policy, fingerprint({"n": 1})))
+        self.assertEqual(analysis_options_fingerprint(settings, policy, None),
+                         analysis_options_fingerprint(settings, policy))
+        self.assertEqual(pending_identity(valid_document(), CLIENT_IDENTITY, base)["options_fingerprint"],
+                         base)
 
 
 if __name__ == "__main__":

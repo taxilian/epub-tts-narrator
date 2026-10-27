@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 import unittest
 
 from epub_tts_narrator.contracts import readiness, validate_document
@@ -565,6 +565,7 @@ class SpeakerDecisionTests(unittest.TestCase):
 
         class Client:
             model, base_url = "test", "https://example.invalid"
+            identity = {"model": "test", "base_url": "https://example.invalid"}
 
             def complete(self, *args, **kwargs):
                 raise AssertionError("This CLI decision test must not call a model")
@@ -585,6 +586,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
                 patch("epub_tts_narrator.cli.fresh_registry", return_value={}), \
                 patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=Client()), \
+                patch("epub_tts_narrator.cli.create_pending", return_value=Mock()), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=lambda *args, **kwargs: deepcopy(document)), \
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
                 patch("epub_tts_narrator.speech_normalization.normalize_document_speech", side_effect=lambda doc, *args, **kwargs: deepcopy(doc)), \
@@ -679,6 +681,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                                "cast_reconciliation_notes": None}, "performance_policy": {}}
         class Client:
             model, base_url = "test", "https://example.invalid"
+            identity = {"model": "test", "base_url": "https://example.invalid"}
         def analyze(*args, **kwargs):
             events.append("automatic")
             return document
@@ -703,6 +706,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
                 patch("epub_tts_narrator.cli.fresh_registry", return_value={}), \
                 patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=Client()), \
+                patch("epub_tts_narrator.cli.create_pending", return_value=Mock()), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=analyze), \
                 patch("epub_tts_narrator.cli.prompt_speaker_decisions", side_effect=decide), \
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \

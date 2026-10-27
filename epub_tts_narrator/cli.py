@@ -28,6 +28,10 @@ from .analysis_directory import (
     default_output, validate_output, continuation_registry, fresh_registry,
     publish_directory, continuation_directories,
 )
+from .analysis_progress import (
+    STAGES, analysis_options_fingerprint, create_pending, is_pending_directory,
+    pending_identity, resume_document,
+)
 
 
 def read_json(path):
@@ -493,8 +497,12 @@ def main(argv=None):
                 output = args.output or default_output(args.input)
             if output.is_dir():
                 args.output = output.resolve()
-                return resume_book(args.output, load_config(args.config))
-            args.output = validate_output(output)
+                if not is_pending_directory(args.output):
+                    return resume_book(args.output, load_config(args.config))
+                # A checkpointed run resumes below, after source extraction and
+                # identity computation prove it belongs to this command.
+            else:
+                args.output = validate_output(output)
         if (args.command in {"extract", "analyze", "review-attribution"}
                 and args.output.resolve() == resolve_config_path(args.config).resolve()):
             raise ValueError("The output must use a separate path from configuration")
@@ -541,7 +549,10 @@ def main(argv=None):
                                          "prior analyses stay unchanged")
                     registry = continuation_registry(args.continue_from, source)
                 else:
-                    registry = fresh_registry(args.output)
+                    # A pending directory's registry does not exist yet; load_registry
+                    # derives the same stable identity it would get on a fresh run.
+                    registry = (load_registry(args.output / "series-cast.json")
+                                if is_pending_directory(args.output) else fresh_registry(args.output))
             elif args.continue_from is not None:
                 raise ValueError("--continue-from requires directory output, not a legacy .json output file")
             elif series_path is not None:
@@ -625,45 +636,94 @@ def main(argv=None):
             settings = config["analysis"]
             cache = settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache"
             model_cache = announce_cache(cache)
-            document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
-                repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
-                whole_book_discovery=settings["whole_book_discovery"], attribution_workers=settings["attribution_workers"],
-                identity_consensus=settings["identity_consensus"],
-                attribution_review=settings["attribution_review"],
-                attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
-                attribution_review_notes=settings["attribution_review_notes"],
-                cast_review_notes=settings["cast_review_notes"],
-                cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
-                cast_reconciliation_notes=settings["cast_reconciliation_notes"],
-                series_registry=registry,
-                policy=config["performance_policy"], progress=lambda message: print(message, file=sys.stderr))
-            if args.edits:
-                document = apply_edits(document, read_json(args.edits))
-            from .audition_scripts import prepare_document_samples
-            from .speech_normalization import normalize_document_speech
-            sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
-                                             max_request_chars=settings["max_request_chars"],
-                                             progress=lambda message: print(message, file=sys.stderr))
-            document = normalize_document_speech(document, sample_requests,
-                workers=min(5, settings["attribution_workers"]),
-                progress=lambda message: print(message, file=sys.stderr))
-            document = prepare_document_samples(document, sample_requests,
-                workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                progress=lambda message: print(message, file=sys.stderr))
-            document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config),
-                                                decisions_cache=model_cache)
-            document = normalize_document_speech(document, sample_requests,
-                workers=min(5, settings["attribution_workers"]),
-                progress=lambda message: print(message, file=sys.stderr))
-            # Human choices may make additional real dialogue available. Keep
-            # optional missing auditions pending without another request pass.
-            document = prepare_document_samples(document, None,
-                workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                progress=lambda message: print(message, file=sys.stderr))
+            edits = read_json(args.edits) if args.edits else None
+            pending = None
+            document = None
+            resume_index = 0
             if directory_mode:
-                state = publish_directory(document, registry, args.output, export_bundle,
-                                          continue_from=args.continue_from,
-                                          source_epub=args.input if args.input.suffix.lower() == ".epub" else None)
+                identity = pending_identity(source, client.identity, analysis_options_fingerprint(
+                    settings, config["performance_policy"],
+                    fingerprint(edits) if edits is not None else None))
+                resumed = resume_document(args.output, identity)
+                if resumed is not None:
+                    document, next_stage = resumed
+                    resume_index = len(STAGES) if next_stage is None else STAGES.index(next_stage)
+                pending = create_pending(args.output, identity)
+
+            def begin(stage):
+                if pending is not None:
+                    pending.begin_stage(stage)
+
+            def complete(stage):
+                if pending is not None:
+                    pending.complete_stage(stage, document)
+
+            try:
+                if resume_index <= 0:
+                    begin("analyzed")
+                    document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
+                        repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
+                        whole_book_discovery=settings["whole_book_discovery"], attribution_workers=settings["attribution_workers"],
+                        identity_consensus=settings["identity_consensus"],
+                        attribution_review=settings["attribution_review"],
+                        attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
+                        attribution_review_notes=settings["attribution_review_notes"],
+                        cast_review_notes=settings["cast_review_notes"],
+                        cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
+                        cast_reconciliation_notes=settings["cast_reconciliation_notes"],
+                        series_registry=registry,
+                        policy=config["performance_policy"], progress=lambda message: print(message, file=sys.stderr))
+                    if edits is not None:
+                        document = apply_edits(document, edits)
+                    complete("analyzed")
+                from .audition_scripts import prepare_document_samples
+                from .speech_normalization import normalize_document_speech
+                sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                                 max_request_chars=settings["max_request_chars"],
+                                                 progress=lambda message: print(message, file=sys.stderr))
+                if resume_index <= 1:
+                    begin("speech-normalized-1")
+                    document = normalize_document_speech(document, sample_requests,
+                        workers=min(5, settings["attribution_workers"]),
+                        progress=lambda message: print(message, file=sys.stderr))
+                    complete("speech-normalized-1")
+                if resume_index <= 2:
+                    begin("samples-prepared-1")
+                    document = prepare_document_samples(document, sample_requests,
+                        workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
+                        progress=lambda message: print(message, file=sys.stderr))
+                    complete("samples-prepared-1")
+                if resume_index <= 3:
+                    begin("speakers-decided")
+                    document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config),
+                                                        decisions_cache=model_cache)
+                    complete("speakers-decided")
+                if resume_index <= 4:
+                    begin("speech-normalized-2")
+                    document = normalize_document_speech(document, sample_requests,
+                        workers=min(5, settings["attribution_workers"]),
+                        progress=lambda message: print(message, file=sys.stderr))
+                    complete("speech-normalized-2")
+                if resume_index <= 5:
+                    # Human choices may make additional real dialogue available. Keep
+                    # optional missing auditions pending without another request pass.
+                    begin("samples-prepared-2")
+                    document = prepare_document_samples(document, None,
+                        workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
+                        progress=lambda message: print(message, file=sys.stderr))
+                    complete("samples-prepared-2")
+                if directory_mode:
+                    state = publish_directory(document, registry, args.output, export_bundle,
+                                              continue_from=args.continue_from,
+                                              source_epub=args.input if args.input.suffix.lower() == ".epub" else None)
+            except BaseException as error:
+                if pending is not None:
+                    pending.mark_failed(error, interrupted=isinstance(error, KeyboardInterrupt))
+                    pending.close()
+                raise
+            if pending is not None:
+                pending.close()
+            if directory_mode:
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
@@ -741,6 +801,7 @@ def main(argv=None):
         resume_guidance()
         return 1
     except KeyboardInterrupt:
-        print("Interrupted. Completed model requests remain cached; rerun the same command to resume.", file=sys.stderr)
+        print("Interrupted. Completed model requests remain cached; checkpointed analysis progress "
+              "is kept in the output directory; rerun the same command to resume.", file=sys.stderr)
         resume_guidance()
         return 130

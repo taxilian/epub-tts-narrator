@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from epub_tts_narrator import pipeline
 from epub_tts_narrator.analysis_directory import continuation_directories
+from epub_tts_narrator.analysis_progress import inspect_pending
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.prompts import PROMPT_VERSION
@@ -227,7 +228,9 @@ class TimeoutResumeTests(unittest.TestCase):
         with patch("epub_tts_narrator.pipeline.write_json", side_effect=durable.write):
             status, error = command(first, arguments)
         self.assertNotEqual(status, 0, error)
-        self.assertFalse(second_book.exists())
+        # Nothing was published: the interrupted run leaves only pending
+        # checkpoint state, never a completed-looking directory.
+        self.assertEqual(inspect_pending(second_book)["status"], "failed")
         saved = self.cached(self.root / ".epub-audiobook-cache")
         self.assertGreaterEqual(len(durable.keys), 4)
 

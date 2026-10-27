@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.analysis_progress import inspect_pending, is_pending_directory
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.provider import ProviderError
@@ -72,7 +73,10 @@ class CLIResumeMessageTests(unittest.TestCase):
             self.assertIn("same input, output, and configuration", stderr)
             self.assertIn("incomplete requests will be retried", stderr)
             self.assertTrue(list(cache.glob("*.json")))
-            self.assertFalse(output.exists())
+            # The failed run checkpointed its pending state instead of leaving
+            # no output, but the directory is never a completed bundle.
+            self.assertTrue(is_pending_directory(output))
+            self.assertEqual(inspect_pending(output)["status"], "failed")
             self.assertNotIn("Wrote analysis", stdout)
             status, _, stderr = self.run_cli(*command)
             self.assertEqual(status, 0, stderr)
@@ -106,9 +110,13 @@ class CLIResumeMessageTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.analyze", side_effect=KeyboardInterrupt):
             status, stdout, stderr = self.run_cli("analyze", self.source, "-o", output)
         self.assertEqual(status, 130)
-        self.assertIn("Interrupted. Completed model requests remain cached; rerun the same command to resume.", stderr)
+        self.assertIn("Interrupted. Completed model requests remain cached; checkpointed analysis "
+                      "progress is kept in the output directory; rerun the same command to resume.", stderr)
         self.assertIn(f"Resume cache: {self.root / '.epub-audiobook-cache'}", stderr)
-        self.assertFalse(output.exists())
+        self.assertTrue(is_pending_directory(output))
+        record = inspect_pending(output)
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["completed_stages"], [])
         self.assertNotIn("Wrote analysis", stdout)
 
     def test_validation_failure_during_model_work_has_recovery_guidance(self):
