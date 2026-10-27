@@ -7,10 +7,11 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
-from epub_tts_narrator.renderer.terminal import play_sample
+from epub_tts_narrator.renderer.terminal import play_sample, wait_key
 
 try:
     import pty
@@ -69,8 +70,9 @@ class Player:
 
 player = Player()
 failure = None
+completed = None
 try:
-    play_sample(player, "sample.wav")
+    completed = play_sample(player, "sample.wav")
 except (KeyboardInterrupt, RuntimeError) as exc:
     failure = type(exc).__name__
 restored_attributes = termios.tcgetattr(0)
@@ -94,6 +96,7 @@ print(json.dumps({
     "stops": player.stops,
     "active": player.active,
     "failure": failure,
+    "completed": completed,
     "pending": pending.hex(),
 }), flush=True)
 '''
@@ -158,10 +161,12 @@ class TerminalPlaybackTests(unittest.TestCase):
         result = self.run_child(writes=[(0, b"x")])
         self.assertEqual(result["stops"], 1)
         self.assertIsNone(result["failure"])
+        self.assertIs(result["completed"], False)
 
     def test_natural_completion_returns_without_input_and_restores_terminal(self):
         result = self.run_child("natural")
         self.assertIsNone(result["failure"])
+        self.assertIs(result["completed"], True)
 
     def test_split_arrow_key_does_not_leak_into_menu(self):
         result = self.run_child(writes=[(0, b"\x1b"), (0.01, b"["), (0.01, b"A")])
@@ -230,10 +235,55 @@ class RedirectedPlaybackTests(unittest.TestCase):
             os.write(writer, b" ")
             with os.fdopen(reader, "rb", buffering=0) as stream:
                 player = FakePlayer(duration=10)
-                play_sample(player, "sample.wav", stream=stream)
+                self.assertIs(play_sample(player, "sample.wav", stream=stream), False)
                 self.assertTrue(player.stopped)
         finally:
             os.close(writer)
+
+    def test_nonzero_player_exit_is_failure_not_a_heard_completion(self):
+        from epub_tts_narrator.renderer.audition import AudioPlayer
+        player = AudioPlayer([sys.executable, "-c", "import sys; sys.exit(3)"])
+        reader, writer = os.pipe()
+        try:
+            with os.fdopen(reader, "rb", buffering=0) as stream, tempfile.TemporaryDirectory() as directory:
+                sample = Path(directory) / "sample.wav"
+                sample.write_bytes(b"not real audio; the player exits nonzero either way")
+                with self.assertRaisesRegex(ValueError, "Audio playback failed"):
+                    play_sample(player, sample, stream=stream)
+        finally:
+            os.close(writer)
+
+
+class WaitKeyTests(unittest.TestCase):
+    def test_pipe_input_returns_key(self):
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, b"k")
+            with os.fdopen(reader, "rb", buffering=0) as stream:
+                self.assertEqual(wait_key(1.0, stream=stream), "key")
+        finally:
+            os.close(writer)
+
+    def test_open_pipe_waits_full_gap_and_times_out(self):
+        reader, writer = os.pipe()
+        try:
+            with os.fdopen(reader, "rb", buffering=0) as stream:
+                started = time.monotonic()
+                self.assertIsNone(wait_key(0.2, stream=stream))
+                self.assertGreaterEqual(time.monotonic() - started, 0.19)
+        finally:
+            os.close(writer)
+
+    def test_closed_pipe_reports_eof(self):
+        reader, writer = os.pipe()
+        os.close(writer)
+        with os.fdopen(reader, "rb", buffering=0) as stream:
+            self.assertEqual(wait_key(1.0, stream=stream), "eof")
+
+    def test_stream_without_descriptor_waits_full_gap(self):
+        started = time.monotonic()
+        self.assertIsNone(wait_key(0.2, stream=io.StringIO("")))
+        self.assertGreaterEqual(time.monotonic() - started, 0.19)
 
 
 if __name__ == "__main__":

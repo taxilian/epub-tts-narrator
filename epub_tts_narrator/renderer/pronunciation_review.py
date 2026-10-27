@@ -74,6 +74,45 @@ def _show(rows, output):
             output(display("     “" + _context(row) + "”"))
 
 
+def _spoken_span(mapping, row, match):
+    """Spoken-text span of an exact source match, or None when a replacement covers it."""
+    absolute_start, absolute_end = row["start"] + match.start(), row["start"] + match.end()
+    for span in mapping:
+        if span["source_start"] <= absolute_start and absolute_end <= span["source_end"]:
+            if span["kind"] == "source":
+                return (span["spoken_start"] + absolute_start - span["source_start"],
+                        span["spoken_start"] + absolute_end - span["source_start"])
+            return span["spoken_start"], span["spoken_end"]
+    return None
+
+
+def _preview_row(row, word):
+    """Copy of a row omitting only normalization edits overlapping an exact occurrence.
+
+    Canonical rows are never mutated: the copy drops solely the analyzer edits
+    that cover the target word, so the preview can map unambiguously while all
+    other approved edits stay intact. Production rendering keeps the strict
+    mapping guards on the canonical row.
+    """
+    from ..pronunciations import WORD_PATTERN
+    record = row.get("speech_normalization") or {}
+    edits = record.get("edits") or []
+    if not edits:
+        return row
+    spans = [(match.start(), match.end()) for match in WORD_PATTERN.finditer(row["text"])
+             if match.group() == word]
+    kept = [edit for edit in edits
+            if not any(edit["start"] < end and start < edit["end"] for start, end in spans)]
+    if len(kept) == len(edits):
+        return row
+    copy = deepcopy(row)
+    normalization = dict(copy.get("speech_normalization") or {})
+    normalization["edits"] = kept
+    copy["speech_normalization"] = normalization
+    copy.pop("spoken_text", None)  # stale derived form; build_spoken recomputes it exactly
+    return copy
+
+
 def _sample_bounds(text, first, last):
     """Bound a real source excerpt at words, preferring sentence boundaries."""
     if len(text) <= _MAX_SAMPLE:
@@ -283,35 +322,32 @@ class PronunciationReviewSession:
         reset_pronunciation(self.bundle["directory"], word)
         self._write_draft(word, None)
 
-    def _sample(self, word):
+    def _occurrences(self, word):
+        """Saved-voice candidates where the exact whole word occurs, best first.
+
+        Selection only needs the word's original source occurrence and a saved
+        voice; it never maps pronunciations, so one ambiguously-normalized
+        occurrence cannot poison the candidates for the whole menu.
+        """
+        from ..pronunciations import WORD_PATTERN
         from ..spoken_text import build_spoken
         from .book_context import voice_store
-        from .pronunciation_runtime import merge_row_pronunciations
+        from .speech_text import trim_speech_text
         if self._store is None:
             self._store = voice_store(self.bundle, self.settings)
-        entries = {word: {"word": word, "status": "confirmed",
-                          "pronunciation": {"alphabet": "respelling", "value": word}}}
         candidates, selected_voices = [], {}
         for chapter in self.bundle["chapters"]:
             for row in chapter["rows"]:
-                # The shared mapper establishes exact source-to-spoken spans,
-                # including previously approved analyzer spelling edits.
-                record = merge_row_pronunciations(row, None, entries)
-                controls = [item for item in record["controls"] if item["kind"] == "pronunciation"] if record else []
-                if not controls:
+                matches = [match for match in WORD_PATTERN.finditer(row["text"]) if match.group() == word]
+                if not matches:
                     continue
-                text, _ = build_spoken(row)
-                from .speech_text import trim_speech_text
-                if not any(character.isalnum() for character in trim_speech_text(text)):
+                try:
+                    spoken, mapping = build_spoken(row)
+                except (KeyError, ValueError):
+                    continue  # A malformed row must not block other occurrences.
+                if not any(character.isalnum() for character in trim_speech_text(spoken)):
                     continue
-                start, end = _sample_bounds(text, controls[0]["start"], controls[0]["end"])
-                # All pronunciation spans are atomic, including repeated words
-                # near the context boundary.
-                for item in controls:
-                    if item["start"] < start < item["end"]:
-                        start = item["start"]
-                    if item["start"] < end < item["end"]:
-                        end = item["end"]
+                spans = [_spoken_span(mapping, row, match) for match in matches]
                 speakers = row.get("simultaneous_speakers") or [{"voice_id": row.get("voice_id"), "role_id": row.get("role_id")}]
                 for speaker in speakers:
                     voice_id = speaker.get("voice_id")
@@ -320,22 +356,133 @@ class PronunciationReviewSession:
                     if voice_id not in selected_voices:
                         selected_voices[voice_id] = self._store.load(voice_id)
                     voice = selected_voices[voice_id]
-                    if voice is not None:
+                    if voice is None:
+                        continue
+                    for span in spans:
+                        if span is None:
+                            # The word is consumed by an approved replacement;
+                            # usable for an isolated preview, never an excerpt.
+                            candidates.append((10 ** 6, len(candidates), {
+                                "row": row, "text": spoken, "start": 0, "end": 0, "spanless": True,
+                                "voice": voice, "voice_id": voice_id, "role_id": speaker.get("role_id"),
+                                "chapter_title": chapter["entry"]["title"]}))
+                            continue
+                        start, end = _sample_bounds(spoken, span[0], span[1])
                         candidates.append((abs(min(end - start, 240) - 160), len(candidates), {
-                            "row": row, "text": text, "start": start, "end": end,
+                            "row": row, "text": spoken, "start": start, "end": end, "spanless": False,
                             "voice": voice, "voice_id": voice_id, "role_id": speaker.get("role_id"),
                             "chapter_title": chapter["entry"]["title"]}))
+        return [item[2] for item in sorted(candidates, key=lambda item: item[:2])]
+
+    def _sample(self, word):
+        candidates = self._occurrences(word)
         if not candidates:
             raise ValueError("No spoken excerpt with an existing saved voice contains this word; cast its character first")
-        return min(candidates, key=lambda item: item[:2])[2]
+        return candidates[0]
 
     def audition(self, word, pronunciation=None, *, cached_only=False):
-        """Return a resumable FLAC preview; never create or modify a voice."""
-        from ..performance_plan import slice_performance
+        """Return a resumable excerpt preview; never create or modify a voice.
+
+        Correction previews omit, on a copy of the row, only the analyzer
+        normalization edits overlapping an exact occurrence of the word; every
+        other approved edit is preserved. When no occurrence maps unambiguously
+        (the word is covered by multiword edits everywhere), the preview falls
+        back to the isolated word with the selected saved voice. The renderer's
+        production mapping guards are unchanged.
+        """
         from ..pronunciations import validate_pronunciation, validate_word
         from ..speech_traits import speech_traits
         from .engines import create_engine
+        from .speech_identity import voice_conditioning_identity
+        validate_word(word)
+        if pronunciation is not None:
+            pronunciation = validate_pronunciation(pronunciation)
+        candidates = self._occurrences(word)
+        if not candidates:
+            return self.audition_isolated(word, pronunciation, cached_only=cached_only)
+        if self._engine is None:
+            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+        engine = self._engine
+        if pronunciation is not None and engine.capabilities.get("structured_performance") is not True:
+            raise ValueError("This synthesis engine does not support structured pronunciation previews")
+        entries = ({word: {"word": word, "status": "confirmed", "pronunciation": pronunciation}}
+                   if pronunciation is not None else None)
+        for sample in candidates:
+            voice = sample["voice"]
+            binding = getattr(engine, "voice_binding_identity", engine.identity)
+            if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):
+                raise ValueError("Selected character voice is not bound to this synthesis engine")
+            record, spoken_start, spoken_end = None, sample["start"], sample["end"]
+            if entries is not None or sample.get("spanless"):
+                plan = self._excerpt_plan(sample, word, entries)
+                if plan is None:
+                    continue  # This occurrence is ambiguously normalized; try the next.
+                text, record, spoken_start, spoken_end = plan
+            else:
+                text = sample["text"][sample["start"]:sample["end"]]
+            profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
+            traits = speech_traits(profile)
+            if record is None:
+                from ..spoken_text import effective_delivery
+                direction = "; ".join(part for part in (traits, effective_delivery(sample["row"])) if part)
+                options = {"direction": direction}
+            else:
+                from ..spoken_text import effective_delivery
+                scene = deepcopy(sample["row"])
+                scene.pop("speech_normalization", None)
+                options = {"direction": effective_delivery(scene),
+                           "performance": record, "traits": traits}
+            request = {"version": 1, "engine_sha256": digest(engine.identity), "voice": voice_conditioning_identity(voice),
+                       "text": text, "word": word, "pronunciation": pronunciation, "options": options,
+                       "seed": self.settings["render"]["seed"], "sample_rate": self.settings["render"]["sample_rate"]}
+            context = {"segment_id": sample["row"]["id"], "voice_id": sample["voice_id"],
+                       "chapter_title": sample["chapter_title"], "spoken_start": spoken_start,
+                       "spoken_end": spoken_end}
+            return self._preview_cache(word, pronunciation, text, options, request, engine, voice,
+                                       purpose="unverified_pronunciation_listening_preview", context=context,
+                                       cached_only=cached_only)
+        return self.audition_isolated(word, pronunciation, cached_only=cached_only)
+
+    def _excerpt_plan(self, sample, word, entries):
+        """Excerpt text, merged record, and bounds from the target-edits-omitted copy.
+
+        Returns None when this occurrence cannot map unambiguously even with
+        overlapping analyzer edits omitted on the copy.
+        """
+        from ..performance_plan import slice_performance
+        from ..pronunciations import WORD_PATTERN
+        from ..spoken_text import build_spoken
         from .pronunciation_runtime import merge_row_pronunciations
+        preview_row = _preview_row(sample["row"], word)
+        try:
+            spoken, mapping = build_spoken(preview_row)
+            match = next((item for item in WORD_PATTERN.finditer(preview_row["text"]) if item.group() == word), None)
+            if match is None:
+                return None
+            span = _spoken_span(mapping, preview_row, match)
+            if span is None:
+                return None
+            merged = merge_row_pronunciations(preview_row, None, entries)
+            if merged is None:
+                return None
+            start, end = _sample_bounds(spoken, span[0], span[1])
+            return spoken[start:end], slice_performance(merged, spoken, start, end), start, end
+        except ValueError:
+            return None
+
+    def audition_isolated(self, word, pronunciation=None, *, cached_only=False):
+        """Return a resumable FLAC preview of the isolated word; distinct cache identity.
+
+        The listening queue speaks the word alone, twice, instead of a bounded
+        source excerpt. The word-only pronunciation control is constructed
+        directly, without source normalization mapping, and the voice is the
+        saved voice of any row containing the exact whole word. The request
+        carries ``isolated: True`` and the bare word text so its cache folder
+        and receipt never collide with excerpt previews of the same choice.
+        """
+        from ..performance_plan import PERFORMANCE_VERSION, text_sha256, validate_performance
+        from ..pronunciations import validate_pronunciation, validate_word
+        from .engines import create_engine
         from .speech_identity import voice_conditioning_identity
         validate_word(word)
         if pronunciation is not None:
@@ -347,29 +494,28 @@ class PronunciationReviewSession:
         binding = getattr(engine, "voice_binding_identity", engine.identity)
         if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):
             raise ValueError("Selected character voice is not bound to this synthesis engine")
-        record = None
+        if pronunciation is not None and engine.capabilities.get("structured_performance") is not True:
+            raise ValueError("This synthesis engine does not support structured pronunciation previews")
+        controls = []
         if pronunciation is not None:
-            if engine.capabilities.get("structured_performance") is not True:
-                raise ValueError("This synthesis engine does not support structured pronunciation previews")
-            entries = {word: {"word": word, "status": "confirmed", "pronunciation": pronunciation}}
-            original = merge_row_pronunciations(sample["row"], None, entries)
-            record = slice_performance(original, sample["text"], sample["start"], sample["end"])
-        text = sample["text"][sample["start"]:sample["end"]]
-        profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
-        traits = speech_traits(profile)
-        if record is None:
-            from ..spoken_text import effective_delivery
-            direction = "; ".join(part for part in (traits, effective_delivery(sample["row"])) if part)
-            options = {"direction": direction}
-        else:
-            from ..spoken_text import effective_delivery
-            scene = deepcopy(sample["row"])
-            scene.pop("speech_normalization", None)
-            options = {"direction": effective_delivery(scene),
-                       "performance": record, "traits": traits}
+            controls.append({"kind": "pronunciation", "start": 0, "end": len(word), "text": word,
+                             "alphabet": pronunciation["alphabet"],
+                             "replacement" if pronunciation["alphabet"] == "respelling" else "phonemes":
+                                 pronunciation["value"]})
+        record = validate_performance({"version": PERFORMANCE_VERSION, "text_sha256": text_sha256(word),
+                                       "controls": controls}, word)
+        options = {"performance": record} if controls else {"direction": ""}
         request = {"version": 1, "engine_sha256": digest(engine.identity), "voice": voice_conditioning_identity(voice),
-                   "text": text, "word": word, "pronunciation": pronunciation, "options": options,
+                   "text": word, "word": word, "pronunciation": pronunciation, "options": options,
+                   "isolated": True,
                    "seed": self.settings["render"]["seed"], "sample_rate": self.settings["render"]["sample_rate"]}
+        context = {"segment_id": sample["row"]["id"], "voice_id": sample["voice_id"],
+                   "chapter_title": sample["chapter_title"], "isolated": True}
+        return self._preview_cache(word, pronunciation, word, options, request, engine, voice,
+                                   purpose="unverified_pronunciation_isolated_preview", context=context,
+                                   cached_only=cached_only)
+
+    def _preview_cache(self, word, pronunciation, text, options, request, engine, voice, *, purpose, context, cached_only):
         key = digest(request)
         folder = self.directory / key
         if folder.is_symlink():
@@ -397,7 +543,7 @@ class PronunciationReviewSession:
             if cached_only:
                 raise ValueError("Play this exact pronunciation with the current voice before confirming it")
             state = state or {"format": _FORMAT, "request": request, "status": "pending",
-                              "purpose": "unverified_pronunciation_listening_preview"}
+                               "purpose": purpose}
             state.setdefault("take", 1)
             state.setdefault("take_seed", request["seed"])
             write_json(state_path, state)
@@ -424,9 +570,7 @@ class PronunciationReviewSession:
                 regular_file(audio).unlink()
             pcm_hash = _flac_master(normalized, audio, self.settings["render"]["ffmpeg"])
             state.update(status="ready", audio_sha256=file_hash(audio), pcm_sha256=pcm_hash, metrics=metrics,
-                         context={"segment_id": sample["row"]["id"], "voice_id": sample["voice_id"],
-                                  "chapter_title": sample["chapter_title"], "spoken_start": sample["start"],
-                                  "spoken_end": sample["end"]})
+                          context=context)
             write_json(state_path, state)
             _remove_redundant_wavs(folder, state)
             return dict(state, path=str(audio))
@@ -434,7 +578,11 @@ class PronunciationReviewSession:
             lock.rmdir()
 
     def mark_played(self, preview):
-        """Bind successful playback (including any-key stop) to this exact take."""
+        """Bind successful playback (including any-key stop) to this exact take.
+
+        Returns the hash-bound played receipt written for this exact audio;
+        callers that accept on completed playback must verify against it.
+        """
         folder = self.directory / digest(preview["request"])
         if folder.is_symlink():
             raise ValueError("Pronunciation preview cache must not be a symlink")
@@ -448,6 +596,7 @@ class PronunciationReviewSession:
                 raise ValueError("Pronunciation preview changed during playback; play it again before confirming")
             state["played"] = {"request_sha256": digest(state["request"]), "audio_sha256": state["audio_sha256"]}
             write_json(state_path, state)
+            return dict(state["played"])
         finally:
             lock.rmdir()
 
@@ -530,6 +679,11 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
             if correction is not None and correction["alphabet"] == "respelling":
                 say("CMU draft auditioned; open pronunciation review and use C to confirm it. Existing decisions are unchanged.")
             return 0
+        if word is None:
+            from .pronunciation_review_queue import run_pronunciation_queue
+            return run_pronunciation_queue(
+                session, player, playback_fn, input_fn=input_fn, output=output,
+                interactive=sys.stdin.isatty() and sys.stdout.isatty())
         while True:
             rows = session.rows(word)
             _show(rows, output)

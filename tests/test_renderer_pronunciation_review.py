@@ -188,7 +188,7 @@ class PronunciationReviewTests(unittest.TestCase):
     def test_pending_name_proposal_plays_exact_phones_and_only_then_confirms(self):
         proposed = self.proposal.return_value
         self.candidate(proposal=proposed)
-        commands = iter(["c 1", "1", "c 1", "q"])
+        commands = iter(["l", "c 1", "1", "c 1", "q"])
         self.command("review", input_fn=lambda _: next(commands), player=SimpleNamespace(stop=Mock()), playback_fn=Mock())
         self.assertTrue(any("guessed; not verified" in line for line in self.output))
         self.assertTrue(any("Play this exact pronunciation" in line for line in self.output))
@@ -262,6 +262,81 @@ class PronunciationReviewTests(unittest.TestCase):
             self.assertEqual(load.call_count, 1)
             self.session._sample("Mara")
             self.assertEqual(load.call_count, 2)
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_multiword_overlap_in_one_occurrence_does_not_poison_other_choices(self):
+        row = self.bundle["chapters"][0]["rows"][1]
+        text = "Mara Vale stood. Mara waited."
+        row["text"] = text
+        row["end"] = row["start"] + len(text)
+        row["speech_normalization"] = {"version": 1, "edits": [
+            {"start": 0, "end": len("Mara Vale"), "original": "Mara Vale",
+             "replacement": "Mahra Vale", "direction": "Read the name smoothly.", "reason": "Blend the name."}]}
+        preview = self.session.audition("Mara", {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+        self.assertEqual(preview["purpose"], "unverified_pronunciation_listening_preview")
+        self.assertIn("M AA1 R AH0", self.engine.calls[-1]["compiled"])
+        self.assertEqual(len(row["speech_normalization"]["edits"]), 1)  # canonical row untouched
+        from epub_tts_narrator.renderer.pronunciation_runtime import merge_row_pronunciations
+        entries = {"Mara": {"word": "Mara", "status": "confirmed",
+                            "pronunciation": {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"}}}
+        with self.assertRaisesRegex(ValueError, "multiword"):
+            merge_row_pronunciations(row, None, entries)  # production mapping guard stays strict
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_all_overlap_word_previews_exact_word_with_the_saved_voice(self):
+        row = self.bundle["chapters"][0]["rows"][1]
+        text = "My name is Mara Vale here."
+        row["text"] = text
+        row["end"] = row["start"] + len(text)
+        row["speech_normalization"] = {"version": 1, "edits": [
+            {"start": len("My name is "), "end": len("My name is Mara Vale"),
+             "original": "Mara Vale", "replacement": "Mahra Vale",
+             "direction": "Read the name smoothly.", "reason": "Blend the name."}]}
+        before = deepcopy(row["speech_normalization"])
+        preview = self.session.audition("Mara", {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+        self.assertEqual(preview["request"]["word"], "Mara")
+        self.assertEqual(self.engine.calls[-1]["voice"]["asset_hash"],
+                         self.store.load(row["voice_id"])["asset_hash"])
+        self.assertIn("Mara", self.engine.calls[-1]["text"])
+        self.assertIn("M AA1 R AH0", self.engine.calls[-1]["compiled"])
+        self.assertEqual(row["speech_normalization"], before)  # canonical row untouched
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_excerpt_preview_omits_only_target_overlapping_analyzer_edits(self):
+        row = self.bundle["chapters"][0]["rows"][1]
+        text = "My name is Mara Vale here. Zorble came."
+        row["text"] = text
+        row["end"] = row["start"] + len(text)
+        row["speech_normalization"] = {"version": 1, "edits": [
+            {"start": len("My name is "), "end": len("My name is Mara Vale"),
+             "original": "Mara Vale", "replacement": "Mahra Vale",
+             "direction": "Read the name smoothly.", "reason": "Blend the name."},
+            {"start": text.index("Zorble"), "end": text.index("Zorble") + len("Zorble"),
+             "original": "Zorble", "replacement": "Zorbul",
+             "direction": "Read it plainly.", "reason": "Approved spelling."}]}
+        from epub_tts_narrator.spoken_text import build_spoken
+        row["spoken_text"] = build_spoken(row)[0]  # analyzer-saved derived form must not stale the copy
+        self.session.audition("Mara", {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+        synthesized = self.engine.calls[-1]["text"]
+        self.assertIn("Zorbul", synthesized)      # unrelated approved edit preserved
+        self.assertIn("Mara Vale", synthesized)   # target-overlapping edit omitted on the copy
+        self.assertNotIn("Mahra", synthesized)
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_isolated_preview_constructs_word_control_without_source_mapping(self):
+        row = self.bundle["chapters"][0]["rows"][1]
+        text = "My name is Mara Vale here."
+        row["text"] = text
+        row["end"] = row["start"] + len(text)
+        row["speech_normalization"] = {"version": 1, "edits": [
+            {"start": len("My name is "), "end": len("My name is Mara Vale"),
+             "original": "Mara Vale", "replacement": "Mahra Vale",
+             "direction": "Read the name smoothly.", "reason": "Blend the name."}]}
+        preview = self.session.audition_isolated("Mara", {"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+        self.assertEqual(preview["purpose"], "unverified_pronunciation_isolated_preview")
+        self.assertEqual(preview["request"]["text"], "Mara")
+        self.assertEqual(self.engine.calls[-1]["text"], "Mara")
+        self.assertIn("M AA1 R AH0", self.engine.calls[-1]["compiled"])
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_preview_uses_original_voice_exact_context_and_real_compiler_then_caches_only_flac(self):
