@@ -7,6 +7,7 @@ import json
 from .pipeline import fingerprint
 from .pronunciations import DISCOVERY_VERSION, WORD_PATTERN, _evidence_contains_word, validate_entry, validate_word, word_id
 from .pronunciation_discovery_prompts import SYSTEM
+from .pronunciation_dictionary import DICTIONARY_SHA256, review_candidates
 
 
 MAX_BATCH_CHARS = 12000
@@ -88,6 +89,7 @@ def character_name_candidates(document):
 
 def _context(source, cast):
     return {"mode": "pronunciation_discovery", "version": DISCOVERY_VERSION,
+            "dictionary_sha256": DICTIONARY_SHA256,
             "source_fingerprint": fingerprint(source),
             "book": {key: deepcopy(source.get("book", {}).get(key)) for key in ("id", "title", "authors", "language")},
             "cast_context": [{key: deepcopy(character.get(key)) for key in ("id", "name", "aliases")}
@@ -201,4 +203,5 @@ def discover_pronunciations(document, requests, progress=None, workers=1):
                 for evidence in entry["evidence"]:
                     if evidence not in existing and len(existing) < 32:
                         existing.append(deepcopy(evidence))
-    return sorted(merged.values(), key=lambda entry: (entry["word"].casefold(), entry["word"]))
+    return sorted(review_candidates(document, merged.values(), automatic=True),
+                  key=lambda entry: (entry["word"].casefold(), entry["word"]))

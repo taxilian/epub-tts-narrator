@@ -442,6 +442,10 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 ## Pronunciation review
 
+Automatic review focuses on unexpected words: dictionary-known candidates are filtered using the packaged offline CMUdict. Character names/aliases established by the cast remain eligible even on a dictionary hit, since their reading must be chosen consistently rather than inferred from an ordinary word's sense. Existing automatic pending records may disappear from the default list, but are not deleted. Confirmed/keep-default decisions, saved drafts, explicit manual review and conflicting case-family choices remain visible; `--word` can still select a filtered word directly.
+
+CMU suggestions use all available dictionary pronunciations plus story/name context and a strengthened phoneme-writing guide. Your readable correction overrides the dictionary; no first-reading shortcut silently locks a name. Suggestions remain pending until the existing listening/confirmation flow accepts them. No new configuration, dictionary installation, or runtime network lookup is required. Existing saved proposals and reference voices are preserved.
+
 Before opening the menu, review prepares missing CMU suggestions for every kind of pending word, including invented words and unusual spellings, then caches both isolated-word and excerpt audio previews for the current choices. Preparation reports progress and saves each result; rerun the same command after interruption to reuse completed suggestions and audio. Preparation does not approve a pronunciation or mark a preview as heard. Existing drafts and confirmed or keep-default decisions remain in effect. New edits and alternate baseline playback can require a new preview.
 
 If an entry lacks a usable saved voice or its preview fails validation, preparation reports that entry as unavailable and continues preparing the rest. The menu remains available for editing and retrying; unavailable entries have a `!` marker in the compact list. API outages, unexpected engine failures, and interruption stop preparation with completed work retained for the next run.

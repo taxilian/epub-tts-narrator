@@ -64,6 +64,7 @@ def prepare_book_pronunciations(directory, config, *, document=None, requests=No
     from .pronunciations import discovery_pending, load_pronunciations, save_candidates, save_proposal
     from .pronunciation_discovery import discover_pronunciations
     from .pronunciation_proposals import propose_name_pronunciations
+    from .pronunciation_dictionary import review_candidates
 
     directory = Path(directory).resolve()
     saved = _completed_directory(directory)[0]
@@ -77,7 +78,7 @@ def prepare_book_pronunciations(directory, config, *, document=None, requests=No
         candidates = discover_pronunciations(document, requests, progress=progress,
                                             workers=min(5, settings["attribution_workers"]))
         save_candidates(directory, document, candidates)
-    entries = load_pronunciations(directory)
+    entries = review_candidates(document, load_pronunciations(directory))
     if any(entry["status"] == "pending" and entry["kind"] in {"name", "place"}
            and not entry.get("proposal") for entry in entries):
         if requests is None:
@@ -85,7 +86,7 @@ def prepare_book_pronunciations(directory, config, *, document=None, requests=No
         propose_name_pronunciations(
             document, entries, requests, progress=progress, workers=min(5, settings["attribution_workers"]),
             on_proposal=lambda entry, proposal: save_proposal(directory, document, entry["word"], proposal))
-        entries = load_pronunciations(directory)
+        entries = review_candidates(document, load_pronunciations(directory))
     pending = sum(entry["status"] == "pending" for entry in entries)
     proposals = sum(entry["status"] == "pending" and bool(entry.get("proposal")) for entry in entries)
     progress(f"Pronunciations: {pending} word(s) to review ({proposals} with CMU suggestions), {len(entries)} total; "

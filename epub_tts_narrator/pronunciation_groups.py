@@ -122,6 +122,9 @@ def group_pronunciations(entries, current_words):
             continue
         ordered = sorted(members, key=rank)
         selected = project(ordered[0], variants)
+        if any(entry.get("review_requested") or entry.get("reason") == "Manually selected for pronunciation review."
+               for entry in members):
+            selected["review_requested"] = True
         proposal = next((entry for entry in ordered if "proposal" in entry), None)
         if proposal is not None:
             selected["proposal"] = deepcopy(proposal["proposal"])

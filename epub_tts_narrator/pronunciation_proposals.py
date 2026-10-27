@@ -7,9 +7,10 @@ import json
 from .performance_plan import validate_phonemes
 from .pronunciations import WORD_PATTERN, validate_word
 from .pronunciation_proposal_prompts import SYSTEM
+from .pronunciation_dictionary import DICTIONARY_SHA256, dictionary_readings
 
 
-PROPOSAL_VERSION = 1
+PROPOSAL_VERSION = 2
 MAX_CONTEXTS = 3
 MAX_CONTEXT_CHARS = 600
 MAX_REQUEST_CHARS = 16000
@@ -97,6 +98,7 @@ def _payload(document, entry, respelling, maximum):
     if language is not None and (not isinstance(language, str) or len(language) > 128):
         raise ValueError("Pronunciation proposal book language must be bounded text")
     result = {"mode": "pronunciation_proposal", "version": PROPOSAL_VERSION, "word": word,
+              "dictionary": {"sha256": DICTIONARY_SHA256, "readings": list(dictionary_readings(word))},
               "book_language": language, "context": _contexts(source, word),
               "cast_context": _cast_context(document, word)}
     if respelling is not None:

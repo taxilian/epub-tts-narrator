@@ -154,6 +154,7 @@ class PronunciationDiscoveryTests(unittest.TestCase):
 
     def test_similar_and_case_variant_candidates_are_never_merged(self):
         self.document["source"]["blocks"][0]["text"] = "Mara Marah mara"
+        self.document["cast"]["characters"][0]["aliases"] = ["mara"]
         client = DiscoveryClient(words=("Mara", "Marah", "mara"))
         entries = discover_pronunciations(self.document, self.requests(client))
         self.assertEqual({entry["word"] for entry in entries}, {"Mara", "Marah", "mara"})

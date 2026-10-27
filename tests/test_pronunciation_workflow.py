@@ -148,3 +148,36 @@ class PronunciationWorkflowTests(unittest.TestCase):
         self.assertEqual(load_pronunciations(self.book)[0]["pronunciation"],
                          {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
         self.assertEqual(CandidateClient.modes, calls)
+
+    def test_rediscovery_hides_legacy_dictionary_pending_without_requesting_its_proposal(self):
+        from epub_tts_narrator.pipeline import write_json
+        from epub_tts_narrator.pronunciations import DISCOVERY_VERSION, save_candidates, word_id
+        from epub_tts_narrator.renderer.bundle import load_bundle
+        from epub_tts_narrator.renderer.config import load_config
+        from epub_tts_narrator.renderer.pronunciation_review import PronunciationReviewSession
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        self.assertEqual(code, 0, output)
+        document = json.loads((self.book / "analysis.json").read_text())
+        block = document["source"]["blocks"][0]
+        legacy = {"id": word_id("door"), "word": "door", "kind": "name", "status": "pending",
+                  "reason": "Legacy model candidate.", "evidence": [{"block_id": block["id"], "quote": "door"}]}
+        save_candidates(self.book, document, [legacy])
+        registry = json.loads((self.book / "pronunciations.json").read_text())
+        registry["discovery"]["version"] = DISCOVERY_VERSION - 1
+        write_json(self.book / "pronunciations.json", registry, overwrite=True)
+        original_proposal = next(row for row in registry["entries"] if row["word"] == "Qarm")["proposal"]
+        CandidateClient.modes = []
+
+        code, output = self.run_cli("discover-pronunciations", self.book)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(CandidateClient.modes, [])
+        refreshed = json.loads((self.book / "pronunciations.json").read_text())
+        self.assertEqual(refreshed["discovery"]["version"], DISCOVERY_VERSION)
+        stored = {row["word"]: row for row in load_pronunciations(self.book)}
+        self.assertNotIn("proposal", stored["door"])
+        self.assertEqual(stored["Qarm"]["proposal"], original_proposal)
+        config = load_config(self.config, require_verifier=False, require_engine=False)
+        session = PronunciationReviewSession(load_bundle(self.book), config)
+        self.assertEqual([row["word"] for row in session.rows()], ["Qarm"])
+        self.assertFalse(preparation_pending(self.book, document))

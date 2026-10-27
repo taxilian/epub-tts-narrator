@@ -155,6 +155,10 @@ After publishing a directory analysis, `analyze` collects character names and al
 
 Each candidate in `BOOK/pronunciations.json` has an exact written word, source quotation, and reason to check it. Pending character and place names automatically receive a suggested CMU Arpabet pronunciation, including vowel stress. The existing configured analysis model proposes it from the name's spelling and book context. These are guesses for listening review, not canonical pronunciations or acoustic verification. Confirmed and keep-default choices, including inherited ones, are reused without new proposals.
 
+Discovery filters automatic candidates covered by the bundled CMU Pronouncing Dictionary, so ordinary known words do not fill the listening queue. Observed character names and aliases from the resolved cast are exempt even when they are dictionary words: a character named `Read`, `May`, or `Rose` still needs a deliberate consistent reading. A model labeling an ordinary word as a name is not enough to bypass this filter. Dictionary membership uses case-insensitive lookup only; the existing source-spelling, capitalization-family, and evidence rules remain unchanged.
+
+The CMU proposer receives every available dictionary reading, not just the first, alongside source/name context and any user respelling. Its guidance covers stress, vowel reduction, inflections, compounds, acronyms, unfamiliar-word analogies, and English approximations for foreign names. A user-supplied spoken hint takes precedence over a dictionary reading. The full dictionary, license, and pinned provenance ship with the package; lookup is offline and needs no `cmudict` dependency or download. Dictionary entries are suggestions, not approval or proof of what the voice will say.
+
 Existing books can add this queue without repeating character or passage analysis:
 
 ```sh
@@ -163,6 +167,8 @@ audiobook-render pronunciations BOOK --config epub-tts-narrator.toml
 ```
 
 Discovery and phoneme proposals use the existing analysis provider and cached requests, with at most five concurrent calls. Each completed name proposal is saved immediately. A failure leaves the published analysis, completed discovery batches, and saved proposals intact; rerun the command to finish. Rerunning `analyze BOOK` also completes missing discovery or proposals. A completed source/cast-bound scan is skipped. Local corrections survive discovery and do not rewrite the canonical analysis, scripts, cast, or reference recordings. Legacy single-JSON analysis output does not have this per-book sidecar workflow.
+
+Older automatic pending dictionary words are hidden from preparation/review without deleting their stored proposals or ancestor records. Explicit choices, manually requested review, drafts and conflicting saved decisions remain available. The updated discovery policy may rescan an older book once; saved name proposals and human decisions are not bulk-regenerated. Display-only CMU estimates refresh lazily when proposal policy changes, without changing drafts or approved speech.
 
 Pending candidates do not affect synthesis. Confirmed respellings or CMU Arpabet choices are loaded at render time, independently of expressive delivery planning. Choices follow the saved continuation chain dynamically: a correction confirmed in Book 1 after Book 2 was analyzed is available to Book 2 on its next render. A Book 2 correction or explicit keep-default decision overrides Book 1 for that word in Book 2 and its descendants. Ordinary capitalization variants share one review entry and choice, including across books. Matching otherwise requires the complete exact spelling, never name resemblance or fuzzy identity merging. Known pronunciation-changing capitonyms and short initialisms remain separate; existing conflicting explicit choices remain visible for review. See [pronunciation review](RENDERER.md#pronunciation-review) for audition and correction commands.
 

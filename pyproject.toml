@@ -28,3 +28,6 @@ Repository = "https://github.com/taxilian/epub-tts-narrator"
 
 [tool.setuptools.packages.find]
 include = ["epub_tts_narrator", "epub_tts_narrator.*"]
+
+[tool.setuptools.package-data]
+epub_tts_narrator = ["data/cmudict.dict.gz", "data/CMUDICT-LICENSE", "data/CMUDICT-PROVENANCE.md"]

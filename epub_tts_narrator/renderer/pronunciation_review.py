@@ -221,6 +221,7 @@ class PronunciationReviewSession:
         self._resolved = None
         self.proposal_fn = proposal_fn
         self.preparation_errors = {}
+        self._dictionary_name_words = None
 
     @property
     def settings(self):
@@ -277,6 +278,7 @@ class PronunciationReviewSession:
 
     def rows(self, word=None):
         from ..pronunciations import load_pronunciations, word_id
+        from ..pronunciation_dictionary import review_candidates
         rows = load_pronunciations(self.bundle["directory"])
         drafts = self._drafts()
         result = []
@@ -311,13 +313,19 @@ class PronunciationReviewSession:
                 result.append(selected)
         result.sort(key=lambda row: (row["word"].lower(), row["word"]))
         if word is None:
-            return result
+            if self._dictionary_name_words is None:
+                from ..pronunciation_discovery import character_name_candidates
+                self._dictionary_name_words = frozenset(
+                    entry["word"] for entry in character_name_candidates(self.bundle))
+            return review_candidates(self.bundle, result, name_words=self._dictionary_name_words)
         selected = find_pronunciation(result, word)
         return [selected] if selected is not None else []
 
     def _estimates(self):
         """Display-only CMU estimates never become pronunciation choices."""
         from ..pronunciations import validate_proposal, validate_word
+        from ..pronunciation_proposals import PROPOSAL_VERSION
+        from ..pronunciation_dictionary import DICTIONARY_SHA256
         path = self.directory / "cmu-estimates.json"
         if not path.exists() and not path.is_symlink():
             return {}
@@ -338,6 +346,8 @@ class PronunciationReviewSession:
             if request["respelling"] is not None:
                 validate_word(request["respelling"])
             validate_proposal(entry["pronunciation"])
+        if value.get("proposal_policy") != {"version": PROPOSAL_VERSION, "dictionary_sha256": DICTIONARY_SHA256}:
+            return {}
         return value["entries"]
 
     def _guess(self, word, respelling=None):
@@ -349,6 +359,8 @@ class PronunciationReviewSession:
 
     def _estimate(self, word, respelling=None, *, prepare=False):
         from ..pronunciations import validate_word
+        from ..pronunciation_proposals import PROPOSAL_VERSION
+        from ..pronunciation_dictionary import DICTIONARY_SHA256
         validate_word(word)
         if respelling is not None:
             validate_word(respelling)
@@ -365,6 +377,7 @@ class PronunciationReviewSession:
             entries.setdefault(key, {"request": request, "pronunciation": pronunciation})
             write_json(self.directory / "cmu-estimates.json", {
                 "format": _ESTIMATE_FORMAT, "version": 1,
+                "proposal_policy": {"version": PROPOSAL_VERSION, "dictionary_sha256": DICTIONARY_SHA256},
                 "book_id": self.bundle["source"]["book"]["id"],
                 "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
                 "entries": entries, "sha256": digest(entries)})
@@ -818,9 +831,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
     if correction is not None and action not in {"set", "play"}:
         raise ValueError("--say-as and --phonemes are used with --action set or play")
     if action == "list":
-        rows = load_pronunciations(bundle["directory"])
-        selected = find_pronunciation(rows, word) if word is not None else None
-        _show(rows if word is None else ([selected] if selected is not None else []), output)
+        _show(PronunciationReviewSession(bundle, config).rows(word), output)
         return 0
     if action == "set":
         if correction is None:

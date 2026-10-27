@@ -14,7 +14,7 @@ from .pronunciation_groups import find_pronunciation
 
 FORMAT = "epub-tts-pronunciations"
 VERSION = 1
-DISCOVERY_VERSION = 2
+DISCOVERY_VERSION = 3
 FILENAME = "pronunciations.json"
 KINDS = frozenset({"name", "place", "invented", "foreign", "ambiguous", "other"})
 STATUSES = frozenset({"pending", "confirmed", "ignored"})
@@ -78,8 +78,10 @@ def _evidence_contains_word(word, quote, source_text):
 def validate_entry(entry, source):
     """Validate stored/proposed metadata against its own book, not a descendant."""
     fields = {"id", "word", "status", "kind", "reason", "evidence"}
-    if not isinstance(entry, dict) or set(entry) - fields - {"pronunciation", "proposal"} or not fields <= set(entry):
+    if not isinstance(entry, dict) or set(entry) - fields - {"pronunciation", "proposal", "review_requested"} or not fields <= set(entry):
         raise ValueError("Pronunciation entry has missing or unsupported fields")
+    if "review_requested" in entry and entry["review_requested"] is not True:
+        raise ValueError("Pronunciation review_requested must be true when present")
     word = validate_word(entry["word"])
     if (entry["id"] != word_id(word) or not isinstance(entry["status"], str) or entry["status"] not in STATUSES
             or not isinstance(entry["kind"], str) or entry["kind"] not in KINDS or not _plain(entry["reason"], 1000)):
@@ -238,9 +240,10 @@ def discovery_pending(directory, document):
 
 def preparation_pending(directory, document):
     """Resume discovery or missing name guesses, without reconsidering decisions."""
+    from .pronunciation_dictionary import review_candidates
     return discovery_pending(directory, document) or any(
         entry["status"] == "pending" and entry["kind"] in {"name", "place"} and "proposal" not in entry
-        for entry in load_pronunciations(directory))
+        for entry in review_candidates(document, load_pronunciations(directory)))
 
 
 def _mutate(directory, operation):
@@ -275,6 +278,8 @@ def save_candidates(directory, document, candidates):
                 replacement = deepcopy(entry)
                 if "proposal" in prior:
                     replacement["proposal"] = deepcopy(prior["proposal"])
+                if prior.get("review_requested") or prior.get("reason") == "Manually selected for pronunciation review.":
+                    replacement["review_requested"] = True
                 entries[entry["id"]] = replacement
         record["entries"] = sorted(entries.values(), key=lambda entry: entry["word"])
         record["discovery"] = _discovery_marker(document)
@@ -310,6 +315,8 @@ def save_proposal(directory, document, word, proposal):
                             for block in source["blocks"] if _word_in(target, block["text"]))
             entry = {key: deepcopy(effective[key]) for key in ("id", "word", "status", "kind", "reason")}
             entry["evidence"] = [evidence]
+        if effective.get("review_requested"):
+            entry["review_requested"] = True
         entry["proposal"] = proposal
         entries[identity] = validate_entry(entry, source)
         record["entries"] = sorted(entries.values(), key=lambda item: item["word"])
@@ -348,6 +355,7 @@ def set_pronunciation(directory, document, word, pronunciation=None, status="con
                 "id": word_id(variant), "word": variant, "kind": effective["kind"] if effective else "other",
                 "reason": "Manually selected for pronunciation review.", "evidence": [citation]}))
             entry["status"] = status
+            entry["review_requested"] = True
             entry.pop("pronunciation", None)
             if status != "pending":
                 entry.pop("proposal", None)
