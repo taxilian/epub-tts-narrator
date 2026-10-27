@@ -335,6 +335,65 @@ Changing worker addresses, credentials, order, or concurrency retains compatible
 
 Validation includes two real HTTP requests to the local Drama 3 model using the existing demonstration voices: a 2.60-second single-voice passage and a 4.04-second two-character passage. Both passed strict Whisper text and acoustic checks, and the original reference checksums were unchanged. The report is `output/distributed-render-pilot-paoj0g29/report.json`. Automated tests additionally exercise two HTTP workers through chapter/M4B assembly and offline resume. The real-model pilot used loopback on one Mac; a second machine and hosted Fish service have not yet been exercised.
 
+### Accepted chapter continuity (local, opt-in)
+
+To carry Drama 3's generated performance context across chunk requests, set
+`continuity = "chapter"` in the existing `[render]` table. The default is `"off"`.
+The selected voice-cloning recording and transcript stay fixed on every request.
+Continuity supplies earlier generated text and codec tokens as completed turns;
+it never replaces the saved cloning reference or changes loudness processing.
+
+```toml
+[render]
+continuity = "chapter"
+
+[render_pool]
+workers = [{ name = "local", type = "local", concurrency = 1 }]
+scheduler = "pipeline"
+chapter_concurrency = 4
+```
+
+Merge these keys into existing tables rather than declaring duplicate tables.
+Run the ordinary `audiobook-render render BOOK` command. A local pool with the
+pipeline scheduler keeps independent chapters active while each chapter admits
+only one complete generation/verification transaction at a time. The next chunk
+starts after its predecessor is accepted; failed attempts never advance history.
+The same single model-affine MLX thread and bounded resource lanes are retained.
+With legacy scheduling or direct `--local` rendering, continuity still works,
+but chapter generation remains sequential. No throughput improvement is promised.
+
+Each voice asset has its own first/latest accepted context, with no duplicate
+first entry. Single-voice paragraphs participate. Chapter boundaries and silent
+controls reset context; mixed-voice paragraphs and simultaneous passages are
+explicit barriers rather than guessed per-speaker codec slices. Their existing
+generation and mixing behavior is preserved. Joined/repaired and best-effort
+selected takes remain accepted audio but reset the corresponding voice history.
+Passage directions remain in effect; continuity does not certify voice identity
+or prevent emotional carryover, so listen before enabling it for a whole book.
+
+This mode currently supports the pinned vendored `drama3_mlx` adapter, directly
+or through an all-supported local pool. The optional `mlx_audio` runtime, remote
+inference workers, remote chapter clients/Runpod, and plugins without the explicit
+capability reject it before rendering instead of silently dropping context.
+`cache-report` also rejects this mode because it does not replay accepted history.
+
+Accepted context is saved as hash-validated `*.codes.json` artifacts alongside
+take records. Rerunning reconstructs history from accepted evidence in source
+order. Missing/corrupt artifacts block reuse; they are never reconstructed from
+WAV files. Normal cleanup preserves them, while explicit render-cache discard
+removes them. Context and runtime identity participate in speech reuse even when
+a model-cache alias is configured. Changing an earlier take can require rendering
+its dependent suffix again until a reset boundary. Keep the same continuity mode
+for `render` and `assemble`; switching it changes synthesis identity, so rerender
+affected chapters rather than assembling stale checkpoints. Existing off-mode
+speech remains available and unchanged in its own cache.
+
+Selected history is never silently shortened to fit a prompt. Context overflow
+fails with a continuity diagnostic; shorten the configured chunk/paragraph limits
+and rerun if needed. Offline tests prove history, resume, rejection, cleanup, and
+chapter overlap mechanics. They do not establish an audible consistency gain;
+that still requires a paired live-model listening comparison.
+
 ## Compare legacy and expressive chapter generation
 
 Expressive generation is opt-in. Existing render commands retain their legacy conditioning and cache identities. To compare a chapter, keep the same saved voices and global config and choose a separate output directory:

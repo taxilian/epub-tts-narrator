@@ -295,6 +295,7 @@ class Drama3MLXEngine:
             "delivery_control": True,
             "structured_performance": True,
             "multi_speaker": True,
+            "chapter_continuity": True,
             "unconditioned_voice_creation": False,
         }
 
@@ -302,6 +303,12 @@ class Drama3MLXEngine:
     def voice_binding_identity(self) -> dict[str, str]:
         """Reference WAVs remain compatible across supported Drama 3 ports."""
         return {"engine": "drama3_mlx", "model": "fishaudio/drama-3"}
+
+    def check_continuity(self):
+        details = _runtime_details()
+        if (details["installed_version"] != DRAMA3_RUNTIME_VERSION
+                or details["installed_revision"] not in (None, DRAMA3_RUNTIME_REVISION)):
+            raise EngineError("Chapter continuity requires the pinned vendored Drama 3 runtime")
 
     @property
     def identity(self) -> dict[str, Any]:
@@ -451,20 +458,25 @@ class Drama3MLXEngine:
             raise EngineError(f"Audio output already exists: {output_path}")
         model = self._load()
         try:
+            from .continuity_codes import previous_takes, save_codes
+            history = previous_takes(self, model)
             iterator = iter(model.generate(
                 engine_text, references=references, temperature=self.temperature,
                 top_p=self.top_p, top_k=self.top_k,
                 max_new_tokens=self.max_new_tokens, single_chunk=True,
-                seed=seed, attempts=1,
+                seed=seed, attempts=1, **history,
             ))
             segment = next(iterator, None)
             if segment is None or next(iterator, None) is not None:
                 raise EngineError("Drama 3 must return exactly one audio segment")
             metadata = self._save_segment(segment, model, engine_text, output_path)
+            metadata.update(save_codes(self, model, segment, output_path))
         except EngineError:
             raise
         except Exception as exc:
-            raise EngineError(f"Drama 3 generation failed: {exc}") from exc
+            from .continuity import current
+            policy = " (chapter continuity keeps all selected first/latest context; overflow is fatal)" if current() else ""
+            raise EngineError(f"Drama 3 generation failed{policy}: {exc}") from exc
         return {
             **metadata,
             "seed": seed,

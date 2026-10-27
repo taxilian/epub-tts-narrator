@@ -253,7 +253,17 @@ class RenderPool:
                 or w.settings.get("protocol") == "fish_sglang_drama3" for w in self._workers),
             "unconditioned_voice_creation": False,
             "structured_performance": True,
+            "chapter_continuity": all(w.local for w in self._workers),
         }
+
+    def check_continuity(self):
+        from .continuity import require_support
+        def check():
+            for worker in self._workers:
+                if not worker.local:
+                    raise EngineError("Chapter continuity requires local pool workers")
+                require_support({"render": {"continuity": "chapter"}}, worker.engine())
+        self._local_runtime.run(check)
 
     @property
     def identity(self):

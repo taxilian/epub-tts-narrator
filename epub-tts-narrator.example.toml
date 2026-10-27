@@ -96,6 +96,13 @@ nested_quotations = "Keep the currently speaking character's performed voice."
 headings_and_nonstory_text = "Use the applicable narrator role."
 bracketed_text = "Give this bracketed text a slight, audible change in delivery while keeping the surrounding sentence natural. Keep the selected speaker's voice."
 
+# Optional local Drama 3 continuity; merge into your existing [render] table.
+# Keeps the voice-cloning reference fixed and passes first/latest accepted
+# generated text/codes to subsequent chunks. No loudness changes.
+# Unsupported remote/MLX-Audio backends reject "chapter" rather than ignore it.
+# [render]
+# continuity = "off"          # "off" (default) or local "chapter"
+
 # Renderer scheduling controls (optional; defaults keep today's behavior).
 # The pipeline scheduler is an explicit opt-in experiment: the default remains
 # "legacy" until the measured live benchmark gate passes. These settings only

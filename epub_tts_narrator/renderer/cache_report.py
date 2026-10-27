@@ -151,6 +151,9 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
     snapshot. Text, voice transcripts, credentials and raw engine metadata are
     deliberately omitted from the shareable report.
     """
+    from .continuity import enabled
+    if enabled(config):
+        raise ValueError("cache-report does not replay accepted chapter continuity; use render to validate and resume it")
     if type(max_examples) is not int or max_examples < 0:
         raise ValueError("max_examples must be a nonnegative integer")
     config = resolve_book_config(bundle, config)

@@ -286,6 +286,7 @@ def paragraph_recovery_part(request, part, voices_by_asset):
     turn = deepcopy(request["chunk"]["paragraph_turns"][0])
     turn["spoken_text"] = part["text"]
     return {"kind": "speech", "engine": deepcopy(request["engine"]),
+            **({"continuity": deepcopy(request["continuity"])} if "continuity" in request else {}),
             "base_seed": request["base_seed"], "sample_rate": request["sample_rate"],
             "voice_asset_hash": collapsed["voice"]["asset_hash"], "chunk": turn}
 
@@ -454,6 +455,13 @@ def _plain_delivery_generation_identity(request, voices_by_asset, metadata):
 
 
 def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
+    result = _generation_identity(request, voices_by_asset, engine_metadata=engine_metadata)
+    if "continuity" in request:
+        result = dict(result, continuity=deepcopy(request["continuity"]))
+    return result
+
+
+def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     """Return generation inputs without position, source IDs or cast bookkeeping.
 
     ``voices_by_asset`` binds request asset hashes to their exact saved records;

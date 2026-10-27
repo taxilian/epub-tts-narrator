@@ -38,6 +38,8 @@ RENDER_CONTRACT = {
     "allow_review": {"default": False, "kind": "bool"},
     "require_cover": {"default": True, "kind": "bool"},
     "paragraph_synthesis": {"default": True, "kind": "bool", "remote_safe": True},
+    "continuity": {"default": "off", "kind": "enum", "choices": ("off", "chapter"),
+                   "remote_safe": True},
     "performance_mode": {"default": "legacy", "kind": "enum", "choices": ("legacy", "expressive"),
                          "remote_safe": True},
     "paragraph_pause_ms": {"default": 400, "kind": "int", "range": (0, 5000),
@@ -464,6 +466,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("render.chapter_format must be m4a or mp3")
     if render["performance_mode"] not in {"legacy", "expressive"}:
         raise ValueError("render.performance_mode must be legacy or expressive")
+    if render["continuity"] not in RENDER_CONTRACT["continuity"]["choices"]:
+        raise ValueError("render.continuity must be off or chapter")
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
     verification = result["verification"]

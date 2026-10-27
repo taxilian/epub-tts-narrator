@@ -341,6 +341,11 @@ def _purge_clip(directory, plan):
         if path.name == ".DS_Store":
             plan.remove_file(path, "render_cache")
             continue
+        codes = re.fullmatch(r"([0-9a-f]{64})\.codes\.json", path.name)
+        if codes is not None:
+            plan.check_file(path, codes[1])
+            plan.remove_file(path, "render_cache")
+            continue
         match = _ATTEMPT.fullmatch(path.name)
         if path.name != "accepted.json" and match is None and _RAW.fullmatch(path.name) is None:
             raise ValueError(f"Cleanup found an unrecognized speech cache file: {path}")

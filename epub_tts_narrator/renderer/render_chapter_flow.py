@@ -55,7 +55,7 @@ class ChapterRunAdmission:
             return self._failure
 
 
-def collect_chapter(scheduler, owner, count, run_one):
+def collect_chapter(scheduler, owner, count, run_one, *, sequential=False):
     """Run one chapter's transactions on the shared logical scheduler.
 
     Returns results in source order. At most ``scheduler.share``
@@ -71,7 +71,7 @@ def collect_chapter(scheduler, owner, count, run_one):
     ``AdmissionClosed`` refusal stops submissions so the drain below can
     retire the owner and surface the original failure.
     """
-    share = max(1, scheduler.share)
+    share = 1 if sequential else max(1, scheduler.share)
     futures = {}
     results = [None] * count
     finished = deque()

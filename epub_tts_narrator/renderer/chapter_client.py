@@ -342,7 +342,8 @@ def _register_voices(client, assets, notify):
 
 
 def _safe_render(settings):
-    return {key: deepcopy(settings[key]) for key in SAFE_RENDER_KEYS if key in settings}
+    return {key: deepcopy(settings[key]) for key in SAFE_RENDER_KEYS if key in settings
+            and not (key == "continuity" and settings[key] == "off")}
 
 
 def _selection(bundle, chapter, config, bindings):
@@ -367,6 +368,9 @@ def validate_remote_plan(bundle, config, plan):
     placeholders let us check the complete source/transport contract locally,
     without compressing voices or making any request to the chapter service.
     """
+    from .continuity import enabled
+    if enabled(config):
+        raise ChapterClientError("Chapter continuity is not supported by remote chapter clients; use local rendering")
     bindings = {voice_id: "0" * 64 for voice_id in plan["voice_ids"]}
     for chapter in plan["chapters"]:
         try:
@@ -971,6 +975,9 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
 
 
 def render_remote(bundle, config, *, notify=print, chapters_only=False):
+    from .continuity import enabled
+    if enabled(config):
+        raise ChapterClientError("Chapter continuity is not supported by remote chapter clients; use local rendering")
     from .workflow import _preflight, _lock_book_audio
     validated = config.pop("_validated_remote_plan", None)
     if validated is None:

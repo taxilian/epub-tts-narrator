@@ -49,6 +49,7 @@ epub-tts-narrator/
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
 | Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2317 ln) | Resumable, checkpointed, quality-gated |
 | Shared render scheduling | `renderer/render_lanes.py`, `renderer/render_pipeline.py`, `renderer/render_chapter_flow.py`, `renderer/render_resources.py`, `renderer/render_resource_context.py` | Bounded stage lanes; fair logical scheduler; chapter coordination (`collect_chapter`/`run_units`); runtime-only controls; pipeline leaf routing (`resource_scope`) |
+| Accepted chunk continuity | `renderer/continuity.py`, `renderer/continuity_codes.py`, `renderer/workflow.py` | Opt-in `render.continuity="chapter"`; fixed clone references, per-voice first/latest accepted codes, source-order replay; local vendored runtime only; pipeline chapters remain parallel |
 | Scheduling diagnostics | `renderer/render_schedule_status.py`, `renderer/chapter_jobs.py:scheduling_status`, `renderer/runpod_progress.py` | Passive read-only numeric snapshots (mode/basis, logical gauges, backlog with monotonic peaks, per-stage queued/active); observing never initializes resources or mutates state |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
 | Casting workflow | `epub_tts_narrator/renderer/casting.py` | `CastingSession` god-class (~37 methods, 20+ callers) |
