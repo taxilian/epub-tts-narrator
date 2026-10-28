@@ -71,9 +71,11 @@ def parser():
                                  help="Remove a local mapping, restoring any inherited or automatic mapping")
         if name == "pronunciations":
             command.add_argument("--action", default="review",
-                                 choices=("review", "list", "discover", "set", "ignore", "reset", "play"),
+                                 choices=("review", "list", "discover", "set", "ignore", "reset", "play", "migrate"),
                                  help="Review pronunciation candidates, audition corrections, or save a book-local choice")
             command.add_argument("--word", help="Exact written word, including case (e.g. Qarm)")
+            command.add_argument("--class", dest="pronunciation_class", choices=("name", "special"))
+            command.add_argument("--name-id", help="Book-local N<number> from prepare-name-script --action list")
             correction = command.add_mutually_exclusive_group()
             correction.add_argument("--say-as", help="Readable pronunciation hint (e.g. Quarm); proposes and auditions CMU for review")
             correction.add_argument("--phonemes", help="Advanced: CMU Arpabet phonemes, with stress digits if needed")
@@ -299,7 +301,19 @@ def main(argv=None):
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
         if args.command == "pronunciations":
+            from .pronunciation_scope_cli import command_scope
+            scope = command_scope(bundle, args)
+            if scope is None and args.action == "list" and (Path(bundle["directory"]) / "name-script.json").exists():
+                from .pronunciation_scope_cli import list_scopes
+                return list_scopes(bundle, config, args.word)
+            if args.action == "migrate":
+                if scope is None:
+                    raise ValueError("Migration requires --class name or special")
+                return 0
             if args.action == "discover":
+                if scope is not None:
+                    from .pronunciation_scope_cli import prepare_scope
+                    return prepare_scope(bundle, config, config_path, scope, args.word)
                 from epub_tts_narrator.config import load_config as load_analysis_config
                 from epub_tts_narrator.pronunciation_workflow import prepare_book_pronunciations
                 prepare_book_pronunciations(bundle["directory"], load_analysis_config(config_path))
@@ -307,7 +321,8 @@ def main(argv=None):
             from .pronunciation_review import run_pronunciation_review
             from epub_tts_narrator.pronunciation_workflow import create_pronunciation_proposer
             return run_pronunciation_review(
-                bundle, config, args, proposal_fn=create_pronunciation_proposer(bundle["directory"], config_path))
+                bundle, config, args, scope=scope,
+                proposal_fn=create_pronunciation_proposer(bundle["directory"], config_path, scope=scope))
         if args.command in {"prepare-performance", "compare-performance"}:
             from epub_tts_narrator.config import load_config as load_analysis_config
             from epub_tts_narrator.performance_planning import load_prepared_performance, prepare_performance

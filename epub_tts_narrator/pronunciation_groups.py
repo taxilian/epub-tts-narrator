@@ -46,13 +46,15 @@ def find_pronunciation(entries, word):
         (entry for entry in entries if word in entry_words(entry)), None)
 
 
-def family_words(word, entries, current_words):
+def family_words(word, entries, current_words, *, contextual=False):
+    if contextual:
+        return sorted({item for item in current_words if item.lower() == word.lower()}, key=natural_spelling)
     named = named_families(entries)
     key = case_key(word, named)
     return sorted({item for item in current_words if case_key(item, named) == key}, key=natural_spelling)
 
 
-def group_pronunciations(entries, current_words):
+def group_pronunciations(entries, current_words, *, contextual=False):
     """Project ordered nearest-book-first records into current spelling groups.
 
     Human choices beat guesses at any depth; nearest-book human choices beat
@@ -63,9 +65,9 @@ def group_pronunciations(entries, current_words):
     named = named_families(entries)
     groups, forms = defaultdict(list), defaultdict(list)
     for entry in entries:
-        groups[case_key(entry["word"], named)].append(entry)
+        groups[(entry["word"].lower(),) if contextual else case_key(entry["word"], named)].append(entry)
     for word in current_words:
-        forms[case_key(word, named)].append(word)
+        forms[(word.lower(),) if contextual else case_key(word, named)].append(word)
     owners = {owner: index for index, owner in enumerate(dict.fromkeys(
         entry.get("origin_directory", "") for entry in entries))}
 
@@ -81,6 +83,9 @@ def group_pronunciations(entries, current_words):
         if word != selected["word"]:
             row["origin_word"] = selected["word"]
         row.update(word=word, id=word_id(word), variants=variants)
+        if "scope" in row:
+            from .pipeline import fingerprint
+            row["id"] = fingerprint([row["scope"], word])
         if conflict:
             row["case_conflict"] = True
         return row

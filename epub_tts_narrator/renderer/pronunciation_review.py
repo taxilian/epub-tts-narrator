@@ -214,8 +214,14 @@ def _reject_preview(folder, state, reason):
 
 
 class PronunciationReviewSession:
-    def __init__(self, bundle, config, *, engine_factory=None, store=None, notify=print, proposal_fn=None):
+    def __init__(self, bundle, config, *, engine_factory=None, store=None, notify=print, proposal_fn=None, scope=None,
+                 name_snapshot=None):
         self.bundle, self.config = bundle, deepcopy(config)
+        self.scope = deepcopy(scope)
+        self._name_annotations = name_snapshot
+        if self.scope is not None and self.scope["class"] == "name" and self._name_annotations is None:
+            from ..name_script_state import load_name_script
+            self._name_annotations = load_name_script(bundle["directory"], bundle)
         self.notify = notify
         self._engine_factory, self._engine, self._store = engine_factory, None, store
         self._resolved = None
@@ -233,6 +239,8 @@ class PronunciationReviewSession:
     @property
     def directory(self):
         path = Path(self.settings["render"]["work_dir"]) / "pronunciations"
+        if self.scope is not None:
+            path = path / digest(self.scope)
         if path.is_symlink() or path.parent.is_symlink():
             raise ValueError("Pronunciation preview directories must not be symlinks")
         return path
@@ -261,8 +269,9 @@ class PronunciationReviewSession:
         lock = acquire_directory_lock(self.directory / ".drafts.lock")
         try:
             entries = self._drafts()
-            rows = load_pronunciations(self.bundle["directory"])
-            members = family_words(word, rows, {*entries, word, *variants})
+            rows = load_pronunciations(self.bundle["directory"], scope=self.scope)
+            members = family_words(word, rows, {*entries, word, *variants},
+                                   contextual=self.scope is not None and self.scope["class"] == "name")
             for member in {*members, *variants}:
                 entries.pop(member, None)
             if pronunciation is not None:
@@ -279,7 +288,10 @@ class PronunciationReviewSession:
     def rows(self, word=None):
         from ..pronunciations import load_pronunciations, word_id
         from ..pronunciation_dictionary import review_candidates
-        rows = load_pronunciations(self.bundle["directory"])
+        rows = load_pronunciations(self.bundle["directory"], scope=self.scope)
+        if self.scope is not None:
+            from .pronunciation_scopes import scoped_review_rows
+            rows = scoped_review_rows(self.bundle, self.scope, rows, snapshot=self._name_annotations)
         drafts = self._drafts()
         result = []
         for row in rows:
@@ -302,6 +314,9 @@ class PronunciationReviewSession:
                 preferred = drafted or variants
                 spelling = row["word"] if row["word"] in preferred else min(preferred, key=natural_spelling)
                 selected = dict(row, word=spelling, id=word_id(spelling), variants=variants)
+                if self.scope is not None:
+                    from ..pipeline import fingerprint
+                    selected["id"] = fingerprint([self.scope, spelling])
                 if spelling != row["word"]:
                     selected.setdefault("origin_word", row["word"])
                 if drafted:
@@ -313,6 +328,8 @@ class PronunciationReviewSession:
                 result.append(selected)
         result.sort(key=lambda row: (row["word"].lower(), row["word"]))
         if word is None:
+            if self.scope is not None and self.scope["class"] == "name":
+                return result
             if self._dictionary_name_words is None:
                 from ..pronunciation_discovery import character_name_candidates
                 self._dictionary_name_words = frozenset(
@@ -422,7 +439,7 @@ class PronunciationReviewSession:
             self.notify(display(f"Preparing pronunciation CMU {index}/{total}: {row['word']}"))
             try:
                 if row["status"] == "pending" and _preferred(row) is None:
-                    save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]))
+                    save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]), scope=self.scope)
                     current = self.rows(row["word"])
                     if not current:
                         raise ValueError("Pronunciation entry changed during preparation; rerun to resume")
@@ -480,7 +497,7 @@ class PronunciationReviewSession:
         if pronunciation["alphabet"] != "cmu_arpabet":
             raise ValueError("Pronunciation suggestion must provide CMU Arpabet phones")
         if not self.rows(word):
-            set_pronunciation(self.bundle["directory"], self.bundle, word, status="pending")
+            set_pronunciation(self.bundle["directory"], self.bundle, word, status="pending", scope=self.scope)
         self._write_draft(word, pronunciation)
         self.notify(display(f"Guessed {_description(pronunciation)}. Audition these exact phones before confirming."))
         return pronunciation
@@ -490,13 +507,15 @@ class PronunciationReviewSession:
         if (proposed is None and row.get("status") == "pending"
                 and self.proposal_fn is not None):
             from ..pronunciations import save_proposal
-            save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]))
+            save_proposal(self.bundle["directory"], self.bundle, row["word"], self._guess(row["word"]), scope=self.scope)
             current = self.rows(row["word"])
             return _preferred(current[0]) if current else None
         return proposed
 
     def confirm(self, row):
         from ..pronunciations import set_pronunciation
+        if self.scope is not None and row.get("scope") != self.scope:
+            raise ValueError("Pronunciation row belongs to another scope")
         current = self.rows(row["word"])
         pronunciation = _preferred(current[0]) if current else None
         if pronunciation is None:
@@ -505,19 +524,19 @@ class PronunciationReviewSession:
         if preview.get("played") != {"request_sha256": digest(preview["request"]),
                                      "audio_sha256": preview["audio_sha256"]}:
             raise ValueError("Play this exact pronunciation with the current voice before confirming it")
-        set_pronunciation(self.bundle["directory"], self.bundle, row["word"], pronunciation, status="confirmed")
+        set_pronunciation(self.bundle["directory"], self.bundle, row["word"], pronunciation, status="confirmed", scope=self.scope)
         self.clear_drafts(current[0])
 
     def ignore(self, word):
         from ..pronunciations import set_pronunciation
         current = self.rows(word)
-        set_pronunciation(self.bundle["directory"], self.bundle, word, status="ignored")
+        set_pronunciation(self.bundle["directory"], self.bundle, word, status="ignored", scope=self.scope)
         self.clear_drafts(current[0] if current else {"word": word})
 
     def reset(self, word):
         from ..pronunciations import reset_pronunciation
         current = self.rows(word)
-        reset_pronunciation(self.bundle["directory"], word)
+        reset_pronunciation(self.bundle["directory"], word, scope=self.scope)
         self.clear_drafts(current[0] if current else {"word": word})
 
     def _occurrences(self, word):
@@ -531,12 +550,21 @@ class PronunciationReviewSession:
         from ..spoken_text import build_spoken
         from .book_context import voice_store
         from .speech_text import trim_speech_text
+        if self.scope is not None and self._name_annotations is None:
+            from ..name_script import FILENAME
+            from ..name_script_state import load_name_script
+            path = Path(self.bundle["directory"]) / FILENAME
+            if path.exists() or path.is_symlink():
+                self._name_annotations = load_name_script(self.bundle["directory"], self.bundle)
         if self._store is None:
             self._store = voice_store(self.bundle, self.settings)
         candidates, selected_voices = [], {}
         for chapter in self.bundle["chapters"]:
             for row in chapter["rows"]:
                 matches = [match for match in WORD_PATTERN.finditer(row["text"]) if match.group() == word]
+                if self.scope is not None:
+                    from .pronunciation_scopes import scoped_matches
+                    matches = scoped_matches(self.bundle, self.scope, row, matches, snapshot=self._name_annotations)
                 if not matches:
                     continue
                 try:
@@ -656,13 +684,20 @@ class PronunciationReviewSession:
         preview_row = _preview_row(sample["row"], word)
         try:
             spoken, mapping = build_spoken(preview_row)
-            match = next((item for item in WORD_PATTERN.finditer(preview_row["text"]) if item.group() == word), None)
+            matches = [item for item in WORD_PATTERN.finditer(preview_row["text"]) if item.group() == word]
+            if self.scope is not None:
+                from .pronunciation_scopes import scoped_matches
+                matches = scoped_matches(self.bundle, self.scope, preview_row, matches, snapshot=self._name_annotations)
+            match = next(iter(matches), None)
             if match is None:
                 return None
             span = _spoken_span(mapping, preview_row, match)
             if span is None:
                 return None
-            merged = merge_row_pronunciations(preview_row, None, entries)
+            selected = None
+            if self.scope is not None and entries is not None:
+                selected = [(item, entries[word]) for item in matches]
+            merged = merge_row_pronunciations(preview_row, None, entries, matches=selected)
             if merged is None:
                 return None
             start, end = _sample_bounds(spoken, span[0], span[1])
@@ -723,6 +758,8 @@ class PronunciationReviewSession:
                                    cached_only=cached_only)
 
     def _preview_cache(self, word, pronunciation, text, options, request, engine, voice, *, purpose, context, cached_only):
+        if self.scope is not None:
+            request = dict(request, scope=self.scope)
         key = digest(request)
         folder = self.directory / key
         if folder.is_symlink():
@@ -817,7 +854,7 @@ class PronunciationReviewSession:
 
 
 def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=print,
-                             engine_factory=None, store=None, player=None, playback_fn=None, proposal_fn=None):
+                             engine_factory=None, store=None, player=None, playback_fn=None, proposal_fn=None, scope=None):
     """Dispatch explicit edits or a keyboard-driven proposal/listening menu."""
     from ..pronunciations import load_pronunciations, set_pronunciation, validate_word
     from ..provider import ProviderError
@@ -831,22 +868,22 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
     if correction is not None and action not in {"set", "play"}:
         raise ValueError("--say-as and --phonemes are used with --action set or play")
     if action == "list":
-        _show(PronunciationReviewSession(bundle, config).rows(word), output)
+        _show(PronunciationReviewSession(bundle, config, scope=scope).rows(word), output)
         return 0
     if action == "set":
         if correction is None:
             raise ValueError("Provide --say-as or --phonemes; use --action ignore to keep the default")
         if correction["alphabet"] == "cmu_arpabet":
-            set_pronunciation(bundle["directory"], bundle, word, correction, status="confirmed")
-            PronunciationReviewSession(bundle, config)._write_draft(word, None)
+            set_pronunciation(bundle["directory"], bundle, word, correction, status="confirmed", scope=scope)
+            PronunciationReviewSession(bundle, config, scope=scope)._write_draft(word, None)
             output(display(f"Confirmed {word}: {_description(correction)}. Existing audio is unchanged."))
             return 0
     if action == "ignore":
-        PronunciationReviewSession(bundle, config).ignore(word)
+        PronunciationReviewSession(bundle, config, scope=scope).ignore(word)
         output(display(f"Keeping the default pronunciation for {word}."))
         return 0
     if action == "reset":
-        PronunciationReviewSession(bundle, config).reset(word)
+        PronunciationReviewSession(bundle, config, scope=scope).reset(word)
         output(display(f"Removed the local pronunciation decision for {word}; inherited decisions apply."))
         return 0
     if action not in {"review", "play", "set"}:
@@ -859,7 +896,7 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
         from .terminal import play_sample
         playback_fn = play_sample
     session = PronunciationReviewSession(bundle, config, engine_factory=engine_factory, store=store, notify=output,
-                                         proposal_fn=proposal_fn)
+                                         proposal_fn=proposal_fn, scope=scope)
     player = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
 
     def say(value):

@@ -101,6 +101,42 @@ def _payload(document, entry, respelling, maximum):
               "dictionary": {"sha256": DICTIONARY_SHA256, "readings": list(dictionary_readings(word))},
               "book_language": language, "context": _contexts(source, word),
               "cast_context": _cast_context(document, word)}
+    if "scope" in entry:
+        from pathlib import Path
+        from .name_script import FILENAME
+        from .scoped_pronunciations import validate_scope
+        scope = validate_scope(entry["scope"])
+        result["scope"] = deepcopy(scope)
+        if scope["class"] == "name" or (Path(document["directory"]) / FILENAME).exists():
+            from .name_script_state import load_name_script
+            snapshot = load_name_script(document["directory"], document)
+            name_ids = {key for key, name in snapshot["names"].items() if name["character_id"] == scope.get("character_id")}
+            context = []
+            for block in source["blocks"]:
+                mentions = {(item["start"], item["end"]): item["name_id"] for item in snapshot["mentions"].get(block["id"], [])}
+                unresolved = {(item["start"], item["end"]) for item in snapshot["unresolved"] if item["block_id"] == block["id"]}
+                for token in WORD_PATTERN.finditer(block["text"]):
+                    span = (token.start(), token.end())
+                    if token.group() != word or span in unresolved:
+                        continue
+                    if scope["class"] == "name" and mentions.get(span) not in name_ids:
+                        continue
+                    if scope["class"] == "special" and span in mentions:
+                        continue
+                    start = max(0, token.start() - 200)
+                    context.append({"block_id": block["id"], "start": start,
+                                    "text": block["text"][start:start + MAX_CONTEXT_CHARS],
+                                    "evidence": {"start": token.start(), "end": token.end(), "quote": word}})
+            if not context:
+                raise ValueError("No resolved occurrence of this exact word in the selected pronunciation scope")
+            result["context"] = context[:MAX_CONTEXTS]
+        if scope["class"] == "name":
+            result["cast_context"] = [{"character_id": character["id"], "names":
+                                       [character["name"], *character.get("aliases", [])]}
+                                      for character in document["cast"]["characters"]
+                                       if character["id"] == scope["character_id"]]
+        else:
+            result["cast_context"] = []
     if respelling is not None:
         result["respelling"] = respelling
     budget = min(maximum, MAX_REQUEST_CHARS)

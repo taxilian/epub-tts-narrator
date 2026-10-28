@@ -283,6 +283,12 @@ def parser():
     pronunciations = commands.add_parser("discover-pronunciations", help="Collect names and unusual words and prepare CMU name suggestions without repeating analysis")
     pronunciations.add_argument("directory", type=Path)
     pronunciations.add_argument("--config", type=Path, help="Global TOML configuration")
+    names = commands.add_parser("prepare-name-script", help="Prepare or review source-bound compact name annotations")
+    names.add_argument("directory", type=Path)
+    names.add_argument("--config", type=Path)
+    names.add_argument("--action", choices=("prepare", "list", "resolve"), default="prepare")
+    names.add_argument("--mention-id", help="Exact source-bound mention ID from --action list")
+    names.add_argument("--decision", help="N<number>, ordinary, or unresolved")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -426,6 +432,9 @@ def main(argv=None):
         return _speaker_completion_status(revised)
 
     try:
+        if args.command == "prepare-name-script":
+            from .name_script_cli import run_name_script
+            return run_name_script(args)
         if args.command == "discover-pronunciations":
             from .pronunciation_workflow import prepare_book_pronunciations
             prepare_book_pronunciations(args.directory, load_config(args.config))

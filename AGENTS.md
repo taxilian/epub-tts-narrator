@@ -16,9 +16,9 @@ Analyzes EPUB books into validated multi-voice scripts (LLM casting/attribution)
 
 ```
 epub-tts-narrator/
-├── epub_tts_narrator/        # analyzer package: 58 Python files, stdlib-only
-│   └── renderer/             # renderer subpackage: 117 Python files, own CLI + AGENTS.md
-├── tests/                    # 302 flat unittest files + fixtures/ + shared helpers
+├── epub_tts_narrator/        # flat analyzer package, stdlib-only
+│   └── renderer/             # flat renderer subpackage, own CLI + AGENTS.md
+├── tests/                    # flat unittest files + fixtures/ + shared helpers
 │                             #   (audition_fixtures.py, shared_fixtures.py); own AGENTS.md
 ├── vendor/drama3-mlx/        # vendored TTS runtime — READ-ONLY; own AGENTS.md
 ├── scripts/                  # standalone eval/benchmark CLIs (never imported by package)
@@ -42,6 +42,7 @@ epub-tts-narrator/
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Expressive performance planning | `performance_plan.py`, `performance_planning.py`, `performance_planning_prompts.py` | Optional source/script/cast-bound sidecar; exact spans, independent remove-only review, resumable batches |
 | Pronunciation discovery and inheritance | `pronunciations.py`, `pronunciation_groups.py`, `pronunciation_dictionary.py`, `pronunciation_discovery.py`, `pronunciation_proposals.py`, `pronunciation_workflow.py` | Offline bundled CMUdict filters automatic known words but exempts cast names; all readings inform pending CMU guesses; capitalization families preserve exact IDs and explicit choices; CLI backfill without reanalysis |
+| Compact name script and scoped rules | `name_script*.py`, `scoped_pronunciations.py`, `renderer/name_pronunciation_runtime.py`, `renderer/pronunciation_scope*.py` | Explicit `prepare-name-script`; compact N# wrappers outside canonical text; entity/alias Name rules versus ordinary Special rules; source-bound checkpoints and explicit legacy migration |
 | Pronunciation listening queue | `epub_tts_narrator/renderer/pronunciation_review_queue.py` (flow/presentation), `renderer/pronunciation_review_state.py` (review-state sidecar), `renderer/terminal.py` (`play_sample` completion vs interruption + failure, `wait_key`) | Count-only queue, isolated-word pairs with interruptible gaps, receipt-bound auto-accept, last-five window with indices, sidecar-only reopen (registry byte-identical); accepted flags bound to effective choice/draft |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
 | Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |
@@ -98,6 +99,7 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 - **Never add global `[voices.aliases]`** — rejected; mappings belong in the book's `voice-aliases.json`.
 - **Pronunciation guesses never change synthesis.** Directory analysis seeds observed cast-name words, scans proper names/other uncertain words, and saves pending CMU name/place proposals after publishing the bundle. Discovery and proposal failures resume through cached requests and per-word checkpoints. Confirmed/ignored choices live in `pronunciations.json`, not global configuration or canonical analysis. Effective lookup groups ordinary capitalization variants while preserving exact stored IDs/evidence, known capitonyms, short initialisms, and conflicting explicit choices; never fuzzy-match spellings. Pending descendants never shadow explicit ancestor decisions.
 - `pronunciation_dictionary.py` loads hash-pinned CMUdict data through stdlib resources; `data/CMUDICT-PROVENANCE.md` and `CMUDICT-LICENSE` own its source/license. Ship all three package-data files. Hide only automatic pending dictionary hits, never cast-name exceptions, drafts, conflicts or explicit choices. Manual `review_requested` survives family grouping/checkpointing. Dictionary variants and respelling precedence guide proposals, never auto-approval. Changing pronunciation prompt policy must not bump the global analysis prompt version.
+- Compact name annotations live only in `name-script.json`; validate exact escaped-source roundtrip and derive canonical offsets before applying scoped rules. Never insert wrappers into canonical text or TTS. Numeric IDs map to character identity, not speaker/voice. Name and Special choices live in source-bound `scoped-pronunciations.json`; preserve scope in grouping, drafts, receipts, inheritance and snapshots. Unresolved affected mentions and unmigrated global collisions block overrides. Migrations preserve legacy case-family boundaries and nearest-book precedence; reset never revives a migrated global rule. No LLM calls during synthesis and no global analysis prompt-version bump.
 - **Never create both `epub-audiobook.toml` and `epub-tts-narrator.toml`** — they do not merge; the new filename wins silently.
 - **Never fill unassigned speech with a fallback narrator** — explicit speaker choice required before generation.
 - **Never run network/model calls in tests** — FakeClient / build_opener patching / skipUnless gating (see tests/AGENTS.md).

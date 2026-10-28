@@ -186,6 +186,9 @@ def make_plan(bundle, config):
     pronunciations = config.get("_pronunciation_snapshot")
     if pronunciations is None:
         pronunciations = confirmed_pronunciations(bundle["directory"])
+    from .name_pronunciation_runtime import name_pronunciation_snapshot, row_matches
+    scoped = (config["_name_pronunciation_snapshot"] if "_name_pronunciation_snapshot" in config else
+              name_pronunciation_snapshot(bundle, pronunciations))
     chapters, errors, used = [], [], set()
     established_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if established_series and config["voices"]["series_id"] != established_series:
@@ -204,7 +207,8 @@ def make_plan(bundle, config):
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
             spans = list(split_text(spoken, settings["max_chunk_chars"])) or [(0, 0)]
             performance = row_performance(row, performances, normalization=False)
-            performance = merge_row_pronunciations(row, performance, pronunciations)
+            performance = merge_row_pronunciations(row, performance, pronunciations,
+                matches=row_matches(row, pronunciations, scoped) if scoped is not None else None)
             spans = protected_spans(spoken, spans, performance, settings["max_chunk_chars"])
             for start, end in spans:
                 speech = spoken[start:end]

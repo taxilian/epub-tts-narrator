@@ -22,7 +22,7 @@ def _requests(directory, config, progress, client_factory=None):
                           max_request_chars=settings["max_request_chars"], progress=progress)
 
 
-def create_pronunciation_proposer(directory, config_path=None, *, progress=print):
+def create_pronunciation_proposer(directory, config_path=None, *, progress=print, scope=None):
     """Lazily create a cached proposal client for interactive readable corrections.
 
     Listing, replaying a prepared proposal, or saving explicit CMU needs no LLM
@@ -44,8 +44,11 @@ def create_pronunciation_proposer(directory, config_path=None, *, progress=print
                          if any(token.group() == word for token in WORD_PATTERN.finditer(block["text"]))), None)
         if evidence is None:
             raise ValueError("Pronunciation word must occur exactly in this book's source")
-        entry = find_pronunciation(load_pronunciations(directory), word) or {
+        entry = find_pronunciation(load_pronunciations(directory, scope=scope), word) or {
             "word": word, "kind": "other", "reason": "Manually selected for pronunciation review.", "evidence": [evidence]}
+        if scope is not None:
+            entry = dict(entry, scope=scope)
+            document = dict(document, directory=directory)
         if requests is None:
             requests = _requests(directory, load_config(config_path), progress)
         return propose_pronunciation(document, entry, requests, respelling=respelling)
@@ -71,6 +74,10 @@ def prepare_book_pronunciations(directory, config, *, document=None, requests=No
     if document is not None and (document["source"] != saved["source"] or document["cast"] != saved["cast"]):
         raise ValueError("Book source or cast changed before pronunciation discovery; rerun against the saved book")
     document = saved
+    from .name_script import FILENAME
+    if (directory / FILENAME).exists() or (directory / FILENAME).is_symlink():
+        from .name_script_workflow import prepare_name_script
+        prepare_name_script(directory, config, requests=requests, progress=progress, client_factory=client_factory)
     settings = config["analysis"]
     if discovery_pending(directory, document):
         if requests is None:

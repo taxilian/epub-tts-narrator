@@ -172,6 +172,58 @@ Older automatic pending dictionary words are hidden from preparation/review with
 
 Pending candidates do not affect synthesis. Confirmed respellings or CMU Arpabet choices are loaded at render time, independently of expressive delivery planning. Choices follow the saved continuation chain dynamically: a correction confirmed in Book 1 after Book 2 was analyzed is available to Book 2 on its next render. A Book 2 correction or explicit keep-default decision overrides Book 1 for that word in Book 2 and its descendants. Ordinary capitalization variants share one review entry and choice, including across books. Matching otherwise requires the complete exact spelling, never name resemblance or fuzzy identity merging. Known pronunciation-changing capitonyms and short initialisms remain separate; existing conflicting explicit choices remain visible for review. See [pronunciation review](RENDERER.md#pronunciation-review) for audition and correction commands.
 
+## Compact name script and scoped pronunciations
+
+Pronunciation rules can distinguish **Names** (a particular entity's alias) from
+**Special words** (a spelling-based rule, normally for an invented term).
+Prepare contextual name annotations explicitly for a published book:
+
+```sh
+epub-tts-narrator prepare-name-script BOOK --config epub-tts-narrator.toml
+epub-tts-narrator prepare-name-script BOOK --action list
+```
+
+This creates `BOOK/name-script.json`, separate from the checksum-bound canonical
+scripts. Its compact text can contain `(N1:Ally) greeted her ally.` The first
+occurrence refers to entity N1; the ordinary second word does not. Numeric IDs
+map to published character identities, not voices. They are stable within that
+book, with new IDs appended and removed IDs reserved; another book's N1 need not
+be the same character. Aliases retain separate word-level pronunciation choices.
+Multiword aliases are represented by marked lexical words, preserving the
+single-word phoneme-control contract.
+
+All alias-token occurrences are enumerated locally, including capitalization
+variants. Two independent contextual model requests classify each candidate as
+a name ID, `ordinary`, or `unresolved`; disagreements stay unresolved. The model
+returns only decisions, and the program inserts wrappers, so it cannot rewrite
+the prose. Escaped parentheses/backslashes preserve literal marker lookalikes.
+Unwrapping must reproduce exact source text and Unicode offsets. Classification
+is model-dependent, not proof of referent identity; review ambiguous cases.
+
+Preparation checkpoints each bounded source window and cached request. Rerun
+after interruption. Normal pronunciation discovery/analyze-resume also resumes
+an already-active name script, but does not activate this new mode for legacy
+books automatically. Source, aliases, identity descriptions or evidence changes
+require preparation again; voice-only profile refresh does not. The artifact
+has a conservative 16 MiB encoded-size bound checked before model work.
+
+The read-only JSON listing reports name IDs and source-bound occurrence IDs,
+word/offset metadata and decisions, without dumping cast evidence or passages.
+To correct any occurrence, including one on which the models agreed:
+
+```sh
+epub-tts-narrator prepare-name-script BOOK --action resolve \
+  --mention-id OCCURRENCE_HASH --decision N1
+# Or use --decision ordinary or --decision unresolved.
+```
+
+Applicable confirmed overrides require ready, current annotations and resolved
+affected occurrences. Default rendering with no dependent override still works
+without annotation model calls. Name markers never enter TTS, ASR expectations,
+canonical source, source ranges, or remote wire text. Scoped choices inherit only
+through the actual book/series identity linkage; occurrence classifications are
+prepared separately for each book.
+
 ## Reusing a series cast
 
 Directory analysis saves a cumulative series cast. Continue a series with `--continue-from`; the prior directory stays unchanged and the new output receives its history and a relative continuation link.

@@ -89,14 +89,16 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         spellings = set(state.entries)
         for item in rows:
             spellings.update(entry_words(item))
-        return family_words(row["word"], rows, spellings)
+        return family_words(row["word"], rows, spellings,
+                            contextual=getattr(session, "scope", None) is not None and session.scope["class"] == "name")
 
     def autoaccept(row, choice, receipt, index, total):
         """Apply a completed, receipt-verified pair; the receipt binds this exact audio."""
         if choice is None:
             session.ignore(row["word"])
         else:
-            set_pronunciation(bundle["directory"], bundle, row["word"], choice, status="confirmed")
+            set_pronunciation(bundle["directory"], bundle, row["word"], choice, status="confirmed",
+                              scope=getattr(session, "scope", None))
             session.clear_drafts(row)
         state.record(row["word"], choice, receipt, accepted=True, variants=decision_words(row))
         draw(f"[{index + 1}/{total}] {row['word']} — accepted ({session.description(row, choice)})")

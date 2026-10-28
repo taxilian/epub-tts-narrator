@@ -5,7 +5,7 @@ Tests protect failure, resume, recovery, validation, and boundary behavior.
 Keep this file current: when suite conventions, helpers, or the run environment change, update it in the same commit.
 
 # LAYOUT
-Flat directory: 302 `test_*.py` files plus shared helper modules.
+Flat directory: `test_*.py` files plus shared helper modules.
 `audition_fixtures.py` holds bundle/script helpers; `shared_fixtures.py` holds cross-cutting helpers (Terminal, snapshot, pcm_hash, make_epub, timed_transcript, FakeEntryPoints, PARENTHESIS_TRIM_CASES, renderer_config). Neither starts with `test_`, so discovery ignores them; add new shared helpers there, not inline copies.
 `fixtures/` contains five JSON contracts: attribution semantics and speech rewrite policies v1 through v4.
 `test_<module>.py` usually maps to `epub_tts_narrator/<module>.py`.
@@ -21,6 +21,7 @@ Casting menu tests cover width-aware full labels, shared-reference edits, duplic
 Pronunciation review startup prepares every pending word kind plus both preview formats before the first menu prompt. Tests must preserve default/confirmed decisions and prove generated previews are not heard/approved; display-only CMU estimates cannot affect the selected pronunciation or audio identity.
 Dictionary tests use the complete pinned packaged lexicon, alternate readings, license/hash checks and real registry/family behavior. Cover ordinary-word filtering, cast-name exceptions, manual/draft/conflict preservation, legacy pending visibility, inherited intent and proposal cache evidence. Fake only the model boundary; assert machine-consumed payloads/behavior, not linguistic prompt prose. Wheel resource QA must run without the editable checkout or optional dependencies on its import path.
 Capitalization tests preserve exact on-disk IDs and evidence while grouping ordinary source variants in review and rendering. Cover conflicting legacy choices/drafts, conservative capitonym/initialism guards, late ancestor choices with different current spelling, variant-aware queue resume/reopen, and unchanged source/cache identities. Never relabel an old audio receipt as a different exact preview.
+`name_script_fixtures.py` builds series-linked source-bound books and provides a deterministic external classification client. Name/scoped tests cover compact grammar/escaping/Unicode, exhaustive two-pass decisions, unresolved/manual resolution, resume, stable numeric identities, scope-isolated receipts/drafts/queue and actual render/cache reuse. Include same-sentence name/ordinary homographs, shared aliases, Special defaults, owner validation, ancestor migration rank and legacy capitonym/initialism boundaries. Keep canonical files/references byte-identical and validate existing remote controls; fixture speech does not establish live referent or acoustic accuracy.
 
 # CONVENTIONS
 Use stdlib `unittest` and `unittest.TestCase`; no pytest fixtures, markers, or conftest files.

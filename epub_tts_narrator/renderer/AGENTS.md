@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Flat renderer subpackage: 117 Python files plus `ENGINE_NOTES.md`.
+Flat renderer subpackage plus `ENGINE_NOTES.md`.
 Resumable, quality-gated audiobook rendering, assembly, casting, and remote execution.
 
 Keep this file current: when modules, entry points, or conventions change, update it in the same commit.
@@ -43,6 +43,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Configure engines or add a plugin | `engines.py`, `ENGINE_NOTES.md` |
 | Compile expressive controls and compare chapters | `performance_compiler.py`, `performance_runtime.py`, `performance_comparison.py`; acoustic pause evidence in `performance_audio.py` |
 | Review and apply book pronunciation choices | `pronunciation_review.py`, `pronunciation_review_queue.py` (queue flow/presentation), `pronunciation_review_state.py` (review-state sidecar), `pronunciation_runtime.py`; registry and discovery in the analyzer package |
+| Resolve name/special scopes at CLI and render boundaries | `pronunciation_scope_cli.py`, `pronunciation_scopes.py`, `name_pronunciation_runtime.py` | Name-script ID selection, entity-isolated review state, source-span controls, explicit legacy migrations; canonical rows and remote wire grammar unchanged |
 | Cast voices and manage aliases | `casting.py`, `voices.py`, `audition.py`, `voice_bindings.py` |
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
@@ -68,6 +69,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 - Use the separate Python 3.12 uv environment and root `renderer.requirements.txt`.
 - Pronunciation review prepares CMU for every pending word kind and both current-choice preview formats before opening the menu. Checkpoint each proposal/preview; preparation never marks playback or approval. Keep display-only default/respelling CMU estimates separate from drafts and registry decisions so they cannot change synthesis or acceptance. Show phones in interrupted rows and before editing.
 - Default pronunciation rows apply `pronunciation_dictionary.review_candidates` after draft/case-family decoration. Dictionary-known automatic pending rows are hidden non-destructively; cast names, drafts/manual intent/conflicts and explicit `--word` selections remain reviewable. Cache the frozen session's cast-name word set rather than rescan book text per menu redraw. Estimate `proposal_policy` invalidates only display estimates on CMU policy/dictionary changes, never saved proposals or choices.
+- Scoped review uses `scope` hashes below the preview directory, isolating drafts/estimates/queue state and receipts for identical spellings. Name scopes resolve numeric labels to stable character identities; Special scopes exclude marked/unresolved names. `_preflight` freezes `_name_pronunciation_snapshot`; source matches feed existing controls via `merge_row_pronunciations(matches=...)`, not marker text or new chunk fields. Preserve normal source mapping/normalization conflict guards and acceptance policy. Scoped reads/migrations never rewrite legacy registries; migrations apply to their legacy family and own/older books only.
 - FFmpeg and FFprobe are required; paths come from TOML configuration.
 - `engines.py:create_engine` supports entry-point groups `epub_tts_narrator.tts` and legacy `audiobook_renderer.tts`.
 - The default engine is `drama3_mlx`; unknown or ambiguous engines raise, with no silent fallback.

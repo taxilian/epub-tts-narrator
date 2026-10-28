@@ -46,7 +46,7 @@ def _mapped_word(row, match, mapping):
     return pieces[0][0], pieces[-1][1]
 
 
-def merge_row_pronunciations(row, record, entries):
+def merge_row_pronunciations(row, record, entries, *, matches=None):
     """Merge source-word corrections with an optional exact spoken-text plan.
 
     An approved spelling edit may change the spelling at a target, but the
@@ -54,10 +54,11 @@ def merge_row_pronunciations(row, record, entries):
     edits fail explicitly; guessed offsets could change unrelated dialogue.
     """
     from .performance_runtime import _with_normalization_directions
-    if not entries:
+    if not entries and matches is None:
         return _with_normalization_directions(row, record) if record is not None else None
-    matches = [(match, entries[match.group()]) for match in _WORD.finditer(row["text"])
-               if match.group() in entries]
+    if matches is None:
+        matches = [(match, entries[match.group()]) for match in _WORD.finditer(row["text"])
+                   if match.group() in entries]
     if not matches:
         return _with_normalization_directions(row, record) if record is not None else None
     spoken, mapping = build_spoken(row)

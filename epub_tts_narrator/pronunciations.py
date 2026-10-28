@@ -179,8 +179,11 @@ def _document_source(directory, document):
     return source
 
 
-def load_pronunciations(directory, *, group_cases=True):
+def load_pronunciations(directory, *, group_cases=True, scope=None):
     """Return effective decisions, rereading ancestors so late approvals are visible."""
+    if scope is not None:
+        from .scoped_pronunciations import load
+        return load(directory, scope)
     directory = _directory(directory)
     manifest_path = directory / "manifest.json"
     ancestors = []
@@ -241,6 +244,12 @@ def discovery_pending(directory, document):
 def preparation_pending(directory, document):
     """Resume discovery or missing name guesses, without reconsidering decisions."""
     from .pronunciation_dictionary import review_candidates
+    from .name_script import FILENAME, binding
+    from .name_script_state import read_state
+    if (Path(directory) / FILENAME).exists() or (Path(directory) / FILENAME).is_symlink():
+        state = read_state(directory)
+        if state["status"] != "ready" or state["binding"] != binding(document):
+            return True
     return discovery_pending(directory, document) or any(
         entry["status"] == "pending" and entry["kind"] in {"name", "place"} and "proposal" not in entry
         for entry in review_candidates(document, load_pronunciations(directory)))
@@ -288,7 +297,7 @@ def save_candidates(directory, document, candidates):
     return load_pronunciations(directory)
 
 
-def save_proposal(directory, document, word, proposal):
+def save_proposal(directory, document, word, proposal, *, scope=None):
     """Checkpoint one CMU guess while its capitalization family is unresolved.
 
     Re-read under the local registry lock: a slow model response must not undo
@@ -296,6 +305,12 @@ def save_proposal(directory, document, word, proposal):
     another process. Inherited pending entries may get a local proposal with
     evidence from this book; ancestor registries are never changed.
     """
+    if scope is not None:
+        from .scoped_pronunciations import load, set_choice
+        current = find_pronunciation(load(directory, scope), word)
+        if current and (current["status"] != "pending" or "proposal" in current):
+            return current
+        return set_choice(directory, document, word, status="pending", scope=scope, proposal=proposal)
     directory = _directory(directory)
     source = _document_source(directory, document)
     validate_word(word)
@@ -331,7 +346,10 @@ def _family(directory, record, source, word):
     return family_words(word, [*record["entries"], *load_pronunciations(directory)], current)
 
 
-def set_pronunciation(directory, document, word, pronunciation=None, status="confirmed"):
+def set_pronunciation(directory, document, word, pronunciation=None, status="confirmed", *, scope=None):
+    if scope is not None:
+        from .scoped_pronunciations import set_choice
+        return set_choice(directory, document, word, pronunciation, status, scope=scope)
     directory = _directory(directory)
     source = _document_source(directory, document)
     validate_word(word)
@@ -368,8 +386,11 @@ def set_pronunciation(directory, document, word, pronunciation=None, status="con
     return find_pronunciation(load_pronunciations(directory), word)
 
 
-def reset_pronunciation(directory, word):
+def reset_pronunciation(directory, word, *, scope=None):
     """Remove this book's capitalization family, exposing ancestor decisions."""
+    if scope is not None:
+        from .scoped_pronunciations import reset
+        return reset(directory, word, scope)
     directory = _directory(directory)
     validate_word(word)
     if not (directory / FILENAME).exists() and not (directory / FILENAME).is_symlink():

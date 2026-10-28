@@ -442,6 +442,68 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 ## Pronunciation review
 
+### Names versus special words (compact scoped mode)
+
+For a name that is also an ordinary word, first run
+`epub-tts-narrator prepare-name-script BOOK --config CONFIG.toml` and inspect
+`epub-tts-narrator prepare-name-script BOOK --action list`. The derived script
+uses markers such as `(N1:Ally) greeted her ally.` Canonical scripts stay unchanged.
+N1 identifies a named entity, not its voice; another speaker can mention it.
+
+```sh
+# Read-only overview of entities, aliases, and scoped choices.
+audiobook-render pronunciations BOOK --action list
+
+# Prepare CMU proposals, then use the existing listening queue for this entity.
+audiobook-render pronunciations BOOK --class name --name-id N1 --action discover
+audiobook-render pronunciations BOOK --class name --name-id N1
+
+# Advanced explicit overrides; --phonemes is a deliberate direct confirmation.
+audiobook-render pronunciations BOOK --class name --name-id N1 \
+  --action set --word Ally --phonemes "AE1 L IY0"
+audiobook-render pronunciations BOOK --class special \
+  --action set --word zorb --phonemes "Z AO1 R B"
+```
+
+Names apply only to occurrences marked with the selected entity ID. Special
+rules apply to complete ordinary occurrences of the spelling, excluding marked
+names. A marked name with no override uses the engine default, never a Special
+override for that spelling. No override or an explicit `ignore` keeps default
+pronunciation. Different entities sharing an alias can have different choices;
+their drafts, estimates, previews, playback receipts, acceptance and reopen state
+are isolated. All aliases for one entity remain separate pronunciation words.
+`list`, `discover`, `review`, `play`, `set`, `ignore`, and `reset` accept scope;
+`--name-id` requires `--class name`. After name-script activation, editing or
+reviewing without an explicit class is rejected rather than guessing a scope.
+
+Conflicting/uncertain classifications can be corrected with
+`epub-tts-narrator prepare-name-script BOOK --action resolve --mention-id HASH --decision N1`
+(or `ordinary`/`unresolved`). A confirmed rule affecting unresolved mentions is
+blocked; Special previews never treat unresolved names as ordinary. Use the
+derived sidecar and original block/offset locations when reviewing the listing.
+Model agreement is not a guarantee of correct contextual attribution.
+
+Legacy global choices are retained, not silently converted. If one collides with
+a cast name after activation, explicitly choose its scope:
+
+```sh
+audiobook-render pronunciations BOOK --action migrate --word Ally \
+  --class name --name-id N1
+# Or --class special to retain a spelling-wide rule for ordinary occurrences.
+```
+
+Migration leaves `pronunciations.json` byte-identical and saves scoped intent in
+`scoped-pronunciations.json`. Resetting a migrated choice does not revive the old
+unsafe global rule. Migration follows existing capitalization-family boundaries,
+so converting `Polish` does not discard a distinct `polish` choice. An ancestor's
+migration cannot silently suppress a newer descendant choice. Books without
+activation retain the existing legacy workflow below. Rendering uses frozen
+validated annotations/choices, needs no annotation LLM call, and preserves audio
+parallelism. Only clips with changed effective controls need new synthesis;
+already-recorded audio is not rewritten by editing a sidecar.
+
+### Legacy discovery and listening
+
 Automatic review focuses on unexpected words: dictionary-known candidates are filtered using the packaged offline CMUdict. Character names/aliases established by the cast remain eligible even on a dictionary hit, since their reading must be chosen consistently rather than inferred from an ordinary word's sense. Existing automatic pending records may disappear from the default list, but are not deleted. Confirmed/keep-default decisions, saved drafts, explicit manual review and conflicting case-family choices remain visible; `--word` can still select a filtered word directly.
 
 CMU suggestions use all available dictionary pronunciations plus story/name context and a strengthened phoneme-writing guide. Your readable correction overrides the dictionary; no first-reading shortcut silently locks a name. Suggestions remain pending until the existing listening/confirmation flow accepts them. No new configuration, dictionary installation, or runtime network lookup is required. Existing saved proposals and reference voices are preserved.

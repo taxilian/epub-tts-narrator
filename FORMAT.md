@@ -327,3 +327,57 @@ Effective lookup rereads the validated continuation chain and groups ordinary ca
 Grouping uses lowercase equality, never fuzzy or phonetic similarity; distinct typography and possessives remain separate. Conservative guards preserve known pronunciation-changing capitonyms and short uppercase initialisms. Conflicting explicit choices at the nearest explicit level remain separate with restricted `variants` and `case_conflict: true`; unclaimed forms remain pending instead of inheriting an arbitrary choice. Pending proposal differences alone do not split a family. A deliberate set/ignore/reset resolves the whole family atomically in the current book with valid local evidence, preserving ancestor files.
 
 The renderer projects each applicable confirmed source word to the approved spoken span and merges it with any explicit performance record. Identical pronunciation controls deduplicate; conflicts or ambiguous source mappings fail. CMU values compile to native phoneme tokens, and readable respellings replace only the synthesis input span. Both retain canonical expected text and source coordinates. Only affected synthesis inputs acquire different audio identities; voice references stay unchanged.
+
+## Compact name annotations and scoped choices
+
+`name-script.json` is an explicit, mutable derived sidecar outside manifest checksums.
+It has `format: "epub-tts-name-script"`, `version: 1`, `binding`, `ids`, `names`,
+`windows`, and `status: "pending" | "ready"`. Binding hashes canonical source and
+the published character identity/aliases/description/evidence table, not voice
+profiles. `ids` is an append-only list of character IDs; index zero maps to N1.
+Removed identities remain reserved. Active `names` map numeric labels to those
+character records. Numeric labels are book-local presentation, never series identity.
+
+Each window contains exact `block_id`, source `start`/`end`, annotated `text`, and
+`unresolved` candidate indexes. Candidates are re-derived in source order from
+whole lexical alias words, without deciding their meaning by capitalization.
+`(N17:Ally)` wraps one complete alias word. Literal parentheses and backslashes
+are escaped with backslash; unknown escapes, malformed/nested markers, unknown
+IDs, non-alias words, partial words, altered unwrapped text and incomplete ready
+coverage are rejected. Unmarked candidates are explicitly classified ordinary
+uses; unresolved indexes cannot also be marked. Persisted windows use compact
+text, not a redundant span object per mention. Validated runtime parsing derives
+original Unicode-code-point offsets for the frozen render snapshot.
+
+`scoped-pronunciations.json` has `format: "epub-tts-scoped-pronunciations"`,
+`version: 1`, owning `book_id`, `source_fingerprint`, `entries`, and `migrated`.
+Each entry retains the legacy word/status/kind/reason/evidence and optional
+proposal/pronunciation/manual-review fields, with an additional `scope`:
+`{"class":"special"}` or
+`{"class":"name","character_id":"...","namespace":["series","..."]}`
+(namespace is `["book", book_id]` without series identity).
+Entry `id` is the JSON fingerprint of `[scope, exact_word]`. Capitalization
+grouping happens within one scope; contextual name groups can share variants
+because their referent is already identified. Different entities never merge.
+
+Every owner file is validated against its own source during inheritance. Scoped
+name rules inherit only for the actual stable series character identity, never
+by numeric label, spelling or voice. Mentions never inherit. Pending descendants
+do not shadow explicit ancestor choices. Marked names select their name rule or
+engine default; ordinary occurrences select a Special rule or default. Existing
+legacy controls remain compatible outside explicit migration/activation.
+
+Migration records contain `word` and a `family` array matching the legacy
+`case_key` (for example `["ally"]`, `["polish","capital"]`, or
+`["us","initialism","US"]`). The closest migration suppresses global choices
+from its own book or older ancestors only. Records persist after scoped reset
+so a retired global override cannot reappear. Legacy registry IDs/files remain
+unchanged. Preview receipts and draft/queue state are namespaced by scope hash.
+
+The renderer compiles resolved source mentions through existing normalization
+mapping into pronunciation controls. Wrappers never modify canonical script
+text, spoken-text expectations, chunk IDs, or source ranges; remote workers
+receive the existing validated performance controls, not marker-bearing text.
+Only changed effective synthesis inputs invalidate speech caches. Missing,
+stale or unresolved annotation evidence blocks dependent overrides, never
+authorizes global substitution or an annotation-model call during synthesis.
