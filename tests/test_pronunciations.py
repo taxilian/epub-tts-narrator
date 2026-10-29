@@ -44,6 +44,19 @@ class PronunciationsTests(unittest.TestCase):
         publish_directory(document, registry, directory, export_bundle, continue_from=previous)
         return directory, document
 
+    def prepare_names(self, directory):
+        from epub_tts_narrator.name_script_workflow import prepare_name_script
+        from epub_tts_narrator.pipeline import CachedRequests
+
+        class MarkFirst:
+            identity = {"model": "name-fixture"}
+
+            def complete(self, system, payload):
+                return {"decisions": [item["names"][0] for item in payload["window"]["candidates"]]}
+
+        prepare_name_script(directory, {}, requests=CachedRequests(MarkFirst(), self.root / "name-cache",
+                                                                    repair_attempts=0))
+
     def test_absent_registry_is_read_only_even_for_minimal_existing_bundles(self):
         self.assertEqual(load_pronunciations(self.root / "missing"), [])
         directory, _ = self.book()
@@ -84,6 +97,8 @@ class PronunciationsTests(unittest.TestCase):
         self.assertFalse(discovery_pending(directory, document))
         self.assertTrue(preparation_pending(directory, document))
         save_proposal(directory, document, "Mara", CMU_MARA)
+        self.assertTrue(preparation_pending(directory, document))
+        self.prepare_names(directory)
         self.assertFalse(preparation_pending(directory, document))
         saved = json.loads((directory / "pronunciations.json").read_text())
         saved["discovery"]["version"] = DISCOVERY_VERSION - 1
@@ -161,6 +176,8 @@ class PronunciationsTests(unittest.TestCase):
         save_candidates(third, third_doc, [candidate()])
         self.assertTrue(preparation_pending(third, third_doc))
         save_proposal(first, first_doc, "Mara", CMU_MARA)
+        for directory in (first, second, third):
+            self.prepare_names(directory)
         before = snapshot(first)
         self.assertEqual(load_pronunciations(second)[0]["proposal"], CMU_MARA)
         self.assertEqual(load_pronunciations(third)[0]["proposal"], CMU_MARA)
@@ -193,6 +210,7 @@ class PronunciationsTests(unittest.TestCase):
         first, first_doc = self.book()
         second, second_doc = self.book("second", first)
         save_candidates(second, second_doc, [candidate()])
+        self.prepare_names(second)
         before = (second / "pronunciations.json").read_bytes()
         for status in ("confirmed", "ignored"):
             set_pronunciation(first, first_doc, "Mara", CMU_MARA if status == "confirmed" else None, status)

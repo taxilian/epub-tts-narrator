@@ -176,7 +176,12 @@ Pending candidates do not affect synthesis. Confirmed respellings or CMU Arpabet
 
 Pronunciation rules can distinguish **Names** (a particular entity's alias) from
 **Special words** (a spelling-based rule, normally for an invented term).
-Prepare contextual name annotations explicitly for a published book:
+Directory analysis automatically prepares contextual name annotations after
+publishing the canonical book. Rerunning `analyze BOOK` or
+`discover-pronunciations BOOK` starts identification when the name script is
+missing, resumes pending work, and refreshes a stale source/identity binding.
+This populates selectable name IDs and annotations without confirming any
+custom pronunciation. You can also prepare or inspect them directly:
 
 ```sh
 epub-tts-narrator prepare-name-script BOOK --config epub-tts-narrator.toml
@@ -201,9 +206,10 @@ Unwrapping must reproduce exact source text and Unicode offsets. Classification
 is model-dependent, not proof of referent identity; review ambiguous cases.
 
 Preparation checkpoints each bounded source window and cached request. Rerun
-after interruption. Normal pronunciation discovery/analyze-resume also resumes
-an already-active name script, but does not activate this new mode for legacy
-books automatically. Source, aliases, identity descriptions or evidence changes
+after interruption; finished windows and cached blind classifications are reused.
+A ready search is not repeated, even if some occurrences remain unresolved;
+manual resolutions survive ordinary reruns. Books with no candidate occurrences
+complete locally without provider calls. Source, aliases, identity descriptions or evidence changes
 require preparation again; voice-only profile refresh does not. The artifact
 has a conservative 16 MiB encoded-size bound checked before model work.
 

@@ -34,6 +34,8 @@ class FakeClient:
             return {"candidates": []}
         if payload.get("mode") == "pronunciation_proposal":
             return {"phonemes": "M AA1 R AH0"}
+        if payload.get("mode") == "name_script":
+            return {"decisions": [item["names"][0] for item in payload["window"]["candidates"]]}
         if payload.get("mode") == "speech_spelling_scan":
             return {"segments": [{"segment_id": row["segment_id"], "edits": []}
                                   for row in payload["target_segments"]]}

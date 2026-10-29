@@ -39,6 +39,7 @@ class PronunciationDictionaryStateTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual((directory / "pronunciations.json").read_bytes(), before)
+        registry_tests.PronunciationsTests.prepare_names(self, directory)
         self.assertFalse(preparation_pending(directory, document))
         self.assertEqual(load_pronunciations(directory)[0]["proposal"], registry_tests.CMU_MARA)
 

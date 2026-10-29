@@ -21,6 +21,13 @@ from epub_tts_narrator.source_epub import SOURCE_EPUB_HINT, remember_source_epub
 from test_series import fixture
 
 
+class _NameFixtureClient:
+    identity = {"model": "name-fixture"}
+
+    def complete(self, system, payload):
+        return {"decisions": [item["names"][0] for item in payload["window"]["candidates"]]}
+
+
 class SourceEpubTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -122,6 +129,10 @@ class SourceEpubTests(unittest.TestCase):
         self.publish(hint=False)
         from epub_tts_narrator.pronunciations import save_candidates
         save_candidates(self.directory, self.document, [])
+        from epub_tts_narrator.name_script_workflow import prepare_name_script
+        from epub_tts_narrator.pipeline import CachedRequests
+        prepare_name_script(self.directory, {}, requests=CachedRequests(
+            _NameFixtureClient(), self.root / "name-script-cache", repair_attempts=0))
         config = self.root / "config.toml"
         config.write_text("")
         with (patch("epub_tts_narrator.cli.source_from", return_value=deepcopy(self.document["source"])),

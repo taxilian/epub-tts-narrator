@@ -52,6 +52,8 @@ class CompletionClient:
             self.normalization_calls.append(deepcopy(payload))
             return {"segments": [{"segment_id": row["segment_id"], "edits": []}
                                  for row in payload["target_segments"]]}
+        if payload.get("mode") == "name_script":
+            return {"decisions": [item["names"][0] for item in payload["window"]["candidates"]]}
         if payload.get("mode") != "speaker_completion":
             raise AssertionError("A resumed analysis must only complete speakers or prepare spoken spelling")
         if self.fail_after is not None and len(self.calls) >= self.fail_after:
@@ -84,7 +86,8 @@ class TruncatedCompletionClient(CompletionClient):
         self.failed_block = failed_block
 
     def complete(self, system, payload):
-        if payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery", "pronunciation_proposal"}:
+        if payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery", "pronunciation_proposal",
+                                   "name_script"}:
             return super().complete(system, payload)
         if (payload["reviewer_id"] == "speaker_completion_3"
                 and (self.failed_block is None or payload["target_units"][0]["block_id"] == self.failed_block)):
@@ -146,6 +149,9 @@ class AnalyzeResumeTests(unittest.TestCase):
         if normalized:
             from epub_tts_narrator.pronunciations import save_candidates
             save_candidates(path, document, [])
+            from epub_tts_narrator.name_script_workflow import prepare_name_script
+            prepare_name_script(path, {}, requests=CachedRequests(FakeClient(), self.root / "name-script-seed-cache",
+                                                                   repair_attempts=0))
         (path / "voices").mkdir()
         (path / "voices" / "reference.wav").write_bytes(b"Existing voice remains unchanged")
         return epub, path, document

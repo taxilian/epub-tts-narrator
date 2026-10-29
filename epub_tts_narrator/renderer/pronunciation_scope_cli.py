@@ -13,8 +13,13 @@ def command_scope(bundle, args):
         raise ValueError("--name-id requires --class name")
     if kind is None:
         if (Path(bundle["directory"]) / FILENAME).exists() and args.action not in {"list", "discover"}:
-            raise ValueError("Scoped mode requires --class name --name-id N<number>, or --class special; "
-                             "word alone cannot identify an entity")
+            from ..name_script_state import load_name_script
+            from ..name_script import alias_words
+            snapshot = load_name_script(bundle["directory"], bundle)
+            possible_names = {word for name in snapshot["names"].values() for word in alias_words(name)}
+            if not args.word or args.word.lower() in possible_names:
+                raise ValueError("Scoped mode requires --class name --name-id N<number>, or --class special; "
+                                 "word alone cannot identify an entity")
         return None
     scope = scope_for(bundle, name_id if kind == "name" else None)
     print(f"Pronunciation scope: {name_id or 'special'}")

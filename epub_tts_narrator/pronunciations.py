@@ -244,12 +244,11 @@ def discovery_pending(directory, document):
 def preparation_pending(directory, document):
     """Resume discovery or missing name guesses, without reconsidering decisions."""
     from .pronunciation_dictionary import review_candidates
-    from .name_script import FILENAME, binding
+    from .name_script import binding
     from .name_script_state import read_state
-    if (Path(directory) / FILENAME).exists() or (Path(directory) / FILENAME).is_symlink():
-        state = read_state(directory)
-        if state["status"] != "ready" or state["binding"] != binding(document):
-            return True
+    state = read_state(directory)
+    if state is None or state["status"] != "ready" or state["binding"] != binding(document):
+        return True
     return discovery_pending(directory, document) or any(
         entry["status"] == "pending" and entry["kind"] in {"name", "place"} and "proposal" not in entry
         for entry in review_candidates(document, load_pronunciations(directory)))

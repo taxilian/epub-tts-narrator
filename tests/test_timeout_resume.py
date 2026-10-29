@@ -239,7 +239,8 @@ class TimeoutResumeTests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         self.assertIn(first.failed_key, resumed.attempted)
         self.assertTrue(saved.keys().isdisjoint(resumed.attempted))
-        self.assertEqual(set(resumed.attempted.values()), {"attribute", "audition_script", "speech_spelling_scan", "pronunciation_discovery"})
+        self.assertEqual(set(resumed.attempted.values()),
+                         {"attribute", "audition_script", "speech_spelling_scan", "pronunciation_discovery", "name_script"})
         from epub_tts_narrator.pronunciations import load_pronunciations
         # The parent already prepared Mara's suggestion; a continuation reuses
         # it even though it also discovers the name in its own source.

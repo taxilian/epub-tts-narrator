@@ -15,7 +15,7 @@ from epub_tts_narrator.analysis_directory import (
 )
 from epub_tts_narrator.cli import export_bundle, main
 from epub_tts_narrator.contracts import readiness, validate_document
-from epub_tts_narrator.pipeline import analyze, fingerprint, write_json
+from epub_tts_narrator.pipeline import CachedRequests, analyze, fingerprint, write_json
 from epub_tts_narrator.series import link_analysis
 from shared_fixtures import snapshot
 from test_contracts import valid_document
@@ -80,6 +80,9 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
         registry = continuation_registry(parent, document["source"]) if parent else fresh_registry(path)
         document = link_analysis(document, registry)
         publish_directory(document, registry, path, export_bundle, continue_from=parent)
+        from epub_tts_narrator.name_script_workflow import prepare_name_script
+        prepare_name_script(path, {}, requests=CachedRequests(
+            FakeClient(), self.root / f"name-script-seed-cache-{number}", repair_attempts=0))
         (path / "voices").mkdir()
         (path / "voices/reference.wav").write_bytes(b"Keep this existing cloning reference")
         (path / "render-work").mkdir()
@@ -102,7 +105,8 @@ class NarrationBoundaryResumeTests(unittest.TestCase):
         # Old bundles need the new spelling pass, but known speaker/cast work
         # must not be repeated. A completed second run makes no model calls.
         self.assertLessEqual(provider.call_count, 1)
-        self.assertTrue(all(payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery", "pronunciation_proposal"}
+        self.assertTrue(all(payload.get("mode") in {"speech_spelling_scan", "pronunciation_discovery",
+                                                    "pronunciation_proposal", "name_script"}
                             for _, payload in client.calls))
         if command == "resolve-speakers":
             provider.assert_not_called()

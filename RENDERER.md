@@ -444,8 +444,10 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 ### Names versus special words (compact scoped mode)
 
-For a name that is also an ordinary word, first run
-`epub-tts-narrator prepare-name-script BOOK --config CONFIG.toml` and inspect
+Analysis automatically creates or resumes the name script; rerun
+`epub-tts-narrator analyze BOOK --config CONFIG.toml` to backfill an older book.
+The explicit `epub-tts-narrator prepare-name-script BOOK --config CONFIG.toml`
+command remains available. Inspect name IDs with
 `epub-tts-narrator prepare-name-script BOOK --action list`. The derived script
 uses markers such as `(N1:Ally) greeted her ally.` Canonical scripts stay unchanged.
 N1 identifies a named entity, not its voice; another speaker can mention it.
@@ -473,8 +475,9 @@ pronunciation. Different entities sharing an alias can have different choices;
 their drafts, estimates, previews, playback receipts, acceptance and reopen state
 are isolated. All aliases for one entity remain separate pronunciation words.
 `list`, `discover`, `review`, `play`, `set`, `ignore`, and `reset` accept scope;
-`--name-id` requires `--class name`. After name-script activation, editing or
-reviewing without an explicit class is rejected rather than guessing a scope.
+`--name-id` requires `--class name`. Editing candidate name spellings or opening
+the scoped review queue requires an explicit class rather than guessing a scope.
+Word-only corrections for unrelated ordinary spellings retain legacy behavior.
 
 Conflicting/uncertain classifications can be corrected with
 `epub-tts-narrator prepare-name-script BOOK --action resolve --mention-id HASH --decision N1`

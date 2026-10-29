@@ -372,7 +372,8 @@ def main(argv=None):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
             from .pronunciations import preparation_pending
-            print("Saved character and passage analysis is complete; preparing pronunciation suggestions."
+            print("Saved character and passage analysis is complete; preparing name identification "
+                  "and pronunciation suggestions."
                   if preparation_pending(directory, original) else
                   "Saved analysis is complete; no model calls or analysis changes are needed.")
             from .pronunciation_workflow import prepare_book_pronunciations

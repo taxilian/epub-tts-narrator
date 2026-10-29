@@ -15,7 +15,7 @@ def _requests(directory, config, progress, client_factory=None):
     if not config["provider"]["model"]:
         raise ValueError("Set provider.model in the global TOML file before preparing pronunciations")
     client = (client_factory or OpenAICompatibleClient)(**config["provider"])
-    progress(f"Preparing pronunciation suggestions with {client.model} at {client.base_url}; "
+    progress(f"Preparing name identification and pronunciation suggestions with {client.model} at {client.base_url}; "
              "book text will be sent to this endpoint.")
     progress(f"Request cache: {cache}; completed discovery and pronunciation requests are reused on retry.")
     return CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
@@ -74,10 +74,8 @@ def prepare_book_pronunciations(directory, config, *, document=None, requests=No
     if document is not None and (document["source"] != saved["source"] or document["cast"] != saved["cast"]):
         raise ValueError("Book source or cast changed before pronunciation discovery; rerun against the saved book")
     document = saved
-    from .name_script import FILENAME
-    if (directory / FILENAME).exists() or (directory / FILENAME).is_symlink():
-        from .name_script_workflow import prepare_name_script
-        prepare_name_script(directory, config, requests=requests, progress=progress, client_factory=client_factory)
+    from .name_script_workflow import prepare_name_script
+    prepare_name_script(directory, config, requests=requests, progress=progress, client_factory=client_factory)
     settings = config["analysis"]
     if discovery_pending(directory, document):
         if requests is None:
