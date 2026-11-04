@@ -239,7 +239,7 @@ class ProviderTests(unittest.TestCase):
         self.opener.open.assert_not_called()
 
     def test_http_errors_are_redacted_and_not_retried(self):
-        for status in (301, 302, 307, 308, 400, 401, 403, 429, 500):
+        for status in (301, 302, 307, 308, 400, 413, 401, 403, 429, 500):
             body = Mock()
             self.opener.open.reset_mock()
             self.opener.open.side_effect = HTTPError(
@@ -250,7 +250,7 @@ class ProviderTests(unittest.TestCase):
             self.assertNotIn("secret", str(caught.exception))
             self.assertEqual(caught.exception.status_code, status)
             self.opener.open.assert_called_once()
-            if status in {429, 500}:
+            if status in {400, 413, 429, 500}:
                 body.read.assert_called_once_with(MAX_ERROR_BYTES + 1)
             else:
                 body.read.assert_not_called()

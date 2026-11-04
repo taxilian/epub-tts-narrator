@@ -69,6 +69,10 @@ class OutputTruncatedError(ProviderError):
     """The provider exhausted its output budget, not a transport outage."""
 
 
+class ResponseCapacityError(ProviderError):
+    """The provider response exceeded a fixed transport capacity bound."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward credentials (or book text) to a redirect destination.
@@ -279,7 +283,7 @@ class OpenAICompatibleClient:
         raw = self._request(encoded, headers)
 
         if len(raw) > MAX_RESPONSE_BYTES:
-            raise ProviderError("The API response exceeds the 16 MiB limit.")
+            raise ResponseCapacityError("The API response exceeds the 16 MiB limit.")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -394,7 +398,7 @@ class OpenAICompatibleClient:
         while raw:
             received += len(raw)
             if received > MAX_RESPONSE_BYTES:
-                raise ProviderError("The API response exceeds the 16 MiB limit.")
+                raise ResponseCapacityError("The API response exceeds the 16 MiB limit.")
             self._progress(received)
             if sock is not None:
                 # Bytes are flowing; silence from here on is an inter-chunk
@@ -490,9 +494,11 @@ class OpenAICompatibleClient:
     def _http_failure(cls, status: int, headers, response) -> ProviderError:
         retryable = status in _TRANSIENT_HTTP_STATUSES
         code = None
-        if retryable:
+        if retryable or status in {400, 413}:
             # Read only a small bounded error envelope, and expose only known
             # codes. Providers sometimes echo credentials or input in messages.
+            # Nonretryable 400/413 responses expose only the capacity code;
+            # their generic failures remain nonretryable and fully redacted.
             try:
                 raw = response.read(MAX_ERROR_BYTES + 1)
                 value = json.loads(raw) if isinstance(raw, bytes) and len(raw) <= MAX_ERROR_BYTES else None
@@ -502,7 +508,8 @@ class OpenAICompatibleClient:
             if not isinstance(details, dict):
                 details = value if isinstance(value, dict) else {}
             raw_code = details.get("code")
-            code = raw_code if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES else None
+            code = (raw_code if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES
+                    and (retryable or raw_code == "context_length_exceeded") else None)
             # A provider's explicit nonretryable verdict always wins. Do not
             # turn billing/quota exhaustion into repeated paid model requests.
             if details.get("retryable") is False or (isinstance(value, dict) and value.get("retryable") is False):
