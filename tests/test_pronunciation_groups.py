@@ -9,13 +9,14 @@ from unittest.mock import patch
 
 from epub_tts_narrator.analysis_directory import continuation_registry, fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle
-from epub_tts_narrator.pipeline import write_json
+from epub_tts_narrator.pipeline import CachedRequests, write_json
 from epub_tts_narrator.pronunciation_groups import case_key, entry_words, family_words
 from epub_tts_narrator.pronunciations import (find_pronunciation, load_pronunciations, reset_pronunciation,
     save_candidates, save_proposal, set_pronunciation, validate_entry, word_id)
 from epub_tts_narrator.series import link_analysis
 from shared_fixtures import snapshot
 from test_pronunciations import candidate
+from test_pronunciation_proposals import ProposalClient
 from test_series import fixture, propose
 
 
@@ -199,13 +200,15 @@ class PronunciationGroupsTests(unittest.TestCase):
         from epub_tts_narrator.pronunciation_proposals import propose_name_pronunciations
         directory, document = self.minimal("Quiet quiet QUIET Pit pit")
         save_candidates(directory, document, [candidate(word) for word in ("Quiet", "quiet", "QUIET", "Pit", "pit")])
-        calls = []
-        with patch("epub_tts_narrator.pronunciation_proposals.propose_pronunciation", side_effect=lambda doc, entry, requests: calls.append(entry["word"]) or QUIET):
-            for _ in range(2):
-                propose_name_pronunciations(document, load_pronunciations(directory), object(),
-                    on_proposal=lambda entry, value: save_proposal(directory, document, entry["word"], value))
-        self.assertEqual(calls, ["Pit", "Quiet"])
-        self.assertEqual(len(load_pronunciations(directory)), 2)
+        client = ProposalClient()
+        requests = CachedRequests(client, self.root / "requests", repair_attempts=0)
+        for _ in range(2):
+            propose_name_pronunciations(document, load_pronunciations(directory), requests,
+                on_proposal=lambda entry, value: save_proposal(directory, document, entry["word"], value))
+        self.assertEqual([payload["word"] for _, payload in client.calls], ["Pit", "Quiet"])
+        saved = load_pronunciations(directory)
+        self.assertEqual(len(saved), 2)
+        self.assertTrue(all("proposal" in row for row in saved))
 
 
 if __name__ == "__main__":

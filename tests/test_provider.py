@@ -248,6 +248,7 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(ProviderError) as caught:
                 OpenAICompatibleClient("model", api_key="api-secret").complete("system-secret", {})
             self.assertNotIn("secret", str(caught.exception))
+            self.assertEqual(caught.exception.status_code, status)
             self.opener.open.assert_called_once()
             if status in {429, 500}:
                 body.read.assert_called_once_with(MAX_ERROR_BYTES + 1)
@@ -473,6 +474,7 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(error=type(error)), self.assertRaises(ProviderError) as caught:
                 OpenAICompatibleClient("model").complete("Analyze", {})
             self.assertNotIn("secret", str(caught.exception))
+            self.assertIn("failed or timed out", str(caught.exception))
             self.opener.open.assert_called_once()
 
     def test_response_read_has_fixed_bound(self):
@@ -545,18 +547,13 @@ class ProviderTests(unittest.TestCase):
         self.opener.open.assert_not_called()
 
     def test_streaming_sets_stream_flag_without_changing_cache_identity(self):
-        legacy_identity = {
-            "model": "model", "base_url": "https://api.openai.com/v1",
-            "json_mode": True, "max_output_tokens": None,
-            "token_limit_field": "max_completion_tokens",
-        }
         for client in (
             OpenAICompatibleClient("model"),
             OpenAICompatibleClient("model", stall_timeout=30),
             OpenAICompatibleClient("model", progress_callback=lambda count: None),
             OpenAICompatibleClient("model", api_key="secret-key"),
         ):
-            self.assertEqual(client.identity, legacy_identity)
+            self.assertEqual(client.identity, OpenAICompatibleClient("model").identity)
         self.respond(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]"))
         OpenAICompatibleClient("model").complete("System", {"text": "Café"})
         body = json.loads(self.opener.open.call_args.args[0].data)
@@ -594,18 +591,19 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {}), {"characters": []})
 
     def test_streamed_finish_reasons_are_validated_like_nonstreamed(self):
+        sentinel = "DO_NOT_ECHO_streamed_private_content"
         for reason, pattern in (
             ("length", "truncated"), ("content_filter", "content filter"),
             ("tool_calls", "completed text"), (None, "completed text"),
         ):
             self.opener.open.reset_mock()
-            events = [delta('{"characters": []}')]
+            events = [delta('{"characters": ["' + sentinel + '"]}')]
             if reason is not None:
                 events.append(delta_end(reason))
             self.respond(sse(*events, "[DONE]"))
             with self.subTest(reason=reason), self.assertRaisesRegex(ProviderError, pattern) as caught:
                 OpenAICompatibleClient("model").complete("Analyze", {})
-            self.assertNotIn("secret", str(caught.exception))
+            self.assertNotIn(sentinel, str(caught.exception))
         self.opener.open.reset_mock()
         self.respond(sse(delta('{"characters": []}'), delta_end("length"), "[DONE]"))
         with self.assertRaises(OutputTruncatedError):
@@ -694,20 +692,26 @@ class ProviderTests(unittest.TestCase):
             client_socket.close()
         self.assertIsNone(OpenAICompatibleClient._stream_socket(FakeResponse(b"")))
 
-    def test_progress_callback_reports_increasing_counts_only(self):
+    def test_progress_callback_reports_strictly_increasing_received_byte_counts(self):
         seen = []
         client = OpenAICompatibleClient("model", progress_callback=seen.append)
-        self.respond(sse(delta('{"cha'), delta('racters": []}'), delta_end("stop"), "[DONE]"))
+        body = sse(delta('{"cha'), delta('racters": []}'), delta_end("stop"), "[DONE]")
+        self.respond(body)
         self.assertEqual(client.complete("Analyze", {}), {"characters": []})
-        self.assertTrue(seen)
-        self.assertEqual(seen, sorted(seen))
+        self.assertGreater(len(seen), 1)
+        self.assertTrue(all(later > earlier for earlier, later in zip(seen, seen[1:])))
         self.assertTrue(all(isinstance(count, int) for count in seen))
-        self.assertGreater(seen[-1], 0)
+        self.assertEqual(seen[-1], len(body))
+        seen.clear()
+        self.respond(completion())
+        self.assertEqual(client.complete("Analyze", {}), {"characters": []})
+        self.assertEqual(seen, [len(json.dumps(completion()).encode())])
 
     def test_non_sse_and_malformed_streams_fail_clean_without_retry(self):
+        sentinel = "DO_NOT_ECHO_malformed_stream"
         for body, pattern in (
-            (b"hello world\n", "not valid JSON"),
-            (b"data: not json\n\n", "not valid JSON"),
+            (b"hello " + sentinel.encode() + b"\n", "not valid JSON"),
+            (b"data: " + sentinel.encode() + b"\n\n", "not valid JSON"),
             (b'data: {"x": 1}\n\noops: broken\n\n', "server-sent event"),
             (b"data: \xff\n\n", "UTF-8"),
         ):
@@ -716,7 +720,7 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaisesRegex(ProviderError, pattern) as caught:
                 OpenAICompatibleClient("model", max_retries=3).complete("Analyze", {})
             self.opener.open.assert_called_once()
-            self.assertNotIn("private", str(caught.exception))
+            self.assertNotIn(sentinel, str(caught.exception))
 
     def test_streamed_bytes_are_bounded(self):
         self.respond(sse(delta('{"char'), delta('acters": []}'), "[DONE]"))
