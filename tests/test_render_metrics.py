@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from epub_tts_narrator.renderer import render_metrics
@@ -340,13 +341,29 @@ class PoolInstrumentationTests(unittest.TestCase):
                 entered.set()
                 self.assertTrue(release.wait(10))
 
-        holder = threading.Thread(target=hold)
-        holder.start()
-        self.assertTrue(entered.wait(10))
-        with pool.admit_chunk():
-            pass
-        release.set()
-        holder.join(10)
+        def wait_for_admission():
+            with pool.admit_chunk():
+                pass
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            holder = executor.submit(hold)
+            waiter = None
+            try:
+                self.assertTrue(entered.wait(10))
+                waiter = executor.submit(wait_for_admission)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if self.metrics.snapshot()["admission"]["queued_now"] == 1:
+                        break
+                    if waiter.done():
+                        waiter.result()
+                    time.sleep(0.005)
+                self.assertEqual(self.metrics.snapshot()["admission"]["queued_now"], 1)
+            finally:
+                release.set()
+            holder.result(timeout=10)
+            if waiter is not None:
+                waiter.result(timeout=10)
         admission = self.metrics.snapshot()["admission"]
         self.assertEqual(admission["wait_count"], 2)
         self.assertEqual(admission["outcomes"]["completed"], 2)

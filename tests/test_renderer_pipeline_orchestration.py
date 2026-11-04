@@ -139,8 +139,12 @@ class OrchestrationTests(unittest.TestCase):
         self.failures = {}
         pool = self.pool()  # global_limit 2, chapter_concurrency 4 -> share 1
         admission = ChapterRunAdmission()
+        starts = [threading.Event() for _ in range(4)]
+        for event in [*starts, *self.gates.values()]:
+            self.addCleanup(event.set)
 
         def unit(index):
+            starts[index].wait(10)
             return self.render_chapter(pool, chapter(index + 1, 3))
 
         outcome = {}
@@ -155,8 +159,12 @@ class OrchestrationTests(unittest.TestCase):
                    side_effect=chunk_runner(self.recorder, self.gates, self.failures)):
             thread = threading.Thread(target=run)
             thread.start()
+            starts[0].set()
             self.recorder.expect("1-0")
+            starts[1].set()
             self.recorder.expect("2-0")  # late chapter admitted beside blocked first
+            for event in starts[2:]:
+                event.set()
             # Both global slots are held by gated first clips: siblings and
             # later chapters stay queued at their non-borrowable shares.
             self.recorder.expect_absent("1-1", "2-1", "3-0", "4-0")
@@ -552,10 +560,13 @@ class VerifierRegressionTests(unittest.TestCase):
         self.assertEqual(legacy_auto.max_inflight, 2)  # legacy window: slots+1
         self.assertIsNone(legacy_auto.logical)
         blocked = threading.Event()
+        started = threading.Event()
+        self.addCleanup(blocked.set)
         completed = []
         errors = []
 
         def blocked_asr(path):
+            started.set()
             blocked.wait(30)
             return {"text": "x"}
 
@@ -568,17 +579,19 @@ class VerifierRegressionTests(unittest.TestCase):
                 errors.append(repr(error))
 
         threads = [threading.Thread(target=submitter, args=(index,))
-                   for index in range(6)]
+                   for index in range(effective + 1)]
         for thread in threads:
             thread.start()
-        deadline = time.monotonic() + 10
-        while len(completed) + len(errors) < 6 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        self.assertTrue(started.wait(10))
+        self.assertTrue(wait_until(
+            lambda: pool.resources.recognition._pending == effective))
+        self.assertEqual(completed, [])
+        self.assertEqual(errors, [])  # saturated lanes backpressure, never LaneFull
         blocked.set()
         for thread in threads:
             thread.join(30)
         self.assertEqual(errors, [])  # saturated lanes backpressure, never LaneFull
-        self.assertEqual(sorted(completed), list(range(6)))
+        self.assertEqual(sorted(completed), list(range(effective + 1)))
 
     def test_saturated_lane_backpressures_without_rerunning_started_work(self):
         from epub_tts_narrator.renderer.render_lanes import ResourceLane

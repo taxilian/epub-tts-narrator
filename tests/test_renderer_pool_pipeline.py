@@ -123,6 +123,25 @@ class PipelinePoolConstructionTests(unittest.TestCase):
         # Automatic synthesis backlog: min(256, 4 * 8 slots).
         self.assertEqual(runtime.tts._max_pending, 32)
 
+    def test_chapter_registration_exposes_real_scheduling_snapshot(self):
+        from epub_tts_narrator.renderer.chapter_executor import ChapterExecutor
+        from epub_tts_narrator.renderer.render_schedule_status import clear_runtime, scheduling_status
+
+        config = pipeline_config(slots=2)
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        executor = ChapterExecutor(config, engine=pool, verifier=object())
+        self.addCleanup(executor.close)
+        self.addCleanup(clear_runtime, pool)
+
+        executor._components()
+        status = scheduling_status()
+
+        self.assertEqual(status["mode"], "pipeline")
+        self.assertEqual(status["capacity"]["tts_slots"], 2)
+        self.assertEqual(status["logical"]["global_limit"], pool.max_inflight)
+        self.assertIsInstance(status["backlog"], dict)
+
     def test_explicit_backlog_and_review_concurrency_are_respected(self):
         pool = RenderPool(pipeline_config(slots=4, review=3, backlog=5))
         self.addCleanup(pool.close)

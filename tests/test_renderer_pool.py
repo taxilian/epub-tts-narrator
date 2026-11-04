@@ -230,7 +230,10 @@ class PoolUnitTests(unittest.TestCase):
         self.assertEqual(set(events[1:]), {"asr", "judge"})
 
     def test_scheduler_restores_source_order_with_bounded_inflight_jobs(self):
-        engine = SimpleNamespace(max_parallel=2)
+        config = pool_config(worker("fixture", concurrency=2))
+        config["render_pool"]["max_inflight"] = 2
+        engine = RenderPool(config)
+        self.addCleanup(engine.close)
         second_done = Event()
         active, maximum = 0, 0
         guard = Lock()
