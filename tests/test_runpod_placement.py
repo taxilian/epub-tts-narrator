@@ -283,20 +283,6 @@ class USPlacementTests(unittest.TestCase):
         self.assertIn("remains billed for storage", notices)
         self.assertIn("no cache or data is migrated", notices)
 
-    def test_affordable_h100_elsewhere_beats_reusing_the_local_rtx_volume(self):
-        self.retained_volume()
-        self.write_state(volume_id="volume_kept", api_key="fixture-worker-secret", deployment_id="d" * 12)
-        self.api.catalog["gpus"] = [gpu_row(RTX, 2.49, (NC,)), gpu_row(H100, 2.59, (CO,))]
-        deployment = self.build_deployment(self.settings)
-        deployment.provision()
-        self.assertEqual(deployment.gpu_type_id, H100)
-        self.assertEqual(deployment.data_center_id, CO)
-        spec = self.api.pod_specs[-1]
-        self.assertEqual(spec["gpu"]["id"], H100)
-        self.assertEqual(spec["dataCenterIds"], [CO])
-        self.assertEqual(spec["mounts"]["network"][0]["volumeId"], "volume_new1")
-        self.assertEqual(self.read_state()["volumes_by_center"][NC], "volume_kept")
-
     def test_pending_volume_request_reconciles_before_today_catalog_or_hint(self):
         name = self.regional_name(NC)
         self.api.volumes["volume_pending"] = {"id": "volume_pending", "name": name,

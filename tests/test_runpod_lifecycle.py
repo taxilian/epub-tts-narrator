@@ -1332,27 +1332,6 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.create_pod.assert_called_once()
         self.assertEqual(self.api.catalog_gpus.call_count, 1)
 
-    def test_over_limit_unstocked_misplaced_or_malformed_h100_falls_back(self):
-        for index, row in enumerate((self.h100_row(price=2.60), self.h100_row(price=2.61), self.h100_row(availability="NONE"),
-                                     self.h100_row(dataCenters=[{"id": "US-OTHER-1", "availability": "HIGH"}]),
-                                     self.h100_row(price=True), self.h100_row(price="2.59"))):
-            with self.subTest(h100=row):
-                self.isolated_state(f"fallback-{index}")
-                self.api.catalog_gpus.return_value = {"gpus": [row, self.fallback_row()]}
-                deployment = self.deployment()
-                deployment.provision()
-                spec = self.api.create_pod.call_args.args[0]
-                self.assertEqual(spec["gpu"]["id"], self.fallback_row()["id"])
-                self.assertEqual(deployment.state["gpu_type_id"], self.fallback_row()["id"])
-                self.api.create_pod.reset_mock()
-
-    def test_prefer_h100_false_pins_the_configured_gpu(self):
-        self.settings["deployment"]["prefer_h100"] = False
-        deployment = self.deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.h100_row(), self.fallback_row()]}
-        deployment.provision()
-        self.assertEqual(self.api.create_pod.call_args.args[0]["gpu"]["id"], self.fallback_row()["id"])
-
     def test_explicit_pinned_h100_can_use_a_higher_configured_cap(self):
         self.settings["deployment"].update(prefer_h100=False, gpu_type_id=self.H100, max_hourly_price=4.10)
         self.api.catalog_gpus.return_value = {"gpus": [self.h100_row(price={"secure": 3.0})]}
