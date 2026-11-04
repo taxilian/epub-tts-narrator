@@ -822,6 +822,7 @@ class FishHTTPTests(unittest.TestCase):
 
     def test_full_queue_rejects_without_additional_inference(self):
         self.server.admission = threading.BoundedSemaphore(1)
+        self.voice = dict(self.voice, reference_text="x" * 1000000)
         entered, release = threading.Event(), threading.Event()
         original = self.engine.synthesize_fish
         def blocked(*args, **kwargs):

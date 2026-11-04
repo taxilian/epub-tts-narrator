@@ -244,6 +244,20 @@ class _RenderServer(ThreadingHTTPServer):
                 request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
                                 b"Connection: close\r\nRetry-After: 2\r\nContent-Length: "
                                 + str(len(data)).encode() + b"\r\n\r\n" + data)
+                # An early response must not reset a client still uploading its
+                # request body, or the client may never see the rejection.
+                request.shutdown(socket.SHUT_WR)
+                deadline = time.monotonic() + 1.0
+                remaining = self.settings.get("max_request_bytes", MAX_AUDIO_BYTES) + 65536
+                while remaining > 0:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    request.settimeout(timeout)
+                    chunk = request.recv(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
             except OSError:
                 pass
             self.shutdown_request(request)
