@@ -192,9 +192,9 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertEqual(self.chapters()["status"], "chapters_complete")
         self.assert_individual_plan(original)
         self.assertEqual(len(self.engine.dialogue_calls), 4)  # original pair + two recast rejections
-        # Four original singles, the two recast source turns, and the two later
-        # narrator takes whose chapter history followed the recast paragraph.
-        self.assertEqual(len(self.engine.speech_calls), 8)
+        # Four original singles and the two recast source turns; history is
+        # same-voice, so later narrator takes never heard the recast voice.
+        self.assertEqual(len(self.engine.speech_calls), 6)
         self.assert_snapshot_unchanged(before)
         child = next(record for path, record in self.accepted_clips().items()
                      if path not in before and record["request"]["chunk"]["segment"]["voice_id"] == "voice_lena")

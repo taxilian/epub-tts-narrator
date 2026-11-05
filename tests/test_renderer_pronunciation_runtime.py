@@ -265,9 +265,8 @@ class PronunciationPlanTests(unittest.TestCase):
             def synthesize(self, text, voice, path, *, seed, direction="", performance=None, traits=""):
                 prepared, compiled, metadata = prepare_synthesis(
                     text, direction, performance=performance, traits=traits)
-                result = super().synthesize(prepared, voice, path, seed=seed, direction=direction)
-                self.speech_calls[-1]["compiled"] = compiled
-                return {**result, **metadata, "synthesis_text": compiled}
+                return {**super().synthesize(prepared, voice, path, seed=seed, direction=direction),
+                        **metadata, "synthesis_text": compiled}
 
         engine = StructuredFixtureEngine({})
         verifier = FixtureVerifier(engine.fixture_transcripts)
@@ -276,17 +275,11 @@ class PronunciationPlanTests(unittest.TestCase):
         calls, voice_calls = len(engine.speech_calls), len(engine.voice_calls)
         self.entries = [entry()]
         revised = render(bundle, self.config, engine, verifier, chapters_only=True, notify=lambda _: None)
-        # The take using the revised pronunciation is new; every later take in
-        # its chapter continues that take's history and is generated again
-        # with unchanged text. Earlier takes are reused.
-        before = [(call["text"], call["compiled"], call["voice_hash"]) for call in engine.speech_calls[:calls]]
-        after = [(call["text"], call["compiled"], call["voice_hash"]) for call in engine.speech_calls[calls:]]
-        self.assertTrue(after)
-        affected = calls - len(after)
-        self.assertGreaterEqual(affected, 0)
-        self.assertEqual((after[0][0], after[0][2]), (before[affected][0], before[affected][2]))
-        self.assertNotEqual(after[0][1], before[affected][1])
-        self.assertEqual(after[1:], before[affected + 1:])
+        # The narrator's revised take is new, and so is the narrator's later
+        # take that heard it; Mara's line (another voice) is reused.
+        self.assertEqual([call["text"] for call in engine.speech_calls[calls:]],
+                         [engine.speech_calls[0]["text"], engine.speech_calls[2]["text"]])
+        self.assertEqual(len({call["voice_hash"] for call in engine.speech_calls[calls:]}), 1)
         self.assertEqual(len(engine.voice_calls), voice_calls)
         self.assertNotEqual(original["chapters"][0]["cache_directory"], revised["chapters"][0]["cache_directory"])
         with patch.object(engine, "synthesize", side_effect=AssertionError("accepted speech regenerated")):

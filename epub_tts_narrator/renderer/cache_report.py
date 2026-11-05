@@ -172,13 +172,12 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                      accepted_records=0, index_records=0)
     totals.update(inventory)
     reasons, examples = Counter(), []
-    from .continuity import ChapterContinuity, is_narration, narrator_asset
+    from .continuity import ChapterContinuity, is_pinnable
     for chapter in plan["chapters"]:
-        # Replay accepted history in source order: each take was conditioned
-        # on the accepted takes before it, so the first miss makes every later
-        # request in the chapter a miss as well.
-        continuity = ChapterContinuity(engine_identity, available, narrator_asset(chapter, available))
-        intact = True
+        # Replay accepted history in source order. A missed take never enters
+        # the replayed history, so the same voice's later takes miss as well.
+        continuity = ChapterContinuity(engine_identity, available)
+        changed_voices = set()
         for chunk in chapter["chunks"]:
             if chunk["silent_control"]:
                 continue
@@ -194,16 +193,12 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                     totals["missing_voice_requests"] += 1
                     differences = ["missing_current_voice"]
                     example["missing_voice_ids"] = missing
-                    intact = False
-                elif not intact:
-                    differences = ["earlier_take_in_chapter_changed"]
                 else:
                     request = (_paragraph_request(chunk, available, engine_identity, config)
                                if "paragraph_turns" in chunk else
                                _speech_request(chunk, available[group[0]["voice_id"]], engine_identity,
                                                config, performer=group[0] if len(speakers) > 1 else None))
-                    with continuity.transaction(request, narration=is_narration(
-                            chunk, available, continuity.narrator)) as bound:
+                    with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
                         identity = cache.identity(bound)
                         continuity.bind(digest(identity))
                         found = cache.find(identity, request=bound)
@@ -211,7 +206,9 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                             continuity.accept(*found)
                             totals["hits"] += 1
                             continue
-                    intact = False
+                    speakers = set(bound.get("voice_assets", {}).values()) or {bound.get("voice_asset_hash")}
+                    earlier_changed = bool(speakers & changed_voices)
+                    changed_voices.update(speakers)
                     request = bound
                     locations = _locations(request)
                     candidates = {index for location in locations for index in by_block[location]}
@@ -233,6 +230,9 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                             "current": request["engine"].get("model")}
                     else:
                         differences = ["no_saved_source_or_text_match"]
+                    if earlier_changed:
+                        # This voice heard a take that is now a miss itself.
+                        differences = ["earlier_take_in_chapter_changed"]
                 totals["misses"] += 1
                 reasons.update(differences)
                 if len(examples) < max_examples:

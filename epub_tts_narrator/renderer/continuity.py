@@ -1,13 +1,16 @@
-"""Mandatory chapter history: Fish's pinned first turn plus the latest accepted turn.
+"""Mandatory same-voice chapter history: Fish's pinned first turn plus the latest.
 
 Every chapter carries Drama 3's generated performance context across its
 requests. The fixed voice references say who is speaking; the history says
-where the performance is. Following Fish's own long-text policy
-(``fish_omni/chunking.py``), the first accepted single-voice narration take of
-the chapter stays pinned and the latest accepted take follows it. Mixed-voice
-paragraphs take part with their speaker tags renumbered per request; every
-history voice is sent as a reference. When a prompt overflows, candidates drop
-the latest turn, then the pinned one, exactly as Fish does.
+where that voice's performance is. Following Fish's own long-text policy
+(``fish_omni/chunking.py``), a request hears the first accepted take (pinned)
+and the latest accepted take of the same voice in this chapter. Only takes
+whose speakers are all among the request's own speakers are eligible, so no
+other character's audio sits in the prompt: Drama 3 documents history for
+continuing one voice's script or revising a take, and another voice's recent
+audio competes with the reference for identity and accent. Chapter headings
+never become the pinned take. When a prompt overflows, candidates drop the
+latest turn, then the pinned one, exactly as Fish does.
 
 Only the sequential chapter coordinator advances history. Inference receives
 an immutable snapshot through a context variable, so recovery callbacks,
@@ -24,7 +27,7 @@ from .common import digest, file_hash, regular_file
 
 
 _CURRENT = ContextVar("accepted_chapter_continuity", default=None)
-POLICY = "fish-pinned-first-narration-latest"
+POLICY = "fish-first-latest-same-voice"
 MAX_SPEAKERS = 16
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 # Joins, repairs and best-effort choices remain accepted audio but are not one
@@ -53,56 +56,47 @@ def _segments(chunk):
     return [chunk["segment"]]
 
 
-def narrator_asset(chapter, voices):
-    """The voice speaking the most narration in this chapter, or None."""
-    totals = {}
-    for chunk in chapter["chunks"]:
-        if chunk.get("silent_control"):
-            continue
-        for segment in _segments(chunk):
-            voice = voices.get(segment.get("voice_id"))
-            if voice is not None and segment.get("kind") == "narration":
-                asset = voice["asset_hash"]
-                totals[asset] = totals.get(asset, 0) + len(segment.get("text", ""))
-    return max(sorted(totals), key=totals.get) if totals else None
+def is_pinnable(chunk):
+    """A take may become its voice's pinned first turn unless it is only headings."""
+    return not all(segment.get("kind") == "heading" for segment in _segments(chunk))
 
 
-def is_narration(chunk, voices, narrator):
-    """Single-voice narration by the chapter narrator, suitable for the pinned turn."""
-    if narrator is None or chunk.get("silent_control"):
-        return False
-    segments = _segments(chunk)
-    return all(segment.get("kind") == "narration" and "simultaneous_speakers" not in segment
-               and voices.get(segment.get("voice_id"), {}).get("asset_hash") == narrator
-               for segment in segments)
+def request_speakers(request):
+    if request.get("kind") == "paragraph_speech":
+        return frozenset(request["voice_assets"].values())
+    return frozenset({request["voice_asset_hash"]})
 
 
 class ChapterContinuity:
-    """Chapter-owned pinned/latest accepted takes and pool worker affinity."""
+    """Chapter-owned accepted takes and pool worker affinity."""
 
-    def __init__(self, engine_identity, voices, narrator=None):
+    def __init__(self, engine_identity, voices):
         # Engine compatibility (transport, runtime updates, model aliases) is
         # the speech cache's decision through the request's own engine
         # identity; history identity names only the exact accepted takes.
         self.voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
-        self.narrator = narrator
-        self.pinned = None
-        self.latest = None
+        self.entries = []
         # A pool keeps a chapter on the worker that produced its first take.
         self.worker = None
 
-    def takes(self):
-        return [entry for entry in (self.pinned, self.latest) if entry is not None]
+    def takes(self, speakers):
+        """Fish's first + latest, from this chapter's takes by these speakers only."""
+        eligible = [entry for entry in self.entries if set(entry["identity"]["speakers"]) <= speakers]
+        if not eligible:
+            return []
+        pinned = next((entry for entry in eligible if entry["pinnable"]), None)
+        latest = eligible[-1]
+        return [latest] if pinned is None or pinned is latest else [pinned, latest]
 
     @contextmanager
-    def transaction(self, request, *, narration=False):
-        takes = deepcopy(self.takes())
-        identity = {"version": 2, "policy": POLICY, "takes": [take["identity"] for take in takes]}
+    def transaction(self, request, *, pinnable=True):
+        takes = deepcopy(self.takes(request_speakers(request)))
+        identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
         scope = {"chapter": self, "identity": identity, "takes": takes,
-                 "request_binding": digest(bound), "narration": narration,
+                 "request_binding": digest(bound), "pinnable": pinnable,
                  # Simultaneous lanes overlap in time; none of them is the
-                 # next turn of the chapter conversation.
+                 # next turn of the chapter.
                  "history": "performer" not in request}
         token = _CURRENT.set(scope)
         try:
@@ -137,16 +131,11 @@ class ChapterContinuity:
             raise ValueError("Continuity history names a voice outside this chapter")
         codes_path = Path(path).parent / marker["file"]
         load_codes(codes_path, marker)
-        entry = {"path": str(codes_path), "marker": deepcopy(marker), "identity": {
+        self.entries.append({"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
+                             "identity": {
             "codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
             "speakers": list(marker["speakers"]), "request_hash": accepted["request_hash"],
-            "audio_sha256": accepted["audio_sha256"]}}
-        if self.pinned is None and scope["narration"]:
-            # The pinned take is also the newest; Fish starts its recent
-            # window only after the pinned chunk.
-            self.pinned, self.latest = entry, None
-        else:
-            self.latest = entry
+            "audio_sha256": accepted["audio_sha256"]}})
 
 
 def _retag(text, mapping):

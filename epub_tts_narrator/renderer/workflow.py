@@ -1109,11 +1109,11 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                 plan, requests, completed=completed_chunks(work, plan["chapters"]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
-    from .speech_traits import bind_plan_speech_traits, speech_trait_overrides
-    traits = config.get("_speech_traits_snapshot")
-    if traits is None:
-        traits = speech_trait_overrides(bundle, config)
-    plan = bind_plan_speech_traits(plan, bundle["cast"], overrides=traits)
+    # Voice speech traits (accent, pace, timbre) are not sent with each line.
+    # Drama 3 clones identity, accent included, from the reference recording
+    # and the voice's own earlier takes in the chapter history; a per-line
+    # voice description competes with the reference and dilutes the line's
+    # own delivery direction. Traits still shape voice design and casting.
     from .performance_runtime import bind_traits
     plan = bind_traits(plan)
     if (not (multi_speaker or single_speaker_paragraph)
@@ -1398,21 +1398,18 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
-    from .continuity import ChapterContinuity, is_narration, narrator_asset
-    continuity = ChapterContinuity(context["engine"], voices, narrator_asset(chapter, voices))
-    # Strict staleness: every later take was conditioned on the earlier ones,
-    # so the first obsolete take makes the rest of the chapter obsolete too.
-    replay = {"intact": True}
+    from .continuity import ChapterContinuity, is_pinnable
+    continuity = ChapterContinuity(context["engine"], voices)
 
     def matches_request(request, accepted, chunk):
         # Identical source requests can prepare different engine inputs after
         # a delivery-formatting update. Check the actual recorded performance.
-        if not replay["intact"]:
-            return False
-        with continuity.transaction(request, narration=is_narration(chunk, voices, continuity.narrator)) as bound:
+        # An obsolete take never enters the replayed history, so the later
+        # takes of the same voice that heard it no longer match either, while
+        # other voices' takes are unaffected.
+        with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             if not speech_cache.matches(bound, accepted):
-                replay["intact"] = False
                 return False
             directory = Path(work) / "clips" / accepted["request_hash"]
             full = read_json(regular_file(directory / "accepted.json"))
@@ -1822,9 +1819,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         if continuity is None:
             # Direct callers outside a chapter (tools, previews) have no history.
             return execute_take(text, generate, request, **options)
-        from .continuity import is_narration
-        with continuity.transaction(request, narration=is_narration(
-                chunk, voices, continuity.narrator)) as bound:
+        from .continuity import is_pinnable
+        with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             result = execute_take(text, generate, bound, **options)
             continuity.accept(*result)
@@ -1960,9 +1956,9 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                            speech_cache=None, paragraph_split_available=False, scheduler_owner=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
-    from .continuity import ChapterContinuity, narrator_asset, require_support
+    from .continuity import ChapterContinuity, require_support
     require_support(engine)
-    continuity = ChapterContinuity(engine_identity, voices, narrator_asset(chapter, voices))
+    continuity = ChapterContinuity(engine_identity, voices)
     if retry_budget is None:
         # The chapter service passes a submission-bound budget; this permissive
         # default remains for direct callers such as tools and benchmarks.

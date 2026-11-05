@@ -639,10 +639,10 @@ class CastingTests(unittest.TestCase):
         first = book_render("first-output")
         speech_count = len(self.engine.speech_calls)
         voices = [call["voice_id"] for call in self.engine.speech_calls]
-        # Each take continues the chapter's accepted takes, so the first take in
-        # the changed voice and every later take in that chapter are new.
+        # History is same-voice, so only the changed voice's own takes are new;
+        # other voices never heard them.
         self.assertIn(self.voice_id, voices)
-        regenerated = voices[voices.index(self.voice_id):]
+        regenerated = [voice for voice in voices if voice == self.voice_id]
         candidate = self.session.generate(self.voice_id)
         pending = book_render("pending-output")
         self.assertEqual(first["voice_assets"], pending["voice_assets"])

@@ -211,12 +211,11 @@ class IncrementalRendererTests(unittest.TestCase):
 
         self.run_render()
 
-        # Chapter openings keep their history and audio. Each take after a
-        # changed predecessor continues different history and is new: the
-        # passage left behind in chapter one, the moved passage, and the
-        # passage now following it in chapter two.
-        changed = [self.document["segments"][i]["text"] for i in (1, 3, 4)]
-        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 3, counts[2] + 3))
+        # History is same-voice. The moved narration now follows chapter two's
+        # heading and the narration after it hears the new take, so both are
+        # new; the other voice's dialogue left in chapter one heard neither.
+        changed = [self.document["segments"][i]["text"] for i in (3, 4)]
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 2, counts[2] + 2))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]], changed)
         for call in self.engine.speech_calls[counts[1]:]:
             self.assertEqual(call["voice_hash"], texts[call["text"]]["voice_hash"])

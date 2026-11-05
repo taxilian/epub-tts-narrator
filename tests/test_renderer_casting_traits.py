@@ -70,34 +70,17 @@ class CastingTraitTests(unittest.TestCase):
         self.assertEqual(row["speech_traits"], TRAITS)
         self.assertNotIn("speech_traits", read_json(self.session._draft_path(self.voice_id)))
 
-    def test_trait_override_changes_only_affected_plan_chunks_and_can_be_cleared(self):
+    def test_trait_edits_never_change_the_render_plan(self):
+        # Rendered lines carry only their own delivery direction; accents come
+        # from the reference recording and same-voice history.
         original = make_render_plan(self.bundle, self.config, multi_speaker=False)
         self.session.update_prompt(self.voice_id, speech_traits=TRAITS)
-        edited = make_render_plan(self.bundle, self.config, multi_speaker=False)
-        affected = 0
-        for old_chapter, new_chapter in zip(original["chapters"], edited["chapters"]):
-            for old, new in zip(old_chapter["chunks"], new_chapter["chunks"]):
-                if old["segment"]["voice_id"] == self.voice_id:
-                    self.assertEqual(new["speech_traits"][self.voice_id], TRAITS)
-                    self.assertEqual({k: v for k, v in new.items() if k != "speech_traits"},
-                                     {k: v for k, v in old.items() if k != "speech_traits"})
-                    affected += 1
-                else:
-                    self.assertEqual(new, old)
-        self.assertGreater(affected, 0)
+        self.assertEqual(make_render_plan(self.bundle, self.config, multi_speaker=False), original)
+        _, preflight, _ = _preflight(self.bundle, self.config, chapters_only=True, multi_speaker=False)
+        self.assertFalse(any("speech_traits" in chunk for chapter in preflight["chapters"]
+                             for chunk in chapter["chunks"]))
         self.session.update_prompt(self.voice_id, speech_traits="")
-        cleared = make_render_plan(self.bundle, self.config, multi_speaker=False)
-        for chapter in cleared["chapters"]:
-            for chunk in chapter["chunks"]:
-                self.assertNotIn(self.voice_id, chunk.get("speech_traits", {}))
-
-    def test_preflight_freezes_traits_for_recovery_but_new_invocation_reads_edits(self):
-        self.session.update_prompt(self.voice_id, speech_traits=TRAITS)
-        frozen, first, _ = _preflight(self.bundle, self.config, chapters_only=True, multi_speaker=False)
-        self.session.update_prompt(self.voice_id, speech_traits="Careful Japanese-influenced English")
-        self.assertEqual(make_render_plan(self.bundle, frozen, multi_speaker=False), first)
-        _, second, _ = _preflight(self.bundle, frozen, chapters_only=True, multi_speaker=False)
-        self.assertNotEqual(first, second)
+        self.assertEqual(make_render_plan(self.bundle, self.config, multi_speaker=False), original)
 
     def test_symlink_foreign_identity_unknown_voice_and_lock_fail_without_overwriting(self):
         target = self.directory / "voice-traits.json"

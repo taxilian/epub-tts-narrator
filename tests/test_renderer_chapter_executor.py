@@ -109,23 +109,17 @@ class ChapterExecutorTests(unittest.TestCase):
         self.assertNotEqual(read_json(first["chapter.json"])["frames"], read_json(second["chapter.json"])["frames"])
         self.assertEqual(counts, (len(self.engine.speech_calls), len(self.engine.dialogue_calls), len(self.verifier.calls)))
 
-    def test_changed_voice_regenerates_its_passage_and_later_history_dependent_takes_only(self):
+    def test_changed_voice_regenerates_only_its_separate_passage(self):
         self.synthesize()
-        first = [call["text"] for call in self.engine.speech_calls]
         before = len(self.engine.speech_calls), len(self.engine.dialogue_calls)
         changed = deepcopy(self.spec)
         changed["voice_bindings"]["voice_lena"] = digest("new-lena")
         self.voices["voice_lena"]["asset_hash"] = changed["voice_bindings"]["voice_lena"]
         self.synthesize(changed)
-        # Every later take was conditioned on the changed one, so the chapter
-        # regenerates from Lena's passage onward; earlier takes, including
-        # the grouped paragraph, are reused.
+        # History is same-voice, so other voices' takes never heard Lena's.
         regenerated = self.engine.speech_calls[before[0]:]
-        lena = next(index for index, call in enumerate(self.engine.speech_calls[:before[0]])
-                    if call["voice_hash"] == self.spec["voice_bindings"]["voice_lena"])
-        self.assertEqual([call["text"] for call in regenerated], first[lena:])
+        self.assertEqual(len(regenerated), 1)
         self.assertEqual(regenerated[0]["voice_hash"], changed["voice_bindings"]["voice_lena"])
-        self.assertGreater(lena, 0)
         self.assertEqual(len(self.engine.dialogue_calls), before[1])
 
     def test_failed_verification_never_publishes_chapter(self):

@@ -138,7 +138,7 @@ arbitrary local checkpoints are not labelled as the recommended release.
 Every engine carries Drama 3's performance context across a chapter's
 requests (RENDERER.md, "Chapter continuity"). The shared
 `engines.HistorySynthesis` mixin tags each request's speakers, adds the
-chapter's pinned-narration and latest accepted turns through
+chapter's same-voice first (pinned) and latest accepted turns through
 `continuity.compose`, and attaches the generated codec tokens to the take's
 metadata. An engine implements only `_generate_wire(text, references, history,
 output, seed)` and returns `(metadata, codes, codebook_size)`:

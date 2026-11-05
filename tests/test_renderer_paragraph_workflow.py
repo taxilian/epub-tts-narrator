@@ -156,22 +156,21 @@ class ParagraphWorkflowTests(unittest.TestCase):
             self.package()
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         self.chapters()
-        # Lena's passage is followed by two narrator/Mara takes in the chapter.
-        # They were conditioned on her old take, so strict continuity renders
-        # them again; the earlier passages and the Mara paragraph are reused.
+        # History is same-voice: the later narrator/Mara takes never heard
+        # Lena's take, so only her passage renders again.
         self.assertEqual(len(self.engine.dialogue_calls), counts[0])
-        self.assertEqual(len(self.engine.speech_calls) - counts[1], 3)
-        self.assertEqual(len(self.verifier.calls) - counts[2], 3)
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 1)
+        self.assertEqual(len(self.verifier.calls) - counts[2], 1)
         self.assertEqual([call["voice_hash"] for call in self.engine.speech_calls[counts[1]:]][0],
                          store.load("voice_lena")["asset_hash"])
         after = self.accepted_clips()
-        self.assertEqual(len(after), len(before) + 3)
+        self.assertEqual(len(after), len(before) + 1)
         self.assertTrue(all(read_json(path) == record for path, record in before.items()))
         new_clips = [record for path, record in after.items() if path not in before]
         new_clip = next(record for record in new_clips
                         if record["request"]["chunk"]["segment"]["voice_id"] == "voice_lena")
         self.assertEqual(sorted(record["request"]["chunk"]["segment"]["block_id"] for record in new_clips),
-                         ["b000004", "b000005", "b000006"])
+                         ["b000004"])
         self.assertEqual(new_clip["request"]["chunk"], old_clip["request"]["chunk"])
         self.assertNotEqual(new_clip["request"]["voice_asset_hash"],
                             old_clip["request"]["voice_asset_hash"])

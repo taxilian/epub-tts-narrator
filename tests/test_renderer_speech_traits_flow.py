@@ -20,7 +20,7 @@ from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required for recovery integration")
 class RendererSpeechTraitsFlowTests(unittest.TestCase):
-    def test_paragraph_fallback_replanning_retains_current_traits_on_individual_passages(self):
+    def test_paragraph_fallback_replanning_sends_no_voice_traits_with_passages(self):
         from audition_fixtures import prepare_document
         from test_contracts import valid_document
         from epub_tts_narrator.cli import export_bundle
@@ -50,8 +50,9 @@ class RendererSpeechTraitsFlowTests(unittest.TestCase):
                         if chunk["segment"]["voice_id"] == "v1"]
             self.assertEqual(len(passages), 2)
             self.assertTrue(all("paragraph_turns" not in chunk for chunk in passages))
-            self.assertEqual([performance_direction(chunk, "v1") for chunk in passages],
-                             [TRAITS, TRAITS])
+            # The voice has traits, but rendered lines carry only their own
+            # (here empty) delivery direction.
+            self.assertEqual([performance_direction(chunk, "v1") for chunk in passages], ["", ""])
 
     def fixture(self):
         config = deepcopy(DEFAULTS)

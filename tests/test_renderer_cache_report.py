@@ -118,18 +118,13 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["misses"], 0)
         self.assertEqual(self.snapshot(), before)
 
-    def test_current_speech_traits_match_verified_audio_in_read_only_report(self):
-        from epub_tts_narrator.renderer.engines import _directed_text
-        from epub_tts_narrator.renderer.speech_text import trim_speech_text
-
-        traits = "Neutral General American accent; clipped phrasing"
+    def test_voice_speech_traits_do_not_condition_rendered_lines(self):
+        # Accent and identity come from the reference and same-voice history;
+        # a voice's saved traits no longer enter each line's request.
         profile = next(voice for voice in self.bundle["cast"]["voices"]
                        if voice["id"] == self.voice_id)
-        profile["speechTraits"] = traits
-        request = deepcopy(self.request)
-        request["chunk"]["speech_traits"] = {self.voice_id: traits}
-        text, delivery = _directed_text(trim_speech_text(request["chunk"]["spoken_text"]), traits)
-        self.save(request, metadata={"synthesis_text": text, **delivery})
+        profile["speechTraits"] = "Neutral General American accent; clipped phrasing"
+        self.save()
         before = self.snapshot()
 
         report = self.report()

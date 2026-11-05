@@ -351,14 +351,18 @@ requests; there is no setting to turn it off.
 - **References say who is speaking.** Each voice's saved recording and
   transcript are sent unchanged on every request and are never replaced by
   generated audio.
-- **History says where the performance is.** Following Fish's own long-text
-  policy (`fish_omni/chunking.py`), each request carries two completed
-  user/assistant turns: the chapter's first accepted single-voice narration take
-  (pinned) and the latest accepted take. A heading or opening dialogue does not
-  become the pin; the first real narration does.
-- **Mixed-voice paragraphs take part.** Their speaker tags are renumbered per
-  request, and every voice heard in the history is sent as a reference
-  (Drama 3 allows 16 speakers per request).
+- **History says where that voice's performance is.** Following Fish's own
+  long-text policy (`fish_omni/chunking.py`), each request carries up to two
+  completed user/assistant turns from the **same voice** in this chapter: that
+  voice's first accepted take (pinned; a heading never becomes the pin) and its
+  latest accepted take. No other character's audio enters a line's prompt.
+  Drama 3 documents history for continuing one voice's script or revising a
+  take; another voice's recent audio competes with the reference for identity
+  and accent. A voice's first line in a chapter has no history.
+- **Each voice change is its own request.** The planner groups consecutive
+  chunks only for the same performer (since 2026-10-21), because speaker tags
+  cannot guarantee an audible switch and transcript verification cannot detect
+  the wrong voice. A multi-voice request would only hear turns by its own voices.
 - **Only accepted takes advance history.** Rejected attempts never do. Joined,
   repaired and best-effort takes stay accepted audio but leave the history as
   it was, because they are not one generation of the exact text. Simultaneous
@@ -599,13 +603,11 @@ For a creation prompt, describe the voice's lasting identity in one or two conci
 
 Fresh analysis is instructed to make the description complete. Default voice creation uses only that description. Structured trait fields remain evidence metadata; neither those fields nor their source quotations are appended to the prompt. An older profile whose important vocal details appear only in trait fields may need its creation prompt edited before casting. Custom description wording and older trait lists are preserved; only recognized obsolete application prefixes are removed when preparing a request. A description over 4,000 characters fails with a request to shorten it instead of silently truncating vocal identity. The sentence count and coherence are model guidance, not a guarantee. Speech verification checks the recording and transcript; listening determines whether the performance suits the character.
 
-The optional voice-profile `speechTraits` field serves a different purpose: it reinforces stable speech behavior on every rendered passage, without changing the selected reference recording or its creation prompt. New analysis supplies one or two short phrases naming an explicit, specific accent and any habitual articulation, rhythm, pace, impediments, or verbal habits. It excludes emotions and personality. Older profiles without this field keep their existing conditioning.
-
-For example, `speechTraits: "Light Glaswegian Scottish accent; clipped consonants and brisk, even phrasing."` combines with a passage direction such as `"speaking quietly"` in the engine's nonspoken style control. Traits apply to each speaker's turn, not to an entire multi-voice paragraph indiscriminately. Ordinary neutral delivery retains persistent traits. A separately audited broad clip-repair plan may override trait conditioning for that clip after two parallel approvals, without changing the global profile. The field accepts at most 400 characters of nonempty, single-line plain text without engine markup. Actual accent compliance still requires listening: transcript and acoustic verification do not certify it.
+The optional voice-profile `speechTraits` field records a voice's stable speech behavior: an explicit accent and habitual articulation, rhythm, pace or verbal habits, never emotions or personality. Rendering does **not** send it with each line. Drama 3 clones identity, accent included, from the saved reference recording and from that voice's own earlier takes in the chapter history (see "Chapter continuity"); a per-line voice description competes with the reference and dilutes each line's own delivery direction, which is all a rendered line now carries in its style control. Keep accents in the reference recording itself. Pronunciation previews still apply the traits. The field accepts at most 400 characters of nonempty, single-line plain text without engine markup.
 
 Use `E` in casting to override these traits, or `cast BOOK --action edit --voice-id ID --speech-traits "Light Mexican Spanish-influenced English; relaxed cadence"`. An empty CLI value clears traits. These explicit edits live in the book's `voice-traits.json`, separate from checksum-bound analysis. Lookup uses the current book, then its parent recursively; a local choice (including an explicit clear) overrides an earlier choice. No global config edits or reanalysis are needed. Each render snapshots the choices for recovery and sends them with remote chapter jobs. Pronunciation previews and frozen comparison snapshots use the same choices.
 
-Changing speech traits requires a new performance for affected clips, even when their words and reference audio are unchanged. Rerun `render` to prepare those clips and chapters; unaffected speech remains reusable, and model-free `assemble` cannot manufacture the new conditioning from old audio. Existing valid reference voices do not need to be regenerated. Structured analysis `traits[]` and their evidence are not rewritten by the casting editor; changing those records still uses the validated analysis/corrections workflow.
+Changing speech traits does not change rendered speech. Existing valid reference voices do not need to be regenerated. Structured analysis `traits[]` and their evidence are not rewritten by the casting editor; changing those records still uses the validated analysis/corrections workflow.
 
 The adapters place this prose differently: Gemini receives it as the voice-design input, following its [one- or two-sentence prompting guidance](https://ai.google.dev/gemini-api/docs/generate-content/voice-design#prompting-best-practices-for-voice-design), while Drama 3 receives it as a character description in the [scene prompt's system message](https://arxiv.org/html/2610.18010v1#A2). Neither adapter sends our trait array as separate model controls. This does not establish that a trait list could never help a particular model; the generated voice still needs listening and evaluation.
 
