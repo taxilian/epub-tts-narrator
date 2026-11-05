@@ -81,10 +81,14 @@ class CastingSession:
         self._designer_factory = designer_factory
         self._engine = None
         self._verifier = None
+        self._actual_verifier = None
+        self._verifier_runtime = None
         self._designer = None
         self._samples = {}
         self._cleanup_attempted = set()
         self._batch_lease = batch_lease
+        # Temporary local/G11 choices must retain the session's verifier owner.
+        self._use_verifier_runtime = self.config.get("voice_design", {}).get("type") == "gemini"
         self._closed = False
         self._profiles = {voice["id"]: deepcopy(voice) for voice in bundle["cast"]["voices"]}
         if len(self._profiles) != len(bundle["cast"]["voices"]):
@@ -497,18 +501,33 @@ class CastingSession:
             self._engine = factory(deepcopy(self.config["engine"]))
         return self._engine
 
+    def _create_verifier(self):
+        if self._verifier_factory is None:
+            from .verification import create_verifier
+            return create_verifier(
+                self.config["verification"], self.config.get("jev"), self.config.get("provider"))
+        return self._verifier_factory(
+            self.config["verification"]["model"], language=self.config["verification"]["language"])
+
     def _get_verifier(self):
         if self._verifier is None:
             if self._model_setup is not None:
                 self._model_setup.ensure("verification")
-            if self._verifier_factory is None:
-                from .verification import create_verifier
-                self._verifier = create_verifier(
-                    self.config["verification"], self.config.get("jev"), self.config.get("provider"))
+            if self._batch_lease is not None or not self._use_verifier_runtime:
+                self._verifier = self._create_verifier()
             else:
-                self._verifier = self._verifier_factory(
-                    self.config["verification"]["model"], language=self.config["verification"]["language"])
+                from .casting_batch import _BatchVerifier, _Fatal
+                from .local_runtime import LocalRuntime
+                self._verifier_runtime = LocalRuntime(name="audiobook-casting-verification")
+                self._actual_verifier = self._verifier_runtime.run(self._create_verifier)
+                self._verifier = _BatchVerifier(
+                    self._actual_verifier, self._verifier_runtime, _Fatal())
         return self._verifier
+
+    def _batch_verifier(self, fatal):
+        self._get_verifier()
+        from .casting_batch import _BatchVerifier
+        return _BatchVerifier(self._actual_verifier, self._verifier_runtime, fatal)
 
     def _get_designer(self):
         engine = self._get_engine()
@@ -1433,3 +1452,5 @@ class CastingSession:
             close = getattr(resource, "close", None)
             if callable(close):
                 close()
+        if self._verifier_runtime is not None:
+            self._verifier_runtime.close()

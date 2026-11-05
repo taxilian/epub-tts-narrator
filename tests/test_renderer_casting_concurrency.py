@@ -280,8 +280,10 @@ class CastingConcurrencyTests(unittest.TestCase):
                              for state in admitted_states), 1)
         self.assertEqual(session.store.regeneration_status(extra)["state"], "pending")
         self.assertFalse((session.store.directory / ".lock").exists())
-        self.assertTrue(verifiers[0].closed.is_set())
+        self.assertFalse(verifiers[0].closed.is_set())
         self.assertEqual(verifiers[0].maximum_active, 1)
+        session.close()
+        self.assertTrue(verifiers[0].closed.is_set())
         self.assertEqual(len(verifiers[0].thread_ids), 1)
         self.assertIn(verifiers[0].close_thread, verifiers[0].thread_ids)
 

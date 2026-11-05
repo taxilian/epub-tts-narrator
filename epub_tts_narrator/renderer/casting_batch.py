@@ -80,7 +80,6 @@ class _BatchVerifier:
         self._runtime = runtime
         self._fatal = fatal
         self._initialize_mlx = requires_mlx(verifier)
-        self.identity = deepcopy(verifier.identity)
 
     def __getattr__(self, name):
         try:
@@ -121,7 +120,6 @@ class _Resources:
         self.fatal = fatal
         self.runtime = LocalRuntime(name="audiobook-casting-verification")
         self.actual_engine = None
-        self.actual_verifier = None
         self.engine = None
         self.verifier = None
         self.closed = False
@@ -133,30 +131,18 @@ class _Resources:
                 from .engines import create_engine
                 engine_factory = create_engine
             self.actual_engine = engine_factory(deepcopy(self.session.config["engine"]))
-            verifier_factory = self.session._verifier_factory
-            if verifier_factory is None:
-                from .verification import create_verifier
-                self.actual_verifier = create_verifier(
-                    self.session.config["verification"], self.session.config.get("jev"),
-                    self.session.config.get("provider"))
-            else:
-                self.actual_verifier = verifier_factory(
-                    self.session.config["verification"]["model"],
-                    language=self.session.config["verification"]["language"])
             self.engine = _BatchEngine(self.actual_engine)
-            self.verifier = _BatchVerifier(self.actual_verifier, self.runtime, self.fatal)
 
         self.runtime.run(construct)
+        self.verifier = self.session._batch_verifier(self.fatal)
 
     def close(self):
         if self.closed:
             return
         self.closed = True
-        for resource in (self.actual_verifier, self.actual_engine):
-            if resource is None:
-                continue
+        if self.actual_engine is not None:
             try:
-                self.runtime.run(_close_resource, resource)
+                self.runtime.run(_close_resource, self.actual_engine)
             except BaseException as error:
                 self.fatal.record(error)
         try:
@@ -183,16 +169,19 @@ def _schedule(workers, representatives, regenerate, limit, fatal):
     } for row in representatives]
     executor = ThreadPoolExecutor(max_workers=limit, thread_name_prefix="audiobook-gemini-casting")
     pending = {}
+    free_slots = list(range(len(workers)))
     next_index = 0
     try:
-        while next_index < len(workers) or pending:
-            while next_index < len(workers) and len(pending) < limit:
+        while next_index < len(representatives) or pending:
+            while next_index < len(representatives) and len(pending) < limit and free_slots:
+                slot = free_slots.pop(0)
                 future = fatal.submit(
-                    executor, _invoke, workers[next_index],
+                    executor, _invoke, workers[slot],
                     representatives[next_index]["voice_id"], regenerate, fatal)
                 if future is None:
+                    free_slots.append(slot)
                     break
-                pending[future] = next_index
+                pending[future] = next_index, slot
                 next_index += 1
             if not pending:
                 break
@@ -202,7 +191,7 @@ def _schedule(workers, representatives, regenerate, limit, fatal):
                 fatal.record(error)
                 continue
             for future in done:
-                index = pending.pop(future)
+                index, slot = pending.pop(future)
                 try:
                     selected = future.result()
                 except BaseException as error:
@@ -212,6 +201,7 @@ def _schedule(workers, representatives, regenerate, limit, fatal):
                         fatal.record(error)
                 else:
                     results[index]["selected"] = selected
+                free_slots.append(slot)
     finally:
         while True:
             try:
@@ -235,16 +225,15 @@ def run_gemini_batch(session, representatives, *, regenerate, worker_factory):
         session.prepare_models(generation=True)
         session._retry_gemini_cleanup()
         resources.start()
-        for _ in representatives:
+        limit = min(session.config["casting"]["gemini_concurrency"], len(representatives))
+        for _ in range(limit):
             worker = worker_factory(lease, resources)
             workers.append(worker)
             worker._cleanup_attempted = set(session._cleanup_attempted)
             worker._get_designer()
         if regenerate:
             session._invalidate_regeneration_targets([row["voice_id"] for row in representatives])
-        results = _schedule(
-            workers, representatives, regenerate,
-            session.config["casting"]["gemini_concurrency"], fatal)
+        results = _schedule(workers, representatives, regenerate, limit, fatal)
     except BaseException as error:
         fatal.record(error)
     finally:
