@@ -66,7 +66,7 @@ def _valid_identity(identity):
 def _pre_prosody_identity(identity):
     if (not isinstance(identity, dict) or not isinstance(identity.get("provider"), dict)
             or type(identity.get("coverage_version")) is not int
-            or identity["coverage_version"] not in {7, 8, 9, SPEECH_COVERAGE_VERSION}):
+            or not 7 <= identity["coverage_version"] <= SPEECH_COVERAGE_VERSION):
         return False
     return identity == _identity(identity["provider"], prosody=False,
                                   coverage_version=identity["coverage_version"])

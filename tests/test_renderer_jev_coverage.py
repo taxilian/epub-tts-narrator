@@ -61,6 +61,15 @@ UNACCEPTABLE = (
     ("arbitrary spacing and spelling cannot hide a lost letter",
      "Their judgements of the sunflower were fair.",
      "Their judgments of the s u n f l o w e were fair."),
+    ("missing letter-name prefix", "Use esspro.", "Use pro."),
+    ("extra letter-name prefix", "Use esspro.", "Use S S pro."),
+    ("missing repeated letter-name prefix", "Use essesspro.", "Use S pro."),
+    ("changed letter-name prefix", "Use esspro.", "Use F pro."),
+    ("missing word after letter-name compound", "Use esspro carefully.", "Use S pro."),
+    ("changed number with letter-name compound", "Use seventeen esspro.", "Use seventy S pro."),
+    ("missing negation with letter-name compound", "Do not use esspro.", "Do use S pro."),
+    ("stretched spelling cannot hide an extra spoken letter", "Use essspro.", "Use S S pro."),
+    ("stretched spelling cannot hide repeated glyph count", "Say esss.", "Say S S."),
 )
 
 ACCEPTABLE = (
@@ -86,6 +95,14 @@ ACCEPTABLE = (
     ("regional spelling across a compound boundary",
      "Their illjudgements were wrong.",
      "Their ill-judgments were wrong."),
+    ("letter-name compound prefix", "Use esspro.", "Use S pro."),
+    ("short letter-name compound spelling", "Use espro.", "Use S pro."),
+    ("letter-name compound with regional spelling", "Our saviour uses esspro.", "Our savior uses S pro."),
+    ("different letter-name compound prefix", "Use the exray.", "Use the X ray."),
+    ("letter-name compound with another spelling", "Follow the beeline.", "Follow the B line."),
+    ("letter-name compound suffix", "Use the prefixess.", "Use the prefix S."),
+    ("repeated letter-name prefix", "Use essesspro.", "Use S S pro."),
+    ("multiword letter name in compound", "Use the doubleyoubeam.", "Use the W beam."),
     ("omitted written accent", "She studied techné.", "She studied techne."),
     ("compound boundary", "We entered the sourcepalace.", "We entered the source palace."),
     ("vowel recognition", "She put the doll on the shelf.", "She put the dull on the shelf."),
@@ -212,6 +229,16 @@ class JevCoverageTests(unittest.TestCase):
         }):
             verifier = ReferenceTextJudgingVerifier(RecordedRecognizer("Trust her judgments."), self.judge)
             report = validate_audio(self.audio, "Trust her judgements.", verifier, purpose="speech")
+        self.assertFalse(report["passed"], report)
+        self.assertEqual(report["text_judge"]["decision"], "different")
+
+    def test_letter_name_compound_does_not_bypass_negative_judgment(self):
+        with patch.object(self.judge._client, "evaluate", return_value={
+            "model": "jev-fixture", "answers": {"roughly_same": {"type": "noul", "noul": .01}},
+            "usage": {"input_tokens": 20, "output_tokens": 2},
+        }):
+            verifier = ReferenceTextJudgingVerifier(RecordedRecognizer("Use S pro."), self.judge)
+            report = validate_audio(self.audio, "Use esspro.", verifier, purpose="speech")
         self.assertFalse(report["passed"], report)
         self.assertEqual(report["text_judge"]["decision"], "different")
 

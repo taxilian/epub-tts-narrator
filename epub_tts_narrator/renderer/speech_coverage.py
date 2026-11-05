@@ -9,17 +9,18 @@ from __future__ import annotations
 
 from collections import Counter
 from functools import lru_cache
+from itertools import product
 import re
 import unicodedata
 
-from .letter_names import make_letter_name_matcher
+from .letter_names import letter_name_spellings, make_letter_name_matcher
 from .phonetic_match import (
     _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _FUNCTION_WORDS, _PROTECTED, _PROTECTED_NUMERIC,
     _load_double_metaphone, phonetic_equivalence,
 )
 
 
-SPEECH_COVERAGE_VERSION = 10
+SPEECH_COVERAGE_VERSION = 11
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS: dict[frozenset[str], str] = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -192,26 +193,36 @@ def speech_coverage(expected_text, transcript):
         if end > len(words):
             return None
         selected = words[start:end]
-        if (not all(eligible_word(word) for word in selected)
+        if (not all(eligible_word(word) or (size > 1 and word == span[2] and letter_name_spellings(span[2]))
+                    for word, span in zip(selected, spans[start:end]))
                 or any(not _ALPHABETIC_WORD.fullmatch(span[2]) for span in spans[start:end])
                 or not contiguous(side, start, size, hyphen=True)):
             return None
         return selected
 
     @lru_cache(maxsize=None)
-    def group_keys(side, start, size):
+    def group_spellings(side, start, size):
         words = span_words(side, start, size)
         if words is None:
             return ()
-        full = set(keys("".join(words).replace("'", "")))
-        if size > 1:
-            # A word must contribute to the sound of the whole group. Without
-            # this constraint a vowel-initial extra word may disappear when
-            # the encoder processes the joined spelling.
-            for index in range(size):
-                remainder = "".join(words[:index] + words[index + 1:]).replace("'", "")
-                full.difference_update(keys(remainder))
-        return tuple(sorted(full))
+        spans = expected_spans if side == "expected" else actual_spans
+        options = [letter_name_spellings(spans[start + index][2]) or (word,)
+                   for index, word in enumerate(words)]
+        return tuple(tuple(word.replace("'", "").replace(" ", "") for word in spellings)
+                     for spellings in product(*options))
+
+    @lru_cache(maxsize=None)
+    def group_keys(side, start, size):
+        found = set()
+        for spoken in group_spellings(side, start, size):
+            full = set(keys("".join(spoken)))
+            if size > 1:
+                # Every complete component, including a spoken letter, must contribute.
+                for index in range(size):
+                    remainder = "".join(spoken[:index] + spoken[index + 1:])
+                    full.difference_update(keys(remainder))
+            found.update(full)
+        return tuple(sorted(found))
 
     def one_repeated_consonant(left, right):
         shorter, longer = sorted((left, right), key=len)
@@ -373,6 +384,13 @@ def speech_coverage(expected_text, transcript):
             multi = left_size != right_size
             if multi and set(left).intersection(right):
                 continue
+            if any(sum(bool(letter_name_spellings(word)) for word in words) > 1
+                   for words in (left, right)):
+                # Phonetic encoding alone can collapse distinct spoken letters.
+                written_left = {"".join(words) for words in group_spellings("expected", i, left_size)}
+                written_right = {"".join(words) for words in group_spellings("actual", j, right_size)}
+                if written_left.isdisjoint(written_right):
+                    continue
             left_keys, right_keys = group_keys("expected", i, left_size), group_keys("actual", j, right_size)
             common = sorted(set(left_keys).intersection(right_keys))
             candidate = None

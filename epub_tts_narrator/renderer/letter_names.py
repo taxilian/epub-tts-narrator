@@ -38,6 +38,15 @@ _REWRITE_NAME_TO_LETTER = {
 }
 
 
+def letter_name_spellings(letter):
+    """Return spoken English names for one explicit letter glyph, not a word."""
+    if not _SINGLE_LETTER.fullmatch(letter):
+        return ()
+    if letter.upper() == "W":
+        return ("double you", "double u")
+    return tuple(name for name, glyph in _NAME_TO_LETTER.items() if glyph == letter.upper())
+
+
 def letter_name_rewrite_equivalent(source, replacement):
     """Recognize one exact letter-name respelling for reviewed synthesis only."""
     if (not isinstance(source, str) or not _SINGLE_LETTER.fullmatch(source)
