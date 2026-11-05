@@ -78,7 +78,22 @@ reasons. Explain only the narrative identity evidence or its limitations.
 """ + SERIES_RETRY_SCOPE_GUIDANCE
 
 SCAN = COMMON + """
-Audit the complete supplied cast against source_units for identity errors.
+Screen source_units for identity errors involving original_cast. This is candidate
+detection, not a final identity decision or a request to rewrite the cast.
+
+SOURCE AND REFERENCE SCOPE
+source_units is the ONLY source of quotations admissible in your evidence arrays.
+source_scope=source_batch means these units are one part of the book, not the
+complete book; other batches are screened separately and their findings combined.
+source_scope=complete_source means all source text is supplied in this request.
+original_cast is the complete, fallible reference cast. Compare its aliases,
+descriptions, relationships, and stored evidence with the supplied source_units.
+Consider identities introduced in other chapters: a local revelation may connect
+two cast records even if one record's introduction is outside this batch.
+Stored cast quotations can guide that comparison, but are NOT additional
+source_units. Neither cast records nor previous responses expand citation scope.
+
+IDENTITY SCREENING
 Look in BOTH directions: separate cast records that are one returning person
 (nicknames, changed titles, disguises, later name revelations), AND one record
 that conflates distinct people (shared names, similar names, reused titles,
@@ -86,16 +101,34 @@ contradictory relationships, separate people appearing together). Audit each
 record's aliases, descriptions and evidence; do not assume its IDs are correct.
 Names or spelling similarity alone NEVER prove identity. A character returning
 after a long absence is not new simply because the scene or description changed.
+Report meaningful concerns supported by this request's source text. A proposal
+needs local narrative evidence of the concern, not every passage needed to settle
+it: later preparation and three independent reviewers receive broader context.
+Use uncertain for a locally evidenced identity ambiguity, not merely because a
+cast member is absent from this batch. Missing context is not proof of identity,
+distinctness, or a cast error. Do not repeat concerns supported only by stored
+out-of-batch quotations, or enumerate every character or pair.
+
+OUTPUT AND CITATIONS
 Return {"cases":[{"kind":"merge|split|keep_separate|uncertain",
 "character_ids":["existing ID"],"reason":"brief source-based explanation",
 "evidence":[{"block_id":"ID","quote":"exact visible source quotation"}]}]}.
 Use merge for exactly two duplicate records, split for exactly one conflated
 record, keep_separate for exactly two records positively established as distinct,
-and uncertain when the evidence cannot settle identity. Report meaningful cases,
-not every pair in the cast. Every case needs nonempty exact visible evidence.
+and uncertain when the local evidence raises a concern but cannot settle identity.
 A suspected split must identify the distinct people and their appearances in its
-reason. Return an empty cases array if no identity issue is found. The absence of
-a case is a screening result, not a claim of perfect identity accuracy.
+reason. Every case, including uncertain, needs nonempty evidence. For EVERY
+evidence item, copy quote verbatim from a source_units text with that same block_id;
+preserve spelling, case, punctuation, and whitespace. A real book quotation or a
+correct cast citation is still INVALID if that exact passage is absent from this
+request's source_units. One valid local citation never authorizes a second hidden
+citation. If a block is supplied only in part, quote only within the supplied part.
+During repair, preserve supported findings and replace invalid citations with
+supporting quotations from source_units; omit a case if no supplied passage
+supports it rather than inventing evidence. Return {"cases":[]} when this source
+reveals no supported concern. That is a screening result for the supplied text,
+not certification that every identity in the book is correct. Return no other
+fields or cast modifications.
 """
 
 PREPARE_SPLIT = COMMON + VOICE_PROFILE_GUIDANCE + """

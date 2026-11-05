@@ -51,3 +51,16 @@ Obey these protections without exception:
   performer/portrayal context integrated once in its description, and free of
   analysis commentary, quotations, and markup. The application adds no prefix.
 """
+
+COMPACT_CONTRAST_GUIDANCE = """
+CONTRAST FINDINGS ENCODING
+contrast_findings is losslessly grouped to avoid repeating long voice IDs and
+identical comparison details. Its voice_ids array is a lookup table. Each entry
+in groups supplies kind, matching_dimensions, differing_dimensions, and pairs.
+Each pair [i,j] identifies the two voices voice_ids[i] and voice_ids[j], using
+zero-based integer indexes. Apply that group's finding details to EVERY listed
+pair. Every original comparison is retained; grouping does not imply that all
+voices in a group are identical, or that unlisted pairs have the same finding.
+These remain advisory findings, not acoustic proof or a requirement to recast.
+Return voice upserts using the actual voice ID strings, never lookup indexes.
+"""

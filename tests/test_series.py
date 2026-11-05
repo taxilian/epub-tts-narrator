@@ -572,8 +572,11 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 4)
         # The ensemble pass sees inherited profiles inside the resolved cast,
         # so only discovery and reconciliation receive raw series context.
-        self.assertTrue(all("series_cast" in payload for _, payload in client.calls
-                            if payload.get("mode") in {"discover", "reconcile"}))
+        discovery = [payload for _, payload in client.calls if payload.get("mode") == "casting_discovery"]
+        self.assertEqual(len(discovery), 1)
+        self.assertIn("series_cast", discovery[0])
+        coverage = next(payload for _, payload in client.calls if payload.get("mode") == "casting_coverage")
+        self.assertEqual(len(coverage["cast_view"]["records"]["characters"]), 1)
         cached = analyze(source, client, self.root / "cache", series_registry=registry, identity_consensus=False)
         self.assertEqual(output, cached)
         self.assertEqual(len(client.calls), 4)

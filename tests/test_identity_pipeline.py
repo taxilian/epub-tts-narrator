@@ -51,7 +51,7 @@ class IdentityPipelineTests(unittest.TestCase):
         client = JuryClient()
         document = self.run_analysis(client)
         modes = [payload.get("mode", "attribute") for _, payload in client.calls]
-        self.assertEqual(modes, ["discover", "reconcile", "identity_scan", "voice_ensemble", "attribute"])
+        self.assertEqual(modes, ["casting_discovery", "identity_scan", "casting_coverage", "voice_ensemble", "attribute"])
         self.assertTrue(document["provenance"]["identity_consensus_enabled"])
         self.assertIn("identity_consensus", document["provenance"])
         self.assertEqual(validate_document(document), [])
@@ -65,8 +65,15 @@ class IdentityPipelineTests(unittest.TestCase):
                          {"identity_reviewer_1", "identity_reviewer_2", "identity_reviewer_3"})
         self.assertTrue(all(len(vote["original_cast"]["characters"]) == 2 for vote in votes))
         self.assertEqual(len(document["cast"]["characters"]), 1)
+        self.assertEqual(len(document["provenance"]["casting"]["candidate_ledger"]["discovery"]["characters"]), 2)
+        self.assertEqual(len(document["provenance"]["casting"]["superseded_candidate_voices"]), 1)
+        self.assertEqual(len(document["cast"]["voices"]), 2)
         attributed = next(payload for _, payload in client.calls if "mode" not in payload)
-        self.assertEqual(attributed["final_cast"], document["cast"])
+        for collection in ("characters", "roles", "voices"):
+            self.assertEqual([item["id"] for item in attributed["final_cast"][collection]],
+                             [item["id"] for item in document["cast"][collection]])
+        self.assertTrue(all("evidence" not in item for item in attributed["final_cast"]["characters"]))
+        self.assertTrue(all("description" not in item for item in attributed["final_cast"]["voices"]))
         self.assertTrue(readiness(document)["ready"])
         self.assertEqual(validate_document(document), [])
 
@@ -120,6 +127,23 @@ class IdentityPipelineTests(unittest.TestCase):
         proposal["merges"][0]["evidence"][0]["quote"] = "Invented quotation"
         with self.assertRaisesRegex(ValueError, "does not occur"):
             merge_patch(self.source, cast, proposal, available, defer_merges=True)
+
+    def test_archiving_a_merged_voice_preserves_its_unresolved_review_concern(self):
+        class VoiceConcernClient(JuryClient):
+            def discover(self, payload):
+                response = super().discover(payload)
+                if len(response["voices"]) == 2:
+                    response["issues"].append({"kind": "casting", "target": response["voices"][1]["id"],
+                                                "reason": "The source vocal cue still requires review."})
+                return response
+
+        document = self.run_analysis(VoiceConcernClient(duplicate=True))
+
+        concern = next(row for row in document["issues"] if row["kind"] == "casting")
+        self.assertFalse(concern["resolved"])
+        self.assertEqual(concern["target"], document["cast"]["characters"][0]["voice_id"])
+        archived = document["provenance"]["casting"]["superseded_candidate_voices"]
+        self.assertEqual(concern["identity_original_target"], archived[0]["voice"]["id"])
 
     def test_deferred_merge_cannot_sneak_through_record_upserts(self):
         client = FakeClient(duplicate=True)

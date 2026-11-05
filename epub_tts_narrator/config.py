@@ -212,8 +212,6 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         for key, value in settings.items():
             _validate(section, key, value)
             result[section][key] = value
-    if len(result["analysis"]["cast_reconciliation_notes"]) > result["analysis"]["cast_reconciliation_rounds"]:
-        raise ValueError("Configuration analysis.cast_reconciliation_notes must have at most cast_reconciliation_rounds entries.")
     result["provider"]["timeout"] = float(result["provider"]["timeout"])
     for key in ("retry_initial_delay", "retry_max_delay"):
         result["provider"][key] = float(result["provider"][key])

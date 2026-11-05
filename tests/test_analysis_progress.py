@@ -338,15 +338,17 @@ class AnalysisProgressTests(unittest.TestCase):
         base = analysis_options_fingerprint(settings, policy)
         self.assertEqual(base, analysis_options_fingerprint(dict(settings), dict(policy)))
         alternates = {"chunk_chars": 1200, "repair_attempts": 2, "max_request_chars": 4000,
-                      "whole_book_discovery": True, "attribution_workers": 1,
+                       "attribution_workers": 1,
                       "identity_consensus": False, "attribution_review": True,
                       "attribution_review_chunk_chars": 2000, "attribution_review_notes": "note",
-                      "cast_review_notes": None, "cast_reconciliation_rounds": 2,
+                       "cast_review_notes": None,
                       "cast_reconciliation_notes": []}
         for field, alternate in alternates.items():
             with self.subTest(field=field):
                 changed = dict(settings, **{field: alternate})
                 self.assertNotEqual(base, analysis_options_fingerprint(changed, policy))
+        for field, alternate in (("whole_book_discovery", True), ("cast_reconciliation_rounds", 3)):
+            self.assertEqual(base, analysis_options_fingerprint(dict(settings, **{field: alternate}), policy))
         self.assertNotEqual(base, analysis_options_fingerprint(settings, {"kind": "expressive"}))
         self.assertNotEqual(base, analysis_options_fingerprint(settings, policy, fingerprint({"n": 1})))
         self.assertEqual(analysis_options_fingerprint(settings, policy, None),

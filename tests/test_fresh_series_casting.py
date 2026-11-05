@@ -39,7 +39,7 @@ SCRIPT = (
 
 
 class FreshSeriesClient(FakeClient):
-    """Supply a valid profile, with its last stable trait added in reconciliation."""
+    """Supply source traits, then author the final profile in the ensemble."""
 
     def discover(self, payload):
         patch = super().discover(payload)
@@ -73,17 +73,22 @@ class FreshSeriesClient(FakeClient):
             profile["description"] = "A different proposed voice for this later book."
         return patch
 
-    def reconcile(self, payload):
-        patch = super().reconcile(payload)
-        character = patch["characters"][0]
-        profile = deepcopy(next(voice for voice in payload["known_cast"]["voices"]
-                                if voice["id"] == character["voice_id"]))
-        profile["traits"].append({"name": "pace", "value": "steady conversational cadence",
-                                  "basis": "casting", "evidence": []})
-        if profile["description"] == INITIAL_DESCRIPTION:
-            profile["description"] = DESCRIPTION
-        patch["voices"] = [profile]
-        return patch
+    def complete(self, system, payload):
+        if payload.get("mode") != "voice_ensemble":
+            return super().complete(system, payload)
+        self.calls.append((system, deepcopy(payload)))
+        character_voices = {character["voice_id"] for character in payload["cast"]["characters"]}
+        upserts = []
+        for voice in payload["cast"]["voices"]:
+            if voice["id"] not in character_voices or voice.get("series_origin"):
+                continue
+            traits = deepcopy(voice["traits"])
+            traits.append({"name": "pace", "value": "steady conversational cadence",
+                           "basis": "casting", "evidence": []})
+            upserts.append({"id": voice["id"], "description": DESCRIPTION, "traits": traits,
+                            "speechTraits": "slightly raspy low alto with crisp consonants and steady cadence"})
+        return {"voices": upserts, "reasons": {voice["id"]: "Coordinate the established source traits."
+                                               for voice in upserts}}
 
 
 @unittest.skipUnless(FFMPEG, "FFmpeg is required for the fresh series casting test")
@@ -105,7 +110,7 @@ class FreshSeriesCastingTests(unittest.TestCase):
             self.assertEqual(validate_document(first), [])
             self.assertTrue(first["readiness"]["ready"])
             self.assertEqual([call[1].get("mode", "attribute") for call in first_client.calls],
-                             ["discover", "reconcile", "voice_ensemble", "attribute"])
+                             ["casting_discovery", "casting_coverage", "voice_ensemble", "attribute"])
             save_registry(registry_path, registry, first)
             registry = load_registry(registry_path)
             self.assertEqual(len(registry["books"]), 1)

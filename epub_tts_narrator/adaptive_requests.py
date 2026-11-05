@@ -107,6 +107,7 @@ def run_partitioned(
     label: str = "Adaptive request",
     requests: _RequestCache[P, R] | None = None,
     cache_validator: Callable[[str, P, JsonObject], R] | None = None,
+    observe: Callable[[JsonObject], None] = lambda event: None,
 ) -> list[tuple[list[T], R]]:
     """Run complete ordered leaves, subdividing only on exact capacity signals.
 
@@ -134,9 +135,10 @@ def run_partitioned(
         within_budget = ((requests is None or request_size(system, payload) <= requests.max_request_chars)
                          and (fits is None or fits(system, payload)))
 
-        def subdivide() -> list[tuple[list[T], R]]:
-            progress(f"{label}: subdividing {len(current)} items" +
-                     (" using a cached capacity failure" if replay else " after a capacity failure"))
+        def subdivide(reason: str, detail: str) -> list[tuple[list[T], R]]:
+            observe({"reason": reason, "target_count": len(current),
+                     "request_fingerprint": _fingerprint(payload), "replayed_hint": replay})
+            progress(f"{label}: subdividing {len(current)} items {detail}")
             midpoint = len(current) // 2
             return run_part(current[:midpoint]) + run_part(current[midpoint:])
 
@@ -152,9 +154,9 @@ def run_partitioned(
                     f"{label}: items contains an indivisible request rejected by fits(system, payload); "
                     "reduce its system/payload request_size or increase the provider capacity"
                 )
-            return subdivide()
+            return subdivide("input_budget", "to fit the request budget")
         if replay:
-            return subdivide()
+            return subdivide("provider_capacity", "using a cached capacity failure")
         try:
             return [(current, execute(system, payload))]
         except ProviderError as error:
@@ -167,6 +169,6 @@ def run_partitioned(
                 ) from error
             if requests is not None and path is not None and marker is not None:
                 _write_marker(path, marker)
-            return subdivide()
+            return subdivide("provider_capacity", "after a provider capacity failure")
 
     return run_part(list(items))

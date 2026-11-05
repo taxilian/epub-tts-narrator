@@ -1,4 +1,4 @@
-"""Cumulative reconciliation preserves accepted cast and legacy request identity."""
+"""Finding-driven source coverage preserves candidates without configured rounds."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -16,8 +16,10 @@ from test_pipeline import FakeClient
 class CumulativeClient(FakeClient):
     def reconcile(self, payload):
         known = payload["known_cast"]
-        name = next(name for name in ("Jules", "Quinn", "Rowan")
-                    if name not in {c["name"] for c in known["characters"]})
+        name = next((name for name in ("Jules", "Quinn", "Rowan")
+                     if name not in {c["name"] for c in known["characters"]}), None)
+        if name is None:
+            return self.patch()
         ids = payload["available_ids"]
         character = {"id": ids["characters"][0], "name": name, "aliases": [],
                      "description": "Another separately named performer.",
@@ -48,8 +50,8 @@ class ReconciliationRoundsTests(unittest.TestCase):
         client = FakeClient()
         implicit = self.run_analysis(client)
         self.assertEqual([p.get("mode", "attribute") for _, p in client.calls],
-                         ["discover", "reconcile", "voice_ensemble", "attribute"])
-        self.assertEqual(implicit["provenance"]["cast_reconciliation_rounds"], 1)
+                         ["casting_discovery", "casting_coverage", "voice_ensemble", "attribute"])
+        self.assertEqual(implicit["provenance"]["casting"]["strategy"], "adaptive_evidence_first")
         replay = FakeClient()
         self.assertEqual(self.run_analysis(replay, cast_reconciliation_rounds=1), implicit)
         self.assertEqual(replay.calls, [])
@@ -59,48 +61,42 @@ class ReconciliationRoundsTests(unittest.TestCase):
         self.assertEqual(fresh.calls, client.calls)
         self.assertTrue(all("cast_reconciliation_rounds" not in payload for _, payload in client.calls))
 
-    def test_extra_round_reuses_first_round_cache_and_keeps_prior_additions(self):
+    def test_distinct_findings_finish_even_when_the_legacy_round_setting_is_one(self):
         for whole_book in (False, True):
             with self.subTest(whole_book=whole_book):
                 self.cache = Path(self.temp.name) / str(whole_book)
                 first = CumulativeClient()
-                baseline = self.run_analysis(first, whole_book_discovery=whole_book,
-                                             cast_review_notes="Check overlooked distinct speakers.")
-                second = CumulativeClient()
                 original = deepcopy(self.source)
+                baseline = self.run_analysis(first, whole_book_discovery=whole_book)
+                self.assertEqual({c["name"] for c in baseline["cast"]["characters"]},
+                                 {"Mara", "Jules", "Quinn", "Rowan"})
+                checks = [payload for _, payload in first.calls if payload.get("mode") == "casting_coverage"]
+                self.assertEqual(len(checks), 4)
+                self.assertEqual({unit["block_id"] for unit in checks[0]["target_units"]}, {"b1", "b2"})
+                self.assertTrue(all({unit["block_id"] for unit in check["target_units"]} == {"b2"}
+                                    for check in checks[1:]))
+                second = CumulativeClient()
                 result = self.run_analysis(second, whole_book_discovery=whole_book,
-                                           cast_review_notes="Check overlooked distinct speakers.",
-                                           cast_reconciliation_rounds=2)
-                self.assertEqual([p.get("mode", "attribute") for _, p in second.calls],
-                                 ["reconcile", "voice_ensemble", "attribute"])
-                later_system, later = second.calls[0]
-                first_system, first_payload = next((s, p) for s, p in first.calls if p.get("mode") == "reconcile")
-                self.assertEqual(later["known_cast"], baseline["cast"])
-                self.assertEqual(later["target_units"], first_payload["target_units"])
-                self.assertEqual(later["context_units"], first_payload["context_units"])
-                self.assertEqual(later["scene_summaries"], first_payload["scene_summaries"])
-                self.assertEqual(later["review_notes"], first_payload["review_notes"])
-                self.assertEqual(later["available_ids"]["characters"][0], "char_0003_001")
-                self.assertIn("later cumulative", later_system)
-                self.assertNotIn("later cumulative", first_system)
-                self.assertEqual({c["name"] for c in result["cast"]["characters"]}, {"Mara", "Jules", "Quinn"})
-                self.assertEqual(result["provenance"]["cast_reconciliation_rounds"], 2)
+                                           cast_reconciliation_rounds=3)
+                self.assertEqual(second.calls, [])
+                self.assertEqual(result, baseline)
                 self.assertEqual(self.source, original)
                 self.assertEqual(validate_document(result), [])
                 replay = CumulativeClient()
                 self.assertEqual(self.run_analysis(replay, whole_book_discovery=whole_book,
-                                                   cast_review_notes="Check overlooked distinct speakers.",
                                                    cast_reconciliation_rounds=2), result)
                 self.assertEqual(replay.calls, [])
 
-    def test_all_rounds_precede_identity_audit_and_preserve_pending_merges(self):
+    def test_initial_and_new_candidates_reach_identity_review_before_voice_design(self):
         class MergeClient(CumulativeClient):
             def reconcile(self, payload):
                 result = super().reconcile(payload)
                 if not payload["pending_identity_merges"]:
                     a, b = payload["known_cast"]["characters"][:2]
-                    result["merges"] = [{"from_character_id": b["id"], "into_character_id": a["id"],
-                                         "evidence": deepcopy(a["evidence"])}]
+                    if all(any(item["block_id"] == unit["block_id"] and item["quote"] in unit["text"]
+                               for unit in payload["target_units"]) for item in a["evidence"]):
+                        result["merges"] = [{"from_character_id": b["id"], "into_character_id": a["id"],
+                                             "evidence": deepcopy(a["evidence"])}]
                 return result
 
         client = MergeClient(duplicate=True)
@@ -113,29 +109,28 @@ class ReconciliationRoundsTests(unittest.TestCase):
         with patch("epub_tts_narrator.identity.audit_identities", side_effect=audit) as identity:
             document = self.run_analysis(client, identity_consensus=True, cast_reconciliation_rounds=3,
                                          cast_reconciliation_notes=["", "", "Verify remaining source identities."])
-        identity.assert_called_once()
-        reconciliations = [p for _, p in client.calls if p.get("mode") == "reconcile"]
-        self.assertEqual(len(reconciliations), 3)
-        self.assertEqual([len(p["known_cast"]["characters"]) for p in reconciliations], [2, 3, 4])
-        self.assertEqual(reconciliations[0]["pending_identity_merges"], [])
-        self.assertEqual(reconciliations[1]["pending_identity_merges"], seen[0][1])
-        self.assertEqual(reconciliations[2]["pending_identity_merges"], seen[0][1])
-        self.assertEqual(len(seen[0][1]), 1)
-        self.assertEqual(seen[0][2], 4, "Identity runs after discovery and all three reconciliations")
-        self.assertEqual(seen[0][0], document["cast"])
+        self.assertEqual(identity.call_count, 2)
+        reconciliations = [p for _, p in client.calls if p.get("mode") == "casting_coverage"]
+        self.assertEqual(len(reconciliations), 4)
+        self.assertEqual([len(p["cast_view"]["records"]["characters"]) for p in reconciliations], [2, 3, 4, 5])
+        self.assertTrue(seen[0][1])
+        self.assertTrue(seen[1][1])
+        self.assertEqual(seen[0][2], 1)
+        self.assertEqual(seen[1][2], 5)
+        self.assertEqual(seen[1][0], document["cast"])
         self.assertEqual(len(document["cast"]["characters"]), 5, "Deferred merge was not applied prematurely")
         self.assertEqual(validate_document(document), [])
 
-    def test_later_round_available_ids_follow_all_discovery_batches(self):
+    def test_repeated_response_local_ids_allocate_distinct_canonical_identities(self):
         for block in self.source["blocks"]:
             block["text"] += " Extra source context." * 24
         client = CumulativeClient()
         document = self.run_analysis(client, chunk_chars=256, cast_reconciliation_rounds=3)
-        discoveries = [p for _, p in client.calls if p.get("mode") == "discover"]
-        reconciliations = [p for _, p in client.calls if p.get("mode") == "reconcile"]
-        self.assertGreater(len(discoveries), 1)
-        self.assertEqual([p["available_ids"]["characters"][0] for p in reconciliations],
-                         [f"char_{len(discoveries) + round_:04d}_001" for round_ in (1, 2, 3)])
+        reconciliations = [p for _, p in client.calls if p.get("mode") == "casting_coverage"]
+        self.assertEqual(len(reconciliations), 4)
+        self.assertEqual({p["available_ids"]["characters"][0] for p in reconciliations}, {"c1"})
+        self.assertEqual(len({row["id"] for row in document["cast"]["characters"]}), 4)
+        self.assertEqual(len({row["voice_id"] for row in document["cast"]["characters"]}), 4)
         self.assertEqual(len(document["cast"]["characters"]), 4)
         self.assertEqual(validate_document(document), [])
 
@@ -147,7 +142,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
             self.assertEqual(client.calls, [])
         self.assertFalse(self.cache.exists())
 
-    def test_failure_in_later_round_stops_before_identity_or_attribution(self):
+    def test_failure_in_a_dirty_check_blocks_publication_and_preserves_accepted_work(self):
         class FailLater(CumulativeClient):
             def reconcile(self, payload):
                 if any(c["name"] == "Jules" for c in payload["known_cast"]["characters"]):
@@ -155,13 +150,14 @@ class ReconciliationRoundsTests(unittest.TestCase):
                 return super().reconcile(payload)
 
         client = FailLater()
-        with patch("epub_tts_narrator.identity.audit_identities") as identity:
+        with patch("epub_tts_narrator.identity.audit_identities",
+                   side_effect=lambda source, cast, *args, **kwargs: (cast, [], {"cases": []})) as identity:
             with self.assertRaises(ProviderError):
                 self.run_analysis(client, identity_consensus=True, cast_reconciliation_rounds=3)
-        identity.assert_not_called()
+        identity.assert_called_once()
         self.assertEqual([p.get("mode", "attribute") for _, p in client.calls],
-                         ["discover", "reconcile", "reconcile"])
-        first_cast = client.calls[-1][1]["known_cast"]
+                         ["casting_discovery", "casting_coverage", "casting_coverage"])
+        first_cast = client.calls[-1][1]["cast_view"]["records"]
         self.assertEqual({c["name"] for c in first_cast["characters"]}, {"Mara", "Jules"})
         # Successful responses remain cached, and a normal resume can finish.
         resumed = CumulativeClient()
@@ -169,7 +165,7 @@ class ReconciliationRoundsTests(unittest.TestCase):
                    side_effect=lambda source, cast, *args, **kwargs: (cast, [], {"cases": []})):
             result = self.run_analysis(resumed, cast_reconciliation_rounds=3, identity_consensus=True)
         self.assertEqual([p.get("mode", "attribute") for _, p in resumed.calls],
-                         ["reconcile", "reconcile", "voice_ensemble", "attribute"])
+                         ["casting_coverage", "casting_coverage", "casting_coverage", "voice_ensemble", "attribute"])
         self.assertEqual({c["name"] for c in result["cast"]["characters"]},
                          {"Mara", "Jules", "Quinn", "Rowan"})
         self.assertEqual(validate_document(result), [])

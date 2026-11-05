@@ -15,6 +15,7 @@ import re
 import unicodedata
 from threading import Event, Lock
 
+from .cast_scope import CAST_SCOPE_GUIDANCE, scoped_cast
 from .identity_prompts import (LENSES, PREPARE_SPLIT, SCAN, SERIES_RETRY_SCAN, SERIES_RETRY_VOTE,
                                SERIES_SCAN, SERIES_VOTE, VOTE)
 
@@ -240,13 +241,17 @@ def _series_scan_payload(source, cast, prior, registry_hash, units, characters, 
             "series_registry_fingerprint": registry_hash, "source_scope": scope}
 
 
-def _series_scan_requests(source, cast, prior, registry_hash, units, requests, whole_book, *, retry_fields=None):
-    """Prefer complete source; otherwise retain full selected blocks, visibly.
+def _series_scan_requests(source, cast, prior, registry_hash, units, requests, whole_book, *, retry_fields=None,
+                          adaptive=False):
+    """Prefer complete source; otherwise group characters via bisection, visibly.
 
-    When bounded mode cannot carry the whole book, each character gets its own
-    request. Cited blocks are mandatory; complete neighboring/mention blocks are
-    added within budget. Omitted context is explicitly disclosed, never treated
-    as evidence that the person is new. An oversized mandatory block fails.
+    Legacy bounded mode gives each character its own request. Adaptive mode
+    bisects the character list instead, so each request carries a group under
+    complete source until a single character still cannot fit; only that leaf
+    falls back to its selected blocks. Cited blocks are mandatory; complete
+    neighboring/mention blocks are added within budget. Omitted context is
+    explicitly disclosed, never treated as evidence that the person is new. An
+    oversized mandatory block fails.
     """
     characters = cast["characters"]
     if not characters:
@@ -268,7 +273,7 @@ def _series_scan_requests(source, cast, prior, registry_hash, units, requests, w
         return [{"unit_id": "series_context_" + blocks[index]["id"], "block_id": blocks[index]["id"],
                  "chapter_id": blocks[index]["chapter_id"], "start": 0, "text": blocks[index]["text"]}
                 for index in sorted(indexes)]
-    for character in characters:
+    def character_request(character):
         selected = {by_id[item["block_id"]] for item in character["evidence"]}
         names = [name for name in [character["name"], *character["aliases"]] if name.strip()]
         patterns = [re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE) for name in names]
@@ -306,17 +311,31 @@ def _series_scan_requests(source, cast, prior, registry_hash, units, requests, w
         payload["context_selection"].update(selected_source_blocks=len(selected), omitted_source_blocks=len(blocks) - len(selected))
         if len(selected) == len(blocks):
             payload["source_scope"] = "complete_source"
-        result.append(payload)
+        return payload
+    if adaptive:
+        def grouped(group):
+            payload = _series_scan_payload(source, cast, prior, registry_hash, units, group, "complete_source")
+            if retry_fields:
+                payload.update(deepcopy(retry_fields))
+            if size(payload) <= budget:
+                return [payload]
+            if len(group) == 1:
+                return [character_request(group[0])]
+            middle = len(group) // 2
+            return grouped(group[:middle]) + grouped(group[middle:])
+        return grouped(characters)
+    for character in characters:
+        result.append(character_request(character))
     return result
 
 
 def _scan_series_identities(source, cast, registry, prior, requests, all_units, whole_book, progress,
-                            *, review_round=1, feedback=None, review_notes=""):
+                            *, review_round=1, feedback=None, review_notes="", adaptive=False):
     registry_hash = _fingerprint(registry)
     retry_fields = ({"series_review_round": review_round, "series_review_feedback": deepcopy(feedback or []),
                      "review_notes": review_notes} if review_round > 1 else None)
-    payloads = _series_scan_requests(source, cast, prior, registry_hash, all_units, requests, whole_book,
-                                    retry_fields=retry_fields)
+    payloads = _series_scan_requests(source, cast, prior, registry_hash, all_units, requests,
+                                     whole_book and not adaptive, retry_fields=retry_fields, adaptive=adaptive)
     provenance = {"version": SERIES_SCAN_VERSION, "source_fingerprint": _fingerprint(source),
                   "input_cast_fingerprint": _fingerprint(cast), "series_registry_fingerprint": registry_hash,
                   "requests": [], "decisions": [], "request_count": len(payloads)}
@@ -474,10 +493,78 @@ def _issue(case, reason):
             "reason": f"{case['id']}: {reason}"}
 
 
+def _vote_payload(cast_view, case, reviewer, lens, *, source_fingerprint, cast_fingerprint):
+    """One reviewer's request; identical key order preserves cache identities.
+
+    ``cast_view`` is the original cast supplied to this reviewer — the complete
+    cast, or a complete-record subset disclosed by an attached cast_scope
+    object — while ``cast_fingerprint`` always identifies the audit's complete
+    original cast so votes stay auditable against it.
+    """
+    payload = {"source_units": case["source_units"], "original_cast": cast_view}
+    if "vote_scope" in case:
+        payload["cast_scope"] = deepcopy(case["vote_scope"])
+    if "prior_series" in case:
+        payload["prior_series"] = case["prior_series"]
+    payload.update({"mode": "identity_vote", "identity_version": IDENTITY_VERSION,
+               "source_fingerprint": source_fingerprint,
+               "original_cast_fingerprint": cast_fingerprint})
+    if "prior_series" in case:
+        payload["series_registry_fingerprint"] = case["series_registry_fingerprint"]
+    if "proposed_scope" in case:
+        payload["proposed_cast_scope"] = deepcopy(case["proposed_scope"])
+    payload.update({"case": case["case"], "proposed_cast": case["proposed_cast"],
+                "patch": case["patch"],
+                "proposed_cast_fingerprint": case.get("canonical_proposed_fingerprint", _fingerprint(case["proposed_cast"])),
+               "patch_fingerprint": _fingerprint(case["patch"]),
+                "reviewer_id": reviewer, "lens": lens})
+    review_round = case.get("series_review_round", 1)
+    if review_round > 1:
+        # Fresh blind samples even if the second scan proposes an identical
+        # cast. The round discriminator leaves first-round payloads intact.
+        payload["series_review_round"] = review_round
+    return payload
+
+
+def _vote_cast_view(requests, full_cast, prepared, system, *, source_fingerprint, cast_fingerprint, source):
+    """Choose one case's complete affected records, never unrelated cast context.
+
+    Returns ``(cast_view, scope, viable)``. A False ``viable`` result means even
+    the explicit complete-record scope exceeds the request budget; the case
+    must stay unresolved without dispatching a partial jury. The size probe
+    uses the longest reviewer identity, so a viable full-cast decision always
+    fits every reviewer's actual payload.
+    """
+    limit = getattr(requests, "max_request_chars", 200000)
+    proposed = prepared["proposed_cast"]
+    prepared["canonical_proposed_fingerprint"] = _fingerprint(proposed)
+    affected_ids = set(prepared["case"]["character_ids"])
+    affected_ids.update(row["id"] for row in prepared["patch"].get("characters", []))
+    proposed_ids = {row["id"] for row in proposed["characters"]}
+    proposed_view, proposed_scope = scoped_cast(
+        source, proposed, (), character_ids=sorted(affected_ids & proposed_ids), identity_case=True)
+    prepared["proposed_cast"], prepared["proposed_scope"] = proposed_view, proposed_scope
+    reviewer, lens = max(LENSES, key=lambda row: len(row[0]) + len(row[1]))
+    def size(cast_view, scope, prompt):
+        probe = dict(prepared, vote_cast=cast_view)
+        if scope is not None:
+            probe["vote_scope"] = scope
+        payload = _vote_payload(cast_view, probe, reviewer, lens,
+                                source_fingerprint=source_fingerprint, cast_fingerprint=cast_fingerprint)
+        return len(prompt) + len(json.dumps(payload, ensure_ascii=False))
+    view, scope = scoped_cast(source, full_cast, (),
+                              character_ids=sorted(set(prepared["case"]["character_ids"])), identity_case=True)
+    if size(view, scope, system + CAST_SCOPE_GUIDANCE) <= limit:
+        return view, scope, True
+    return view, scope, False
+
+
 def _votes(requests, source, cast, cases, workers, *, progress=lambda message: None, label="Identity jury"):
     """The immutable request snapshot prevents peer votes or earlier edits leaking in."""
+    from .identity_vote_validation import make_vote_accept
     tasks = [(case, reviewer, lens) for case in cases for reviewer, lens in LENSES]
     cancelled, failure_lock, failures = Event(), Lock(), []
+    source_hash, cast_hash = _fingerprint(source), _fingerprint(cast)
 
     def review(task):
         case, reviewer, lens = task
@@ -485,49 +572,23 @@ def _votes(requests, source, cast, cases, workers, *, progress=lambda message: N
         # long shared source/reference data first, then the candidate, and the
         # private reviewer identity last. Fingerprints sort object keys, so this
         # ordering preserves existing validated response-cache identities.
-        payload = {"source_units": case["source_units"], "original_cast": cast}
-        if "prior_series" in case:
-            payload["prior_series"] = case["prior_series"]
-        payload.update({"mode": "identity_vote", "identity_version": IDENTITY_VERSION,
-                   "source_fingerprint": _fingerprint(source),
-                   "original_cast_fingerprint": _fingerprint(cast)})
-        if "prior_series" in case:
-            payload["series_registry_fingerprint"] = case["series_registry_fingerprint"]
-        payload.update({"case": case["case"], "proposed_cast": case["proposed_cast"],
-                   "patch": case["patch"],
-                   "proposed_cast_fingerprint": _fingerprint(case["proposed_cast"]),
-                   "patch_fingerprint": _fingerprint(case["patch"]),
-                   "reviewer_id": reviewer, "lens": lens})
+        cast_view = case.get("vote_cast", cast)
+        payload = _vote_payload(cast_view, case, reviewer, lens,
+                                source_fingerprint=source_hash, cast_fingerprint=cast_hash)
         review_round = case.get("series_review_round", 1)
-        if review_round > 1:
-            # Fresh blind samples even if the second scan proposes an identical
-            # cast. The round discriminator leaves first-round payloads intact.
-            payload["series_review_round"] = review_round
 
-        def accept(response):
-            if not isinstance(response, dict) or response.get("verdict") not in {"approve", "reject", "uncertain"}:
-                raise ValueError("Identity reviewer must return approve, reject, or uncertain")
-            if not isinstance(response.get("reason"), str) or not response["reason"].strip() or len(response["reason"]) > 2400:
-                raise ValueError("Identity review needs a concise source-bound reason")
-            _evidence(response.get("evidence"), source, case["source_units"])
-            if response["verdict"] == "approve" and not _has_context(response["evidence"], cast, case["case"],
-                    case.get("prior_series"), case["proposed_cast"]):
-                raise ValueError("Identity approval needs narrative evidence beyond names or aliases alone")
-            vote = {"reviewer_id": reviewer, "lens": lens, "verdict": response["verdict"],
-                    "reason": response["reason"], "evidence": deepcopy(response["evidence"]),
-                    "request_fingerprint": _fingerprint(payload),
-                    "source_fingerprint": payload["source_fingerprint"],
-                    "original_cast_fingerprint": payload["original_cast_fingerprint"],
-                    "proposed_cast_fingerprint": payload["proposed_cast_fingerprint"],
-                    "patch_fingerprint": payload["patch_fingerprint"]}
-            if "series_registry_fingerprint" in payload:
-                vote["series_registry_fingerprint"] = payload["series_registry_fingerprint"]
-            if review_round > 1:
-                vote["series_review_round"] = review_round
-            return vote
+        accept = make_vote_accept(
+            reviewer=reviewer, lens=lens, source=source, source_units=case["source_units"],
+            cast_view=cast_view, identity_case=case["case"], proposed_cast=case["proposed_cast"],
+            prior_series=case.get("prior_series"), request_fingerprint=_fingerprint(payload),
+            fingerprints={key: payload[key] for key in ("source_fingerprint", "original_cast_fingerprint",
+                                                       "proposed_cast_fingerprint", "patch_fingerprint")},
+            series_registry_fingerprint=payload.get("series_registry_fingerprint"), review_round=review_round)
 
         try:
             system = (SERIES_RETRY_VOTE if review_round > 1 else SERIES_VOTE) if "prior_series" in case else VOTE
+            if "vote_scope" in case:
+                system += CAST_SCOPE_GUIDANCE
             vote = requests.run(system, payload, accept, cancelled=cancelled)
         except ValueError as exc:
             # Exhausted schema repairs or a context-budget failure cannot vote.
@@ -597,8 +658,89 @@ def _unanimous(votes):
     return len(votes) == 3 and {vote["reviewer_id"] for vote in votes} == {row[0] for row in LENSES} and all(vote["verdict"] == "approve" for vote in votes)
 
 
+_BUDGET_UNDISPATCHED = ("The complete case records exceed the request budget even with an explicit "
+                        "complete-record cast scope; no reviewer was dispatched and the original cast is retained.")
+
+
+def _adaptive_case_context(source, cast, case, all_units):
+    view, _ = scoped_cast(source, cast, (), character_ids=case["character_ids"], identity_case=True)
+    return _source_context(source, view, dict(case, scan_indexes=[]), [], all_units, False)
+
+
+def _adaptive_identity_scans(source, initial, all_units, requests, progress, *, regions=None):
+    """Run adaptive book scans; return one ``(payload, scope, found, group)`` leaf per actual scan, in order.
+
+    Each leaf carries the full cast when the request fits and a complete-record
+    cast scope otherwise. Every character is visible in at least one executed
+    scan: additional candidate groups are scheduled — and their coverage
+    verified — for anyone the regions did not include, instead of assuming the
+    lexical scope was complete. No record or evidence is ever trimmed.
+    """
+    from .adaptive_requests import run_partitioned, request_size
+    limit = getattr(requests, "max_request_chars", 200000)
+    system = SCAN + CAST_SCOPE_GUIDANCE
+    source_hash, cast_hash = _fingerprint(source), _fingerprint(initial)
+    all_ids = sorted(row["id"] for row in initial["characters"])
+    records = []
+
+    def build(units, group=()):
+        def construct(cast_view, scope):
+            payload = {"mode": "identity_scan", "identity_version": IDENTITY_VERSION,
+                       "source_fingerprint": source_hash, "original_cast_fingerprint": cast_hash,
+                       "original_cast": cast_view, "source_units": units,
+                       "source_scope": "complete_source" if units == all_units else "source_batch"}
+            if scope is not None:
+                payload["cast_scope"] = scope
+            return payload
+        full = construct(initial, {"complete": True, "full_cast_fingerprint": cast_hash,
+                                   "included_ids": list(all_ids),
+                                   "omitted_counts": {"characters": 0, "roles": 0, "voices": 0},
+                                   "selection": "complete cast; every character, role, and voice record supplied"})
+        if request_size(system, full) <= limit:
+            return system, full
+        view, scope = scoped_cast(source, initial, units, character_ids=sorted(set(group)))
+        return system, construct(view, scope)
+
+    def execute(system_prompt, payload):
+        found = requests.run(system_prompt, payload, lambda response: _accept_scan(
+            response, source, payload["original_cast"], payload["source_units"]))
+        records.append((payload, payload["cast_scope"], found))
+        return found
+
+    def scan(items, label, group=()):
+        start = len(records)
+        run_partitioned(items, lambda units: build(units, group), execute,
+                        progress=progress, label=label, requests=requests)
+        return [(payload, scope, found, tuple(group)) for payload, scope, found in records[start:]]
+
+    leaves = []
+    for region in (regions if regions is not None else [all_units]):
+        leaves.extend(scan(region, "Adaptive identity scan"))
+    covered = set()
+    for payload, scope, found, group in leaves:
+        covered.update(scope["included_ids"])
+    # Explicit regions (dirty re-audit) are the caller's targeted selection; the
+    # candidate-coverage guarantee applies to computed adaptive book scans.
+    if regions is not None:
+        return leaves
+    missing = [row["id"] for row in initial["characters"] if row["id"] not in covered]
+    if missing:
+        progress("Scheduling additional identity candidate group(s) for " + str(len(missing))
+                 + " character(s) not visible in any region")
+        added = scan(all_units, "Adaptive identity candidate group", missing)
+        leaves.extend(added)
+        for payload, scope, found, group in added:
+            covered.update(scope["included_ids"])
+        still = [row["id"] for row in initial["characters"] if row["id"] not in covered]
+        if still:
+            raise ValueError("Identity candidate(s) " + ", ".join(still) + " did not occur in any executed "
+                             "adaptive scan; candidate coverage is a precondition, not an assumption")
+    return leaves
+
+
 def audit_identities(source, cast, requests, batches, *, whole_book=False, pending_merges=(),
-                     series_registry=None, workers=1, review_notes="", progress=lambda message: None):
+                      series_registry=None, workers=1, review_notes="", progress=lambda message: None,
+                      adaptive=False, scan_regions=None, collision_state=None, resolve_candidate_collisions=True):
     """Return an audited copy, new unresolved issue specs, and reproducible evidence.
 
 Scans and candidate preparation finish before blind judging. Mutations are then
@@ -610,14 +752,35 @@ applied only for disjoint, source-valid candidates with unanimous approval.
         raise ValueError("Identity workers must be an integer from 1 to 8")
     if not isinstance(review_notes, str):
         raise ValueError("Identity review_notes must be a string")
+    if not isinstance(adaptive, bool):
+        raise ValueError("Identity adaptive must be a boolean")
+    if type(resolve_candidate_collisions) is not bool:
+        raise ValueError("Identity resolve_candidate_collisions must be a boolean")
+    if collision_state is not None and not adaptive:
+        raise ValueError("Identity collision_state requires adaptive identity review")
     check_cast(source, cast)
     _validate_units(source, batches)
     initial = deepcopy(cast)
     all_units = [unit for batch in batches for unit in batch]
+    if scan_regions is not None:
+        if not adaptive:
+            raise ValueError("Identity scan_regions requires adaptive identity scans")
+        if not isinstance(scan_regions, list) or any(
+                not isinstance(region, list) or any(not isinstance(unit, dict) for unit in region)
+                for region in scan_regions):
+            raise ValueError("Identity scan_regions must be a list of source-unit region lists")
+        by_id = {unit["unit_id"]: unit for unit in all_units}
+        for region in scan_regions:
+            for unit in region:
+                if by_id.get(unit.get("unit_id")) != unit:
+                    raise ValueError("Identity scan_regions may only contain source units from the audited batches")
     scans = [all_units] if whole_book else batches
     if not scans or not all_units:
         raise ValueError("Identity audit needs source units")
     source_hash, cast_hash = _fingerprint(source), _fingerprint(initial)
+    if adaptive:
+        from .identity_collisions import collision_state_for_source
+        collision_state = collision_state_for_source(collision_state, source_hash)
     provenance = {"version": IDENTITY_VERSION, "policy": "unanimous_3", "source_fingerprint": source_hash,
                   "original_cast_fingerprint": cast_hash, "original_cast": deepcopy(initial),
                   "scans": [], "cases": [], "series_cases": []}
@@ -635,15 +798,29 @@ applied only for disjoint, source-valid candidates with unanimous approval.
         else:
             cases[key] = dict(deepcopy(case), id=_case_id(case), scan_indexes=list(indexes))
 
-    for index, units in enumerate(scans):
-        progress(f"Auditing character identities {index + 1}/{len(scans)}")
-        payload = {"mode": "identity_scan", "identity_version": IDENTITY_VERSION,
-                   "source_fingerprint": source_hash, "original_cast_fingerprint": cast_hash,
-                   "original_cast": initial, "source_units": units}
-        found = requests.run(SCAN, payload, lambda response: _accept_scan(response, source, initial, units))
-        provenance["scans"].append({"index": index, "request_fingerprint": _fingerprint(payload), "case_count": len(found)})
-        for case in found:
-            add(case, range(len(batches)) if whole_book else [index])
+    context_batches, context_whole = batches, whole_book
+    if adaptive:
+        leaves = _adaptive_identity_scans(source, initial, all_units, requests, progress, regions=scan_regions)
+        for leaf_index, (payload, scope, found, group) in enumerate(leaves):
+            progress(f"Auditing character identities {leaf_index + 1}/{len(leaves)}: "
+                     f"{len(payload['source_units'])} source unit(s), {len(scope['included_ids'])} visible cast record(s)")
+            provenance["scans"].append({"index": leaf_index, "request_fingerprint": _fingerprint(payload),
+                                        "case_count": len(found), "source_scope": payload["source_scope"],
+                                        "cast_scope": deepcopy(scope), "candidate_character_ids": list(group)})
+            for found_case in found:
+                add(found_case, [leaf_index])
+        context_batches, context_whole = [payload["source_units"] for payload, _, _, _ in leaves], False
+    else:
+        for index, units in enumerate(scans):
+            progress(f"Auditing character identities {index + 1}/{len(scans)}")
+            payload = {"mode": "identity_scan", "identity_version": IDENTITY_VERSION,
+                       "source_fingerprint": source_hash, "original_cast_fingerprint": cast_hash,
+                       "original_cast": initial, "source_units": units,
+                       "source_scope": "complete_source" if len(scans) == 1 else "source_batch"}
+            found = requests.run(SCAN, payload, lambda response: _accept_scan(response, source, initial, units))
+            provenance["scans"].append({"index": index, "request_fingerprint": _fingerprint(payload), "case_count": len(found)})
+            for case in found:
+                add(case, range(len(batches)) if whole_book else [index])
     known = {row["id"] for row in initial["characters"]}
     for merge in pending_merges:
         origin, target = merge.get("from_character_id"), merge.get("into_character_id")
@@ -653,8 +830,9 @@ applied only for disjoint, source-valid candidates with unanimous approval.
         add({"kind": "merge", "character_ids": sorted((origin, target)),
              "reason": "Discovery proposed that these records represent the same person; independent verification is required.",
              "evidence": deepcopy(merge["evidence"]), "merge": deepcopy(merge), "origin": "pending_discovery_merge"})
-    for case in _collision_cases(initial, list(cases.values())):
-        add(case)
+    if not adaptive:
+        for case in _collision_cases(initial, list(cases.values())):
+            add(case)
     cases = list(cases.values())
     prepared, issues = [], []
     for case in cases:
@@ -665,16 +843,37 @@ applied only for disjoint, source-valid candidates with unanimous approval.
             record["status"] = "unresolved"
             issues.append(_issue(case, case["reason"]))
             continue
-        units = _source_context(source, initial, case, batches, all_units, whole_book)
+        if adaptive and case["kind"] == "merge":
+            from .identity_collisions import prior_merge_conflict
+            if prior_merge_conflict(collision_state, case["character_ids"], source_hash):
+                record["status"] = "prior_identity_conflict"
+                issues.append(_issue(case, "A retained negative identity constraint conflicts with this merge; "
+                                     "source records remain separate for review."))
+                continue
+        units = (_adaptive_case_context(source, initial, case, all_units) if adaptive else
+                 _source_context(source, initial, case, context_batches, all_units, context_whole))
         available = {"characters": [], "roles": [], "voices": []}
+        split_payload = split_system = None
+        if case["kind"] == "split":
+            available = _split_ids(case, initial)
+            split_payload = {"mode": "identity_prepare_split", "identity_version": IDENTITY_VERSION,
+                             "case": case, "original_cast": initial, "available_ids": available,
+                             "source_units": units, "source_fingerprint": source_hash,
+                             "original_cast_fingerprint": cast_hash}
+            split_system = PREPARE_SPLIT
+            if adaptive:
+                limit = getattr(requests, "max_request_chars", 200000)
+                view, scope = scoped_cast(source, initial, (), character_ids=case["character_ids"], identity_case=True)
+                split_payload["original_cast"] = view
+                split_payload["cast_scope"] = scope
+                split_system = PREPARE_SPLIT + CAST_SCOPE_GUIDANCE
+                if len(split_system) + len(json.dumps(split_payload, ensure_ascii=False)) > limit:
+                    record["status"] = "unresolved"
+                    issues.append(_issue(case, _BUDGET_UNDISPATCHED))
+                    continue
         try:
             if case["kind"] == "split":
-                available = _split_ids(case, initial)
-                payload = {"mode": "identity_prepare_split", "identity_version": IDENTITY_VERSION,
-                           "case": case, "original_cast": initial, "available_ids": available,
-                           "source_units": units, "source_fingerprint": source_hash,
-                           "original_cast_fingerprint": cast_hash}
-                patch, proposed, extra = requests.run(PREPARE_SPLIT, payload,
+                patch, proposed, extra = requests.run(split_system, split_payload,
                     lambda response: _accept_split(response, source, initial, case, units, available))
             else:
                 merges = []
@@ -684,8 +883,20 @@ applied only for disjoint, source-valid candidates with unanimous approval.
                 patch = _empty_patch(merges=merges)
                 proposed, extra, _ = merge_patch(source, initial, patch, available)
             record.update(patch=deepcopy(patch), proposed_cast_fingerprint=_fingerprint(proposed))
-            prepared.append({"case": case, "patch": patch, "proposed_cast": proposed,
-                             "source_units": units, "available": available, "issues": extra, "record": record})
+            candidate = {"case": case, "patch": patch, "proposed_cast": proposed,
+                         "source_units": units, "available": available, "issues": extra, "record": record}
+            if adaptive:
+                vote_cast, vote_scope, viable = _vote_cast_view(requests, initial, candidate, VOTE,
+                                                                source_fingerprint=source_hash,
+                                                                cast_fingerprint=cast_hash, source=source)
+                if not viable:
+                    record["status"] = "unresolved"
+                    issues.append(_issue(case, _BUDGET_UNDISPATCHED))
+                    continue
+                candidate["vote_cast"] = vote_cast
+                if vote_scope is not None:
+                    candidate["vote_scope"] = vote_scope
+            prepared.append(candidate)
         except ValueError as exc:
             record.update(status="invalid_proposal", error=str(exc))
             issues.append(_issue(case, "Proposal failed deterministic validation: " + str(exc)))
@@ -718,6 +929,16 @@ applied only for disjoint, source-valid candidates with unanimous approval.
             # approved patch. Existing caller issues are never touched here.
             issues.extend(issue for issue in new_issues if case["kind"] != "merge" or issue["kind"] != "identity_merge")
             record["status"] = "applied" if case["kind"] in {"merge", "split"} else "confirmed_separate"
+    if adaptive and resolve_candidate_collisions:
+        from .identity_collisions import resolve_collisions
+        updated, collision_issues, collision_provenance = resolve_collisions(
+            source, updated, requests, original_cast=initial, source_cases=provenance["cases"],
+            prior=collision_state, workers=workers, progress=progress)
+        issues.extend(collision_issues)
+        provenance["collision_resolution"] = collision_provenance
+        provenance["cases"].extend(deepcopy(collision_provenance["cases"]))
+    elif adaptive and collision_state is not None:
+        provenance["collision_resolution"] = {"state": deepcopy(collision_state)}
     if series_registry is not None:
         prior = series_context(series_registry, source)
         provenance["series_registry_fingerprint"] = _fingerprint(series_registry)
@@ -726,14 +947,15 @@ applied only for disjoint, source-valid candidates with unanimous approval.
             round_issues = []
             if prior["prior_books"]:
                 updated, continuity_issues, continuity_scan = _scan_series_identities(
-                    source, updated, series_registry, prior, requests, all_units, whole_book, progress,
-                    review_round=review_round, feedback=feedback, review_notes=review_notes)
+                    source, updated, series_registry, prior, requests, all_units, whole_book and not adaptive, progress,
+                    review_round=review_round, feedback=feedback, review_notes=review_notes, adaptive=adaptive)
                 round_issues.extend(continuity_issues)
                 provenance["series_scan"] = continuity_scan
                 provenance["series_review_rounds"] = review_round
             validate_series_proposals(source, updated, series_registry)
             series_initial = deepcopy(updated)
             series_prepared = []
+            series_hash = _fingerprint(series_initial)
             provenance["series_cases"] = []
             for character in series_initial["characters"]:
                 proposal = character.get("series_identity")
@@ -748,9 +970,24 @@ applied only for disjoint, source-valid candidates with unanimous approval.
                 candidate = {"case": case, "patch": {"series_identity": deepcopy(proposal)},
                     "proposed_cast": series_initial, "prior_series": prior, "record": record,
                     "series_registry_fingerprint": provenance["series_registry_fingerprint"],
-                    "source_units": _source_context(source, series_initial, case, batches, all_units, whole_book)}
+                    "source_units": (_adaptive_case_context(source, series_initial, case, all_units) if adaptive else
+                                     _source_context(source, series_initial, case, context_batches, all_units, context_whole))}
                 if review_round > 1:
                     candidate["series_review_round"] = review_round
+                if adaptive:
+                    system = SERIES_RETRY_VOTE if review_round > 1 else SERIES_VOTE
+                    vote_cast, vote_scope, viable = _vote_cast_view(requests, series_initial, candidate, system,
+                                                                    source_fingerprint=source_hash,
+                                                                    cast_fingerprint=series_hash, source=source)
+                    if not viable:
+                        record.update(votes=[], status="unresolved")
+                        next(row for row in updated["characters"] if row["id"] == character["id"])["series_identity"].update(
+                            basis="uncertain", review_required=True)
+                        round_issues.append(_issue(case, _BUDGET_UNDISPATCHED))
+                        continue
+                    candidate["vote_cast"] = vote_cast
+                    if vote_scope is not None:
+                        candidate["vote_scope"] = vote_scope
                 series_prepared.append(candidate)
             if series_prepared:
                 progress(f"Independently reviewing {len(series_prepared)} series identity matches (round {review_round}/2)")

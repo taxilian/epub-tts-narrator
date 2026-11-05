@@ -64,11 +64,8 @@ threshold = 0.75
 chunk_chars = 12000
 max_request_chars = 200000
 repair_attempts = 1
-# Whole-book discovery requires a model context large enough for all source text.
-whole_book_discovery = false
-# Sequential cast reconciliation passes (1–3). Each sees the preceding accepted cast.
-# Each extra pass adds one baseline model request; identity review follows all passes.
-cast_reconciliation_rounds = 1
+# Casting automatically partitions the book and verifies source-backed findings.
+# No whole-book switch, reconciliation-round count, or partition limit is needed.
 # Scan for merged/split identities and require three independent approvals.
 # Disabling this skips the additional identity checks; merges remain reviewable.
 identity_consensus = true

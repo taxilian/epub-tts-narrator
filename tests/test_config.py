@@ -142,17 +142,17 @@ headings_and_nonstory_text = "The narrator reads headings."
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "cast_reconciliation_rounds"):
                 self.load_text(f"[analysis]\ncast_reconciliation_rounds = {value}")
 
-    def test_reconciliation_notes_are_bounded_per_pass_string_lists(self):
+    def test_reconciliation_notes_are_string_lists_not_a_round_quota(self):
         settings = self.load_text('[analysis]\ncast_reconciliation_notes = ["", "", "Final source lead."]\n'
                                   'cast_reconciliation_rounds = 3\n')["analysis"]
         self.assertEqual(settings["cast_reconciliation_notes"], ["", "", "Final source lead."])
         for value in ('"private-fixture-value"', "true", "3", "[1]", "[true]", '[["nested"]]',
-                      '{ first = "lead" }', '["", "", "", ""]'):
+                      '{ first = "lead" }'):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "cast_reconciliation_notes") as error:
                 self.load_text(f"[analysis]\ncast_reconciliation_rounds = 3\ncast_reconciliation_notes = {value}\n")
             self.assertNotIn("private-fixture-value", str(error.exception))
-        with self.assertRaisesRegex(ValueError, "at most"):
-            self.load_text('[analysis]\ncast_reconciliation_notes = ["", ""]\n')
+        many = self.load_text('[analysis]\ncast_reconciliation_notes = ["a", "b", "c", "d", "e"]\n')
+        self.assertEqual(many["analysis"]["cast_reconciliation_notes"], ["a", "b", "c", "d", "e"])
 
     def test_explicit_missing_or_unreadable_path_is_an_error(self):
         missing = self.root / "missing-secret-name.toml"

@@ -28,16 +28,18 @@ def plan_analysis(source, settings, policy, registry=None):
         "series_continuity_rounds_maximum": 2 if series_scans else 0,
         "attribution_review": review, "attribution_review_scan_requests": review_scans,
         "attribution_review_verdicts_per_proposal": 3 if review else 0,
-        "voice_ensemble_requests_minimum": 1, "baseline_model_requests": baseline,
+        "voice_ensemble_requests_estimate": 1, "baseline_model_requests": baseline,
+        "baseline_assumptions": {"nonempty_cast": True, "ensemble_design_needed": True},
         "request_count_is_estimate": True,
         "note": (
-            "The baseline is a lower-bound estimate before cache reuse, repairs and retries. "
+            "The baseline is a planning estimate, not a guaranteed lower or upper bound, before cache reuse, repairs and retries. "
             "Discovery, identity scans and source-backed coverage checks use automatic source-sized partitions, "
             "not attribution-sized discovery batches or a configured number of reconciliation rounds. "
             "Each initial source partition tree has at most 2N-1 nodes for N original source units; "
             "local preflight splits make no model call. Provider capacity and output truncation can add splits. "
             "Coverage repairs follow distinct source-anchored findings and stop on repeated findings or no progress. "
-            "Identity cases add three blind verdicts and split cases may add one preparation request. "
+            "Identity cases need three blind verdicts and split cases may add one preparation request. "
+            "Candidate collision reviews use bounded matching waves rather than all name pairs, and may batch disjoint cases. "
             "Series continuity, voice-target grouping, speaker completion and auditions add data-dependent work. "
             "The baseline assumes voices need design; that stage can instead be skipped. "
             "Characters are not tokens. No book-level request, partition or repair quota needs configuring."

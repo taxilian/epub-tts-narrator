@@ -46,10 +46,10 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                     cast_reconciliation_rounds=2,
                 )
                 modes = [payload.get("mode") for _, payload in client.calls]
-                self.assertEqual(modes.count("discover"), 1)
-                self.assertEqual(modes.count("reconcile"), 2)
+                self.assertEqual(modes.count("casting_discovery"), 1)
+                self.assertEqual(modes.count("casting_coverage"), 1)
                 self.assertEqual(modes.count("voice_ensemble"), 1)
-                initial = next(payload for _, payload in client.calls if payload.get("mode") == "discover")
+                initial = next(payload for _, payload in client.calls if payload.get("mode") == "casting_discovery")
                 # No source evidence has been read when this cast is seeded.
                 # Neither discovery route should inherit an invented accent.
                 self.assertEqual(initial["known_cast"]["characters"], [])
@@ -59,13 +59,17 @@ class VoiceProfileGuidanceTests(unittest.TestCase):
                     if payload.get("mode") == "voice_ensemble":
                         self.assertEqual(system.count(VOICE_PROFILE_GUIDANCE), 1)
                         self.assertEqual(system.count(VOICE_PROFILE_RECONCILIATION), 1)
-                    elif payload.get("mode") in {"discover", "reconcile"}:
+                    elif payload.get("mode") in {"casting_discovery", "casting_coverage"}:
                         self.assertNotIn(VOICE_PROFILE_GUIDANCE, system)
                         self.assertNotIn(VOICE_PROFILE_RECONCILIATION, system)
                     else:
                         # Acoustic rewriting is not an attribution task.
                         self.assertNotIn(VOICE_PROFILE_GUIDANCE, system)
-                        self.assertEqual(payload["final_cast"], document["cast"])
+                        for collection in ("characters", "roles", "voices"):
+                            self.assertEqual([item["id"] for item in payload["final_cast"][collection]],
+                                             [item["id"] for item in document["cast"][collection]])
+                        self.assertTrue(all("description" not in voice and "speechTraits" not in voice
+                                            for voice in payload["final_cast"]["voices"]))
 
     def test_new_split_voice_gets_contract_without_recasting_existing_person(self):
         source, cast = fixture(("Mara",))

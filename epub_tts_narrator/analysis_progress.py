@@ -39,10 +39,10 @@ _IDENTITY_FIELDS = ("source_fingerprint", "prompt_version", "analyzer_version",
 _ERROR_LIMIT = 2000
 
 
-_OPTIONS_FIELDS = ("chunk_chars", "repair_attempts", "max_request_chars", "whole_book_discovery",
+_OPTIONS_FIELDS = ("chunk_chars", "repair_attempts", "max_request_chars",
                    "attribution_workers", "identity_consensus", "attribution_review",
                    "attribution_review_chunk_chars", "attribution_review_notes", "cast_review_notes",
-                   "cast_reconciliation_rounds", "cast_reconciliation_notes")
+                   "cast_reconciliation_notes")
 
 
 def analysis_options_fingerprint(settings, performance_policy, edits_fingerprint=None):
@@ -50,6 +50,7 @@ def analysis_options_fingerprint(settings, performance_policy, edits_fingerprint
     options = {field: settings.get(field) for field in _OPTIONS_FIELDS}
     options["performance_policy"] = performance_policy
     options["edits"] = edits_fingerprint
+    options["casting_policy"] = "adaptive_evidence_first_v1"
     return fingerprint(options)
 
 

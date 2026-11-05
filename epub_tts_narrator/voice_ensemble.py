@@ -17,7 +17,7 @@ import unicodedata
 from .pipeline import check_cast, fingerprint
 from .speech_traits import validate_speech_traits
 from .voice_contrast import VERSION as CONTRAST_VERSION, contrast_findings
-from .voice_ensemble_prompts import ENSEMBLE_SYSTEM
+from .voice_ensemble_prompts import COMPACT_CONTRAST_GUIDANCE, ENSEMBLE_SYSTEM
 from .voice_prompt_refresh import _record_context
 
 
@@ -48,6 +48,23 @@ def _plain_text(value, limit):
 def _plain_reason(value):
     return (isinstance(value, str) and 0 < len(value) <= 1000 and value == value.strip()
             and not any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value))
+
+
+def _contrast_context(findings):
+    """Losslessly group pair findings; keep the original wire shape when smaller."""
+    voice_ids = list(dict.fromkeys(voice_id for finding in findings for voice_id in finding["voice_ids"]))
+    indexes = {voice_id: index for index, voice_id in enumerate(voice_ids)}
+    groups = {}
+    for finding in findings:
+        key = (finding["kind"], tuple(finding["matching_dimensions"]), tuple(finding["differing_dimensions"]))
+        if key not in groups:
+            groups[key] = {"kind": finding["kind"],
+                           "matching_dimensions": deepcopy(finding["matching_dimensions"]),
+                           "differing_dimensions": deepcopy(finding["differing_dimensions"]), "pairs": []}
+        groups[key]["pairs"].append([indexes[voice_id] for voice_id in finding["voice_ids"]])
+    compact = {"voice_ids": voice_ids, "groups": list(groups.values())}
+    return (compact if len(json.dumps(compact, ensure_ascii=False)) < len(json.dumps(findings, ensure_ascii=False))
+            else deepcopy(findings))
 
 
 def _payload(source, cast, policy, findings):
@@ -153,8 +170,11 @@ def _validate_response(source, cast):
     return validate
 
 
-def design_ensemble(source, cast, requests, *, policy, progress=lambda message: None):
+def design_ensemble(source, cast, requests, *, policy, progress=lambda message: None, adaptive=False):
     """Return the cast after one coordinated design pass plus its provenance."""
+    if adaptive:
+        from .voice_ensemble_adaptive import design_adaptive_ensemble
+        return design_adaptive_ensemble(source, cast, requests, policy=policy, progress=progress)
     findings_before = contrast_findings(cast["voices"]) if len(cast["voices"]) >= 2 else []
     designable = [voice for voice in cast["voices"] if not _inherited(voice)]
     if len(cast["voices"]) < 2 or not designable:
@@ -170,14 +190,20 @@ def design_ensemble(source, cast, requests, *, policy, progress=lambda message: 
                                 "contrast_findings_before": findings_before,
                                 "contrast_findings_after": findings_before}
     payload = _payload(source, cast, policy, findings_before)
-    size = len(ENSEMBLE_SYSTEM) + len(json.dumps(payload, ensure_ascii=False))
+    system = ENSEMBLE_SYSTEM
+    size = len(system) + len(json.dumps(payload, ensure_ascii=False))
     limit = getattr(requests, "max_request_chars", 200000)
+    if size > limit:
+        payload["contrast_findings"] = _contrast_context(findings_before)
+        if isinstance(payload["contrast_findings"], dict):
+            system += COMPACT_CONTRAST_GUIDANCE
+        size = len(system) + len(json.dumps(payload, ensure_ascii=False))
     if size > limit:
         raise ValueError(f"Voice ensemble request is {size} characters, exceeding the configured request budget "
                          f"({limit}). The complete cast is never dropped or trimmed to fit; "
                          "raise analysis.max_request_chars.")
     progress("Designing the voice cast as one ensemble")
-    accepted = requests.run(ENSEMBLE_SYSTEM, payload, _validate_response(source, cast))
+    accepted = requests.run(system, payload, _validate_response(source, cast))
     updated, reasons = accepted["cast"], accepted["reasons"]
     original = {voice["id"]: voice for voice in cast["voices"]}
     changed = {}
@@ -191,7 +217,7 @@ def design_ensemble(source, cast, requests, *, policy, progress=lambda message: 
                      "source_fingerprint": fingerprint(source),
                      "cast_fingerprint_before": fingerprint(cast),
                      "cast_fingerprint_after": fingerprint(updated),
-                     "guidance_fingerprint": fingerprint(ENSEMBLE_SYSTEM),
+                     "guidance_fingerprint": fingerprint(system),
                      "request_characters": size,
                      "updated": changed,
                      "contrast_findings_before": findings_before,

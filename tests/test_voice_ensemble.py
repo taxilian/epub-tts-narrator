@@ -31,10 +31,10 @@ class EnsembleClient:
     def complete(self, system, payload):
         self.calls.append((system, deepcopy(payload)))
         mode = payload.get("mode")
-        if mode == "discover":
+        if mode == "casting_discovery":
             return self.discover(payload)
-        if mode == "reconcile":
-            return cast_patch()
+        if mode == "casting_coverage":
+            return dict(cast_patch(), findings=[], certified=True)
         if mode == "identity_scan":
             return {"cases": []}
         if mode == "voice_ensemble":
@@ -98,7 +98,7 @@ class VoiceEnsembleTests(unittest.TestCase):
         client = EnsembleClient()
         document = self.run_analysis(client, identity_consensus=True)
         self.assertEqual(self.modes(client),
-                         ["discover", "reconcile", "identity_scan", "voice_ensemble", "attribute"])
+                         ["casting_discovery", "identity_scan", "casting_coverage", "voice_ensemble", "attribute"])
         system, payload = client.calls[3]
         self.assertEqual(payload["mode"], "voice_ensemble")
         self.assertEqual(payload["performance_policy"], DEFAULT_POLICY)
@@ -111,7 +111,10 @@ class VoiceEnsembleTests(unittest.TestCase):
         self.assertEqual(document["provenance"]["voice_ensemble"]["contrast_findings_after"],
                          document["provenance"]["voice_ensemble"]["contrast_findings_before"])
         attribution = next(item for _, item in client.calls if "mode" not in item)
-        self.assertEqual(attribution["final_cast"], document["cast"])
+        for collection in ("characters", "roles", "voices"):
+            self.assertEqual([item["id"] for item in attribution["final_cast"][collection]],
+                             [item["id"] for item in document["cast"][collection]])
+        self.assertTrue(all("description" not in voice for voice in attribution["final_cast"]["voices"]))
         self.assertEqual(validate_document(document), [])
 
     def test_ensemble_upserts_coordinate_profiles_and_provenance_traces_changes(self):
@@ -146,7 +149,10 @@ class VoiceEnsembleTests(unittest.TestCase):
                          ["insufficient_known_contrast"])
         self.assertEqual([finding["kind"] for finding in ensemble["contrast_findings_after"]], [])
         attribution = next(item for _, item in client.calls if "mode" not in item)
-        self.assertEqual(attribution["final_cast"], document["cast"])
+        self.assertEqual([item["id"] for item in attribution["final_cast"]["voices"]],
+                         [item["id"] for item in document["cast"]["voices"]])
+        self.assertTrue(all("description" not in item and "speechTraits" not in item
+                            for item in attribution["final_cast"]["voices"]))
 
     def test_ensemble_rejects_upserts_that_change_text_supported_traits(self):
         def rewrite(payload):
