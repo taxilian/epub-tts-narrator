@@ -17,6 +17,7 @@ from epub_tts_narrator.contracts import readiness
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis
+from shared_fixtures import Terminal
 from test_series import fixture, propose
 
 
@@ -165,6 +166,93 @@ class AnalysisRevisionTests(unittest.TestCase):
             _completed_directory(path)
             self.assertEqual(continuation_directories(path), list(reversed(self.paths[:index])))
             self.assertEqual((path / "voices/reference.wav").read_bytes(), b"untouched voice")
+
+    def test_cli_saves_explicit_new_voice_in_published_parent_without_changing_descendant_casts(self):
+        before = deepcopy(self.documents[0]["cast"])
+        answers = Terminal("N\nLater Revealed Speaker\nA low, lightly textured adult voice with precise conversational articulation.\n")
+        with patch("sys.stdin", answers):
+            code, _, _, errors = self.invoke([self.paths[0]], lambda document, requests, **kwargs: document)
+        self.assertEqual(code, 0, errors)
+        revised, _, _ = _completed_directory(self.paths[0])
+        character = next(row for row in revised["cast"]["characters"] if row["name"] == "Later Revealed Speaker")
+        self.assertEqual(revised["segments"][0]["voice_id"], character["voice_id"])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "user")
+        for collection in ("characters", "voices", "roles"):
+            self.assertEqual(revised["cast"][collection][:len(before[collection])], before[collection])
+            self.assertEqual(len(revised["cast"][collection]), len(before[collection]) + 1)
+        for index, path in enumerate(self.paths):
+            document, registry, _ = _completed_directory(path)
+            self.assertEqual(registry["books"][0]["cast"], revised["cast"])
+            self.assertEqual(continuation_directories(path), list(reversed(self.paths[:index])))
+            if index:
+                self.assertEqual(document["cast"], self.documents[index]["cast"])
+            self.assertEqual((path / "voices/reference.wav").read_bytes(), b"untouched voice")
+            self.assertEqual((path / "render-work/accepted.json").read_text(), "untouched cache")
+            self.assertEqual((path / "voice-aliases.json").read_text(), "untouched aliases")
+
+    def test_analyze_existing_directory_saves_new_voice_without_reanalyzing_source(self):
+        config = deepcopy(DEFAULTS)
+        config["provider"].update(model="test-model", api_key="test-key")
+        answers = Terminal("N\nLater Revealed Speaker\nA low, lightly textured adult voice with precise conversational articulation.\n")
+        output, errors = io.StringIO(), io.StringIO()
+        with (patch("epub_tts_narrator.cli.load_config", return_value=config),
+              patch("epub_tts_narrator.speaker_completion.complete_speakers", side_effect=lambda document, requests, **kwargs: document),
+              patch("epub_tts_narrator.cli.analyze") as fresh_analysis,
+              patch("sys.stdin", answers),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
+            code = main(["analyze", str(self.paths[0])])
+        self.assertEqual(code, 0, errors.getvalue())
+        fresh_analysis.assert_not_called()
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["source"], self.documents[0]["source"])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "user")
+        self.assertEqual(revised["cast"]["characters"][-1]["name"], "Later Revealed Speaker")
+
+    def test_failed_new_voice_publication_replays_the_human_journal_without_defining_twice(self):
+        before = self.managed()
+        calls = 0
+
+        def fail_once(source, destination):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("Fixture interrupted manual publication")
+            return _install(source, destination)
+
+        with (patch("sys.stdin", Terminal("N\nLater Revealed Speaker\nA low, lightly textured adult voice.\n")),
+              patch("epub_tts_narrator.analysis_revision._install", side_effect=fail_once)):
+            code, _, _, _ = self.invoke([self.paths[0]], lambda document, requests, **kwargs: document)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.managed(), before)
+        with patch("sys.stdin", Terminal("")):
+            code, _, output, errors = self.invoke([self.paths[0]], lambda document, requests, **kwargs: document)
+        self.assertEqual(code, 0, errors)
+        self.assertIn("Replaying 1 saved speaker decision", errors)
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(sum(row["name"] == "Later Revealed Speaker" for row in revised["cast"]["characters"]), 1)
+
+    def test_new_voice_is_saved_when_the_user_quits_with_another_passage_pending(self):
+        path = self.root / "partial-manual"
+        document = fixture()
+        for row in document["segments"][:2]:
+            row.update(role_id=None, voice_id=None)
+            row["attribution"].update(basis="unresolved", review_required=True, candidates=[])
+        registry = fresh_registry(path)
+        document = link_analysis(document, registry)
+        publish_directory(document, registry, path, export_bundle)
+        with patch("sys.stdin", Terminal("N\nLater Revealed Speaker\nA low, lightly textured adult voice.\nQ\n")):
+            code, _, _, errors = self.invoke([path], lambda document, requests, **kwargs: document)
+        self.assertEqual(code, 2, errors)
+        revised, _, _ = _completed_directory(path)
+        self.assertEqual(revised["cast"]["characters"][-1]["name"], "Later Revealed Speaker")
+        self.assertIsNotNone(revised["segments"][0]["voice_id"])
+        self.assertIsNone(revised["segments"][1]["voice_id"])
+        with patch("sys.stdin", Terminal("O\n3\n")):
+            code, _, _, errors = self.invoke([path], lambda document, requests, **kwargs: document)
+        self.assertEqual(code, 0, errors)
+        resumed, _, _ = _completed_directory(path)
+        self.assertEqual(resumed["cast"], revised["cast"])
+        self.assertEqual(resumed["segments"][1]["voice_id"], revised["segments"][0]["voice_id"])
 
     def test_cli_transport_failure_does_not_publish_part_of_the_chain(self):
         before = self.managed()

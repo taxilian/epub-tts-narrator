@@ -1,5 +1,6 @@
 """Revise attribution while preserving voices and validated continuation history."""
 
+from contextlib import ExitStack
 from copy import deepcopy
 import hashlib
 import json
@@ -141,30 +142,68 @@ def _install(source, destination):
 
 
 def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
-                       scope="attribution", sidecars=None):
+                       scope="attribution", sidecars=None, speaker_decision_inputs=None):
+    """Publish a revision, coordinating manual decisions with profile refreshes."""
+    if scope not in {"attribution", "voice-profiles", "speaker-decisions"}:
+        raise ValueError("Revision scope must be attribution, voice-profiles, or speaker-decisions")
+    if speaker_decision_inputs is not None and scope != "speaker-decisions":
+        raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
+    if scope != "speaker-decisions":
+        return _revise_directories(revisions, directories=directories,
+                                   expected_manifest_hashes=expected_manifest_hashes,
+                                   progress=progress, scope=scope, sidecars=sidecars)
+    if speaker_decision_inputs is None:
+        raise ValueError("speaker-decisions revisions require trusted pre-UI input documents")
+    from .voice_profile_guard import _require_ready, refresh_locks, require_valid_profiles
+    for path in revisions:
+        require_valid_profiles(path)
+    paths = related_directories(directories or revisions)
+    with ExitStack() as stack:
+        covered = set()
+        for path in paths:
+            if path in covered:
+                continue
+            stack.enter_context(refresh_locks(path))
+            covered.update(related_directories([path]))
+            covered.update(continuation_directories(path))
+        for path in covered:
+            _require_ready(path, marker_only=True)
+        return _revise_directories(revisions, directories=paths,
+                                   expected_manifest_hashes=expected_manifest_hashes,
+                                   progress=progress, scope=scope, sidecars=sidecars,
+                                   speaker_decision_inputs=speaker_decision_inputs)
+
+
+def _revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
+                        scope="attribution", sidecars=None, speaker_decision_inputs=None):
     """Stage and validate all changes, back up originals, and refresh descendants.
 
-    This operation only revises attribution and its audit/review state. Source,
-    cast, voice identities, and book locations stay fixed. Voice stores, aliases,
-    render caches, and existing audiobooks are never part of the write inventory.
+    This operation revises attribution and its audit/review state. Source and book
+    locations stay fixed; cast and voice identities are fixed except for validated
+    manual-decision appends. Voice stores, aliases, render caches, and existing
+    audiobooks are never part of the write inventory.
 
     ``scope`` selects the change contract: ``"attribution"`` (default) permits
     speaker revisions only; ``"voice-profiles"`` instead permits exactly the
     allowlisted voice profile fields (description, traits, speechTraits), their
     provenance cast_fingerprint rebind, and the refresh audit record.
+    ``"speaker-decisions"`` reconstructs manual choices from trusted pre-UI
+    documents and their receipts, including exact append-only voice creation.
     ``sidecars`` optionally maps a directory to already validated JSON records
     (keyed by plain existing filenames, e.g. audition-scripts.json) that are
     backed up, replaced, and rolled back atomically with the revision.
     """
     from .cli import export_bundle
-    if scope not in {"attribution", "voice-profiles"}:
-        raise ValueError("Revision scope must be attribution or voice-profiles")
     sidecars = {} if sidecars is None else {
         Path(path).resolve(): {name: deepcopy(record) for name, record in files.items()}
         for path, files in sidecars.items()}
     if sidecars and scope != "voice-profiles":
         raise ValueError("Revision sidecars are supported only for voice-profile audition bindings")
     revisions = {Path(path).resolve(): deepcopy(document) for path, document in revisions.items()}
+    speaker_decision_inputs = {Path(path).resolve(): deepcopy(document)
+                               for path, document in (speaker_decision_inputs or {}).items()}
+    if scope == "speaker-decisions" and set(speaker_decision_inputs) != set(revisions):
+        raise ValueError("Every speaker-decisions revision needs exactly one trusted pre-UI input document")
     paths = related_directories(directories or revisions)
     if not set(revisions) <= set(paths):
         raise ValueError("Revision directories must be included in the update chain")
@@ -193,12 +232,26 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
             if (candidate["source"] != document["source"] or candidate["cast"] != document["cast"]
                     or candidate["provenance"].get("series") != document["provenance"].get("series")):
                 raise ValueError("Speaker revisions must preserve source, cast, and series identities")
-        else:
+        elif scope == "voice-profiles":
             differences = profile_revision_differences(document, candidate)
             if differences:
                 raise ValueError("Voice-profile revisions may change only cast voice description, traits, "
                                  "and speechTraits with their provenance bindings; rejected: "
                                  + "; ".join(differences[:6]))
+        elif path in revisions:
+            from .manual_speaker_revision import validate_manual_speaker_revision
+            added_voices = validate_manual_speaker_revision(
+                document, speaker_decision_inputs[path], candidate)
+            sidecar = path / "audition-scripts.json"
+            if added_voices and (sidecar.exists() or sidecar.is_symlink()):
+                from .voice_profile_refresh import audition_sidecar_rebind
+                sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
+                    sidecar, source_fingerprint=fingerprint(document["source"]),
+                    cast_fingerprint_before=fingerprint(document["cast"]),
+                    cast_fingerprint_after=fingerprint(candidate["cast"]),
+                    voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
+                names[path].append(sidecar.name)
+                original_hashes[path][sidecar.name] = _hash(sidecar)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
         if _render_active(path):
@@ -226,7 +279,7 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
             # A resolved parent attribution may have been copied into descendants
             # as a review issue. Refresh only such inherited review records.
             history = dict(registry, books=registry["books"][:-1])
-            if scope == "attribution":
+            if scope in {"attribution", "speaker-decisions"}:
                 _refresh_import_reviews(document, history, document["provenance"]["series"])
             document["readiness"] = readiness(document)
             snapshot = _snapshot(document)

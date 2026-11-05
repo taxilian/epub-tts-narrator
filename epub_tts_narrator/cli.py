@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -392,6 +393,7 @@ def main(argv=None):
                                         target_block_ids=targets, retry_unresolved=True,
                                         progress=lambda message: print(message, file=sys.stderr))
             revised = repair_narration_boundaries(revised, progress=print)
+        speaker_input = deepcopy(revised)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config),
                                            decisions_cache=decisions_cache)
         if "voice_samples" in original["provenance"] or audition_preparation_pending(revised):
@@ -402,7 +404,8 @@ def main(argv=None):
                 progress=lambda message: print(message, file=sys.stderr))
         if revised != original:
             result = revise_directories({directory: revised}, directories=directories,
-                                        expected_manifest_hashes=hashes)
+                                        expected_manifest_hashes=hashes, scope="speaker-decisions",
+                                        speaker_decision_inputs={directory: speaker_input})
             print(f"Original analysis files and revision journal: {result['backup_directory']}")
             print(f"Updated saved analysis and chapter scripts in {directory}.")
         else:
@@ -448,12 +451,22 @@ def main(argv=None):
                 revised[directory] = repair_narration_boundaries(revised[directory], progress=print)
             judge = _speaker_judge(config)
             decisions_cache = Path(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache").resolve()
+            speaker_inputs = {}
             for directory in revised:
+                speaker_inputs[directory] = deepcopy(revised[directory])
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory,
-                                                              jev_client=judge, decisions_cache=decisions_cache)
+                                                               jev_client=judge, decisions_cache=decisions_cache)
+                if (revised[directory]["cast"] != documents[directory]["cast"]
+                        and "voice_samples" in documents[directory]["provenance"]):
+                    from .audition_scripts import prepare_document_samples
+                    revised[directory] = prepare_document_samples(revised[directory], requests,
+                        workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
+                        progress=lambda message: print(message, file=sys.stderr))
             changed = {path: document for path, document in revised.items() if document != documents[path]}
             if changed:
-                result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes)
+                result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes,
+                                            scope="speaker-decisions",
+                                            speaker_decision_inputs={path: speaker_inputs[path] for path in changed})
                 print(f"Original analysis files and revision journal: {result['backup_directory']}")
             else:
                 print("No speaker decisions changed; saved files are unchanged.")

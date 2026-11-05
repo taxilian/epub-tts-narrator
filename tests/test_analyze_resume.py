@@ -346,7 +346,9 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, _, error, _ = self.run_cli(epub, "-o", current, "--continue-from", parent)
         self.assertEqual(status, 0, error)
         self.assertEqual(continuation_directories(current), [parent])
-        self.assertEqual(snapshot(parent), original_parent)
+        after = snapshot(parent)
+        self.assertEqual(after.pop(".voice-profile-refresh.lock.lease"), b"")
+        self.assertEqual(after, original_parent)
 
     def test_parent_revision_refreshes_descendant_links_and_keeps_descendant_voices(self):
         _, parent, _ = self.seed()
@@ -360,15 +362,15 @@ class AnalyzeResumeTests(unittest.TestCase):
         self.assertEqual((child / "voices/reference.wav").read_bytes(), b"Existing voice remains unchanged")
 
     def test_existing_prepared_auditions_refresh_locally_after_human_selection(self):
-        _, path, _ = self.seed(prepared=True)
-        with patch("epub_tts_narrator.audition_scripts.prepare_document_samples", wraps=prepare_document_samples) as prepare:
-            status, _, error, _ = self.run_cli(path, answers="o\n2\n", client=CompletionClient(uncertain=True))
+        _, path, original = self.seed(prepared=True)
+        status, _, error, _ = self.run_cli(path, answers="o\n2\n", client=CompletionClient(uncertain=True))
         self.assertEqual(status, 0, error)
-        prepare.assert_called_once()
-        self.assertTrue(prepare.call_args.kwargs["allow_incomplete"])
         # A request client is available for pending scripts, but this client's
         # protocol rejects audition calls: existing prepared scripts stay local.
-        self.assertIsInstance(prepare.call_args.args[1], CachedRequests)
+        updated = _completed_directory(path)[0]
+        self.assertFalse(unassigned_segments(updated))
+        self.assertEqual(updated["provenance"]["voice_samples"]["scripts"],
+                         original["provenance"]["voice_samples"]["scripts"])
 
     def test_timeout_preserves_bundle_and_reuses_completed_jury_requests_on_next_run(self):
         _, path, _ = self.seed()
