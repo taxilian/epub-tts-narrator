@@ -67,6 +67,33 @@ class ProviderCapacityTests(TestCase):
                 self.opener.open.assert_called_once()
                 sleep.assert_not_called()
 
+    def test_documented_zai_prompt_limit_is_capacity_but_generic_vendor_errors_are_not(self):
+        for code, expected in (("1261", "context_length_exceeded"), (1261, "context_length_exceeded"),
+                               ("1210", None), ("1301", None)):
+            with self.subTest(code=code):
+                self.opener.open.reset_mock()
+                self.opener.open.side_effect = self.http_error(400, {"code": code, "message": "private source"})
+                with self.assertRaises(ProviderError) as caught:
+                    OpenAICompatibleClient("glm-fixture", base_url="https://api.z.ai/api/paas/v4").complete("Analyze", {})
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual(capacity_error(caught.exception), expected is not None)
+                self.assertNotIn("private", str(caught.exception))
+                self.opener.open.assert_called_once()
+
+    def test_zai_numeric_code_is_not_reinterpreted_for_an_unrelated_provider(self):
+        self.opener.open.side_effect = self.http_error(400, {"code": "1261"})
+        with self.assertRaises(ProviderError) as caught:
+            OpenAICompatibleClient("model", base_url="https://example.invalid/v1").complete("Analyze", {})
+        self.assertIsNone(caught.exception.code)
+        self.assertFalse(capacity_error(caught.exception))
+
+    def test_zai_capacity_error_inside_a_success_envelope_is_still_explicit(self):
+        self.opener.open.return_value = FakeResponse(json.dumps({"error": {"code": "1261"}}).encode())
+        with self.assertRaises(ProviderError) as caught:
+            OpenAICompatibleClient("glm-fixture", base_url="https://api.z.ai/api/paas/v4").complete("Analyze", {})
+        self.assertEqual(caught.exception.code, "context_length_exceeded")
+        self.assertTrue(capacity_error(caught.exception))
+
     def test_nonstream_response_size_limit_raises_typed_capacity_without_retry(self):
         self.opener.open.return_value = FakeResponse(b"x" * 100)
         with patch("epub_tts_narrator.provider.MAX_RESPONSE_BYTES", 32), \

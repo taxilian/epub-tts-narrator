@@ -291,7 +291,8 @@ class OpenAICompatibleClient:
         result = _json_object(text, "The API response")
 
         if result.get("error") is not None:
-            raise ProviderError("The API returned an error response.")
+            details = result["error"] if isinstance(result["error"], dict) else {}
+            raise ProviderError("The API returned an error response.", code=self._safe_error_code(details.get("code")))
         choices = result.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ProviderError("The API response has no valid completion choice.")
@@ -475,14 +476,22 @@ class OpenAICompatibleClient:
         sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
         return sock if isinstance(sock, socket.socket) else None
 
-    @staticmethod
-    def _stream_error(details) -> ProviderError:
+    def _safe_error_code(self, raw_code) -> str | None:
+        if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES:
+            return raw_code
+        host = urlsplit(self.base_url).hostname or ""
+        if (host == "z.ai" or host.endswith(".z.ai")) and (
+                raw_code == "1261" or (type(raw_code) is int and raw_code == 1261)):
+            return "context_length_exceeded"
+        return None
+
+    def _stream_error(self, details) -> ProviderError:
         # Mid-stream error chunks classify like HTTP error envelopes: only
         # known safe codes are exposed, and an explicit nonretryable verdict
         # from the provider always wins.
         details = details if isinstance(details, dict) else {}
         raw_code = details.get("code")
-        code = raw_code if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES else None
+        code = self._safe_error_code(raw_code)
         retryable = details.get("retryable") is not False and code not in _NONRETRYABLE_CODES
         return ProviderError("The API returned an error response.", code=code, retryable=retryable)
 
@@ -490,8 +499,7 @@ class OpenAICompatibleClient:
         if self.progress_callback is not None:
             self.progress_callback(received)
 
-    @classmethod
-    def _http_failure(cls, status: int, headers, response) -> ProviderError:
+    def _http_failure(self, status: int, headers, response) -> ProviderError:
         retryable = status in _TRANSIENT_HTTP_STATUSES
         code = None
         if retryable or status in {400, 413}:
@@ -508,8 +516,8 @@ class OpenAICompatibleClient:
             if not isinstance(details, dict):
                 details = value if isinstance(value, dict) else {}
             raw_code = details.get("code")
-            code = (raw_code if isinstance(raw_code, str) and raw_code in _SAFE_ERROR_CODES
-                    and (retryable or raw_code == "context_length_exceeded") else None)
+            classified = self._safe_error_code(raw_code)
+            code = classified if retryable or classified == "context_length_exceeded" else None
             # A provider's explicit nonretryable verdict always wins. Do not
             # turn billing/quota exhaustion into repeated paid model requests.
             if details.get("retryable") is False or (isinstance(value, dict) and value.get("retryable") is False):
@@ -520,9 +528,9 @@ class OpenAICompatibleClient:
                 "authentication", "invalid api key", "permission denied",
             )):
                 retryable = False
-        retry_after = cls._retry_after(headers)
-        rate_limits = cls._rate_limits(headers)
-        message = cls._http_error_message(status)
+        retry_after = self._retry_after(headers)
+        rate_limits = self._rate_limits(headers)
+        message = self._http_error_message(status)
         if code is not None:
             message += f" Provider code: {code}."
         if rate_limits:
