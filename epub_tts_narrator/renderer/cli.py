@@ -34,14 +34,14 @@ def parser():
             command.add_argument("-o", "--output", type=Path, help="Book-specific audio output (default: BOOK/audiobook)")
             command.add_argument("--epub", type=Path, help="Original EPUB for cover and metadata (default: source saved by analyze)")
         if name == "prepare-performance":
-            command.add_argument("--chapters", required=True, help="Explicit manifest chapter numbers to plan, e.g. 1 or 1-3")
+            command.add_argument("--chapters", required=True, help="Manifest chapter numbers or ranges to plan, e.g. 1, start-3, or 39-end")
         if name == "compare-performance":
             command.add_argument("--chapter", type=int, required=True, help="One manifest chapter number to compare")
             command.add_argument("--directory", type=Path, required=True, help="Separate comparison directory, outside the original book and render caches")
             command.add_argument("--prepare-only", action="store_true", help="Freeze source/voices and prepare expressive controls without loading synthesis or ASR models")
             command.add_argument("--local", action="store_true", help="Use the configured local engine and ASR; ignore remote chapter and render-pool workers for this comparison")
         if name in {"plan", "cache-report", "render", "assemble"}:
-            command.add_argument("--chapters", help="Manifest chapter numbers, e.g. 1-3,5 (default: all)")
+            command.add_argument("--chapters", help="Manifest chapter numbers or ranges, e.g. start-3,5,39-end (start=first, end=last; default: all)")
             command.add_argument("--allow-review", action="store_true", default=None,
                                  help="Compatibility option; review notes are advisory and need no override")
         if name in {"plan", "render", "assemble"}:
@@ -119,12 +119,14 @@ def parser():
 def chapter_numbers(value, maximum):
     """Expand bounded manifest ranges in source order, ignoring duplicate entries."""
     selected = set()
+    aliases = {"start": 1, "end": maximum}
     for part in value.split(","):
-        match = re.fullmatch(r"([0-9]+)(?:\s*-\s*([0-9]+))?", part.strip())
+        match = re.fullmatch(r"([0-9]+|start|end)(?:\s*-\s*([0-9]+|start|end))?", part.strip(), re.IGNORECASE)
         if match is None:
-            raise ValueError("--chapters must contain chapter numbers or ranges, such as 1-3,5")
-        start = int(match[1])
-        end = int(match[2]) if match[2] else start
+            raise ValueError("--chapters must contain chapter numbers, start/end, or ranges, such as start-3,5-end")
+        first, last = match[1].lower(), (match[2] or match[1]).lower()
+        start = aliases[first] if first in aliases else int(first)
+        end = aliases[last] if last in aliases else int(last)
         if not 1 <= start <= end <= maximum:
             raise ValueError(f"--chapters entries must be ascending ranges within 1-{maximum}")
         selected.update(range(start, end + 1))

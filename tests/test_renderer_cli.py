@@ -227,13 +227,32 @@ class RendererCLITests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 chapter_numbers(value, 5)
 
+    def test_chapter_aliases_resolve_to_manifest_boundaries(self):
+        cases = (
+            ("39-end", 92, list(range(39, 93))),
+            ("start-3", 5, [1, 2, 3]),
+            ("start-end", 5, [1, 2, 3, 4, 5]),
+            ("start", 5, [1]),
+            ("end", 5, [5]),
+            (" END , 2-4, start, 4-end ", 5, [1, 2, 3, 4, 5]),
+            ("start-end", 1, [1]),
+        )
+        for value, maximum, expected in cases:
+            with self.subTest(value=value, maximum=maximum):
+                self.assertEqual(chapter_numbers(value, maximum), expected)
+        for value in ("end-start", "3-start", "end-2", "start-6", "39-end", "start-", "-end", "ending"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                chapter_numbers(value, 5)
+
     def test_plan_chapter_override_does_not_edit_global_config(self):
         before = self.config.read_bytes()
-        status, output, error = self.run_cli("plan", self.bundle, "--config", self.config,
-                                             "--chapters", "1,1-1")
-        self.assertEqual(status, 0, error)
-        self.assertEqual(json.loads(output)["chapter_titles"][0]["number"], 1)
-        self.assertEqual(self.config.read_bytes(), before)
+        for selection in ("1,1-1", "start-end"):
+            with self.subTest(selection=selection):
+                status, output, error = self.run_cli("plan", self.bundle, "--config", self.config,
+                                                   "--chapters", selection)
+                self.assertEqual(status, 0, error)
+                self.assertEqual(json.loads(output)["chapter_titles"][0]["number"], 1)
+                self.assertEqual(self.config.read_bytes(), before)
 
     def test_invalid_chapter_selection_stops_before_loading_models(self):
         with patch("epub_tts_narrator.renderer.engines.create_engine") as engine:

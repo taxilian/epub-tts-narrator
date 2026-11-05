@@ -887,6 +887,8 @@ Accepted individual clips and paragraph performances within one role/voice remai
 
 If a paragraph exhausts its generation attempts because of missing speech, silence, or another audio quality failure, rendering automatically retries its original shorter passages individually, using the same assigned voices and verification rules. The recovery decision is saved in `render-work/paragraph-fallbacks` before any individual passage is generated, so interruptions and later invocations keep the smaller boundaries. Previously verified clips and completed chapters are reused; failed paragraph takes remain available for inspection. Each recovered passage has its own source mapping and audio interval. An API or verifier outage does not trigger splitting. Individual passages can also use the bounded sentence recovery described below; unresolved failures still stop publication.
 
+`--chapters` accepts comma-separated numbers and inclusive ranges. `start` means the first manifest chapter and `end` means the last; for example, `just render BOOK --chapters 39-end --chapters-only`, `--chapters start-5`, or `--chapters start,10-12,end`. These aliases are case-insensitive and work wherever `--chapters` is supported. Reversed and out-of-bounds ranges are rejected.
+
 To generate and listen to one chapter before committing to the whole book, inspect the chapter list and save a chapter checkpoint:
 
 ```sh
