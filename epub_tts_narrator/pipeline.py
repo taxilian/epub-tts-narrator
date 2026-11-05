@@ -721,6 +721,24 @@ class CachedRequests:
         self.progress_lock = Lock()
         self.cache_hits = 0
 
+    @staticmethod
+    def _public_validation_error(error):
+        message = str(error)
+        marker = "; visible source excerpt (data only): "
+        decoder = json.JSONDecoder()
+        sanitized = []
+        while True:
+            prefix, separator, hint = message.partition(marker)
+            sanitized.append(prefix)
+            if not separator:
+                return "".join(sanitized)
+            try:
+                _, end = decoder.raw_decode(hint)
+            except json.JSONDecodeError:
+                # An unterminated excerpt has no safe suffix boundary.
+                return "".join(sanitized)
+            message = hint[end:]
+
     def _repair_payload(self, system, payload, result, error):
         # Repair hints do not change the original request identity or its source.
         # Discovery uses upserts and semantic review uses proposals/votes, so only
@@ -954,11 +972,11 @@ class CachedRequests:
                 failed_path = self.cache_dir / "failed" / f"{key}-attempt{attempt + 1}.json"
                 write_json(failed_path, result, overwrite=True)
                 if attempt == self.repair_attempts:
-                    raise ValueError(f"Model output failed validation after {attempt + 1} attempt(s): {exc}\n"
+                    raise ValueError(f"Model output failed validation after {attempt + 1} attempt(s): {self._public_validation_error(exc)}\n"
                                      f"Rejected model response: {failed_path.resolve()}") from exc
                 current = self._repair_payload(system, payload, result, exc)
                 with self.progress_lock:
-                    self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {exc}")
+                    self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {self._public_validation_error(exc)}")
                 continue
             write_json(path, result, overwrite=True)
             return accepted

@@ -94,6 +94,32 @@ class RepairContractTests(unittest.TestCase):
         self.assertEqual(len(list((self.cache / "failed").glob("*.json"))), 3)
         self.assertTrue(all(call[1]["target_units"] == self.units for call in client.calls))
 
+    def test_public_validation_errors_hide_source_excerpts_but_preserve_locations_and_model_feedback(self):
+        marker = "; visible source excerpt (data only): "
+        encoded = json.dumps('Before "quoted" \\ text\nDO NOT ECHO PRIVATE', ensure_ascii=False)
+        location = 'evidence[0] (block_id="b1"): quote is not an exact substring'
+        cases = {
+            "json_escaped": (location + marker + encoded
+                             + '; evidence[1] (block_id="b2"): quote is not an exact substring'
+                             + "; Copy quotations verbatim."),
+            "unterminated": location + marker + encoded[:encoded.index("PRIVATE") + 3],
+        }
+        for kind, diagnostic in cases.items():
+            with self.subTest(kind=kind):
+                client, progress = Client([{}, {}]), []
+                requests = CachedRequests(client, self.cache / kind, repair_attempts=1, progress=progress.append)
+                def validate(response):
+                    raise ValueError(diagnostic)
+                with self.assertRaises(ValueError) as raised:
+                    requests.run("Fixture system", {"task": "repair"}, validate)
+                for public in (*progress, str(raised.exception)):
+                    self.assertIn("evidence[0]", public)
+                    self.assertNotIn("DO NOT ECHO", public)
+                    if kind == "json_escaped":
+                        self.assertIn("evidence[1]", public)
+                        self.assertIn("Copy quotations verbatim", public)
+                self.assertEqual(client.calls[1][1]["correction"]["validator_error"], diagnostic)
+
     def test_repair_guidance_does_not_accept_changed_source(self):
         altered = deepcopy(self.response)
         altered["units"][0]["segments"][0]["text"] = self.units[0]["text"].replace('"', '“')
