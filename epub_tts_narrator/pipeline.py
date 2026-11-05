@@ -724,6 +724,8 @@ class CachedRequests:
     @staticmethod
     def _public_validation_error(error):
         message = str(error)
+        for private_context in (" Expected source around mismatch: ", "; received around mismatch: "):
+            message = message.partition(private_context)[0]
         marker = "; visible source excerpt (data only): "
         decoder = json.JSONDecoder()
         sanitized = []

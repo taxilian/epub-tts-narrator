@@ -103,6 +103,9 @@ class RepairContractTests(unittest.TestCase):
                              + '; evidence[1] (block_id="b2"): quote is not an exact substring'
                              + "; Copy quotations verbatim."),
             "unterminated": location + marker + encoded[:encoded.index("PRIVATE") + 3],
+            "alignment_context": (location + " Expected source around mismatch: "
+                                  + repr("DO NOT ECHO PRIVATE SOURCE")
+                                  + "; received around mismatch: " + repr("DO NOT ECHO PRIVATE RESPONSE")),
         }
         for kind, diagnostic in cases.items():
             with self.subTest(kind=kind):
