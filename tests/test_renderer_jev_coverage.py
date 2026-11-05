@@ -49,11 +49,43 @@ UNACCEPTABLE = (
     ("hyphenated compound cannot hide omission", "The apeman drew his halfblade.",
      "The ape-man drew half-blade."),
     ("actual fraction omitted", "Mota carried half a blade.", "Moda carried a blade."),
+    ("regional spelling and spacing cannot hide omission",
+     "Refuelling can happen at any time despite our judgements.",
+     "Refueling can happen at anytime despite judgments."),
+    ("regional spelling and spacing cannot hide an added word",
+     "Refuelling can happen at any time despite our judgements.",
+     "Refueling can always happen at anytime despite our judgments."),
+    ("compound spelling and hyphens cannot hide negation",
+     "An essencefuelled blow-torch did not fire.",
+     "An essence-fueled blowtorch did fire."),
+    ("arbitrary spacing and spelling cannot hide a lost letter",
+     "Their judgements of the sunflower were fair.",
+     "Their judgments of the s u n f l o w e were fair."),
 )
 
 ACCEPTABLE = (
     ("transliterated term", "She gathered qi in the courtyard.", "She gathered chi in the courtyard."),
     ("regional spelling", "Trust her judgement.", "Trust her judgment."),
+    ("silent e before ment", "The lodgement was complete.", "The lodgment was complete."),
+    ("silent e before ments", "The acknowledgements arrived.", "The acknowledgments arrived."),
+    ("different stem with silent e", "The abridgements arrived.", "The abridgments arrived."),
+    ("plural regional spelling", "Trust her judgements.", "Trust her judgments."),
+    ("reverse plural regional spelling", "Trust her judgments.", "Trust her judgements."),
+    ("combined regional spelling and spacing",
+     "Refuelling can happen at any time despite our judgements.",
+     "Refueling can happen at anytime despite our judgments."),
+    ("compound spelling with shifted hyphens",
+     "An essencefuelled blow-torch flashed.",
+     "An essence-fueled blowtorch flashed."),
+    ("arbitrary spacing alongside regional spelling",
+     "Their judgements of the sunflower were fair.",
+     "Their judgments of the s u n f l o w e r were fair."),
+    ("shifted boundaries alongside regional spelling",
+     "Their judgements involved over taking the cart.",
+     "Their judgments involved overtak ing the cart."),
+    ("regional spelling across a compound boundary",
+     "Their illjudgements were wrong.",
+     "Their ill-judgments were wrong."),
     ("omitted written accent", "She studied techné.", "She studied techne."),
     ("compound boundary", "We entered the sourcepalace.", "We entered the source palace."),
     ("vowel recognition", "She put the doll on the shelf.", "She put the dull on the shelf."),
@@ -172,6 +204,16 @@ class JevCoverageTests(unittest.TestCase):
                 self.assertEqual(report["transcript"], partial)
                 if purpose == "reference":
                     self.assertEqual(report["reference_text"], expected)
+
+    def test_plural_regional_spelling_does_not_bypass_negative_judgment(self):
+        with patch.object(self.judge._client, "evaluate", return_value={
+            "model": "jev-fixture", "answers": {"roughly_same": {"type": "noul", "noul": .01}},
+            "usage": {"input_tokens": 20, "output_tokens": 2},
+        }):
+            verifier = ReferenceTextJudgingVerifier(RecordedRecognizer("Trust her judgments."), self.judge)
+            report = validate_audio(self.audio, "Trust her judgements.", verifier, purpose="speech")
+        self.assertFalse(report["passed"], report)
+        self.assertEqual(report["text_judge"]["decision"], "different")
 
     def test_two_recognizers_agreeing_on_missing_speech_cannot_approve_it(self):
         expected = "I understand, she added tiredly, but we must leave." + CONTEXT
