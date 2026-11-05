@@ -61,6 +61,7 @@ epub-tts-narrator/
 | Deployment | `deploy/runpod/README.md`, `renderer/runpod.py`, `renderer/fish_speech_engine.py` | Pinned inference contract; do not improvise versions; Pod inference is our `serve` on Fish's library (stock Fish/SGLang servers cannot carry history) |
 | Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one); `scripts/benchmark_chapter_pipeline.py` (prepare/run chapter-pipeline A/B with telemetry) | Standalone; live-model runs need `--config`; fake runs are permanently ineligible |
 | Commands/config reference | `README.md`, `ANALYSIS.md`, `RENDERER.md`, `REMOTE_RENDERING.md` | Docs are the automation surface — there is no CI |
+| Checkout command shortcuts | `justfile` | `just analyze/plan/cast/render/assemble/test`; forwards arguments via quoted positional parameters using `.venv-renderer/bin/python`; bare `just` lists recipes |
 
 ## CODE MAP
 

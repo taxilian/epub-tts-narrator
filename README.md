@@ -46,6 +46,21 @@ Remote endpoints require HTTPS; HTTP is loopback-only; redirects are refused.
 
 ## Use
 
+From this checkout, `just` provides short commands without activating a virtual environment or remembering binary paths. Install it once with `brew install just` if needed; the recipes use the existing `.venv-renderer` environment described above.
+
+```sh
+just                         # list available commands
+just analyze "path/to/book.epub"
+just plan "path/to/book.epub"
+just cast runs/book-01
+just render runs/book-01 --chapters 3 --chapters-only
+just assemble runs/book-01
+just test
+just test -p test_epub.py     # optional unittest discovery arguments
+```
+
+Arguments are forwarded unchanged, including quoted paths containing spaces. Recipes do not install dependencies automatically. The underlying commands remain available directly:
+
 ```sh
 # Estimate batches and baseline model requests; no model calls, no writes.
 epub-tts-narrator plan book.epub
