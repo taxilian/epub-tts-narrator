@@ -1051,7 +1051,11 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
             revised = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                             notify=lambda _: None, chapters_only=False)
-        self.assertEqual(len(engine.speech_calls), calls_before_assembly + 1)
+        # Chapter history makes every later take depend on the changed first
+        # take, so all of chapter 1 is regenerated; chapter 2 is untouched.
+        spoken = [chunk for chunk in self.plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
+        self.assertGreater(len(spoken), 1)
+        self.assertEqual(len(engine.speech_calls), calls_before_assembly + len(spoken))
         self.assertNotEqual(revised["chapter_identities"]["chapter-0001"],
                             previous["chapter_identities"]["chapter-0001"])
         self.assertEqual(revised["chapter_identities"]["chapter-0002"],

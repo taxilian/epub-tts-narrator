@@ -14,14 +14,16 @@ from epub_tts_narrator.renderer.interrupts import RenderPaused
 from epub_tts_narrator.renderer.local_runtime import LocalRuntime
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.progress import ChapterProgress
+from shared_fixtures import HISTORY_CAPABILITY
 
 
 PAYLOAD_MARKER = "DO NOT ECHO: chapter text and api_key=super-secret"
 
 
-def pool_config(*workers, max_inflight=0):
+def pool_config(*workers, max_inflight=0, scheduler="pipeline"):
     return {"engine": {"type": "drama3_mlx"},
-            "render_pool": {"workers": list(workers), "max_inflight": max_inflight}}
+            "render_pool": {"workers": list(workers), "max_inflight": max_inflight,
+                            "scheduler": scheduler}}
 
 
 def worker(name, concurrency=1, local=False):
@@ -33,6 +35,7 @@ class FakeEngine:
     """Offline TTS boundary double; identity fields satisfy pool result wrapping."""
 
     identity = {"engine": "fake", "model": "fake-model"}
+    capabilities = dict(HISTORY_CAPABILITY)
 
     def __init__(self, error=None):
         self.error = error
@@ -330,8 +333,9 @@ class PoolInstrumentationTests(unittest.TestCase):
         self.assertEqual(snapshot["synthesis_slot"]["outcomes"]["completed"], 1)
         self.assertNotIn("DO NOT ECHO", json.dumps(snapshot))
 
-    def test_admission_wait_is_recorded_while_the_window_is_saturated(self):
-        pool = RenderPool(pool_config(worker("local", local=True), max_inflight=1))
+    def test_admission_wait_is_recorded_while_the_legacy_window_is_saturated(self):
+        # The whole-chunk admission window exists only in legacy scheduling.
+        pool = RenderPool(pool_config(worker("local", local=True), max_inflight=1, scheduler="legacy"))
         pool._local_runtime = LocalRuntime(metrics_stage="model_thread")
         pool._workers[0]._engine = FakeEngine()
         entered, release = threading.Event(), threading.Event()
@@ -380,15 +384,22 @@ class PoolInstrumentationTests(unittest.TestCase):
         self.assertEqual(snapshot["model_thread"]["outcomes"]["completed"], 1)
 
     def test_text_review_lane_records_review_stage_without_the_inference_lane(self):
-        pool = RenderPool(pool_config(worker("local", local=True)))
-        pool._local_runtime = LocalRuntime(metrics_stage="model_thread")
-        verifier = pool.wrap_verifier(FakeVerifier())
-        with patch("epub_tts_narrator.renderer.pool._text_review_method", return_value=True):
-            self.assertEqual(verifier.check("value"), "value")
-        snapshot = self.metrics.snapshot()
-        self.assertEqual(snapshot["review"]["outcomes"]["completed"], 1)
-        self.assertEqual(snapshot["recognition"]["outcomes"].get("completed", 0), 0)
-        self.assertEqual(snapshot["model_thread"]["outcomes"].get("completed", 0), 0)
+        # Legacy reviews run on the review thread; pipeline review parents run
+        # on review coordination, whose leaves alone use the review lane.
+        for scheduler, stage in (("legacy", "review"), ("pipeline", "review_coordination")):
+            with self.subTest(scheduler=scheduler):
+                self.metrics.reset()
+                pool = RenderPool(pool_config(worker("local", local=True), scheduler=scheduler))
+                self.addCleanup(pool.close)
+                pool._local_runtime = LocalRuntime(metrics_stage="model_thread")
+                verifier = pool.wrap_verifier(FakeVerifier())
+                with patch("epub_tts_narrator.renderer.pool._text_review_method", return_value=True):
+                    self.assertEqual(verifier.check("value"), "value")
+                snapshot = self.metrics.snapshot()
+                self.assertEqual(snapshot[stage]["outcomes"]["completed"], 1)
+                self.assertEqual(snapshot[stage]["active_now"], 0)
+                self.assertEqual(snapshot["recognition"]["outcomes"].get("completed", 0), 0)
+                self.assertEqual(snapshot["model_thread"]["outcomes"].get("completed", 0), 0)
 
 
 class ChapterProgressMetricsTests(unittest.TestCase):

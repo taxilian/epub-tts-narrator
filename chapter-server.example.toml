@@ -4,8 +4,8 @@
 [engine]
 # Shared Drama 3 sampling contract. The remote-only pool below does not load MLX.
 type = "drama3_mlx"
-temperature = 1.0
-top_p = 0.9
+temperature = 0.7
+top_p = 0.7
 top_k = 30
 max_new_tokens = 2048
 
@@ -17,8 +17,9 @@ model_revision = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
 name = "cuda-local"
 type = "fish_http"
 url = "http://127.0.0.1:8080/v1/tts"
-# Official native Fish Speech profile. Use fish_inline for older compatible APIs.
-protocol = "fish_native_drama3"
+# An audiobook-render serve worker (history protocol v2), e.g. Runpod's
+# fish_speech_cuda inference service. Stock Fish/SGLang servers cannot carry history.
+protocol = "fish_inline"
 api_key = ""
 concurrency = 1
 multi_speaker = true

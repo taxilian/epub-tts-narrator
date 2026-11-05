@@ -6,8 +6,10 @@ or accepted. They live in ``render_pool`` only: they never enter
 generation/verification/cache identity. ``0`` means automatic where a
 setting supports it, mirroring ``max_inflight``.
 
-Defaults keep today's behavior: ``scheduler = "legacy"``. The pipeline
-scheduler is an explicit opt-in until measured throughput gates pass.
+The default is ``scheduler = "pipeline"``: chapter history makes each
+chapter strictly sequential, so throughput comes from several chapter
+coordinators queueing their next take for the shared model. ``legacy``
+renders one chapter at a time.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from copy import deepcopy
 SCHEDULERS = ("legacy", "pipeline")
 
 PIPELINE_RENDER_POOL_DEFAULTS = {
-    "scheduler": "legacy",
+    "scheduler": "pipeline",
     "chapter_concurrency": 0,  # automatic: 4 for pipeline, 2 effective in legacy mode
     "synthesis_backlog": 0,    # automatic: min(256, 4 * total TTS slots)
     "pending_audio_mb": 256,   # soft high-water for materialized untranscribed audio
@@ -27,7 +29,7 @@ PIPELINE_RENDER_POOL_DEFAULTS = {
 
 def validate_pipeline_settings(pool, tts_slots):
     """Validate the scheduler controls without any external or model access."""
-    scheduler = pool.get("scheduler", "legacy")
+    scheduler = pool.get("scheduler", "pipeline")
     if not isinstance(scheduler, str) or scheduler not in SCHEDULERS:
         raise ValueError("render_pool.scheduler must be legacy or pipeline")
     chapter_concurrency = pool.get("chapter_concurrency", 0)
@@ -66,7 +68,7 @@ def effective_scheduling(config):
     workers = pool.get("workers") or []
     slots = sum(worker.get("concurrency", 1) for worker in workers)
     remote = any(worker.get("type") != "local" for worker in workers)
-    scheduler = pool.get("scheduler", "legacy")
+    scheduler = pool.get("scheduler", "pipeline")
     chapter_concurrency = pool.get("chapter_concurrency") or (4 if scheduler == "pipeline" else 2)
     max_inflight = pool.get("max_inflight", 0) or (min(256, max(64, 16 * slots)) if remote else 16)
     backlog = pool.get("synthesis_backlog") or min(256, 4 * slots)

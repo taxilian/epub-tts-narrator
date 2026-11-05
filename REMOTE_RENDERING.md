@@ -137,42 +137,23 @@ audiobook-render serve-chapters --config epub-tts-narrator.toml
 ```
 
 See [chapter-server.example.toml](chapter-server.example.toml) for server settings.
-The service can use a local MLX engine on Apple Silicon or configured Fish HTTP
-workers. On a Linux GPU host, run a CUDA-capable Drama 3 backend separately and
-point a `render_pool` worker at its compatible `/v1/tts` endpoint. The chapter
-service itself does not install, modify, or launch another inference library;
-the optional Runpod launcher handles that process lifecycle. The
-existing Fish adapter requires the inline-reference contract documented in
-[RENDERER.md](RENDERER.md); compatibility with a particular CUDA backend still
-needs a real deployment test. Keep that backend on the same host when avoiding
-uncompressed audio between machines: its internal synthesis endpoint uses WAV,
-while this chapter service exposes compressed artifacts to the client.
+The service can use a local MLX engine on Apple Silicon or configured
+`audiobook-render serve` workers. Chapter continuity is mandatory, so every
+worker must accept the chapter's history turns and return the codec tokens it
+generated (protocol `audiobook-history-wav-v2`). Stock Fish and SGLang-Omni
+servers do neither (verified at the pinned commits and at SGLang-Omni `main`
+on 2026-11-05) and cannot be render workers. On a Linux GPU host, run
+`audiobook-render serve` with `[engine] type = "fish_speech_cuda"` inside the
+pinned Fish Speech environment; it calls Fish's unmodified library functions
+(`build_drama3_prompt` with history, `generate_drama3`) on CUDA. The optional
+Runpod launcher manages that process on private loopback. Keep the inference
+service on the same host as the chapter service: its internal endpoint uses
+WAV, while the chapter service exposes compressed artifacts to the client.
 
-For the pinned official native Fish server, set the worker's
-`protocol = "fish_native_drama3"` and `concurrency = 1`. This enables reference
-memory caching, preserves our paragraph boundaries, and puts the seed in the
-native request body. The default `fish_inline` profile remains available for
-existing compatible workers. The native profile requires `engine.top_k = 30`.
-The native adapter folds generated seeds into the server's supported 31-bit
-range so retries do not collapse to the same clamped seed. Take metadata retains
-the requested and submitted seeds; previously accepted audio remains reusable.
-
-The stock SGLang-Omni profile uses `protocol = "fish_sglang_drama3"`, a
-`/v1/audio/speech` URL, `multi_speaker = false`, and a bounded worker concurrency
-(start with four). Several requests share one loaded model. A request may retain
-an entire paragraph using one saved voice, including changes of delivery, but
-cannot mix different voices. References remain unchanged FLAC bytes; only
-loopback synthesis responses use WAV. Stock SGLang does not support per-request
-seeds, which the adapter reports explicitly in each take's metadata.
-
-This profile requires `engine.top_k = 30` for residual codebooks and uses the
-upstream stock uncapped main-token setting. Upstream warns that capping the main
-token at 30 can make output fall silent. Worker identity and take metadata record
-the requested and effective sampling profiles. Accepted speech remains reusable
-across native and SGLang workers for the same configured model contract, text,
-and voice; this retains already verified audio, not a promise of identical
-sampling or deterministic reproduction. Changed model contracts, text, or
-voices continue to invalidate the relevant cached takes.
+The chapter service runs each chapter sequentially with its history and
+overlaps chapters with its own coordinators, as local rendering does. A
+remote take's history and codes are persisted on the service with its take
+records; resuming a chapter rebuilds history from them.
 
 For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and

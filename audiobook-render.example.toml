@@ -23,8 +23,8 @@ checkpoint = "./models/drama-3"
 # for cached speech; text, voices, delivery, and sampling must still match.
 # cache_model_alias = "fishaudio/drama-3"
 experts = "q8" # Sogni only; MLX-Audio uses the checkpoint's quantization.
-temperature = 1.0
-top_p = 0.9
+temperature = 0.7
+top_p = 0.7
 top_k = 30
 max_new_tokens = 2048
 

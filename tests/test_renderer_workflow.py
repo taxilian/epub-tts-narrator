@@ -19,7 +19,7 @@ from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_take
 from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
-from shared_fixtures import renderer_config, timed_transcript
+from shared_fixtures import fixture_codes, renderer_config, timed_transcript
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern"
@@ -45,7 +45,7 @@ class FixtureEngine:
     """Registers PCM fixtures with the test verifier; no real model is loaded."""
 
     identity = {"engine": "fixture", "model": "fixture-model-v1", "settings": {"version": 1}}
-    capabilities = {"reference_voice": True, "voice_design": True}
+    capabilities = {"reference_voice": True, "voice_design": True, "chapter_continuity": True}
 
     def __init__(self, fixture_transcripts):
         self.fixture_transcripts = fixture_transcripts
@@ -68,7 +68,7 @@ class FixtureEngine:
                                   "seed": seed, "direction": direction})
         if self.interrupt_speech_number == len(self.speech_calls):
             raise KeyboardInterrupt("test interruption")
-        return self._write(text, path, seed)
+        return {**self._write(text, path, seed), **fixture_codes(text, [voice])}
 
 
 class FixtureVerifier:

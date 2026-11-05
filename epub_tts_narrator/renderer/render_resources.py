@@ -57,15 +57,17 @@ class RenderResources:
         review_pending = max_inflight + _REVIEW_HEADROOM * review_concurrency
         self.tts = ResourceLane(name="render-tts", workers=tts_slots,
                                 stage="synthesis", max_pending=synthesis_backlog)
+        # Only synthesis stops at dequeue: after Ctrl-C every already generated
+        # take still finishes normalization, verification and saving.
         self.preparation = ResourceLane(name="render-preparation", workers=2,
-                                        stage="preparation", max_pending=pending)
+                                        stage="preparation", max_pending=pending, stop_at_dequeue=False)
         self.recognition = ResourceLane(name="render-recognition", workers=1,
-                                        stage="recognition", max_pending=pending)
+                                        stage="recognition", max_pending=pending, stop_at_dequeue=False)
         self.review = ResourceLane(name="render-review", workers=review_concurrency,
-                                   stage="review", max_pending=review_pending)
+                                   stage="review", max_pending=review_pending, stop_at_dequeue=False)
         self.review_coordination = ResourceLane(
             name="render-review-coordination", workers=2 * review_concurrency,
-            stage="review_coordination", max_pending=review_pending)
+            stage="review_coordination", max_pending=review_pending, stop_at_dequeue=False)
         # Attempt-scoped untranscribed-audio backpressure: the exact pending
         # count follows the declared synthesis backlog and the soft byte
         # high-water follows ``render_pool.pending_audio_mb``.

@@ -30,9 +30,11 @@ def configuration(**pool):
 
 
 class PipelineConfigDefaultsTests(unittest.TestCase):
-    def test_scheduler_default_is_legacy_and_automatic_knob_defaults_are_zero(self):
-        self.assertEqual(PIPELINE_RENDER_POOL_DEFAULTS["scheduler"], "legacy")
-        self.assertEqual(DEFAULTS["render_pool"]["scheduler"], "legacy")
+    def test_scheduler_default_is_pipeline_and_automatic_knob_defaults_are_zero(self):
+        # Chapter history makes each chapter sequential; overlapping chapters
+        # through the pipeline scheduler is the default source of throughput.
+        self.assertEqual(PIPELINE_RENDER_POOL_DEFAULTS["scheduler"], "pipeline")
+        self.assertEqual(DEFAULTS["render_pool"]["scheduler"], "pipeline")
         self.assertEqual(DEFAULTS["render_pool"]["chapter_concurrency"], 0)
         self.assertEqual(DEFAULTS["render_pool"]["synthesis_backlog"], 0)
         self.assertEqual(DEFAULTS["render_pool"]["pending_audio_mb"], 256)
@@ -41,6 +43,7 @@ class PipelineConfigDefaultsTests(unittest.TestCase):
     def test_effective_values_match_the_plan_table(self):
         legacy = effective_scheduling(configuration(scheduler="legacy"))
         self.assertEqual(legacy["chapter_concurrency"], 2)
+        self.assertEqual(effective_scheduling(configuration())["scheduler"], "pipeline")
         pipeline = effective_scheduling(configuration(scheduler="pipeline"))
         self.assertEqual(pipeline["chapter_concurrency"], 4)
         # Managed 8-slot remote: logical 128, backlog 32, per-chapter share 32.
@@ -122,10 +125,11 @@ class PipelineProjectionTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
 
-    def legacy_remote(self, local):
-        deployment = {"tts_backend": "sglang", "tts_concurrency": 8,
-                      "state_dir": str(self.directory / "state")}
-        return build_remote_config(local, {}, "pod", "app-key", deployment=deployment)
+    def deployment(self, **values):
+        return {"state_dir": str(self.directory / "state"), **values}
+
+    def remote(self, local):
+        return build_remote_config(local, {}, "pod", "app-key", deployment=self.deployment())
 
     def test_scheduler_knobs_never_enter_the_wire_contract_or_chapter_settings(self):
         self.assertTrue(SCHEDULER_KEYS.isdisjoint(SAFE_RENDER_KEYS))
@@ -138,21 +142,24 @@ class PipelineProjectionTests(unittest.TestCase):
 
     def test_legacy_projection_is_unchanged_and_carries_no_scheduler_controls(self):
         local = configuration(scheduler="legacy", chapter_concurrency=4, max_inflight=40)
-        remote = self.legacy_remote(local)
+        remote = self.remote(local)
         self.assertNotIn("scheduler", remote["render_pool"])
         self.assertNotIn("chapter_concurrency", remote["render_pool"])
         self.assertNotIn("synthesis_backlog", remote["render_pool"])
         self.assertNotIn("review_concurrency", remote["render_pool"])
-        self.assertEqual(remote["render_pool"]["max_inflight"], 32)
+        # The single history-carrying worker needs no batched-backend bound.
+        self.assertNotIn("max_inflight", remote["render_pool"])
 
     def test_pipeline_projection_keeps_worker_config_and_honors_automatic_inflight(self):
         local = configuration(scheduler="pipeline", chapter_concurrency=4, max_inflight=0,
                               synthesis_backlog=0, review_concurrency=2, pending_audio_mb=256)
-        remote = self.legacy_remote(local)
+        remote = self.remote(local)
         worker, = remote["render_pool"]["workers"]
-        self.assertEqual(worker["concurrency"], 8)
-        self.assertEqual(worker["protocol"], "fish_sglang_drama3")
-        self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/audio/speech")
+        # One history-carrying inference service; chapters overlap through it.
+        self.assertEqual(worker["concurrency"], 1)
+        self.assertEqual(worker["protocol"], "fish_inline")
+        self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/tts")
+        self.assertIs(worker["multi_speaker"], True)
         self.assertEqual(remote["render_pool"]["scheduler"], "pipeline")
         self.assertEqual(remote["render_pool"]["chapter_concurrency"], 4)
         self.assertEqual(remote["render_pool"]["max_inflight"], 0)
@@ -160,14 +167,14 @@ class PipelineProjectionTests(unittest.TestCase):
         self.assertEqual(remote["render_pool"]["review_concurrency"], 2)
         self.assertEqual(remote["render_pool"]["pending_audio_mb"], 256)
         effective = effective_scheduling(remote)
-        self.assertEqual(effective["max_inflight"], 128)
+        self.assertEqual(effective["max_inflight"], 64)
 
     def test_projections_do_not_alter_fingerprint_input_keys(self):
         legacy = configuration(scheduler="legacy")
         pipeline = configuration(scheduler="pipeline", chapter_concurrency=4,
                                  synthesis_backlog=16, review_concurrency=3)
-        legacy_remote = self.legacy_remote(legacy)
-        pipeline_remote = self.legacy_remote(pipeline)
+        legacy_remote = self.remote(legacy)
+        pipeline_remote = self.remote(pipeline)
         self.assertEqual(pipeline_remote["render"], legacy_remote["render"])
         self.assertEqual(pipeline_remote["engine"], legacy_remote["engine"])
         self.assertEqual(pipeline_remote["verification"], legacy_remote["verification"])
@@ -176,16 +183,24 @@ class PipelineProjectionTests(unittest.TestCase):
         local = configuration()
         local["render_pool"]["scheduler"] = "turbo"
         with self.assertRaisesRegex(ValueError, "scheduler"):
-            self.legacy_remote(local)
+            self.remote(local)
 
-    def test_conflicting_projected_backlog_fails_before_paid_work(self):
-        local = configuration(scheduler="pipeline", synthesis_backlog=4,
+    def test_invalid_projected_backlog_fails_before_paid_work(self):
+        local = configuration(scheduler="pipeline", synthesis_backlog=300,
                               workers=[{"name": "w", "type": "fish_http",
                                         "url": "http://w.invalid/v1/tts", "concurrency": 1}])
-        deployment = {"tts_backend": "sglang", "tts_concurrency": 8,
-                      "state_dir": str(self.directory / "state")}
         with self.assertRaisesRegex(ValueError, "synthesis_backlog"):
-            build_remote_config(local, {}, "pod", "app-key", deployment=deployment)
+            self.remote(local)
+
+    def test_removed_sglang_backend_settings_are_rejected_before_any_projection(self):
+        # Stock SGLang cannot accept history turns or return generated codes,
+        # so its deployment settings no longer exist.
+        for key, value in (("tts_backend", "sglang"), ("tts_backend", "native"),
+                           ("tts_concurrency", 4), ("sglang_source", "/workspace/sglang-omni")):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(ValueError, "Unknown key"):
+                    build_remote_config(configuration(), {}, "pod", "app-key",
+                                        deployment=self.deployment(**{key: value}))
 
 
 if __name__ == "__main__":

@@ -17,12 +17,13 @@ from urllib.request import Request, urlopen
 import wave
 
 from epub_tts_narrator.renderer.engines import EngineError
-from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
+from epub_tts_narrator.renderer.fish_http import PROTOCOL, FishHTTPEngine
 from epub_tts_narrator.renderer.reference_cache import (
     UNKNOWN_REFERENCE_MARKER,
     ReferenceCache,
 )
 from epub_tts_narrator.renderer.server import make_server
+from test_fish_http import wire_response
 
 REQUIREMENTS = "requires renderer HTTP dependencies"
 
@@ -49,12 +50,13 @@ class FakeEngine:
         self.top_k = 30
         self.max_new_tokens = 2048
 
-    def synthesize_fish(self, text, voices, path, *, seed):
-        self.calls.append({"text": text, "seed": seed,
+    def synthesize_fish(self, text, voices, path, *, seed, history=()):
+        self.calls.append({"text": text, "seed": seed, "history": list(history),
                            "references": [(Path(v["reference_audio"]).read_bytes(), v["reference_text"],
                                            v["speaker"]) for v in voices]})
         path.write_bytes(wav_bytes())
-        return {"seed": seed}
+        return {"seed": seed, "codes": [[1] * 3 for _ in range(10)], "codebook_size": 1024,
+                "history_turns": len(history), "history_sha256": "0" * 64}
 
     def close(self):
         pass
@@ -174,18 +176,24 @@ class ServeReferenceReuseTests(unittest.TestCase):
         self.server.server_close()
 
     def post(self, body):
-        values = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key"}
+        values = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key",
+                  "X-Audiobook-Seed": "5", "X-Audiobook-Top-K": "30"}
         request = Request(self.url, data=json.dumps(body).encode(), headers=values)
         return urlopen(request, timeout=5)
+
+    def audio(self, response):
+        import msgpack
+        self.assertEqual(response.headers.get_content_type(), "application/msgpack")
+        return msgpack.unpackb(response.read(), raw=False)["audio"]
 
     def inline_body(self, *, reference_id=None, text="Reference.", sample=1000):
         reference = {"audio": base64.b64encode(wav_bytes(sample)).decode(), "text": text}
         if reference_id is not None:
             reference["reference_id"] = reference_id
-        return {"text": "Hello.", "format": "wav", "normalize": False, "references": [reference]}
+        return {"text": "Hello.", "format": "wav", "normalize": False, "temperature": 0.7, "top_p": 0.7, "max_new_tokens": 2048, "references": [reference]}
 
     def id_body(self, content_id=WAV_SHA, text="Reference."):
-        return {"text": "Hello.", "format": "wav", "normalize": False,
+        return {"text": "Hello.", "format": "wav", "normalize": False, "temperature": 0.7, "top_p": 0.7, "max_new_tokens": 2048,
                 "references": [{"reference_id": content_id, "text": text}]}
 
     def test_health_advertises_reference_reuse(self):
@@ -197,9 +205,9 @@ class ServeReferenceReuseTests(unittest.TestCase):
 
     def test_inline_then_id_only_second_request_transfers_no_audio_bytes(self):
         with self.post(self.inline_body()) as response:
-            self.assertEqual(response.read(), wav_bytes())
+            self.assertEqual(self.audio(response), wav_bytes())
         with self.post(self.id_body()) as response:
-            self.assertEqual(response.read(), wav_bytes())
+            self.assertEqual(self.audio(response), wav_bytes())
         self.assertEqual(len(self.engine.calls), 2)
         expected = [(wav_bytes(), "Reference.", None)]
         self.assertEqual(self.engine.calls[0]["references"], expected)
@@ -327,7 +335,7 @@ class EngineReferenceReuseTests(unittest.TestCase):
         self.client.synthesize("Hello again.", self.voice, self.root / "second.wav", seed=2)
         self.assertEqual(len(self.engine.calls), 2)
         self.assertEqual(self.engine.calls[0]["references"], self.engine.calls[1]["references"])
-        self.assertEqual(self.engine.calls[1]["text"], "Hello again.")
+        self.assertEqual(self.engine.calls[1]["text"], "<|speaker:0|> Hello again.")
         self.assertLess(len(self.bodies[1]), len(wav_bytes()))
         self.assertNotIn(wav_bytes(), self.bodies[1])
         self.assertFalse(list(self.root.glob(".fish-*")))
@@ -361,8 +369,8 @@ class EngineReferenceReuseTests(unittest.TestCase):
     def test_identity_stays_the_inline_contract_without_reuse_markers(self):
         self.assertEqual(self.client.identity, {
             "engine": "fish_http", "model": "drama-3",
-            "protocol": "fish-inline-reference-wav-v1",
-            "sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
+            "protocol": PROTOCOL,
+            "sampling": {"temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048},
             "multi_speaker": True,
         })
 
@@ -370,12 +378,7 @@ class EngineReferenceReuseTests(unittest.TestCase):
         opens = []
         def respond(request, **kwargs):
             opens.append(request)
-            body = (json.dumps({"status": "ready"}).encode() if request.get_method() == "GET"
-                    else wav_bytes())
-            response = io.BytesIO(body)
-            response.status = 200
-            response.headers = {"Content-Length": str(len(body))}
-            return response
+            return wire_response(request=request)
         opener = Mock()
         opener.open.side_effect = respond
         with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
@@ -394,13 +397,7 @@ class EngineReferenceReuseTests(unittest.TestCase):
         opens = []
         def respond(request, **kwargs):
             opens.append(request)
-            body = (json.dumps({"status": "ready", "reference_reuse": True}).encode()
-                    if request.get_method() == "GET" else wav_bytes())
-            response = io.BytesIO(body)
-            response.status = 200
-            response.headers = {"Content-Length": str(len(body)),
-                                "X-Audiobook-Reference-Reuse": "sha256-v1"}
-            return response
+            return wire_response(headers={"X-Audiobook-Reference-Reuse": "sha256-v1"}, request=request)
         opener = Mock()
         opener.open.side_effect = respond
         with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
@@ -414,7 +411,7 @@ class EngineReferenceReuseTests(unittest.TestCase):
         self.assertEqual(first["references"][0]["audio"], wav_bytes())
         self.assertNotIn("reference_id", first["references"][0])
         self.assertEqual(second["references"][0],
-                         {"reference_id": WAV_SHA, "text": "The reference words."})
+                         {"reference_id": WAV_SHA, "text": "The reference words.", "speaker": 0})
         self.assertGreater(len(opens[0].data), len(wav_bytes()))
         self.assertLess(len(opens[1].data), len(wav_bytes()) // 4)
         self.assertNotIn(wav_bytes(), opens[1].data)

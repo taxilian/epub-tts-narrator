@@ -20,7 +20,7 @@ from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, au
 from epub_tts_narrator.renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
-from shared_fixtures import pcm_hash
+from shared_fixtures import HISTORY_CAPABILITY, fixture_codes, pcm_hash
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -29,7 +29,7 @@ FFMPEG = shutil.which("ffmpeg")
 
 class CastingEngine:
     identity = {"engine": "casting_fixture", "model": "fixture-v1"}
-    capabilities = {"reference_voice": True, "voice_design": True}
+    capabilities = {"reference_voice": True, "voice_design": True, **HISTORY_CAPABILITY}
 
     def __init__(self, transcripts):
         self.transcripts = transcripts
@@ -56,7 +56,7 @@ class CastingEngine:
 
     def synthesize(self, text, voice, path, *, seed, direction=""):
         self.speech_calls.append({"voice_id": voice["voice_id"], "asset_hash": voice["asset_hash"]})
-        return self._write(text, path, seed)
+        return {**self._write(text, path, seed), **fixture_codes(text, [voice])}
 
     def close(self):
         self.closed = True
@@ -638,7 +638,11 @@ class CastingTests(unittest.TestCase):
 
         first = book_render("first-output")
         speech_count = len(self.engine.speech_calls)
-        affected_count = sum(call["voice_id"] == self.voice_id for call in self.engine.speech_calls)
+        voices = [call["voice_id"] for call in self.engine.speech_calls]
+        # Each take continues the chapter's accepted takes, so the first take in
+        # the changed voice and every later take in that chapter are new.
+        self.assertIn(self.voice_id, voices)
+        regenerated = voices[voices.index(self.voice_id):]
         candidate = self.session.generate(self.voice_id)
         pending = book_render("pending-output")
         self.assertEqual(first["voice_assets"], pending["voice_assets"])
@@ -647,9 +651,13 @@ class CastingTests(unittest.TestCase):
         changed = book_render("selected-output")
         self.assertEqual(changed["voice_assets"][self.voice_id], candidate["asset_hash"])
         self.assertNotEqual(first["voice_assets"][self.voice_id], changed["voice_assets"][self.voice_id])
-        self.assertEqual(len(self.engine.speech_calls), speech_count + affected_count)
+        self.assertEqual([call["voice_id"] for call in self.engine.speech_calls[speech_count:]],
+                         regenerated)
         for call in self.engine.speech_calls[speech_count:]:
-            self.assertEqual(call["asset_hash"], candidate["asset_hash"])
+            if call["voice_id"] == self.voice_id:
+                self.assertEqual(call["asset_hash"], candidate["asset_hash"])
+            else:
+                self.assertEqual(call["asset_hash"], first["voice_assets"][call["voice_id"]])
         # A new book has a different source, but the same stable series/voice IDs.
         following = read_json(EXAMPLE.parent / "reviewed.json")
         following["source"]["book"]["id"] = hashlib.sha256(b"casting sequel").hexdigest()

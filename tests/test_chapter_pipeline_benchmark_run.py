@@ -116,7 +116,7 @@ class BenchmarkFixture(unittest.TestCase):
         original = pool_module.create_render_engine
         observed = []
 
-        def observer(config, *, shared_inference=False):
+        def observer(config, *, shared_inference=True):
             engine = original(config, shared_inference=shared_inference)
             observed.append(engine)
             return engine

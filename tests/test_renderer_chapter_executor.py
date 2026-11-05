@@ -17,6 +17,7 @@ from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import RenderBlocked, make_render_plan
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureVerifier, write_tone
+from shared_fixtures import HISTORY_CAPABILITY
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -108,14 +109,23 @@ class ChapterExecutorTests(unittest.TestCase):
         self.assertNotEqual(read_json(first["chapter.json"])["frames"], read_json(second["chapter.json"])["frames"])
         self.assertEqual(counts, (len(self.engine.speech_calls), len(self.engine.dialogue_calls), len(self.verifier.calls)))
 
-    def test_changed_voice_regenerates_only_its_separate_passage(self):
+    def test_changed_voice_regenerates_its_passage_and_later_history_dependent_takes_only(self):
         self.synthesize()
+        first = [call["text"] for call in self.engine.speech_calls]
         before = len(self.engine.speech_calls), len(self.engine.dialogue_calls)
         changed = deepcopy(self.spec)
         changed["voice_bindings"]["voice_lena"] = digest("new-lena")
         self.voices["voice_lena"]["asset_hash"] = changed["voice_bindings"]["voice_lena"]
         self.synthesize(changed)
-        self.assertEqual(len(self.engine.speech_calls) - before[0], 1)
+        # Every later take was conditioned on the changed one, so the chapter
+        # regenerates from Lena's passage onward; earlier takes, including
+        # the grouped paragraph, are reused.
+        regenerated = self.engine.speech_calls[before[0]:]
+        lena = next(index for index, call in enumerate(self.engine.speech_calls[:before[0]])
+                    if call["voice_hash"] == self.spec["voice_bindings"]["voice_lena"])
+        self.assertEqual([call["text"] for call in regenerated], first[lena:])
+        self.assertEqual(regenerated[0]["voice_hash"], changed["voice_bindings"]["voice_lena"])
+        self.assertGreater(lena, 0)
         self.assertEqual(len(self.engine.dialogue_calls), before[1])
 
     def test_failed_verification_never_publishes_chapter(self):
@@ -170,14 +180,21 @@ class ChapterExecutorTests(unittest.TestCase):
 
     def test_capabilities_match_backend_and_reject_unsupported_paragraphs(self):
         self.assertTrue(self.executor.multi_speaker)
-        self.engine.capabilities = {"multi_speaker": False}
+        self.engine.capabilities = {**HISTORY_CAPABILITY, "multi_speaker": False}
         self.assertFalse(self.executor.multi_speaker)
         with self.assertRaisesRegex(ValueError, "cannot render multi-speaker"):
             self.synthesize()
         self.assertFalse(self.engine.speech_calls or self.engine.dialogue_calls)
 
+    def test_backend_without_chapter_continuity_is_rejected_before_generation(self):
+        self.engine.capabilities = {key: value for key, value in self.engine.capabilities.items()
+                                    if key != "chapter_continuity"}
+        with self.assertRaisesRegex(ValueError, "does not support chapter continuity"):
+            self.synthesize()
+        self.assertFalse(self.engine.speech_calls or self.engine.dialogue_calls)
+
     def test_single_voice_paragraph_backend_can_render_original_remote_spec(self):
-        self.engine.capabilities = {"multi_speaker": False, "single_speaker_paragraph": True}
+        self.engine.capabilities = {**HISTORY_CAPABILITY, "multi_speaker": False, "single_speaker_paragraph": True}
         self.assertFalse(self.executor.multi_speaker)
         self.assertTrue(self.executor.single_speaker_paragraph)
         original = deepcopy(self.spec)

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError, create_engine
 from epub_tts_narrator.renderer.config import load_config
@@ -30,16 +32,26 @@ class RendererEngineTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.engine = Drama3MLXEngine(self.root)
         self.model = Mock(sample_rate=100)
+        self.model.model.config.audio_decoder.num_codebooks = 10
+        self.model.model.config.audio_decoder.vocab_size = 1024
         self.engine._model = self.model
         self.sf = self.engine._soundfile = Mock()
         self.sf.write.side_effect = lambda path, *args, **kwargs: Path(path).write_bytes(b"wave")
         self.output = self.root / "output.wav"
 
-    def segment(self, text="Hello.", finish="eos", audio=None):
+    def segment(self, text="Hello.", finish="eos", audio=None, codes=None):
         return SimpleNamespace(
             text=text, finish_reason=finish,
             audio=array("f", [0.1] * 100) if audio is None else audio,
+            codes=np.arange(40, dtype=np.int64).reshape(10, 4) if codes is None else codes,
         )
+
+    def assert_tagged_reference(self, reference, saved, speaker=0):
+        # Requests are always speaker-tagged: the encoded reference is reused,
+        # only its transcript gains the request-local tag.
+        self.assertIsNot(reference, saved)
+        self.assertIs(reference.codes, saved.codes)
+        self.assertEqual(reference.text, f"<|speaker:{speaker}|> {saved.text}")
 
     def generate(self, *segments):
         self.model.generate.return_value = iter(segments)
@@ -51,8 +63,8 @@ class RendererEngineTests(unittest.TestCase):
                    return_value=(self.segment(), audit)) as design:
             result = self.engine.create_voice(description, "Hello.", self.output, seed=1)
         design.assert_called_once_with(
-            self.model, description, "Hello.", seed=1, temperature=1.0,
-            top_p=0.9, top_k=30, max_new_tokens=2048,
+            self.model, description, "Hello.", seed=1, temperature=0.7,
+            top_p=0.7, top_k=30, max_new_tokens=2048,
         )
         self.assertEqual(self.output.read_bytes(), b"wave")
         self.assertTrue(result["description_applied"])
@@ -105,13 +117,22 @@ class RendererEngineTests(unittest.TestCase):
         self.assertNotEqual(designed, self.engine.voice_design_identity)
 
     def test_synthesis_uses_saved_reference_and_one_verified_attempt(self):
-        self.generate(self.segment())
-        with patch.object(self.engine, "_reference", return_value="saved-voice"):
-            self.engine.synthesize("Hello.", {}, self.output, seed=1)
+        saved = FakeReference("The saved reference words.", object())
+        self.generate(self.segment(text="<|speaker:0|> Hello."))
+        with patch.object(self.engine, "_reference", return_value=saved):
+            result = self.engine.synthesize("Hello.", {}, self.output, seed=1)
         self.assertEqual(self.output.read_bytes(), b"wave")
         args, kwargs = self.model.generate.call_args
-        self.assertEqual(args, ("Hello.",))
-        self.assertEqual(kwargs["references"], ["saved-voice"])
+        self.assertEqual(args, ("<|speaker:0|> Hello.",))
+        [reference] = kwargs["references"]
+        self.assert_tagged_reference(reference, saved)
+        self.assertEqual(saved.text, "The saved reference words.")
+        # Outside a chapter transaction (casting, previews) there is no history
+        # and generated codes are not returned as chapter evidence.
+        self.assertEqual(kwargs["previous_takes"], [])
+        self.assertEqual((result["history_turns"], result["history_available"]), (0, 0))
+        self.assertNotIn("generated_codes", result)
+        self.assertEqual(result["synthesis_text"], "Hello.")
         self.assertEqual(kwargs["attempts"], 1)
         self.assertTrue(kwargs["single_chunk"])
         self.assertNotIn("accept", kwargs)
@@ -119,10 +140,10 @@ class RendererEngineTests(unittest.TestCase):
     def test_synthesis_trims_wrapping_quotes_before_applying_delivery(self):
         source = '\u2003“ \' Hello, don\'t call it "easy". \' ”\n'
         expected = '<whisper>Hello, don\'t call it "easy".</whisper>'
-        self.generate(self.segment(text=expected))
-        with patch.object(self.engine, "_reference", return_value="saved-voice"):
+        self.generate(self.segment(text=f"<|speaker:0|> {expected}"))
+        with patch.object(self.engine, "_reference", return_value=FakeReference("Saved.", object())):
             result = self.engine.synthesize(source, {}, self.output, seed=1, direction="whisper")
-        self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(self.model.generate.call_args.args, (f"<|speaker:0|> {expected}",))
         self.assertEqual(result["synthesis_text"], expected)
 
     def test_quote_only_synthesis_is_rejected_before_loading_reference(self):
@@ -141,15 +162,15 @@ class RendererEngineTests(unittest.TestCase):
         for index, (source, target) in enumerate(cases):
             with self.subTest(source=source):
                 expected = f"<whisper>{target}</whisper>"
-                self.generate(self.segment(text=expected))
+                self.generate(self.segment(text=f"<|speaker:0|> {expected}"))
                 with patch.object(self.engine, "_reference", return_value=saved):
                     result = self.engine.synthesize(
                         source, voice, self.root / f"parenthesis-{index}.wav",
                         seed=1, direction="whisper",
                     )
-                self.assertEqual(self.model.generate.call_args.args, (expected,))
+                self.assertEqual(self.model.generate.call_args.args, (f"<|speaker:0|> {expected}",))
                 self.assertEqual(result["synthesis_text"], expected)
-                self.assertIs(self.model.generate.call_args.kwargs["references"][0], saved)
+                self.assert_tagged_reference(self.model.generate.call_args.kwargs["references"][0], saved)
                 self.assertEqual(saved.text, "(A saved reference).")
                 self.assertEqual(voice, original)
 
@@ -187,8 +208,10 @@ class RendererEngineTests(unittest.TestCase):
         expected = '<|speaker:0|> Hello.\n<|speaker:0|> <whisper>Stay here.</whisper>'
         self.generate(self.segment(text=expected))
         with patch.object(self.engine, "_reference", return_value=FakeReference(voice["reference_text"], object())):
-            self.engine.synthesize_fish(text, [voice], self.output, seed=1)
+            result = self.engine.synthesize_fish(text, [voice], self.output, seed=1)
         self.assertEqual(self.model.generate.call_args.args, (expected,))
+        self.assertEqual(result["codes"], np.arange(40).reshape(10, 4).tolist())
+        self.assertEqual(result["codebook_size"], 1024)
 
     def dialogue_voice(self, name):
         return {
@@ -322,11 +345,19 @@ class RendererEngineTests(unittest.TestCase):
             [self.segment(audio=array("f", [float("nan")] * 100))],
             [self.segment(audio=array("f", [float("inf")] * 100))],
             [self.segment(audio=array("h", [1] * 100))],
+            [self.segment(codes=np.zeros((9, 4), dtype=np.int64))],
+            [self.segment(codes=np.zeros((10, 4), dtype=np.float32))],
+            [self.segment(codes=np.zeros(4, dtype=np.int64))],
         ]
+        tagged = "<|speaker:0|> Hello."
         for segments in cases:
+            for segment in segments:
+                if segment.text == "Hello.":
+                    segment.text = tagged
             with self.subTest(segments=len(segments)):
                 self.generate(*segments)
-                with patch.object(self.engine, "_reference", return_value="reference"), self.assertRaises(EngineError):
+                with patch.object(self.engine, "_reference", return_value=FakeReference("Saved.", object())), \
+                        self.assertRaises(EngineError):
                     self.engine.synthesize("Hello.", {}, self.output, seed=1)
                 self.assertFalse(self.output.exists())
         self.sf.write.assert_not_called()
@@ -339,14 +370,16 @@ class RendererEngineTests(unittest.TestCase):
         self.model.generate.assert_not_called()
 
     def test_direction_is_separate_from_spoken_text_and_cannot_inject_tags(self):
-        self.generate(self.segment(text="<whisper>Hello.</whisper>"))
-        with patch.object(self.engine, "_reference", return_value="reference"):
+        saved = FakeReference("Saved.", object())
+        self.generate(self.segment(text="<|speaker:0|> <whisper>Hello.</whisper>"))
+        with patch.object(self.engine, "_reference", return_value=saved):
             result = self.engine.synthesize(
                 "Hello.", {}, self.output, seed=9, direction="whispering",
             )
         self.assertTrue(result["direction_applied"])
-        self.assertEqual(self.model.generate.call_args.args[0], "<whisper>Hello.</whisper>")
-        self.assertEqual(self.model.generate.call_args.kwargs["references"], ["reference"])
+        self.assertEqual(self.model.generate.call_args.args[0], "<|speaker:0|> <whisper>Hello.</whisper>")
+        [reference] = self.model.generate.call_args.kwargs["references"]
+        self.assert_tagged_reference(reference, saved)
         for direction in ("sigh] say something [", "<|speaker:1|>", "a\nb",
                           "a\u2028b", "a\u200bb", "a" * (MAX_DELIVERY_CHARACTERS + 1)):
             with self.subTest(direction=direction), patch.object(
@@ -358,16 +391,18 @@ class RendererEngineTests(unittest.TestCase):
 
     def test_freeform_delivery_conditions_saved_voice_without_becoming_literal_speech(self):
         direction = "sibilant with prolonged s sounds"
-        expected = f"[{direction}] This is stupid."
+        expected = f"<|speaker:0|> [{direction}] This is stupid."
+        saved = FakeReference("Saved.", object())
         self.generate(self.segment(text=expected))
-        with patch.object(self.engine, "_reference", return_value="reference"):
+        with patch.object(self.engine, "_reference", return_value=saved):
             result = self.engine.synthesize(
                 "This is stupid.", {}, self.output, seed=9, direction=direction,
             )
         self.assertTrue(result["direction_applied"])
         self.assertEqual(result["applied_control"], "style_prefix")
         self.assertEqual(self.model.generate.call_args.args[0], expected)
-        self.assertEqual(self.model.generate.call_args.kwargs["references"], ["reference"])
+        [reference] = self.model.generate.call_args.kwargs["references"]
+        self.assert_tagged_reference(reference, saved)
 
     def test_distinct_freeform_styles_on_one_voice_do_not_merge(self):
         voice = self.dialogue_voice("character")
@@ -391,9 +426,9 @@ class RendererEngineTests(unittest.TestCase):
                      "prolong the vowel in the final word without adding other words; "
                      "let the final word rise in volume while preserving the same character's pitch and tone.")
         self.assertGreater(len(direction), 240)
-        expected = f"[{direction}] No!"
+        expected = f"<|speaker:0|> [{direction}] No!"
         self.generate(self.segment(text=expected))
-        with patch.object(self.engine, "_reference", return_value="reference"):
+        with patch.object(self.engine, "_reference", return_value=FakeReference("Saved.", object())):
             self.engine.synthesize("No!", {}, self.output, seed=9, direction=direction)
         self.assertEqual(self.model.generate.call_args.args[0], expected)
 

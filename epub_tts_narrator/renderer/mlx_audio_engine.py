@@ -1,9 +1,12 @@
 """Reference-conditioned Drama 3 synthesis using the supported MLX-Audio port.
 
-MLX-Audio generates one nonstreaming result per text chunk. A result has no
-finish_reason: generating fewer frames than max_tokens means its frame
-loop encountered EOS. We reject the cap and require every expected text chunk
-before publishing any audio; transcript verification remains the next stage.
+MLX-Audio's public ``generate`` accepts neither prior turns nor returns codes,
+so this adapter drives the same model internals ``generate`` uses
+(``_voice``, ``build_frames``, ``_frames`` and the codec's streaming decoder)
+for one chunk with the chapter history. Fewer frames than ``max_new_tokens``
+means the frame loop encountered EOS; the cap is rejected. Transcript
+verification remains the next stage. The internals are pinned by the
+``mlx-audio`` requirement and checked before use.
 """
 
 from __future__ import annotations
@@ -22,20 +25,19 @@ from typing import Any
 from .drama3_models import (
     MLX_AUDIO_DRAMA3_REQUIREMENT, get_drama3_model, supports_mlx_audio_drama3,
 )
-from .engines import (
-    EngineError, _checkpoint_fingerprints, _seed, _text,
-    format_dialogue, prepare_synthesis,
-)
-from .fish_http import read_reference, trim_wire_text
-from .speech_text import trim_speech_text
+from .engines import EngineError, HistorySynthesis, _checkpoint_fingerprints
+from .fish_http import read_reference
+
+# Same prompt ceiling as the pinned Sogni runtime (drama3_mlx/prompt.py).
+MAX_PROMPT_ROWS = 8192
 
 
-class MLXAudioDrama3Engine:
+class MLXAudioDrama3Engine(HistorySynthesis):
     """One lazy, local quantized model; saved references retain their identity."""
 
     def __init__(
         self, checkpoint: str | Path, *, model: str,
-        temperature: float = 1.0, top_p: float = 0.9, top_k: int = 30,
+        temperature: float = 0.7, top_p: float = 0.7, top_k: int = 30,
         max_new_tokens: int = 2048, min_audio_seconds: float = 0.1,
     ) -> None:
         self.checkpoint = Path(checkpoint).expanduser().resolve()
@@ -82,7 +84,7 @@ class MLXAudioDrama3Engine:
             "voice_design": False, "reference_voice": True,
             "preset_voice": False, "delivery_control": True,
             "multi_speaker": True, "unconditioned_voice_creation": False,
-            "structured_performance": True,
+            "structured_performance": True, "chapter_continuity": True,
         }
 
     @property
@@ -118,8 +120,8 @@ class MLXAudioDrama3Engine:
                 "temperature": self.temperature, "top_p": self.top_p,
                 "top_k": self.top_k, "max_new_tokens": self.max_new_tokens,
                 "min_audio_seconds": self.min_audio_seconds,
-                "stream": False, "chunking": "mlx-audio-fish_drama3",
-                "completion_check": "all-text-chunks-and-each-token-count-below-cap",
+                "stream": False, "chunking": "single-chunk-chapter-history",
+                "completion_check": "eos-before-max_new_tokens",
                 "reference_decoder": "mlx_audio.audio_io.read-float32-mono",
                 "output_encoding": "wav-float32-mono",
             }
@@ -174,55 +176,19 @@ class MLXAudioDrama3Engine:
             "a separate [voice_design] provider or select an existing saved reference voice."
         )
 
-    def synthesize(
-        self, text: str, voice: dict[str, Any], output_path: Path, *,
-        seed: int, direction: str = "", performance=None, traits: str = "",
-    ) -> dict[str, Any]:
-        _seed(seed)
-        _, engine_text, delivery = prepare_synthesis(text, direction, performance=performance, traits=traits)
-        return {
-            **self._generate_audio(engine_text, [voice], [None], output_path, seed=seed),
-            **delivery,
-        }
-
-    def synthesize_dialogue(
-        self, turns: list[dict[str, Any]], output_path: Path, *, seed: int,
-    ) -> dict[str, Any]:
-        _seed(seed)
-        text, voices, metadata = format_dialogue(turns)
-        return {
-            **self._generate_audio(text, voices, list(range(len(voices))), output_path, seed=seed),
-            **metadata,
-        }
-
-    def synthesize_fish(
-        self, text: str, voices: list[dict[str, Any]], output_path: Path, *, seed: int,
-    ) -> dict[str, Any]:
-        _seed(seed)
-        if not isinstance(voices, list) or not voices or any(not isinstance(v, dict) for v in voices):
-            raise EngineError("MLX-Audio Drama 3 requires saved reference voices")
-        speakers = [voice.get("speaker") for voice in voices]
-        if any(s is not None and (type(s) is not int or not 0 <= s <= 15) for s in speakers):
-            raise EngineError("Reference speaker IDs must be integers from 0 through 15")
-        text = trim_wire_text(text, set(speakers))
-        return self._generate_audio(text, voices, speakers, output_path, seed=seed)
-
-    def _generate_audio(
-        self, text: str, voices: list[dict[str, Any]], speakers: list[int | None],
-        output_path: Path, *, seed: int,
-    ) -> dict[str, Any]:
+    def _generate_wire(self, text, references, history, output_path, *, seed):
         output_path = Path(output_path)
         if output_path.exists():
             raise EngineError(f"Audio output already exists: {output_path}")
-        if any(not isinstance(voice, dict) for voice in voices):
-            raise EngineError("MLX-Audio Drama 3 requires a saved reference voice")
         # Capture and verify every reference before loading the large model.
-        references = [read_reference(voice) for voice in voices]
+        blobs = {voice["speaker"]: read_reference(voice) for voice in references}
+        from .continuity import candidates
+        from .continuity_codes import history_digest
         try:
             import numpy as np
             import soundfile as sf
 
-            for blob, _ in references:
+            for blob, _ in blobs.values():
                 original, rate = sf.read(io.BytesIO(blob), dtype="float32", always_2d=True)
                 if (type(rate) is not int or rate <= 0 or original.ndim != 2
                         or not original.shape[0] or not original.shape[1]
@@ -230,13 +196,15 @@ class MLXAudioDrama3Engine:
                     raise EngineError("Saved reference audio is empty or malformed")
 
             model = self._load()
+            if not all(callable(getattr(model, name, None)) for name in ("_voice", "build_frames", "_frames")) \
+                    or not callable(getattr(model.codec, "streaming_step", None)):
+                raise EngineError("The installed mlx-audio Drama 3 internals do not support chapter history")
             import mlx.core as mx
             from mlx_audio.audio_io import read as audio_read
-            from mlx_audio.tts.models.fish_drama3.chunking import split_text
 
             rate = model.sample_rate
-            audio_refs, text_refs = [], []
-            for (blob, transcript), speaker in zip(references, speakers):
+            decoded = {}
+            for speaker, (blob, transcript) in blobs.items():
                 # Match the runtime's path-based decoder using verified bytes,
                 # so a file changed since validation cannot reach conditioning.
                 audio, ref_rate = audio_read(
@@ -246,50 +214,37 @@ class MLXAudioDrama3Engine:
                 if (type(ref_rate) is not int or ref_rate != rate or audio.ndim != 1 or not len(audio)
                         or not np.isfinite(audio).all()):
                     raise EngineError("Decoded reference audio is empty or malformed")
-                audio_refs.append(audio)
-                text_refs.append(f"<|speaker:{speaker}|> {transcript}" if speaker is not None else transcript)
-
-            expected_chunks = len(split_text(text))
-            if not expected_chunks:
-                raise EngineError("MLX-Audio Drama 3 text contains no generation chunks")
-            mx.synchronize()
-            mx.random.seed(seed)
-            iterator = iter(model.generate(
-                text=text, ref_audio=audio_refs, ref_text=text_refs,
-                temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
-                max_tokens=self.max_new_tokens, stream=False,
-            ))
-            chunks, token_counts = [], []
-            try:
-                for index, result in enumerate(iterator):
-                    if (index >= expected_chunks or type(result.segment_idx) is not int
-                            or result.segment_idx != index
-                            or type(result.is_final_chunk) is not bool
-                            or result.is_final_chunk != (index == expected_chunks - 1)
-                            or result.is_streaming_chunk is not False):
-                        raise EngineError("MLX-Audio Drama 3 returned incomplete or unordered chunks")
-                    if type(result.token_count) is not int or result.token_count <= 0:
-                        raise EngineError("MLX-Audio Drama 3 returned invalid token metadata")
-                    if result.token_count >= self.max_new_tokens:
-                        raise EngineError("MLX-Audio Drama 3 reached the token limit; the take may be incomplete")
-                    if type(result.sample_rate) is not int or result.sample_rate != rate:
-                        raise EngineError("MLX-Audio Drama 3 returned an invalid sample rate")
-                    audio = np.asarray(result.audio, dtype=np.float32)
-                    if (audio.ndim != 1 or not len(audio) or not np.isfinite(audio).all()
-                            or type(result.samples) is not int or result.samples != len(audio)):
-                        raise EngineError("MLX-Audio Drama 3 returned empty or malformed audio")
-                    # Keep owned samples if the runtime reuses its output buffer.
-                    chunks.append(audio.copy())
-                    token_counts.append(result.token_count)
-            finally:
-                if callable(getattr(iterator, "close", None)):
-                    iterator.close()
+                decoded[speaker] = (audio, f"<|speaker:{speaker}|> {transcript}")
+            for selected, kept in candidates(text, references, history):
+                voice = model._voice([decoded[item["speaker"]][0] for item in selected],
+                                     [decoded[item["speaker"]][1] for item in selected])
+                turns = [(turn_text, mx.array(np.array(codes, dtype=np.int32))) for turn_text, codes in kept]
+                frames, system_rows = model.build_frames(voice.references, turns, text)
+                if frames.shape[0] > MAX_PROMPT_ROWS:
+                    continue
                 mx.synchronize()
-            if len(chunks) != expected_chunks:
-                raise EngineError("MLX-Audio Drama 3 did not return every text chunk")
-            audio = np.concatenate(chunks)
-            if len(audio) < math.ceil(rate * self.min_audio_seconds):
-                raise EngineError("MLX-Audio Drama 3 returned implausibly short audio")
+                mx.random.seed(seed)
+                codes = list(model._frames(frames, system_rows, voice, self.max_new_tokens,
+                                           self.temperature, self.top_k, self.top_p))
+                if not codes:
+                    raise EngineError("MLX-Audio Drama 3 returned no audio frames")
+                if len(codes) >= self.max_new_tokens:
+                    raise EngineError("MLX-Audio Drama 3 reached the token limit; the take may be incomplete")
+                stacked = mx.stack(codes, axis=1)
+                model.codec.reset_streaming_state()
+                audio = model.codec.streaming_step(stacked[None])[0, 0]
+                mx.eval(audio)
+                audio = np.asarray(audio, dtype=np.float32).copy()
+                generated = np.asarray(stacked, dtype=np.int64)
+                mx.synchronize()
+                break
+            else:
+                raise EngineError("MLX-Audio Drama 3 prompt is too long even without chapter history")
+            if (audio.ndim != 1 or not np.isfinite(audio).all()
+                    or len(audio) < math.ceil(rate * self.min_audio_seconds)):
+                raise EngineError("MLX-Audio Drama 3 returned empty, malformed or implausibly short audio")
+            if generated.ndim != 2 or generated.shape[0] != model.num_codebooks:
+                raise EngineError("MLX-Audio Drama 3 returned invalid generated codec tokens")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             staged_name = None
             try:
@@ -306,11 +261,13 @@ class MLXAudioDrama3Engine:
             raise
         except Exception as exc:
             raise EngineError(f"MLX-Audio Drama 3 generation failed: {exc}") from exc
-        return {
+        metadata = {
             "finish_reason": "inferred_eos",
-            "completion_evidence": "Every text chunk returned fewer frames than max_new_tokens",
+            "completion_evidence": "The frame loop returned EOS before max_new_tokens",
             "sample_rate": rate, "sample_count": len(audio),
             "duration_seconds": len(audio) / rate, "seed": seed,
-            "chunk_count": len(chunks), "token_counts": token_counts,
-            "synthesis_text": text,
+            "chunk_count": 1, "token_counts": [len(codes)],
+            "synthesis_text": text, "history_turns": len(kept),
+            "history_available": len(history), "history_sha256": history_digest(kept),
         }
+        return metadata, generated.tolist(), model.tower.vocab_size

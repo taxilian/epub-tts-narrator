@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .book_context import resolve_book_config, voice_store
 from .bundle import chunk_speakers
-from .common import file_hash, read_json, regular_file
+from .common import digest, file_hash, read_json, regular_file
 from .speech_cache import SpeechCache
 from .speech_identity import engines_compatible, synthesis_engine_identity, _model_alias
 from .workflow import make_render_plan, _paragraph_request, _speech_request
@@ -151,9 +151,6 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
     snapshot. Text, voice transcripts, credentials and raw engine metadata are
     deliberately omitted from the shareable report.
     """
-    from .continuity import enabled
-    if enabled(config):
-        raise ValueError("cache-report does not replay accepted chapter continuity; use render to validate and resume it")
     if type(max_examples) is not int or max_examples < 0:
         raise ValueError("max_examples must be a nonnegative integer")
     config = resolve_book_config(bundle, config)
@@ -175,7 +172,13 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                      accepted_records=0, index_records=0)
     totals.update(inventory)
     reasons, examples = Counter(), []
+    from .continuity import ChapterContinuity, is_narration, narrator_asset
     for chapter in plan["chapters"]:
+        # Replay accepted history in source order: each take was conditioned
+        # on the accepted takes before it, so the first miss makes every later
+        # request in the chapter a miss as well.
+        continuity = ChapterContinuity(engine_identity, available, narrator_asset(chapter, available))
+        intact = True
         for chunk in chapter["chunks"]:
             if chunk["silent_control"]:
                 continue
@@ -191,15 +194,25 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                     totals["missing_voice_requests"] += 1
                     differences = ["missing_current_voice"]
                     example["missing_voice_ids"] = missing
+                    intact = False
+                elif not intact:
+                    differences = ["earlier_take_in_chapter_changed"]
                 else:
                     request = (_paragraph_request(chunk, available, engine_identity, config)
                                if "paragraph_turns" in chunk else
                                _speech_request(chunk, available[group[0]["voice_id"]], engine_identity,
                                                config, performer=group[0] if len(speakers) > 1 else None))
-                    identity = cache.identity(request)
-                    if cache.find(identity, request=request) is not None:
-                        totals["hits"] += 1
-                        continue
+                    with continuity.transaction(request, narration=is_narration(
+                            chunk, available, continuity.narrator)) as bound:
+                        identity = cache.identity(bound)
+                        continuity.bind(digest(identity))
+                        found = cache.find(identity, request=bound)
+                        if found is not None:
+                            continuity.accept(*found)
+                            totals["hits"] += 1
+                            continue
+                    intact = False
+                    request = bound
                     locations = _locations(request)
                     candidates = {index for location in locations for index in by_block[location]}
                     candidates.update(by_text.get(identity.get("text"), []))

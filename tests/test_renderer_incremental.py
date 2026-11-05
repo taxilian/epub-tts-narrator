@@ -99,8 +99,11 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(current["status"], "complete")
         self.assertNotEqual(original["bundle_hash"], current["bundle_hash"])
         self.assertEqual(current["bundle_hash"], self.bundle["bundle_hash"])
-        self.assertEqual(self.model_counts(), (before[0], before[1] + 1, before[2] + 1))
-        self.assertEqual(self.engine.speech_calls[-1]["text"], self.document["segments"][1]["text"])
+        # The corrected passage is new; the following take in its chapter
+        # continues that passage's history, so it is generated again too.
+        self.assertEqual(self.model_counts(), (before[0], before[1] + 2, before[2] + 2))
+        self.assertEqual([call["text"] for call in self.engine.speech_calls[-2:]],
+                         [self.document["segments"][1]["text"], self.document["segments"][2]["text"]])
         self.assertNotEqual(old_book, file_hash(self.output / "book.m4b"))
         self.assertNotEqual(old_manifest, (self.output / "audio-manifest.json").read_bytes())
         self.assertNotEqual(first_checkpoint, self.checkpoint(1).read_bytes())
@@ -193,9 +196,10 @@ class IncrementalRendererTests(unittest.TestCase):
 
         self.assertEqual(self.model_counts(), counts)
 
-    def test_moving_a_passage_to_another_chapter_reuses_audio_and_rebuilds_timing(self):
+    def test_moving_a_passage_to_another_chapter_regenerates_changed_history_and_rebuilds_timing(self):
         self.run_render()
         counts = self.model_counts()
+        texts = {call["text"]: call for call in self.engine.speech_calls}
         before = read_json(self.output / "sync.json")
         old = next(row for row in before["segments"] if row["segment_id"] == "s2")
         order = [0, 2, 3, 1, 4]
@@ -207,7 +211,16 @@ class IncrementalRendererTests(unittest.TestCase):
 
         self.run_render()
 
-        self.assertEqual(self.model_counts(), counts)
+        # Chapter openings keep their history and audio. Each take after a
+        # changed predecessor continues different history and is new: the
+        # passage left behind in chapter one, the moved passage, and the
+        # passage now following it in chapter two.
+        changed = [self.document["segments"][i]["text"] for i in (1, 3, 4)]
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 3, counts[2] + 3))
+        self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]], changed)
+        for call in self.engine.speech_calls[counts[1]:]:
+            self.assertEqual(call["voice_hash"], texts[call["text"]]["voice_hash"])
+        counts = self.model_counts()
         after = read_json(self.output / "sync.json")
         moved = next(row for row in after["segments"] if row["segment_id"] == "s2")
         self.assertNotEqual(old["chapter_id"], moved["chapter_id"])
@@ -216,7 +229,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.run_render()
         self.assertEqual(self.model_counts(), counts)
 
-    def test_splitting_a_dialogue_tag_does_not_regenerate_later_unchanged_speech(self):
+    def test_splitting_a_dialogue_tag_does_not_regenerate_unchanged_later_chapters(self):
         passage = '"Wow, this is amazing," she said, "Why should we do that again?"'
         self.document["source"]["blocks"][1]["text"] = passage
         self.document["segments"][1].update(
@@ -234,10 +247,13 @@ class IncrementalRendererTests(unittest.TestCase):
         self.run_render()
 
         # Adding two segments shifts the export sequence for every later row;
-        # that bookkeeping change must not be treated as different speech.
-        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 3, counts[2] + 3))
+        # that bookkeeping change must not be treated as different speech. The
+        # following take in the same chapter continues the new passages'
+        # history, so only it is generated again with them.
+        following = next(segment for segment in self.document["segments"] if segment["block_id"] == "b3")
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 4, counts[2] + 4))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]],
-                         [trim_speech_text(segment["text"]) for segment in repaired])
+                         [trim_speech_text(segment["text"]) for segment in [*repaired, following]])
         self.assertEqual(read_json(self.checkpoint(2))["audio_file"], unaffected_chapter)
         self.assertEqual(file_hash(unaffected_chapter), unaffected_audio)
 

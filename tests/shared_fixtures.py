@@ -88,3 +88,26 @@ def renderer_config(root=None, *, series_id=None, checkpoint="unused-tts", asr_m
     config["render"].update(max_attempts=max_attempts, ffmpeg=ffmpeg, ffprobe=ffprobe, **render)
     config["quality"] = validate_policy({})
     return config
+
+
+def fixture_codes(text, voices, *, frames=4):
+    """Generated-codes metadata that a chapter-history fake engine returns.
+
+    Every renderer engine must return the codec tokens it generated so the
+    next take can continue the chapter. Fakes return small valid codes for
+    the speaker-tagged text they were asked to speak.
+    """
+    voices = list(voices)
+    distinct = []
+    for voice in voices:
+        if voice.get("asset_hash") not in [item.get("asset_hash") for item in distinct]:
+            distinct.append(voice)
+    if not text.lstrip().startswith("<|speaker:"):
+        text = f"<|speaker:0|> {text}"
+    seed = sum(map(ord, text)) % 1000
+    return {"generated_codes": {"codes": [[(seed + row) % 1024] * frames for row in range(10)],
+                                "codebook_size": 1024, "text": text,
+                                "speakers": [voice.get("asset_hash") for voice in distinct]}}
+
+
+HISTORY_CAPABILITY = {"chapter_continuity": True}

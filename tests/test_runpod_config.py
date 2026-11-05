@@ -61,18 +61,22 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertEqual(settings["deployment"]["state_dir"], str(self.directory / "deployment"))
         self.assertEqual(settings["deployment"]["max_hourly_price"], 2.75)
 
-    def test_remote_has_single_native_worker_and_cpu_verifier(self):
+    def test_remote_has_single_history_worker_and_cpu_verifier(self):
         remote = self.remote()
         worker, = remote["render_pool"]["workers"]
         self.assertEqual(worker["concurrency"], 1)
-        self.assertEqual(worker["protocol"], "fish_native_drama3")
+        self.assertEqual(worker["protocol"], "fish_inline")
         self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/tts")
+        self.assertTrue(worker["multi_speaker"])
+        self.assertFalse(worker["api_key"])
         self.assertEqual(remote["engine"]["checkpoint"], "/workspace/models/drama-3")
         self.assertEqual(remote["engine"]["temperature"], 0.8)
         self.assertEqual(remote["verification"]["type"], "faster_whisper")
         self.assertEqual(remote["verification"]["device"], "cpu")
         self.assertEqual(remote["verification"]["compute_type"], "int8")
-        self.assertNotIn("max_inflight", remote["render_pool"])
+        # The default pipeline scheduler keeps automatic whole-transaction admission.
+        self.assertEqual(remote["render_pool"]["scheduler"], "pipeline")
+        self.assertEqual(remote["render_pool"]["max_inflight"], 0)
         self.assertEqual(remote["verification"]["model"], "/workspace/models/whisper-ct2")
         self.assertEqual(remote["verification"]["reference_model"], "/workspace/models/whisper-ct2-reference")
         self.assertEqual(remote["verification"]["recurrence_threshold"], 4)
@@ -90,20 +94,13 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertIsNone(remote["verification"]["reference_model"])
         load_config(write_private_toml(self.directory / "worker.toml", remote))
 
-    def test_batched_backend_uses_one_server_with_bounded_request_slots(self):
-        write_private_toml(self.directory / "runpod.local.toml", {
-            "runpod": {"tts_backend": "sglang", "tts_concurrency": 8}})
-        remote = self.remote()
-        worker, = remote["render_pool"]["workers"]
-        self.assertEqual(worker["protocol"], "fish_sglang_drama3")
-        self.assertEqual(worker["url"], "http://127.0.0.1:8080/v1/audio/speech")
-        self.assertEqual(worker["concurrency"], 8)
-        self.assertEqual(remote["render_pool"]["max_inflight"], 32)
-        self.assertFalse(worker["multi_speaker"])
-        self.assertFalse(worker["api_key"])
-        self.assertEqual(remote["engine"]["checkpoint"], "/workspace/models/drama-3")
-        loaded = load_config(write_private_toml(self.directory / "worker.toml", remote))
-        self.assertEqual(loaded["render_pool"]["workers"][0]["concurrency"], 8)
+    def test_removed_sglang_backend_settings_are_unknown(self):
+        # Stock SGLang cannot carry chapter history; its settings no longer exist.
+        for key, value in (("tts_backend", "sglang"), ("tts_concurrency", 8), ("sglang_source", "/workspace/sglang")):
+            with self.subTest(key=key):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {key: value}})
+                with self.assertRaisesRegex(ValueError, "Unknown key"):
+                    load_settings(self.path)
 
     def test_remote_verification_device_and_compute_type_are_explicit_overrides(self):
         # The local machine's hardware settings never opt the remote into CUDA.
@@ -131,16 +128,6 @@ class RunpodConfigTests(unittest.TestCase):
                 write_private_toml(self.directory / "runpod.local.toml", {"verification": override})
                 with self.assertRaisesRegex(ValueError, "verification"):
                     self.remote()
-
-    def test_invalid_batching_options_are_rejected_before_cloud_calls(self):
-        for key, value in (("tts_backend", "other"), ("tts_backend", []),
-                           ("tts_concurrency", True), ("tts_concurrency", 0),
-                           ("tts_concurrency", 9), ("tts_concurrency", 1.5),
-                           ("sglang_source", "/workspace/../etc/sglang")):
-            with self.subTest(key=key, value=value):
-                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {key: value}})
-                with self.assertRaisesRegex(ValueError, "runpod"):
-                    load_settings(self.path)
 
     def test_deployment_service_port_controls_worker_without_changing_local_server(self):
         base = deepcopy(self.base)
@@ -187,7 +174,7 @@ class RunpodConfigTests(unittest.TestCase):
         remote = self.remote()
         path = write_private_toml(self.directory / "worker.toml", remote)
         loaded = load_config(path)
-        self.assertEqual(loaded["render_pool"]["workers"][0]["protocol"], "fish_native_drama3")
+        self.assertEqual(loaded["render_pool"]["workers"][0]["protocol"], "fish_inline")
         self.assertEqual(loaded["render"]["sentence_pause_ms"], 315)
         self.assertEqual(loaded["chapter_server"]["api_key"], "application-key")
 
@@ -296,11 +283,18 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertFalse(destination.is_symlink())
         self.assertEqual(original.read_text(), "do not replace")
 
-    def test_invalid_native_sampling_fails_before_deployment(self):
+    def test_sampling_reaches_the_inference_service_and_invalid_values_fail_before_deployment(self):
+        # The history service accepts the full sampling profile, including top_k.
         settings = load_settings(self.path)
         settings["override_raw"] = {"engine": {"top_k": 40}}
-        with self.assertRaisesRegex(ValueError, "top_k must be 30"):
-            self.remote(settings)
+        self.assertEqual(self.remote(settings)["engine"]["top_k"], 40)
+        for override in ({"top_k": 0}, {"top_k": 1001}, {"top_k": True}, {"temperature": 0},
+                         {"temperature": 2.5}, {"max_new_tokens": 2049}):
+            with self.subTest(override=override):
+                settings = load_settings(self.path)
+                settings["override_raw"] = {"engine": override}
+                with self.assertRaisesRegex(ValueError, "engine\\."):
+                    self.remote(settings)
 
     def test_h100_preference_defaults_on_and_only_accepts_booleans(self):
         from epub_tts_narrator.renderer.runpod_config import DEPLOYMENT_DEFAULTS

@@ -15,7 +15,7 @@ from epub_tts_narrator.renderer.workflow import (
     RenderBlocked, _render_chapter_chunks, assemble, make_render_plan, render,
 )
 from epub_tts_narrator.cli import export_bundle
-from shared_fixtures import renderer_config
+from shared_fixtures import fixture_codes, renderer_config
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
 
@@ -38,7 +38,8 @@ class ParagraphFixtureEngine(FixtureEngine):
         })
         if self.interrupt_dialogue_number == len(self.dialogue_calls):
             raise KeyboardInterrupt("fixture paragraph interruption")
-        return self._write("".join(turn["text"] for turn in turns), path, seed)
+        text = "".join(turn["text"] for turn in turns)
+        return {**self._write(text, path, seed), **fixture_codes(text, [turn["voice"] for turn in turns])}
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required for paragraph integration")
@@ -155,13 +156,22 @@ class ParagraphWorkflowTests(unittest.TestCase):
             self.package()
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         self.chapters()
+        # Lena's passage is followed by two narrator/Mara takes in the chapter.
+        # They were conditioned on her old take, so strict continuity renders
+        # them again; the earlier passages and the Mara paragraph are reused.
         self.assertEqual(len(self.engine.dialogue_calls), counts[0])
-        self.assertEqual(len(self.engine.speech_calls) - counts[1], 1)
-        self.assertEqual(len(self.verifier.calls) - counts[2], 1)
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 3)
+        self.assertEqual(len(self.verifier.calls) - counts[2], 3)
+        self.assertEqual([call["voice_hash"] for call in self.engine.speech_calls[counts[1]:]][0],
+                         store.load("voice_lena")["asset_hash"])
         after = self.accepted_clips()
-        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(len(after), len(before) + 3)
         self.assertTrue(all(read_json(path) == record for path, record in before.items()))
-        new_clip = next(record for path, record in after.items() if path not in before)
+        new_clips = [record for path, record in after.items() if path not in before]
+        new_clip = next(record for record in new_clips
+                        if record["request"]["chunk"]["segment"]["voice_id"] == "voice_lena")
+        self.assertEqual(sorted(record["request"]["chunk"]["segment"]["block_id"] for record in new_clips),
+                         ["b000004", "b000005", "b000006"])
         self.assertEqual(new_clip["request"]["chunk"], old_clip["request"]["chunk"])
         self.assertNotEqual(new_clip["request"]["voice_asset_hash"],
                             old_clip["request"]["voice_asset_hash"])
@@ -194,7 +204,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         members = passages([source], voices=["voice_lena"], offset=17)
         original = deepcopy(members)
         chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=members)
-        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": "lena"}}
+        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": digest("lena")}}
 
         clips, accepted = _render_chapter_chunks(
             chapter, voices, self.engine, self.engine.identity, self.verifier,
@@ -215,7 +225,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         from test_renderer_paragraphs import passages
         members = passages([' “Keep the lantern burning.” '], voices=["voice_lena"])
         chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=members)
-        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": "lena"}}
+        voices = {"voice_lena": {"voice_id": "voice_lena", "asset_hash": digest("lena")}}
 
         # Reproduce a valid take generated before edge trimming was introduced.
         with patch("epub_tts_narrator.renderer.workflow.trim_speech_text", side_effect=lambda text: text):
@@ -240,7 +250,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         original = deepcopy(members)
         grouped = group_paragraphs(plan(members))["chapters"][0]["chunks"]
         chapter = dict(make_render_plan(self.bundle, self.config)["chapters"][0], chunks=grouped)
-        voices = {voice_id: {"voice_id": voice_id, "asset_hash": "shared-voice"}
+        voices = {voice_id: {"voice_id": voice_id, "asset_hash": digest("shared-voice")}
                   for voice_id in ("voice_lena", "voice_mara")}
 
         clips, accepted = _render_chapter_chunks(
@@ -278,14 +288,19 @@ class ParagraphWorkflowTests(unittest.TestCase):
             self.package()
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         self.chapters()
+        # The mixed paragraph becomes two individual takes; the two later
+        # takes in the chapter followed it in history and render again too.
         self.assertEqual(len(self.engine.dialogue_calls), counts[0])
-        self.assertEqual(len(self.engine.speech_calls) - counts[1], 2)
-        self.assertEqual(len(self.verifier.calls) - counts[2], 2)
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 4)
+        self.assertEqual(len(self.verifier.calls) - counts[2], 4)
         new = {path: record for path, record in self.accepted_clips().items() if path not in before}
-        self.assertEqual(len(new), 2)
-        ordered = sorted(new.values(), key=lambda row: row["request"]["chunk"]["segment"]["start"])
-        self.assertEqual([record["request"]["chunk"] for record in ordered],
+        self.assertEqual(len(new), 4)
+        ordered = sorted(new.values(), key=lambda row: (row["request"]["chunk"]["segment"]["block_id"],
+                                                        row["request"]["chunk"]["segment"]["start"]))
+        self.assertEqual([record["request"]["chunk"] for record in ordered[:2]],
                          old_mixed["request"]["chunk"]["paragraph_turns"])
+        self.assertEqual([record["request"]["chunk"]["segment"]["block_id"] for record in ordered[2:]],
+                         ["b000005", "b000006"])
         for path, record in before.items():
             self.assertEqual(read_json(path), record)
             self.assertEqual(file_hash(path.parent / record["audio_file"]), hashes[path])

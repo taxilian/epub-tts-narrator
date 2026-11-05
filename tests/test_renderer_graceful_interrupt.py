@@ -157,6 +157,15 @@ class GracefulRenderTests(unittest.TestCase):
         self.assert_pool_drains(3)
 
     def assert_pool_drains(self, inflight):
+        # Takes within one chapter are sequential (chapter history), so the two
+        # workers are kept busy by two chapters rendering at the same time.
+        original_chapter = self.bundle["chapters"][0]
+        first, following = deepcopy(original_chapter), deepcopy(original_chapter)
+        first["rows"] = first["rows"][:4]
+        following["rows"] = following["rows"][4:]
+        following["entry"]["title"] = "Following chapter"
+        following["entry"]["path"] = "scripts/chapter-0002.json"
+        self.bundle["chapters"] = [first, following]
         self.config["render_pool"] = pool_config(worker("first"), worker("second"))["render_pool"]
         pool = RenderPool(self.config)
         pool.max_inflight = inflight

@@ -1,4 +1,9 @@
-"""A bounded Fish-compatible rendering endpoint for the local Drama 3 engine."""
+"""A bounded rendering endpoint for chapter-history Drama 3 requests (protocol v2).
+
+Clients send the composed request: tagged text, speaker-tagged references and
+the chapter's history turns with their codec tokens. The response is one
+MessagePack object with the WAV, the generated codes and the history used.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,6 @@ import json
 import math
 from pathlib import Path
 import secrets
-import shutil
 import socket
 import tempfile
 import threading
@@ -22,7 +26,7 @@ import time
 from .chapter_protocol import require_hash
 from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
-from .fish_http import MAX_AUDIO_BYTES, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
+from .fish_http import MAX_AUDIO_BYTES, PROTOCOL, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
 from .local_runtime import LocalRuntime, requires_mlx
 from .reference_cache import UNKNOWN_REFERENCE_MESSAGE, ReferenceCache
 
@@ -51,7 +55,7 @@ def _parse_request(data, content_type, references_cache=None):
         raise RequestError(f"Invalid request body: {exc}") from exc
     if not isinstance(body, dict):
         raise RequestError("Request body must be an object")
-    allowed = {"text", "references", "format", "normalize", "temperature", "top_p", "max_new_tokens"}
+    allowed = {"text", "references", "history", "format", "normalize", "temperature", "top_p", "max_new_tokens"}
     unsupported = set(body) - allowed
     if unsupported:
         raise RequestError("Unsupported Fish request option(s): " + ", ".join(sorted(map(str, unsupported))))
@@ -60,8 +64,9 @@ def _parse_request(data, content_type, references_cache=None):
     if body.get("normalize", False) is not False:
         raise RequestError("This server requires normalize=false to preserve audiobook wording")
     references = body.get("references")
-    if not isinstance(references, list) or not 1 <= len(references) <= 16:
-        raise RequestError("Provide 1–16 inline audio references; reference_id and remote audio paths are unsupported")
+    # Zero references is the deployment smoke probe's unconditioned voice.
+    if not isinstance(references, list) or not 0 <= len(references) <= 16:
+        raise RequestError("Provide at most 16 inline audio references; remote audio paths are unsupported")
     normalized = []
     for index, reference in enumerate(references):
         if (not isinstance(reference, dict)
@@ -127,37 +132,56 @@ def _parse_request(data, content_type, references_cache=None):
         text = body.get("text")
         if not isinstance(text, str) or not SPEAKER_TAG.match(text.lstrip()):
             raise RequestError("Text using tagged references must begin with a matching speaker tag")
-    validate_wire_text(body.get("text"), {reference["speaker"] for reference in normalized})
-    return body, normalized
+    speaker_ids = {reference["speaker"] for reference in normalized}
+    validate_wire_text(body.get("text"), speaker_ids)
+    history = body.get("history", [])
+    if not isinstance(history, list) or len(history) > 2:
+        raise RequestError("history must list at most two prior turns")
+    from .continuity_codes import validate_codes
+    turns = []
+    for index, turn in enumerate(history):
+        if not isinstance(turn, dict) or set(turn) != {"text", "codes"}:
+            raise RequestError(f"history[{index}] must contain text and codes")
+        if not isinstance(turn["text"], str) or not SPEAKER_TAG.match(turn["text"]):
+            raise RequestError(f"history[{index}].text must begin with a speaker tag")
+        try:
+            validate_wire_text(turn["text"], speaker_ids)
+            # Codebook bounds are checked against the loaded model by the engine.
+            validate_codes(turn["codes"], 65536)
+        except (EngineError, ValueError) as exc:
+            raise RequestError(f"history[{index}]: {exc}") from exc
+        turns.append((turn["text"], turn["codes"]))
+    return body, normalized, turns
 
 
 def _sampling(body, headers):
+    """The controlling client's sampling and seed; the worker's own config never applies.
+
+    Every history request must carry temperature, top_p and max_new_tokens in
+    the body and the seed and top-k as headers. The response echoes the values
+    actually applied so the client can prove the take used its settings.
+    """
     settings = {}
     for key in ("temperature", "top_p"):
-        if key in body:
-            value = body[key]
-            lower = 0.000001
-            upper = 2 if key == "temperature" else 1
-            if type(value) not in (int, float) or not math.isfinite(value) or not lower <= value <= upper:
-                raise RequestError(f"{key} must be between {lower} and {upper}")
-            settings[key] = value
-    if "max_new_tokens" in body:
-        value = body["max_new_tokens"]
-        if type(value) is not int or not 1 <= value <= 2048:
-            raise RequestError("max_new_tokens must be an integer between 1 and 2048")
-        settings["max_new_tokens"] = value
+        if key not in body:
+            raise RequestError(f"{key} is required; the controlling client owns sampling")
+        value = body[key]
+        upper = 2 if key == "temperature" else 1
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0.000001 <= value <= upper:
+            raise RequestError(f"{key} must be between 0.000001 and {upper}")
+        settings[key] = float(value)
+    value = body.get("max_new_tokens")
+    if type(value) is not int or not 1 <= value <= 2048:
+        raise RequestError("max_new_tokens is required as an integer between 1 and 2048")
+    settings["max_new_tokens"] = value
     try:
-        seed = int(headers.get("X-Audiobook-Seed", str(secrets.randbits(32))))
-        if not 0 <= seed <= 0xFFFFFFFF:
+        seed = int(headers["X-Audiobook-Seed"])
+        top_k = int(headers["X-Audiobook-Top-K"])
+        if not 0 <= seed <= 0xFFFFFFFF or not 1 <= top_k <= 1000:
             raise ValueError()
-        top_k = headers.get("X-Audiobook-Top-K")
-        if top_k is not None:
-            top_k = int(top_k)
-            if not 1 <= top_k <= 1000:
-                raise ValueError()
-            settings["top_k"] = top_k
-    except ValueError as exc:
-        raise RequestError("X-Audiobook-Seed must be uint32 and X-Audiobook-Top-K must be 1–1000") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RequestError("X-Audiobook-Seed (uint32) and X-Audiobook-Top-K (1–1000) are required") from exc
+    settings["top_k"] = top_k
     return seed, settings
 
 
@@ -205,21 +229,21 @@ class _RenderServer(ThreadingHTTPServer):
                 # request handler from releasing its admission slot.
                 pass
 
-    def _infer(self, text, voices, output, seed, sampling, request_id=None, queued_at=None):
+    def _infer(self, text, voices, history, output, seed, sampling, request_id=None, queued_at=None):
         if request_id:
             self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
         previous = {key: getattr(self.engine, key) for key in sampling}
         try:
             for key, value in sampling.items():
                 setattr(self.engine, key, value)
-            return self.engine.synthesize_fish(text, voices, output, seed=seed)
+            return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history)
         finally:
             for key, value in previous.items():
                 setattr(self.engine, key, value)
 
-    def synthesize(self, text, voices, output, seed, sampling, *, request_id=None, queued_at=None):
+    def synthesize(self, text, voices, output, seed, sampling, *, history=(), request_id=None, queued_at=None):
         return self.inference_runtime.run(
-            self._infer, text, voices, output, seed, sampling, request_id, queued_at,
+            self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at,
             initialize_mlx=requires_mlx(self.engine),
         )
 
@@ -325,8 +349,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": {"message": "Use GET /health or POST /v1/tts"}})
             return
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
-        self._json(200, {"status": "ready", "model": model,
-                         "protocol": "fish-inline-reference-wav-v1", "reference_reuse": True})
+        self._json(200, {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True})
 
     def do_POST(self):
         self.request_id = self.server.next_request_id()
@@ -358,8 +381,8 @@ class _Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise RequestError("Incomplete request body")
-            body, references = _parse_request(data, self.headers.get_content_type(),
-                                              self.server.references)
+            body, references, history = _parse_request(data, self.headers.get_content_type(),
+                                                       self.server.references)
             seed, sampling = _sampling(body, self.headers)
         except (RequestError, EngineError) as exc:
             self._json(400, {"error": {"message": str(exc)}})
@@ -387,23 +410,29 @@ class _Handler(BaseHTTPRequestHandler):
                 suffix = f", {reused} reused" if reused else ""
                 queued_at = time.monotonic()
                 self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, "
-                                                     f"{len(voices)} reference(s){suffix}")
-                self.server.synthesize(body["text"], voices, output, seed, sampling,
-                                       request_id=self.request_id, queued_at=queued_at)
+                                                     f"{len(voices)} reference(s), {len(history)} history turn(s){suffix}")
+                generated = self.server.synthesize(body["text"], voices, output, seed, sampling, history=history,
+                                                   request_id=self.request_id, queued_at=queued_at)
                 audio = inspect_wav(output)
-                size = output.stat().st_size
-                if size > MAX_AUDIO_BYTES:
+                if output.stat().st_size > MAX_AUDIO_BYTES:
                     raise EngineError("Generated WAV exceeds the 100 MiB response limit")
+                import msgpack
+                payload = msgpack.packb({
+                    "audio": output.read_bytes(), "codes": generated["codes"],
+                    "codebook_size": generated["codebook_size"],
+                    "history_turns": generated["history_turns"],
+                    "history_sha256": generated["history_sha256"],
+                    "sampling": sampling, "seed": seed}, use_bin_type=True)
+                size = len(payload)
                 self.send_response(200)
-                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Type", "application/msgpack")
                 self.send_header("Content-Length", str(size))
                 self.send_header("X-Audiobook-Seed-Applied", str(seed))
                 self.send_header("X-Audiobook-Reference-Reuse", "sha256-v1")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.close_connection = True
-                with output.open("rb") as stream:
-                    shutil.copyfileobj(stream, self.wfile)
+                self.wfile.write(payload)
                 self.wfile.flush()
                 self.server.activity(
                     self.request_id,
@@ -428,8 +457,8 @@ def make_server(config, engine=None, *, notify=_print_activity):
     if not loopback and not settings.get("api_key"):
         raise EngineError("Set server.api_key before listening beyond localhost")
     if engine is None:
-        if config["engine"].get("type", "drama3_mlx") != "drama3_mlx":
-            raise EngineError("The local server requires engine.type='drama3_mlx'")
+        if config["engine"].get("type", "drama3_mlx") not in {"drama3_mlx", "fish_speech_cuda"}:
+            raise EngineError("The renderer server requires engine.type='drama3_mlx' or 'fish_speech_cuda'")
         engine = create_engine(config["engine"])
     return _RenderServer((host, settings.get("port", 8080)), config, engine, notify=notify)
 

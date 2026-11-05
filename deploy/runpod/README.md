@@ -1,10 +1,13 @@
 # Run our chapter worker on Runpod
 
 The lifecycle CLI installs **this project's code** for voice registration, chapter
-jobs, verification, assembly, and Ceph publication. One pinned, unmodified Fish
-Speech or SGLang-Omni process supplies CUDA inference on loopback. Native Fish
-serializes requests; SGLang batches concurrent requests through one loaded TTS
-model. Verification and CPU assembly can overlap synthesis. Built-in JEV and
+jobs, verification, assembly, and Ceph publication. CUDA inference runs on
+loopback as our own `audiobook-render serve` process with
+`engine.type = "fish_speech_cuda"`, inside the pinned, unmodified Fish Speech
+environment. It calls Fish's library directly because chapter continuity needs
+prior turns with codec tokens and returned codes, which Fish's stock
+`api_server.py` does not offer. Inference serializes requests; several chapter
+coordinators overlap verification and CPU assembly with synthesis. Built-in JEV and
 pronunciation reviews use a separate bounded queue so network waits do not
 occupy the recognition/model thread.
 
@@ -204,19 +207,16 @@ weights, voices and job checkpoints on `/workspace`:
 | Path | Contents |
 | --- | --- |
 | `/workspace/epub-tts-narrator` | Application checkout and Python environment |
-| `/workspace/fish-speech` | Pinned, unmodified native inference checkout/environment |
-| `/workspace/sglang-omni` | Optional pinned, unmodified batching checkout/environment |
+| `/workspace/fish-speech` | Pinned, unmodified Fish checkout/environment; also holds our package for the inference service |
 | `/workspace/.epub-tts-runtime` | Installer, managed Python and dependency cache |
 | `/workspace/models` | Drama 3 and Whisper weights |
 | `/workspace/chapter-server-data` | Registered voices, durable jobs and resumable audio |
-| `/workspace/chapter-server-data/runtime-cache/sglang` | SGLang, Triton, Inductor, FlashInfer and CUDA compilation caches |
+| `/workspace/chapter-server-data/runtime/inference.toml` | Inference service config written by the launcher |
 | `/workspace/epub-tts-narrator.remote.toml` | Private merged server configuration |
 
 The launcher places the selected backend's virtual-environment tools first in
-its subprocess search path, including `ninja` used for kernel compilation.
-SGLang compilation caches are derived from `chapter_server.data_dir` and retained
-across stops; no environment-variable configuration is required. Restarting
-still loads model weights and captures process-local CUDA graphs.
+its subprocess search path. Restarting loads model weights and captures
+process-local CUDA graphs.
 
 A network volume retains these files even if the Pod is replaced. Ceph retains
 finished exports independently. Persistent storage continues to cost money
@@ -263,35 +263,14 @@ FLAC masters support final M4B assembly without generating speech again.
 Timing metadata currently links text at paragraph/chunk precision, not words.
 See [remote rendering](../../REMOTE_RENDERING.md) for artifacts and recovery.
 
-## Optional batched inference
+## Inference backend
 
-Select the backend in the deployment override, then run a full Update:
-
-```toml
-[runpod]
-tts_backend = "sglang"
-tts_concurrency = 4
-```
-
-`tts_backend` defaults to `native`. For `sglang`, `tts_concurrency` accepts 1–8
-simultaneous requests; these share one model, not multiple replicas. The worker
-uses stock SGLang-Omni commit `35e973de917988da23eeba5706c1d6045f260104`
-in its own environment and reuses the existing Drama 3 checkpoint and codec.
-The pinned dependency stack requires Linux glibc 2.34+ and a CUDA-13-compatible
-driver. Installation leaves the native environment and upstream source intact.
-
-The stock speech API supports one speaker per request. Single-voice paragraph
-groups keep their original text and delivery controls; mixed-speaker paragraphs
-require the native backend. This stock API has no per-request seed control:
-metadata explicitly records `seed_applied = false`, and repeated requests draw
-new stochastic takes. Model/voice/sampling compatibility still controls reuse
-of previously accepted pool clips. Switching scheduling or concurrency alone
-does not discard accepted audio.
-
-The generated SGLang configuration bounds unfinished paragraphs across all
-chapter coordinators to four times `tts_concurrency`. This includes recognition
-and review, so a full GPU batch can run while earlier audio is being checked.
-It still uses one TTS model and one shared Whisper model.
+Inference is always our service on Fish's library. Stock SGLang-Omni batches concurrent requests through one
+model, but its Drama 3 speech API accepts codes only as system-turn references,
+has no assistant-turn history and never returns generated codes (checked at the
+pinned commit `35e973de` and at `main` on 2026-11-05), so it cannot carry chapter
+history and is rejected. A future batched backend would need custom SGLang
+preprocessing and vocoder stages that accept history and return codes.
 
 ### Optional CUDA verification
 
@@ -314,14 +293,11 @@ The application environment pins CTranslate2 `4.8.3` and CUDA 12 cuBLAS
 `12.8.4.1`. This CTranslate2 release uses native CUDA convolution and needs no
 cuDNN; its [Linux wheel build](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/python/tools/prepare_build_environment_linux.sh)
 disables cuDNN. The launcher supplies the application library path before Python
-starts and removes it from the separate SGLang CUDA 13 subprocess. These are
+starts and removes it from the separate inference subprocess. These are
 internal runtime settings; users continue configuring everything through TOML.
 
-With CUDA verification, SGLang's engine memory share is 0.60 instead of 0.70,
-using the stock `--tts_engine.gpu_memory_fraction` option. The vocoder's 0.10
-share and preprocessing reserve stay unchanged. This leaves more space for
-Whisper; benchmark the combined load and actual peak memory on the chosen GPU.
-The native backend's memory behavior is unchanged.
+With CUDA verification, Whisper shares the GPU with the inference service; benchmark
+the combined load and actual peak memory on the chosen GPU.
 
 Benchmark before choosing a concurrency level. See
 [benchmark_rendering.py](../../scripts/benchmark_rendering.py) for a fixed-book
@@ -415,11 +391,17 @@ instead. Do not mount `/workspace` over `/opt`.
 - CTranslate2 Whisper large-v3: `edaa852ec7e145841d8ffdb056a99866b5f0a478`.
 - Fish uses managed Python 3.12 and its frozen CUDA 12.9 lock. Chapter processing
   and CPU/CUDA recognition use a separate environment.
-- Native requests use `single_chunk=true`, `use_memory_cache="on"`, a seed in
-  the MessagePack body, and speaker-tagged references. Native `top_k` is fixed
-  at 30; inference concurrency is **1**. No second model copy is loaded.
-- Native compilation is disabled. Multiple chapter coordinators overlap CPU
-  stages without adding unsupported GPU batching.
+- `install.sh` installs this stdlib-only package into Fish's environment with
+  `--no-deps` (plus `msgpack`) after every frozen `uv sync`; Fish's source and
+  lock stay unmodified.
+- The inference service loads Drama 3 like the stock server (bfloat16, no
+  compilation, codec on the tower device) and generates one chunk per request
+  with `build_drama3_prompt(history=...)` and `generate_drama3`, Fish's default
+  sampling (`temperature`/`top_p` 0.7, `top_k` 30) and `set_seed`. Inference
+  concurrency is **1**; no second model copy is loaded.
+- Requests and responses use protocol `audiobook-history-wav-v2`: speaker-tagged
+  references, up to two history turns with codes, and a MessagePack response
+  with the WAV and the generated codes.
 
 Primary references: [Fish installation](https://speech.fish.audio/install/),
 [Fish inference](https://speech.fish.audio/inference/),

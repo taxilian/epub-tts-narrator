@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from contextvars import copy_context
 import os
 from pathlib import Path
 import re
@@ -20,6 +19,7 @@ from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare
 from .chapter_records import signed_record
 from .bundle import chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .continuity import POLICY as CONTINUITY_POLICY
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
 from .interrupts import stop_if_requested
@@ -629,6 +629,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                             metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
                         else:
                             metadata = generate(raw, seed)
+                    from .continuity_codes import persist
+                    metadata = persist(directory, raw, metadata)
                     if attempt_ticket is not None:
                         # The raw candidate is materialized untranscribed
                         # audio the moment generation returns, before any
@@ -1096,9 +1098,6 @@ def _publish(stage, destination, **kwargs):
 def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False):
     """Group new paragraphs while preserving legacy accepted chunk boundaries."""
     plan = make_plan(bundle, config)
-    from .continuity import enabled
-    if enabled(config):
-        plan["continuity"] = "chapter"
     work = config["render"].get("work_dir")
     requests = []
     if work:
@@ -1274,7 +1273,7 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
             engine_config["model"] = selected.repo
     return {
         "version": 1, "bundle_hash": bundle["bundle_hash"],
-        **({"continuity": "chapter"} if config["render"].get("continuity") == "chapter" else {}),
+        "continuity": CONTINUITY_POLICY,
         "source_fingerprint": bundle["manifest"]["source_fingerprint"],
         "chapter_hash": digest(chapter), "total_chapters": len(bundle["chapters"]),
         "voice_assets": {key: voices[key]["asset_hash"] for key in sorted(used)},
@@ -1399,19 +1398,21 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
-    from .continuity import ChapterContinuity, current, enabled
-    continuity = ChapterContinuity(context["engine"]) if enabled(config) else None
+    from .continuity import ChapterContinuity, is_narration, narrator_asset
+    continuity = ChapterContinuity(context["engine"], voices, narrator_asset(chapter, voices))
+    # Strict staleness: every later take was conditioned on the earlier ones,
+    # so the first obsolete take makes the rest of the chapter obsolete too.
+    replay = {"intact": True}
 
-    def matches_request(request, accepted):
+    def matches_request(request, accepted, chunk):
         # Identical source requests can prepare different engine inputs after
         # a delivery-formatting update. Check the actual recorded performance.
-        if continuity is None:
-            return speech_cache.matches(request, accepted)
-        with continuity.transaction(request) as bound:
-            identity = speech_cache.identity(bound)
-            current().update(request_binding=digest(identity), compiled_text=identity.get("text"))
+        if not replay["intact"]:
+            return False
+        with continuity.transaction(request, narration=is_narration(chunk, voices, continuity.narrator)) as bound:
+            continuity.bind(digest(speech_cache.identity(bound)))
             if not speech_cache.matches(bound, accepted):
-                continuity.reset()
+                replay["intact"] = False
                 return False
             directory = Path(work) / "clips" / accepted["request_hash"]
             full = read_json(regular_file(directory / "accepted.json"))
@@ -1440,17 +1441,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         cached_clips = {clip["chunk_id"]: clip for clip in cache_record["identity"]["clips"]}
         timings = {item["chunk_id"]: item for item in composed["segments"]}
         stale_chunks = set()
-        reset_before = set()
-        barrier = False
-        for item in chapter["chunks"]:
-            if item["silent_control"]:
-                barrier = True
-            elif barrier:
-                reset_before.add(item["chunk_id"])
-                barrier = False
         for chunk, accepted in zip(expected, acceptance):
-            if continuity is not None and chunk["chunk_id"] in reset_before:
-                continuity.reset()
             if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
                 raise ValueError("Invalid chapter verification record")
             cached = cached_clips[chunk["chunk_id"]]
@@ -1460,7 +1451,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
             speakers = chunk_speakers(chunk)
             if "paragraph_turns" in chunk:
                 request = _paragraph_request(chunk, voices, context["engine"], config)
-                if not matches_request(request, accepted):
+                if not matches_request(request, accepted, chunk):
                     stale_chunks.add(chunk["chunk_id"])
             elif len(speakers) > 1:
                 lanes, mix = accepted.get("speaker_lanes"), accepted.get("mix")
@@ -1493,11 +1484,11 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                     if (lane["role_id"] != speaker["role_id"] or lane["voice_id"] != speaker["voice_id"]
                             or not _has_accepted_verification(lane)):
                         raise ValueError("A simultaneous speaker lacks matching verification")
-                    if not matches_request(request, lane):
+                    if not matches_request(request, lane, chunk):
                         stale_chunks.add(chunk["chunk_id"])
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
-                if not matches_request(request, accepted):
+                if not matches_request(request, accepted, chunk):
                     stale_chunks.add(chunk["chunk_id"])
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
@@ -1711,8 +1702,6 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                   speech_cache=None, paragraph_split_available=False, continuity=None):
     """Render one complete performance; publication and ordering stay upstream."""
     if chunk["silent_control"]:
-        if continuity is not None:
-            continuity.reset()
         return dict(chunk, wav_path=None), None
     if retry_budget is None and getattr(verifier, "speech_resolver", None) is not None:
         retry_budget = SpeechRetryBudget(retry_paragraphs=True)
@@ -1831,11 +1820,12 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
     def take(text, generate, request, **options):
         if continuity is None:
+            # Direct callers outside a chapter (tools, previews) have no history.
             return execute_take(text, generate, request, **options)
-        with continuity.transaction(request) as bound:
-            from .continuity import current
-            identity = speech_cache.identity(bound)
-            current().update(request_binding=digest(identity), compiled_text=identity.get("text"))
+        from .continuity import is_narration
+        with continuity.transaction(request, narration=is_narration(
+                chunk, voices, continuity.narrator)) as bound:
+            continuity.bind(digest(speech_cache.identity(bound)))
             result = execute_take(text, generate, bound, **options)
             continuity.accept(*result)
             return result
@@ -1970,9 +1960,9 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                            speech_cache=None, paragraph_split_available=False, scheduler_owner=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
-    from .continuity import ChapterContinuity, enabled, require_support
-    require_support(config, engine)
-    continuity = ChapterContinuity(engine_identity) if enabled(config) else None
+    from .continuity import ChapterContinuity, narrator_asset, require_support
+    require_support(engine)
+    continuity = ChapterContinuity(engine_identity, voices, narrator_asset(chapter, voices))
     if retry_budget is None:
         # The chapter service passes a submission-bound budget; this permissive
         # default remains for direct callers such as tools and benchmarks.
@@ -1984,17 +1974,14 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
-    parallel = getattr(engine, "max_inflight", getattr(engine, "max_parallel", 1))
-    if continuity is not None:
-        parallel = 1
-    if type(parallel) is not int or parallel < 1:
-        raise RenderBlocked("Render worker concurrency must be a positive integer")
+    # Each take is conditioned on the accepted takes before it, so a chapter
+    # is strictly sequential; throughput comes from overlapping chapters.
     scheduler = getattr(engine, "logical", None)
     resources = getattr(engine, "resources", None)
     owner = scheduler_owner or (None, chapter.get("number", 1))
 
     with ChapterProgress(chapter.get("number", 1), total_chapters or chapter.get("number", 1), chunks,
-                         notify=notify, parallel=getattr(engine, "max_parallel", parallel)) as progress:
+                         notify=notify, parallel=getattr(engine, "max_parallel", 1)) as progress:
         def run(index):
             stop_if_requested()
             def transaction():
@@ -2004,7 +1991,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                                          engine_identity, verifier, config, work, take_locks,
                                          take_locks_guard, notify=task_notify, retry_budget=retry_budget,
                                          speech_cache=speech_cache,
-                                         **({"continuity": continuity} if continuity is not None else {}),
+                                         continuity=continuity,
                                          paragraph_split_available=paragraph_split_available)
             if resources is not None:
                 # Every logical runner carries its chapter's resource scope
@@ -2016,55 +2003,17 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             return transaction()
 
         if scheduler is not None:
-            # One shared, chapter-fair scheduler replaces the per-chapter clip
-            # executor: submissions are bounded to this chapter's reserved
-            # share, results return in source order, and the first terminal
-            # failure closes the chapter's admission before new work starts.
+            # One shared, chapter-fair scheduler admits only this chapter's
+            # next transaction; other chapters' transactions overlap with it.
+            # Results return in source order, and the first terminal failure
+            # closes the chapter's admission before new work starts.
             from .render_chapter_flow import collect_chapter, retire_owner
             try:
-                results = collect_chapter(scheduler, owner, len(chunks), run,
-                                          sequential=continuity is not None)
+                results = collect_chapter(scheduler, owner, len(chunks), run, sequential=True)
             finally:
                 retire_owner(scheduler, owner)
-            stop_if_requested()
-            return [result[0] for result in results], [result[1] for result in results if result[1] is not None]
-
-        if parallel == 1:
-            results = [run(index) for index in range(len(chunks))]
         else:
-            results = [None] * len(chunks)
-            executor = ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="audiobook-render")
-            pending, next_index = {}, 0
-            try:
-                while next_index < len(chunks) and len(pending) < parallel:
-                    stop_if_requested()
-                    # Each future gets its own fresh context copy, captured
-                    # here on the dispatching thread so any scoped stop
-                    # condition (such as a disconnected chapter client) is
-                    # visible inside the chunk thread. A Context object is
-                    # never reused concurrently.
-                    context = copy_context()
-                    pending[executor.submit(context.run, run, next_index)] = next_index
-                    next_index += 1
-                while pending:
-                    finished, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    # Inspect every completion before submitting more work, so a
-                    # known failure cannot keep a large queue of new jobs running.
-                    for future in finished:
-                        index = pending.pop(future)
-                        results[index] = future.result()
-                    stop_if_requested()
-                    while next_index < len(chunks) and len(pending) < parallel:
-                        stop_if_requested()
-                        context = copy_context()
-                        pending[executor.submit(context.run, run, next_index)] = next_index
-                        next_index += 1
-            finally:
-                for future in pending:
-                    future.cancel()
-                # In-flight remote/local jobs may still publish verified clips.
-                # Drain before render() can release book/cache locks, even on Ctrl-C.
-                executor.shutdown(wait=True, cancel_futures=True)
+            results = [run(index) for index in range(len(chunks))]
         stop_if_requested()
         clips = [result[0] for result in results]
         acceptance = [result[1] for result in results if result[1] is not None]
@@ -2168,7 +2117,7 @@ def _publish_chapter_links(config, rendered, *, notify):
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False,
            voice_store_override=None):
     from .continuity import require_support
-    require_support(config, engine)
+    require_support(engine)
     run_started = monotonic()
     retry_budget = SpeechRetryBudget()
     from .pool import bind_engine_verifier

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and supervise our chapter service plus the private Fish CUDA process.
+"""Prepare and supervise our chapter service plus our private Fish CUDA inference service.
 
 Run with the project's Python environment. Application settings and credentials
 come exclusively from the supplied global TOML file. Only ``prepare`` downloads
@@ -37,13 +37,11 @@ from epub_tts_narrator.renderer.drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA
 
 APPLICATION_ROOT = Path(__file__).resolve().parents[2]
 FISH_SOURCE = APPLICATION_ROOT.parent / "fish-speech"
-SGLANG_SOURCE = APPLICATION_ROOT.parent / "sglang-omni"
 APPLICATION_PYTHON = APPLICATION_ROOT / ".venv/bin/python"
 WHISPER_REPOSITORY = "Systran/faster-whisper-large-v3"
 WHISPER_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 RECEIPT = ".epub-tts-prepared.json"
 FISH_URL = "http://127.0.0.1:8080/v1/tts"
-SGLANG_URL = "http://127.0.0.1:8080/v1/audio/speech"
 SMOKE_TEXT = ("The little boat crossed the quiet lake. We reached the far shore before sunset, "
               "then walked home together beneath the stars.")
 
@@ -56,15 +54,11 @@ def validate_worker(config):
     if len(workers) != 1:
         raise ValueError("Use exactly one private CUDA worker")
     worker = workers[0]
-    native = (worker.get("protocol") == "fish_native_drama3"
-              and worker["url"] == FISH_URL and worker["concurrency"] == 1)
-    batched = (worker.get("protocol") == "fish_sglang_drama3"
-               and worker["url"] == SGLANG_URL
-               and type(worker["concurrency"]) is int and 1 <= worker["concurrency"] <= 8
-               and not worker.get("multi_speaker", False))
-    if worker["type"] != "fish_http" or worker.get("api_key") or not (native or batched):
-        raise ValueError("Use one loopback Fish native worker (concurrency 1) or SGLang worker "
-                         "(concurrency 1–8, multi_speaker = false), with no internal API key")
+    if (worker["type"] != "fish_http" or worker.get("api_key")
+            or worker.get("protocol", "fish_inline") != "fish_inline"
+            or worker["url"] != FISH_URL or worker["concurrency"] != 1):
+        raise ValueError("Use one loopback history worker (protocol fish_inline, concurrency 1) "
+                         "with no internal API key")
     if not config["engine"].get("checkpoint"):
         raise ValueError("engine.checkpoint must name the native Drama 3 model directory")
     if not re.fullmatch(r"[0-9a-f]{40}", config["render_pool"]["model_revision"]):
@@ -389,8 +383,8 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
             directory = Path(temporary)
             audio = directory / "sample.wav"
             # A self-contained smoke check cannot require any book's cast. The
-            # native transport accepts an empty reference list for this probe.
-            engine._request(SMOKE_TEXT, [], audio, 4101)
+            # inference service accepts an empty reference list for this probe.
+            engine._request(SMOKE_TEXT, [], [], audio, 4101)
             device = config["verification"]["device"].upper()
             print(f"Smoke test: checking generated words with {device} Whisper.", flush=True)
             verifier = (verifier_factory or create_verifier)(
@@ -423,20 +417,18 @@ class WorkerStopped(Exception):
     pass
 
 
-def wait_ready(process, stop, *, timeout=600, fetch=_get_json, protocol="fish_native_drama3",
-               worker=None):
-    """Wait for the backend's loopback health and model identity.
+def wait_ready(process, stop, *, timeout=600, fetch=_get_json, worker=None):
+    """Wait for our inference service's loopback health and history protocol.
 
-    URLs and the expected model name come from the render_pool worker table
-    that the loaded configuration (runpod_config) minted; the pinned constants
-    are only fallbacks for direct manual invocations.
+    The URL comes from the render_pool worker table that the loaded
+    configuration (runpod_config) minted; the pinned constant is only a
+    fallback for direct manual invocations.
     """
+    from epub_tts_narrator.renderer.fish_http import PROTOCOL
     settings = worker or {}
-    url = settings.get("url") or (SGLANG_URL if protocol == "fish_sglang_drama3" else FISH_URL)
+    url = settings.get("url") or FISH_URL
     parts = urlsplit(url)
     origin = f"{parts.scheme}://{parts.netloc}"
-    versioned = origin + "/v1"
-    model = settings.get("model", "drama-3")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if stop.is_set():
@@ -444,22 +436,10 @@ def wait_ready(process, stop, *, timeout=600, fetch=_get_json, protocol="fish_na
         if process.poll() is not None:
             raise RuntimeError("Fish CUDA process exited during startup; inspect its log above")
         try:
-            if protocol == "fish_sglang_drama3":
-                health = fetch(origin + "/health")
-                models = fetch(versioned + "/models")
-                if (isinstance(health, dict) and health.get("status") == "healthy"
-                        and health.get("running") is True and isinstance(models, dict)
-                        and any(isinstance(item, dict) and item.get("id") == model
-                                for item in models.get("data", []))):
-                    return
-            else:
-                health = fetch(versioned + "/health")
-                defaults = fetch(url + "/defaults")
-                # model_family is the stock Fish server's Drama 3 label, not a
-                # deployment pin; the model identity is the configuration's.
-                if (health == {"status": "ok"} and isinstance(defaults, dict)
-                        and defaults.get("model_family") == "drama3"):
-                    return
+            health = fetch(origin + "/health")
+            if (isinstance(health, dict) and health.get("status") == "ready"
+                    and health.get("protocol") == PROTOCOL):
+                return
         except (OSError, HTTPError, URLError, ValueError):
             pass
         stop.wait(1)
@@ -489,34 +469,38 @@ def stop_children(children, *, grace_seconds=15):
         process.wait()
 
 
-def inference_command(config, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_SOURCE):
-    """Select one stock server. Parallel slots are requests, never model replicas."""
-    worker = config["render_pool"]["workers"][0]
-    if worker.get("protocol") == "fish_sglang_drama3":
-        executable = sglang_source / ".venv/bin/sgl-omni"
-        if not executable.is_file():
-            raise ValueError(f"Worker image is missing {executable}; run a full update")
-        return [str(executable), "serve", "--model-path", config["engine"]["checkpoint"],
-                "--model-name", "drama-3", "--host", "127.0.0.1", "--port", "8080",
-                "--tts_engine.gpu_memory_fraction",
-                "0.60" if config["verification"]["device"] == "cuda" else "0.70",
-                "--tts_engine.factory.max_running_requests", str(worker["concurrency"]),
-                "--tts_engine.factory.first_frame_cuda_graph_max_requests", str(worker["concurrency"]),
-                "--vocoder.factory.codec_path", str(Path(config["engine"]["checkpoint"]) / "codec.pth")], sglang_source
+def inference_config(config):
+    """The inference service's own minimal TOML: CUDA engine and loopback server."""
+    engine = config["engine"]
+    service = Path(config["chapter_server"]["data_dir"]) / "runtime"
+    service.mkdir(parents=True, exist_ok=True)
+    path = service / "inference.toml"
+    lines = ["[engine]", 'type = "fish_speech_cuda"', f"checkpoint = {json.dumps(str(engine['checkpoint']))}"]
+    for key in ("temperature", "top_p"):
+        lines.append(f"{key} = {float(engine[key])!r}")
+    for key in ("top_k", "max_new_tokens"):
+        lines.append(f"{key} = {int(engine[key])}")
+    lines += ["", "[server]", 'host = "127.0.0.1"', "port = 8080", ""]
+    staged = path.with_suffix(".tmp")
+    staged.write_text("\n".join(lines))
+    os.replace(staged, path)
+    return path
+
+
+def inference_command(config, *, fish_source=FISH_SOURCE):
+    """Our renderer server in Fish's environment, calling Fish's library on CUDA."""
     fish_python = fish_source / ".venv/bin/python"
-    for path in (fish_python, fish_source / "tools/api_server.py"):
-        if not path.is_file():
-            raise ValueError(f"Worker image is missing {path}")
-    return [str(fish_python), "-u", "tools/api_server.py", "--listen", "127.0.0.1:8080",
-            "--llama-checkpoint-path", config["engine"]["checkpoint"],
-            "--device", "cuda:0", "--workers", "1"], fish_source
+    if not fish_python.is_file():
+        raise ValueError(f"Worker image is missing {fish_python}")
+    return [str(fish_python), "-u", "-m", "epub_tts_narrator.renderer", "serve",
+            "--config", str(inference_config(config))], fish_source
 
 
 def inference_environment(config, backend_directory, *, application_python=APPLICATION_PYTHON):
     """Resolve compiler tools and caches before the backend imports its libraries."""
     environment = os.environ.copy()
     # The application may have been launched with its CUDA 12 loader path.
-    # Never pass that managed path to the independent SGLang CUDA 13 process.
+    # Never pass the application's private cuBLAS path to the inference process.
     app_venv = Path(application_python).absolute().parent.parent.resolve()
     if "LD_LIBRARY_PATH" in environment:
         remaining = [entry for entry in environment["LD_LIBRARY_PATH"].split(os.pathsep)
@@ -531,32 +515,13 @@ def inference_environment(config, backend_directory, *, application_python=APPLI
     environment["PATH"] = os.pathsep.join(
         [backend_bin, *(entry for entry in inherited_path.split(os.pathsep)
                         if entry and entry != backend_bin)])
-    if config["render_pool"]["workers"][0].get("protocol") == "fish_sglang_drama3":
-        # These are stock upstream cache controls, not user configuration via
-        # environment variables. Derive their location from the configured
-        # persistent store and override ambient ephemeral paths before imports.
-        # Omni otherwise selects /root/.cache/sglang-omni/torchinductor early.
-        cache = Path(config["chapter_server"]["data_dir"]) / "runtime-cache" / "sglang"
-        directories = {
-            "SGLANG_CACHE_DIR": cache,
-            "SGLANG_JIT_CACHE_DIR": cache / "jit",
-            "TORCHINDUCTOR_CACHE_DIR": cache / "inductor",
-            "TRITON_CACHE_DIR": cache / "triton",
-            # FlashInfer appends .cache/flashinfer/<version>/<architecture>.
-            "FLASHINFER_WORKSPACE_BASE": cache,
-            "CUDA_CACHE_PATH": cache / "nv",
-        }
-        for key, directory in directories.items():
-            directory.mkdir(parents=True, exist_ok=True)
-            environment[key] = str(directory)
     return environment
 
 
-def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_SOURCE,
+def serve(config, config_path, *, fish_source=FISH_SOURCE,
           application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True, maintenance=False):
     check(config, application_python=application_python)
-    native_command, native_directory = inference_command(
-        config, fish_source=fish_source, sglang_source=sglang_source)
+    native_command, native_directory = inference_command(config, fish_source=fish_source)
     if chapters and not application_python.is_file():
         raise ValueError(f"Worker image is missing {application_python}")
     chapter_command = [str(application_python), "-u", "-m", "epub_tts_narrator.renderer.cli",
@@ -582,8 +547,7 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE, sglang_source=SGLANG_
                                                                 application_python=application_python))
             children.append(native)
             backend = config["render_pool"]["workers"][0]
-            wait_ready(native, stop, timeout=startup_timeout, worker=backend,
-                       protocol=backend["protocol"])
+            wait_ready(native, stop, timeout=startup_timeout, worker=backend)
             if stop.is_set():
                 raise WorkerStopped()
             chapter = None
@@ -624,8 +588,6 @@ def main(argv=None):
                         help="Seconds to allow the private CUDA process to load (1–3600)")
     parser.add_argument("--fish-source", type=Path, default=FISH_SOURCE,
                         help="Persistent, pinned Fish Speech checkout (default: beside the application)")
-    parser.add_argument("--sglang-source", type=Path, default=SGLANG_SOURCE,
-                        help="Persistent, pinned SGLang-Omni checkout")
     parser.add_argument("command", choices=("prepare", "check", "serve", "serve-maintenance", "serve-tts", "smoke", "run-application"))
     args = parser.parse_args(arguments[:separator])
     config = None
@@ -660,7 +622,7 @@ def main(argv=None):
                 signal.signal(signal.SIGALRM, previous_handler)
         else:
             return serve(config, args.config, startup_timeout=args.startup_timeout,
-                         fish_source=args.fish_source, sglang_source=args.sglang_source,
+                         fish_source=args.fish_source,
                          chapters=args.command != "serve-tts", maintenance=args.command == "serve-maintenance")
         return 0
     except KeyboardInterrupt:

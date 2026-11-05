@@ -16,10 +16,12 @@ from .censorship import DEFAULT_POLICY as CENSORSHIP_DEFAULTS, validate_policy a
 from .render_pipeline_config import PIPELINE_RENDER_POOL_DEFAULTS, validate_pipeline_settings
 
 
-# Shared Drama 3 sampling defaults. config.py owns the user-facing values;
-# pool.py and fish_http.py derive their request profiles from this constant.
+# Shared Drama 3 sampling defaults: Fish's own evaluation and runtime defaults
+# (fish_omni/generate.py generate_drama3: temperature 0.7, top_p 0.7, top_k 30).
+# config.py owns the user-facing values; pool.py and fish_http.py derive their
+# request profiles from this constant.
 SAMPLING_DEFAULTS = {
-    "experts": "q8", "temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048,
+    "experts": "q8", "temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048,
 }
 
 
@@ -38,8 +40,6 @@ RENDER_CONTRACT = {
     "allow_review": {"default": False, "kind": "bool"},
     "require_cover": {"default": True, "kind": "bool"},
     "paragraph_synthesis": {"default": True, "kind": "bool", "remote_safe": True},
-    "continuity": {"default": "off", "kind": "enum", "choices": ("off", "chapter"),
-                   "remote_safe": True},
     "performance_mode": {"default": "legacy", "kind": "enum", "choices": ("legacy", "expressive"),
                          "remote_safe": True},
     "paragraph_pause_ms": {"default": 400, "kind": "int", "range": (0, 5000),
@@ -467,8 +467,6 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("render.chapter_format must be m4a or mp3")
     if render["performance_mode"] not in {"legacy", "expressive"}:
         raise ValueError("render.performance_mode must be legacy or expressive")
-    if render["continuity"] not in RENDER_CONTRACT["continuity"]["choices"]:
-        raise ValueError("render.continuity must be off or chapter")
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
     verification = result["verification"]

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import tomllib
 import unittest
 import wave
 from unittest.mock import Mock, patch
@@ -55,8 +56,8 @@ class RunpodWorkerTests(unittest.TestCase):
                                             model=str(self.root / "whisper"))
         self.config["chapter_server"].update(data_dir=str(self.root / "data"), api_key="test-service-key")
         self.config["render_pool"]["workers"] = [{
-            "name": "native", "type": "fish_http", "protocol": "fish_native_drama3",
-            "url": worker.FISH_URL, "concurrency": 1, "api_key": ""}]
+            "name": "drama3-cuda", "type": "fish_http", "protocol": "fish_inline",
+            "url": worker.FISH_URL, "concurrency": 1, "api_key": "", "multi_speaker": True}]
         self.downloader = Mock(side_effect=fake_download)
         self.real_check_audio_decoder = worker.check_audio_decoder
         self.decoder_check = patch.object(worker, "check_audio_decoder").start()
@@ -68,10 +69,9 @@ class RunpodWorkerTests(unittest.TestCase):
 
     def native_image(self):
         native = self.root / "fish"
-        for name in (".venv/bin/python", "tools/api_server.py"):
-            path = native / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
+        path = native / ".venv/bin/python"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
         application = self.root / "app/.venv/bin/python"
         application.parent.mkdir(parents=True, exist_ok=True)
         application.touch()
@@ -163,16 +163,8 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(len(imports), 2)
         self.assertIn("faster_whisper", imports[0])
         self.assertIn("torch", imports[1])
-        self.assertFalse((self.root / "runtime").exists())
-        # SGLang uses its own existing environment; native is not imported or
-        # loaded as a second copy when the batching backend is selected.
-        result = subprocess.run(
-            ["/bin/sh", str(_path.parent / "install.sh"), str(app), "runtime",
-             str(self.root / "runtime"), str(self.root / "missing-native"), "sglang", str(fish)],
-            capture_output=True, text=True,
-            env={**os.environ, "PATH": str(commands) + ":" + os.environ.get("PATH", "")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("sglang_omni", log.read_text().splitlines()[-1])
+        # Our inference service runs inside Fish's environment; startup proves it imports there.
+        self.assertIn("epub_tts_narrator.renderer.fish_speech_engine", imports[1])
         self.assertFalse((self.root / "runtime").exists())
         # Runtime startup cannot silently use an old CUDA verifier environment.
         (app / ".venv/bin/python").write_text("#!/bin/sh\nexit 1\n")
@@ -250,7 +242,9 @@ class RunpodWorkerTests(unittest.TestCase):
     def test_deployment_profile_rejects_remote_backend_duplicate_gpu_and_mlx(self):
         variants = []
         for key, value in (("url", "https://external.example/v1/tts"), ("concurrency", 2),
-                           ("protocol", "fish_compatible"), ("api_key", "unexpected")):
+                           ("protocol", "fish_compatible"), ("protocol", "fish_native_drama3"),
+                           ("protocol", "fish_sglang_drama3"), ("url", "http://127.0.0.1:8080/v1/audio/speech"),
+                           ("api_key", "unexpected")):
             item = deepcopy(self.config)
             item["render_pool"]["workers"][0][key] = value
             variants.append(item)
@@ -290,40 +284,31 @@ class RunpodWorkerTests(unittest.TestCase):
                 with worker.worker_lease(self.config):
                     self.fail("second worker acquired the same lease")
 
-    def test_ready_requires_native_drama3_model_family(self):
+    def test_ready_requires_our_service_health_with_the_history_protocol(self):
+        from epub_tts_narrator.renderer.fish_http import PROTOCOL
         process = Mock()
         process.poll.return_value = None
-        fetch = Mock(side_effect=[{"status": "ok"}, {"model_family": "drama3"}])
+        fetch = Mock(return_value={"status": "ready", "protocol": PROTOCOL})
         worker.wait_ready(process, threading.Event(), fetch=fetch)
-        self.assertEqual(fetch.call_count, 2)
-        fetch = Mock(side_effect=[{"status": "ok"}, {"model_family": "other"}])
-        stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        with self.assertRaises(worker.WorkerStopped):
-            worker.wait_ready(process, stop, fetch=fetch)
+        self.assertEqual([call.args[0] for call in fetch.call_args_list], ["http://127.0.0.1:8080/health"])
+        # A stock Fish/SGLang server, an older serve, or a loading service never counts as ready.
+        for health in ({"status": "ok"}, {"status": "healthy", "running": True},
+                       {"status": "ready", "protocol": "fish-inline-reference-wav-v1"},
+                       {"status": "loading", "protocol": PROTOCOL}, ["ready"]):
+            with self.subTest(health=health):
+                stop = Mock()
+                stop.is_set.side_effect = [False, True]
+                with self.assertRaises(worker.WorkerStopped):
+                    worker.wait_ready(process, stop, fetch=Mock(return_value=health))
 
-    def test_ready_urls_and_model_come_from_the_worker_configuration(self):
+    def test_ready_url_comes_from_the_worker_configuration(self):
+        from epub_tts_narrator.renderer.fish_http import PROTOCOL
         process = Mock()
         process.poll.return_value = None
-        native = {"url": "http://127.0.0.1:9091/v1/tts", "model": "drama-3"}
-        fetch = Mock(side_effect=[{"status": "ok"}, {"model_family": "drama3"}])
-        worker.wait_ready(process, threading.Event(), fetch=fetch, worker=native)
-        self.assertEqual([call.args[0] for call in fetch.call_args_list],
-                         ["http://127.0.0.1:9091/v1/health", "http://127.0.0.1:9091/v1/tts/defaults"])
-        batched = {"url": "http://127.0.0.1:9091/v1/audio/speech", "model": "drama-3"}
-        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
-                                  {"data": [{"id": "drama-3"}]}])
-        worker.wait_ready(process, threading.Event(), protocol="fish_sglang_drama3",
-                          fetch=fetch, worker=batched)
-        self.assertEqual([call.args[0] for call in fetch.call_args_list],
-                         ["http://127.0.0.1:9091/health", "http://127.0.0.1:9091/v1/models"])
-        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
-                                  {"data": [{"id": "other"}]}])
-        stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        with self.assertRaises(worker.WorkerStopped):
-            worker.wait_ready(process, stop, protocol="fish_sglang_drama3", fetch=fetch,
-                              worker=batched)
+        fetch = Mock(return_value={"status": "ready", "protocol": PROTOCOL})
+        worker.wait_ready(process, threading.Event(), fetch=fetch,
+                          worker={"url": "http://127.0.0.1:9091/v1/tts", "model": "drama-3"})
+        self.assertEqual([call.args[0] for call in fetch.call_args_list], ["http://127.0.0.1:9091/health"])
 
     def test_early_model_exit_is_detected_before_starting_chapter_service(self):
         process = Mock()
@@ -333,57 +318,27 @@ class RunpodWorkerTests(unittest.TestCase):
             worker.wait_ready(process, threading.Event(), fetch=fetch)
         fetch.assert_not_called()
 
-    def batched_image(self):
-        self.config["render_pool"]["workers"][0].update(
-            protocol="fish_sglang_drama3", url=worker.SGLANG_URL,
-            concurrency=4, multi_speaker=False)
-        root = self.root / "sglang"
-        executable = root / ".venv/bin/sgl-omni"
-        executable.parent.mkdir(parents=True)
-        executable.touch()
-        return root
+    def test_inference_service_is_our_serve_in_fish_venv_with_a_cuda_engine_config(self):
+        image = self.native_image()
+        self.config["engine"].update(temperature=0.8, top_p=0.75, top_k=40, max_new_tokens=1024)
+        command, cwd = worker.inference_command(self.config, fish_source=image["fish_source"])
+        self.assertEqual(cwd, image["fish_source"])
+        inference = self.root / "data/runtime/inference.toml"
+        self.assertEqual(command, [str(image["fish_source"] / ".venv/bin/python"), "-u", "-m",
+                                   "epub_tts_narrator.renderer", "serve", "--config", str(inference)])
+        settings = tomllib.loads(inference.read_text())
+        self.assertEqual(settings, {
+            "engine": {"type": "fish_speech_cuda", "checkpoint": str(self.root / "drama"),
+                       "temperature": 0.8, "top_p": 0.75, "top_k": 40, "max_new_tokens": 1024},
+            "server": {"host": "127.0.0.1", "port": 8080}})
+        # Loopback only: the service has no key and never listens beyond localhost.
+        self.assertNotIn("api_key", inference.read_text())
+        (image["fish_source"] / ".venv/bin/python").unlink()
+        with self.assertRaisesRegex(ValueError, "missing"):
+            worker.inference_command(self.config, fish_source=image["fish_source"])
 
-    def test_batched_server_is_one_process_with_loopback_and_local_codec(self):
-        root = self.batched_image()
-        worker.validate_worker(self.config)
-        command, cwd = worker.inference_command(self.config, sglang_source=root)
-        self.assertEqual(cwd, root)
-        self.assertEqual(command[0], str(root / ".venv/bin/sgl-omni"))
-        self.assertEqual(command[command.index("--host") + 1], "127.0.0.1")
-        self.assertEqual(command[command.index("--tts_engine.factory.max_running_requests") + 1], "4")
-        self.assertEqual(command[command.index("--tts_engine.gpu_memory_fraction") + 1], "0.70")
-        self.assertEqual(command[command.index("--vocoder.factory.codec_path") + 1],
-                         str(self.root / "drama/codec.pth"))
-        self.assertNotIn("--workers", command)
-        self.config["verification"].update(device="cuda", compute_type="int8_float16")
-        worker.validate_worker(self.config)
-        cuda_command, _ = worker.inference_command(self.config, sglang_source=root)
-        self.assertEqual(cuda_command[cuda_command.index("--tts_engine.gpu_memory_fraction") + 1], "0.60")
-        self.assertNotIn("--tts_engine.engine.mem_fraction_static", cuda_command)
-        for update in ({"concurrency": 9}, {"multi_speaker": True}, {"url": worker.FISH_URL}):
-            with self.subTest(update=update):
-                invalid = deepcopy(self.config)
-                invalid["render_pool"]["workers"][0].update(update)
-                with self.assertRaises(ValueError):
-                    worker.validate_worker(invalid)
-
-    def test_batched_readiness_checks_health_and_loaded_model(self):
-        process = Mock()
-        process.poll.return_value = None
-        fetch = Mock(side_effect=[{"status": "healthy", "running": True},
-                                  {"data": [{"id": "drama-3"}]}])
-        worker.wait_ready(process, threading.Event(), protocol="fish_sglang_drama3", fetch=fetch)
-        self.assertEqual([call.args[0] for call in fetch.call_args_list],
-                         ["http://127.0.0.1:8080/health", "http://127.0.0.1:8080/v1/models"])
-        stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        wrong = Mock(side_effect=[{"status": "healthy", "running": True},
-                                  {"data": [{"id": "other"}]}])
-        with self.assertRaises(worker.WorkerStopped):
-            worker.wait_ready(process, stop, protocol="fish_sglang_drama3", fetch=wrong)
-
-    def test_backend_environment_finds_venv_tools_and_preserves_compile_caches(self):
-        root = self.batched_image()
+    def test_backend_environment_finds_venv_tools_and_preserves_ambient_settings(self):
+        root = self.native_image()["fish_source"]
         for name in ("ninja", "python"):
             executable = root / ".venv/bin" / name
             executable.write_text(f"#!/bin/sh\nprintf 'selected-{name}'\n")
@@ -401,20 +356,10 @@ class RunpodWorkerTests(unittest.TestCase):
         for name in ("ninja", "python"):
             result = subprocess.run([name], env=environment, text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout, "selected-" + name)
-        cache = self.root / "data/runtime-cache/sglang"
-        expected = {
-            "SGLANG_CACHE_DIR": cache, "SGLANG_JIT_CACHE_DIR": cache / "jit",
-            "TORCHINDUCTOR_CACHE_DIR": cache / "inductor", "TRITON_CACHE_DIR": cache / "triton",
-            "FLASHINFER_WORKSPACE_BASE": cache, "CUDA_CACHE_PATH": cache / "nv"}
-        for key, directory in expected.items():
-            self.assertEqual(environment[key], str(directory))
-            self.assertTrue(directory.is_dir())
-        marker = cache / "triton/compiled-fixture"
-        marker.write_bytes(b"keep across launches")
-        worker.inference_environment(self.config, root)
-        self.assertEqual(marker.read_bytes(), b"keep across launches")
+        self.assertEqual(environment["TORCHINDUCTOR_CACHE_DIR"], "/ephemeral-cache")
+        self.assertFalse((self.root / "data/runtime-cache").exists())
 
-    def test_native_backend_environment_selects_its_venv_without_sglang_cache_controls(self):
+    def test_native_backend_environment_selects_its_venv_without_extra_cache_controls(self):
         root = self.native_image()["fish_source"]
         with patch.dict(os.environ, {}, clear=True):
             environment = worker.inference_environment(self.config, root)
@@ -450,7 +395,7 @@ class RunpodWorkerTests(unittest.TestCase):
                 worker.cuda_library_directory(python)
 
     def test_cuda_loader_path_is_application_only_and_does_not_mutate_parent(self):
-        root = self.batched_image()
+        root = self.native_image()["fish_source"]
         python, directory = self.cuda_runtime()
         self.config["verification"].update(device="cuda", compute_type="int8_float16")
         inherited = {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/driver/lib:/other/lib", "KEEP": "value"}
@@ -532,7 +477,7 @@ class RunpodWorkerTests(unittest.TestCase):
 
     def test_cuda_service_gets_loader_environment_but_tts_does_not(self):
         self.prepare()
-        root = self.batched_image()
+        root = self.native_image()["fish_source"]
         python, directory = self.cuda_runtime()
         self.config["verification"].update(device="cuda", compute_type="int8_float16")
         native, chapter = Mock(pid=100001), Mock(pid=100002)
@@ -544,13 +489,13 @@ class RunpodWorkerTests(unittest.TestCase):
               patch("sys.stdout", new=io.StringIO()),
               patch.dict(os.environ, {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/driver/lib"}, clear=True)):
             self.assertEqual(worker.serve(self.config, self.root / "cuda.toml",
-                                         sglang_source=root, application_python=python), 0)
+                                         fish_source=root, application_python=python), 0)
         preflight.assert_called_once_with(self.config, application_python=python)
         self.assertEqual(popen.call_args_list[0].kwargs["env"]["LD_LIBRARY_PATH"], "/driver/lib")
         self.assertEqual(popen.call_args_list[1].kwargs["env"]["LD_LIBRARY_PATH"], str(directory) + ":/driver/lib")
 
     def test_isolated_tts_mode_never_starts_or_resumes_chapter_jobs(self):
-        root = self.batched_image()
+        root = self.native_image()["fish_source"]
         self.prepare()
         inference = Mock(pid=100001)
         inference.poll.return_value = 2
@@ -559,12 +504,12 @@ class RunpodWorkerTests(unittest.TestCase):
               patch.object(worker, "stop_children") as cleanup,
               patch("sys.stdout", new=io.StringIO())):
             with self.assertRaisesRegex(RuntimeError, "exited"):
-                worker.serve(self.config, self.root / "config.toml", sglang_source=root, chapters=False)
+                worker.serve(self.config, self.root / "config.toml", fish_source=root, chapters=False)
         self.assertEqual(popen.call_count, 1)
+        self.assertIn("serve", popen.call_args.args[0])
         environment = popen.call_args.kwargs["env"]
         self.assertEqual(environment["PATH"].split(os.pathsep)[0], str(root / ".venv/bin"))
-        self.assertEqual(environment["TORCHINDUCTOR_CACHE_DIR"], str(self.root / "data/runtime-cache/sglang/inductor"))
-        self.assertEqual(ready.call_args.kwargs["protocol"], "fish_sglang_drama3")
+        self.assertEqual(ready.call_args.kwargs["worker"], self.config["render_pool"]["workers"][0])
         cleanup.assert_called_once_with([inference])
 
     def test_process_supervision_uses_one_model_and_cleans_up_both_groups(self):
@@ -581,9 +526,11 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(status, 7)
         self.assertEqual(popen.call_count, 2)
         native_command, chapter_command = [call.args[0] for call in popen.call_args_list]
-        self.assertNotIn("--compile", native_command)
-        self.assertEqual(native_command[native_command.index("--workers") + 1], "1")
-        self.assertEqual(native_command[native_command.index("--device") + 1], "cuda:0")
+        self.assertEqual(native_command[:5], [str(image["fish_source"] / ".venv/bin/python"), "-u", "-m",
+                                              "epub_tts_narrator.renderer", "serve"])
+        inference = tomllib.loads(Path(native_command[native_command.index("--config") + 1]).read_text())
+        self.assertEqual(inference["engine"]["type"], "fish_speech_cuda")
+        self.assertEqual(inference["server"]["host"], "127.0.0.1")
         self.assertIn("serve-chapters", chapter_command)
         self.assertNotIn("--maintenance", chapter_command)
         self.assertEqual(popen.call_args_list[0].kwargs["env"]["PATH"].split(os.pathsep)[0],
@@ -715,8 +662,10 @@ class RunpodWorkerTests(unittest.TestCase):
         from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
         fetch = Mock(return_value={"protocol": PROTOCOL})
         engine = Mock()
-        def generate(text, references, destination, seed):
+        def generate(text, references, history, destination, seed):
+            self.assertEqual(text, worker.SMOKE_TEXT)
             self.assertEqual(references, [])
+            self.assertEqual(history, [])
             with wave.open(str(destination), "wb") as stream:
                 stream.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
                 stream.writeframes(b"\x10\x10" * 24000)

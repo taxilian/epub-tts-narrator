@@ -2,22 +2,25 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import io
+import json
 from pathlib import Path
 import tempfile
-from threading import Barrier, Event, Lock
+from threading import Event, Lock
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.engines import DRAMA3_MODEL_REVISION, EngineError
-from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
+from epub_tts_narrator.renderer.fish_http import PROTOCOL
 from epub_tts_narrator.renderer.pool import RenderPool, create_render_engine
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
+from epub_tts_narrator.renderer.speech_cache import SpeechCache
 from epub_tts_narrator.renderer.workflow import (
     RenderBlocked, _render_chapter_chunks, assemble, ensure_voice,
     make_render_plan, render, verified_take,
@@ -26,6 +29,7 @@ from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
+from shared_fixtures import HISTORY_CAPABILITY
 
 
 def worker(name, *, local=False, concurrency=1, multi_speaker=True):
@@ -34,6 +38,17 @@ def worker(name, *, local=False, concurrency=1, multi_speaker=True):
     return {"name": name, "type": "fish_http", "url": f"http://{name}.local:8080/v1/tts",
             "api_key": "private-token", "model": "drama-3", "timeout_seconds": 300,
             "concurrency": concurrency, "multi_speaker": multi_speaker}
+
+
+def health_only_workers():
+    """Answer each remote worker's one /health check; any synthesis request fails."""
+    def open_request(request, timeout):
+        if request.get_method() != "GET" or not request.full_url.endswith("/health"):
+            raise AssertionError("contacted a worker for synthesis")
+        return io.BytesIO(json.dumps({"status": "ready", "protocol": PROTOCOL}).encode())
+    opener = Mock()
+    opener.open.side_effect = open_request
+    return patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener), opener
 
 
 def pool_config(*workers):
@@ -94,12 +109,24 @@ class PoolUnitTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
-    def test_empty_pool_preserves_existing_factory(self):
+    def test_unpooled_drama3_uses_one_lazy_local_slot_while_plugins_keep_their_factory(self):
         config = pool_config()
         sentinel = object()
         with patch("epub_tts_narrator.renderer.pool.create_engine", return_value=sentinel) as create:
-            self.assertIs(create_render_engine(config), sentinel)
-        create.assert_called_once_with(config["engine"])
+            engine = create_render_engine(config)
+            self.addCleanup(engine.close)
+            self.assertIsInstance(engine, RenderPool)
+            self.assertEqual(engine.max_parallel, 1)
+            self.assertEqual([worker.settings["type"] for worker in engine._workers], ["local"])
+            self.assertIsNotNone(engine.logical)
+            create.assert_not_called()  # the model loads on the first take, not at construction
+            self.assertEqual(config["render_pool"]["workers"], [])
+
+            plugin = deepcopy(config)
+            plugin["engine"]["type"] = "fixture_plugin"
+            self.assertIs(create_render_engine(plugin), sentinel)
+            create.assert_called_once_with(plugin["engine"])
+            self.assertIs(create_render_engine(config, shared_inference=False), sentinel)
 
     def test_remote_only_pool_never_loads_local_model(self):
         config = pool_config(worker("remote"))
@@ -134,24 +161,6 @@ class PoolUnitTests(unittest.TestCase):
         self.assertFalse(pool.capabilities["multi_speaker"])
         with self.assertRaisesRegex(EngineError, "Every render worker"):
             pool.synthesize_dialogue([], self.root / "unused.wav", seed=0)
-
-    def test_sglang_pool_keeps_uniform_paragraphs_but_rejects_different_references(self):
-        settings = {**worker("sglang", concurrency=4, multi_speaker=False),
-                    "protocol": "fish_sglang_drama3"}
-        pool = RenderPool(pool_config(settings))
-        self.addCleanup(pool.close)
-        self.assertFalse(pool.capabilities["multi_speaker"])
-        self.assertTrue(pool.capabilities["single_speaker_paragraph"])
-        voice = {"kind": "reference", "reference_audio": "/voice.wav", "reference_text": "Saved speech."}
-        uniform = [{"text": "Hello.", "voice": voice}, {"text": "Goodbye.", "voice": voice}]
-        with patch.object(pool, "_execute", return_value={}) as execute:
-            pool.synthesize_dialogue(uniform, self.root / "uniform.wav", seed=3)
-            execute.assert_called_once_with("synthesize_dialogue", uniform, self.root / "uniform.wav", seed=3)
-            with self.assertRaisesRegex(EngineError, "Every render worker"):
-                pool.synthesize_dialogue([uniform[0], {"text": "Another voice.",
-                    "voice": {**voice, "reference_text": "Different saved speech."}}],
-                    self.root / "mixed.wav", seed=4)
-            self.assertEqual(execute.call_count, 1)
 
     def test_free_fast_worker_takes_more_work_without_waiting_for_slow_worker(self):
         pool = RenderPool(pool_config(worker("slow"), worker("fast")))
@@ -229,59 +238,102 @@ class PoolUnitTests(unittest.TestCase):
         self.assertEqual(events[0], "synthesis")
         self.assertEqual(set(events[1:]), {"asr", "judge"})
 
-    def test_scheduler_restores_source_order_with_bounded_inflight_jobs(self):
-        config = pool_config(worker("fixture", concurrency=2))
-        config["render_pool"]["max_inflight"] = 2
-        engine = RenderPool(config)
+    def two_slot_pool(self):
+        engine = RenderPool(pool_config(worker("fixture", concurrency=2)))
         self.addCleanup(engine.close)
-        second_done = Event()
-        active, maximum = 0, 0
+        # Chapter history support is confirmed per worker before synthesis;
+        # these chunk-level fakes never reach the worker.
+        engine._workers[0]._engine = SimpleNamespace(capabilities=HISTORY_CAPABILITY)
+        return engine
+
+    def test_one_chapter_runs_its_takes_in_order_while_another_chapter_overlaps(self):
+        engine = self.two_slot_pool()
+        second_chapter_started = Event()
+        active, maximum, per_chapter = 0, 0, {1: 0, 2: 0}
+        chapter_maximum = {1: 0, 2: 0}
         guard = Lock()
         completion = []
 
         def fake_chunk(chunk, number, *args, **kwargs):
             nonlocal active, maximum
+            chapter = chunk["chapter"]
             with guard:
                 active += 1
+                per_chapter[chapter] += 1
                 maximum = max(maximum, active)
-            if number == 1:
-                if not second_done.wait(5):
-                    raise AssertionError("second job did not run concurrently")
-            else:
-                second_done.set()
+                chapter_maximum[chapter] = max(chapter_maximum[chapter], per_chapter[chapter])
+            if chapter == 2:
+                second_chapter_started.set()
+            elif number == 1 and not second_chapter_started.wait(5):
+                raise AssertionError("the next chapter did not overlap the first chapter's take")
+            time.sleep(.005)
             with guard:
                 active -= 1
-                completion.append(number)
-            return {"chunk_id": number}, {"chunk_id": number}
+                per_chapter[chapter] -= 1
+                completion.append((chapter, number))
+            return {"chunk_id": (chapter, number)}, {"chunk_id": (chapter, number)}
 
-        with patch("epub_tts_narrator.renderer.workflow._render_chunk", side_effect=fake_chunk):
-            clips, reports = _render_chapter_chunks({"chunks": [{}] * 5}, {}, engine, {}, None,
-                                                    {}, self.root, notify=lambda _: None)
-        self.assertEqual([clip["chunk_id"] for clip in clips], [1, 2, 3, 4, 5])
-        self.assertEqual([report["chunk_id"] for report in reports], [1, 2, 3, 4, 5])
-        self.assertEqual(completion[0], 2)
+        def chapter(number):
+            chunks = [{"chapter": number, "segment": {}, "silent_control": False}] * 4
+            return _render_chapter_chunks({"number": number, "chunks": chunks}, {}, engine, {}, None,
+                                          {}, self.root, notify=lambda _: None)
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chunk", side_effect=fake_chunk), \
+                ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = executor.submit(chapter, 1), executor.submit(chapter, 2)
+            results = {1: first.result(10), 2: second.result(10)}
+        for number, (clips, reports) in results.items():
+            self.assertEqual([clip["chunk_id"] for clip in clips], [(number, index) for index in range(1, 5)])
+            self.assertEqual([report["chunk_id"] for report in reports],
+                             [(number, index) for index in range(1, 5)])
+            self.assertEqual([item for item in completion if item[0] == number],
+                             [(number, index) for index in range(1, 5)])
+        self.assertEqual(chapter_maximum, {1: 1, 2: 1})
         self.assertEqual(maximum, 2)
 
-    def test_failure_drains_active_jobs_and_stops_new_dispatch(self):
-        engine = SimpleNamespace(max_parallel=2)
-        both_started = Barrier(2)
-        calls, drained = [], Event()
+    def test_failure_stops_its_chapter_without_cancelling_another_chapters_take(self):
+        for name in ("direct engine", "pool scheduler"):
+            with self.subTest(engine=name):
+                engine = (SimpleNamespace(capabilities=HISTORY_CAPABILITY) if name == "direct engine"
+                          else self.two_slot_pool())
+                other_started, failed = Event(), Event()
+                calls = []
 
-        def fake_chunk(chunk, number, *args, **kwargs):
-            calls.append(number)
-            both_started.wait(5)
-            if number == 1:
-                raise KeyboardInterrupt("fixture cancellation")
-            time.sleep(.02)
-            drained.set()
-            return {}, None
+                def fake_chunk(chunk, number, *args, **kwargs):
+                    calls.append((chunk["chapter"], number))
+                    if chunk["chapter"] == 1:
+                        raise KeyboardInterrupt("fixture cancellation")
+                    other_started.set()
+                    if number == 1 and not failed.wait(5):
+                        raise AssertionError("the failing chapter never stopped")
+                    return {}, None
 
-        with patch("epub_tts_narrator.renderer.workflow._render_chunk", side_effect=fake_chunk):
-            with self.assertRaises(KeyboardInterrupt):
-                _render_chapter_chunks({"chunks": [{}] * 5}, {}, engine, {}, None,
-                                       {}, self.root, notify=lambda _: None)
-        self.assertTrue(drained.is_set())
-        self.assertEqual(sorted(calls), [1, 2])
+                def chapter(number):
+                    chunks = [{"chapter": number, "segment": {}, "silent_control": False}] * 3
+                    return _render_chapter_chunks({"number": number, "chunks": chunks}, {}, engine, {},
+                                                  None, {}, self.root, notify=lambda _: None)
+
+                with patch("epub_tts_narrator.renderer.workflow._render_chunk", side_effect=fake_chunk), \
+                        ThreadPoolExecutor(max_workers=1) as executor:
+                    other = executor.submit(chapter, 2)
+                    self.assertTrue(other_started.wait(5))
+                    with self.assertRaises(KeyboardInterrupt):
+                        chapter(1)
+                    failed.set()
+                    clips, _ = other.result(10)
+                self.assertEqual([call for call in calls if call[0] == 1], [(1, 1)])
+                self.assertEqual([call for call in calls if call[0] == 2], [(2, 1), (2, 2), (2, 3)])
+                self.assertEqual(len(clips), 3)
+
+    def test_removed_stock_server_protocols_fail_before_any_request(self):
+        for protocol in ("fish_native_drama3", "fish_sglang_drama3"):
+            with self.subTest(protocol=protocol):
+                pool = RenderPool(pool_config({**worker("stock"), "protocol": protocol}))
+                self.addCleanup(pool.close)
+                with patch("epub_tts_narrator.renderer.fish_http.build_opener",
+                           side_effect=AssertionError("contacted a stock server")):
+                    with self.assertRaisesRegex(EngineError, "cannot carry chapter history"):
+                        pool.check_continuity()
 
 
 class TransportFailure(RuntimeError):
@@ -327,8 +379,8 @@ class PoolWorkflowTests(unittest.TestCase):
     def accepted(self):
         return {path: read_json(path) for path in (self.root / "work" / "clips").glob("*/accepted.json")}
 
-    def test_parallel_paragraphs_verify_serially_preserve_order_and_resume(self):
-        # Keep one same-role paragraph to exercise grouped parallel work; the
+    def test_pooled_paragraphs_verify_serially_preserve_order_and_resume(self):
+        # Keep one same-role paragraph to exercise grouped paragraph work; the
         # different-role/different-voice paragraph remains separate.
         for row in self.bundle["chapters"][0]["rows"]:
             if row["block_id"] == "b000003":
@@ -368,15 +420,28 @@ class PoolWorkflowTests(unittest.TestCase):
             final = assemble(self.bundle, self.config, notify=lambda _: None)
         self.assertEqual(final["status"], "complete")
 
-    def test_one_extra_inflight_job_keeps_remote_busy_while_verifier_waits(self):
+    def run_chapters(self, engine, chapters, voices, verifier, config, work):
+        """Render chapters concurrently the way render() does: shared take locks and cache."""
+        take_locks, guard = {}, Lock()
+        cache = SpeechCache(work, voices)
+        with ThreadPoolExecutor(max_workers=len(chapters)) as executor:
+            futures = [executor.submit(_render_chapter_chunks, chapter, voices, engine, engine.identity,
+                                       verifier, config, work, notify=lambda _: None,
+                                       take_locks=take_locks, take_locks_guard=guard, speech_cache=cache)
+                       for chapter in chapters]
+            return [future.result(15) for future in futures]
+
+    def test_next_chapter_keeps_single_remote_slot_busy_while_previous_chapter_verifies(self):
         self.config["render"]["paragraph_synthesis"] = False
         self.config["render_pool"]["workers"] = [worker("single")]
         single = RenderPool(self.config)
+        self.addCleanup(single.close)
         single._workers[0]._engine = self.engines[0]
         self.assertEqual(single.max_parallel, 1)
-        self.assertEqual(single.max_inflight, 2)
+        self.assertIsNotNone(single.logical)
         plan = make_render_plan(self.bundle, self.config)
-        chunks = [chunk for chunk in plan["chapters"][0]["chunks"] if not chunk["silent_control"]][:2]
+        spoken = [chunk for chunk in plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
+        chapters = [{"number": 1, "chunks": [spoken[1]]}, {"number": 2, "chunks": [spoken[5]]}]
         store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
         voices = {key: store.load(key) for key in plan["voice_ids"]}
         generated_second = Event()
@@ -393,16 +458,15 @@ class PoolWorkflowTests(unittest.TestCase):
         def recognize(path):
             recognition_calls.append(path)
             if len(recognition_calls) == 1 and not generated_second.wait(5):
-                raise AssertionError("remote synthesis stalled behind verification")
+                raise AssertionError("remote synthesis stalled behind the other chapter's verification")
             return original_asr(path)
 
         with patch.object(self.engines[0], "synthesize", side_effect=generation), \
              patch.object(self.verifier, "transcribe", side_effect=recognize):
-            clips, reports = _render_chapter_chunks({"chunks": chunks}, voices, single,
-                single.identity, single.wrap_verifier(self.verifier), self.config,
-                self.root / "work", notify=lambda _: None)
-        self.assertEqual(len(clips), 2)
-        self.assertTrue(all(report["report"]["passed"] for report in reports))
+            results = self.run_chapters(single, chapters, voices, single.wrap_verifier(self.verifier),
+                                        self.config, self.root / "work")
+        self.assertEqual([len(clips) for clips, _ in results], [1, 1])
+        self.assertTrue(all(report["report"]["passed"] for _, reports in results for report in reports))
         self.assertEqual(len(generation_calls), 2)
 
     def test_endpoint_membership_and_model_location_changes_keep_completed_chapter(self):
@@ -411,10 +475,14 @@ class PoolWorkflowTests(unittest.TestCase):
         self.config["render_pool"]["workers"][0]["api_key"] = "new-token"
         self.config["engine"]["checkpoint"] = "/another/mac/checkpoint"
         replacement = RenderPool(self.config)
+        self.addCleanup(replacement.close)
+        health, opener = health_only_workers()
         with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("resynthesized")), \
-             patch("epub_tts_narrator.renderer.pool._Worker.engine", side_effect=AssertionError("loaded worker")):
+             health:
             self.assertEqual(self.chapters(replacement)["chapters"], first["chapters"])
             self.assertEqual(assemble(self.bundle, self.config, notify=lambda _: None)["status"], "complete")
+        # The new endpoint is only asked once whether it carries chapter history.
+        self.assertEqual(opener.open.call_count, 1)
 
     def test_changed_pool_sampling_or_revision_requires_rerender_for_assembly(self):
         self.chapters()
@@ -426,7 +494,7 @@ class PoolWorkflowTests(unittest.TestCase):
                 assemble(self.bundle, self.config, notify=lambda _: None)
             self.config[section][key] = old
 
-    def test_local_pool_local_switch_preserves_completed_book_without_loading_workers(self):
+    def test_local_pool_local_switch_preserves_completed_book_without_remote_synthesis(self):
         local = ContractLocalFixtureEngine(self.config, self.fixtures)
         remote_workers = deepcopy(self.config["render_pool"]["workers"])
         self.config["render_pool"]["workers"] = []
@@ -437,7 +505,9 @@ class PoolWorkflowTests(unittest.TestCase):
 
         self.config["render_pool"]["workers"] = remote_workers
         remote_only = RenderPool(self.config)
-        with patch("epub_tts_narrator.renderer.pool._Worker.engine", side_effect=AssertionError("loaded worker")), \
+        self.addCleanup(remote_only.close)
+        health, opener = health_only_workers()
+        with health, \
              patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("reverified speech")), \
              patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")), \
              patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("repackaged audiobook")):
@@ -448,6 +518,8 @@ class PoolWorkflowTests(unittest.TestCase):
         self.assertEqual(first["audio"]["chapters"], pooled["audio"]["chapters"])
         self.assertEqual(first["audio"]["chapters"], returned["audio"]["chapters"])
         self.assertEqual(calls, (len(local.speech_calls), len(local.dialogue_calls), len(self.verifier.calls)))
+        # Each remote worker is asked once whether it carries chapter history.
+        self.assertEqual(opener.open.call_count, len(remote_workers))
         self.assertEqual(published, {path: file_hash(path) for path in (self.root / "output").rglob("*")
                                      if path.is_file()})
 
@@ -477,53 +549,6 @@ class PoolWorkflowTests(unittest.TestCase):
 
                     self.assertEqual(resumed, first)
                     self.assertEqual(len(self.verifier.calls), count)
-
-    def test_native_to_sglang_preserves_uniform_paragraph_plan_and_accepted_audio(self):
-        for row in self.bundle["chapters"][0]["rows"]:
-            if row["block_id"] == "b000003":
-                row["role_id"] = "mara_dialogue"
-        native_config = deepcopy(self.config)
-        native_settings = {**worker("native"), "protocol": "fish_native_drama3"}
-        native_config["render_pool"]["workers"] = [native_settings]
-        sglang_config = deepcopy(native_config)
-        sglang_config["render_pool"]["workers"] = [
-            {**worker("sglang", concurrency=4, multi_speaker=False), "protocol": "fish_sglang_drama3"}]
-        native, sglang = RenderPool(native_config), RenderPool(sglang_config)
-        self.addCleanup(native.close)
-        self.addCleanup(sglang.close)
-        self.assertEqual(native.identity, sglang.identity)
-        native_plan = make_render_plan(self.bundle, native_config)
-        sglang_plan = make_render_plan(self.bundle, sglang_config, multi_speaker=False,
-                                       single_speaker_paragraph=True)
-        self.assertEqual(native_plan, sglang_plan)
-        paragraph = next(chunk for chapter in native_plan["chapters"]
-                         for chunk in chapter["chunks"] if chunk.get("paragraph_turns"))
-        store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
-        voices = {key: store.load(key) for key in native_plan["voice_ids"]}
-        fixture = ParagraphFixtureEngine()
-        fixture.fixture_transcripts = self.fixtures
-        fixture.identity = FishHTTPEngine(native_settings, native_config["engine"]).identity
-        native._workers[0]._engine = fixture
-
-        for indexed in (False, True):
-            with self.subTest(indexed=indexed):
-                work = self.root / f"native-sglang-{indexed}"
-                first = _render_chapter_chunks({"chunks": [paragraph]}, voices, native,
-                    native.identity, self.verifier, native_config, work, notify=lambda _: None)
-                acceptance = read_json(next((work / "clips").glob("*/accepted.json")))
-                self.assertEqual(acceptance["engine_metadata"]["worker_engine"]["protocol"],
-                                 "fish-native-drama3-wav-v1")
-                count = len(self.verifier.calls)
-                if not indexed:
-                    for path in (work / "speech-cache").glob("*.json"):
-                        path.unlink()
-                with patch.object(sglang, "synthesize", side_effect=AssertionError("regenerated speech")), \
-                     patch.object(sglang, "synthesize_dialogue", side_effect=AssertionError("regenerated paragraph")):
-                    resumed = _render_chapter_chunks({"chunks": [paragraph]}, voices, sglang,
-                        sglang.identity, self.verifier, sglang_config, work, notify=lambda _: None)
-                self.assertEqual(first, resumed)
-                self.assertEqual(len(self.verifier.calls), count)
-                self.assertEqual(read_json(next((work / "clips").glob("*/accepted.json"))), acceptance)
 
     def test_pool_model_revision_and_sampling_changes_do_not_reuse_local_speech(self):
         self.config["render"]["paragraph_synthesis"] = False
@@ -724,18 +749,26 @@ class PoolWorkflowTests(unittest.TestCase):
             folder, request, self.verifier, self.config, notify=lambda _: None)
         self.assertTrue(accepted["report"]["passed"])
 
-    def test_duplicate_request_is_generated_only_once(self):
+    def test_identical_first_takes_of_concurrent_chapters_are_generated_only_once(self):
         self.config["render"]["paragraph_synthesis"] = False
         plan = make_render_plan(self.bundle, self.config)
         chunk = next(c for c in plan["chapters"][0]["chunks"] if not c["silent_control"])
         store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
         voices = {key: store.load(key) for key in plan["voice_ids"]}
-        clips, reports = _render_chapter_chunks({"chunks": [chunk, chunk]}, voices, self.pool,
+        (first_clips, first_reports), (second_clips, second_reports) = self.run_chapters(
+            self.pool, [{"number": 1, "chunks": [chunk]}, {"number": 2, "chunks": [chunk]}], voices,
+            self.pool.wrap_verifier(self.verifier), self.config, self.root / "work")
+        self.assertGreater(self.pool.max_parallel, 1)
+        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 1)
+        self.assertEqual(first_clips[0]["wav_path"], second_clips[0]["wav_path"])
+        self.assertEqual(first_reports, second_reports)
+
+        # Within one chapter the repeat follows the first take in the chapter
+        # history, so it is a different generation and is synthesized again.
+        _render_chapter_chunks({"number": 3, "chunks": [chunk, chunk]}, voices, self.pool,
             self.pool.identity, self.pool.wrap_verifier(self.verifier), self.config,
             self.root / "work", notify=lambda _: None)
-        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 1)
-        self.assertEqual(clips[0]["wav_path"], clips[1]["wav_path"])
-        self.assertEqual(reports[0], reports[1])
+        self.assertEqual(sum(len(e.speech_calls) for e in self.engines), 2)
 
     def test_concurrent_identical_speech_at_different_positions_keeps_both_current_mappings(self):
         self.config["render"]["paragraph_synthesis"] = False
@@ -751,9 +784,14 @@ class PoolWorkflowTests(unittest.TestCase):
         store = VoiceStore(self.config["voices"]["directory"], "pool-fixture")
         voices = {key: store.load(key) for key in plan["voice_ids"]}
 
-        clips, reports = _render_chapter_chunks({"chunks": [original, moved]}, voices, self.pool,
-            self.pool.identity, self.pool.wrap_verifier(self.verifier), self.config,
-            self.root / "work", notify=lambda _: None)
+        # The same speech opens two concurrently rendered chapters, so both
+        # takes have the same (empty) chapter history.
+        results = self.run_chapters(self.pool, [{"number": 1, "chunks": [original]},
+                                                {"number": 2, "chunks": [moved]}],
+                                    voices, self.pool.wrap_verifier(self.verifier), self.config,
+                                    self.root / "work")
+        clips = [result[0][0] for result in results]
+        reports = [result[1][0] for result in results]
 
         self.assertGreater(self.pool.max_parallel, 1)
         self.assertEqual(sum(len(engine.speech_calls) for engine in self.engines), 1)
@@ -813,21 +851,38 @@ class PoolWorkflowTests(unittest.TestCase):
         finally:
             lock.rmdir()
 
-    def test_failure_keeps_book_locks_until_other_work_finishes_and_resumes(self):
+    def test_failure_keeps_book_locks_until_other_chapter_work_finishes_and_resumes(self):
+        # Takes within a chapter are sequential, so the concurrent work that
+        # must drain before locks are released belongs to another chapter.
         self.config["render"]["paragraph_synthesis"] = False
-        self.pool.max_inflight = 2  # Keep this failure race to exactly two active jobs.
-        both_started = Barrier(2)
+        original_chapter = self.bundle["chapters"][0]
+        first_chapter, following = deepcopy(original_chapter), deepcopy(original_chapter)
+        first_chapter["rows"] = first_chapter["rows"][:4]
+        following["rows"] = following["rows"][4:]
+        following["entry"]["title"] = "Following chapter"
+        following["entry"]["path"] = "scripts/chapter-0002.json"
+        self.bundle["chapters"] = [first_chapter, following]
+        plan = make_render_plan(self.bundle, self.config)
+        self.assertEqual(len(plan["chapters"]), 2)
+        first_text = plan["chapters"][0]["chunks"][0]["spoken_text"]
+        following_texts = [chunk["spoken_text"] for chunk in plan["chapters"][1]["chunks"]
+                           if not chunk["silent_control"]]
+        other_started, failed = Event(), Event()
         checked = []
         original = self.pool.synthesize
-        first_text = make_render_plan(self.bundle, self.config)["chapters"][0]["chunks"][0]["spoken_text"]
         calls = []
 
         def generation(text, *args, **kwargs):
             calls.append(text)
-            both_started.wait(5)
             if text == first_text:
+                if not other_started.wait(5):
+                    raise AssertionError("the following chapter never overlapped")
+                failed.set()
                 raise KeyboardInterrupt("fixture stop")
-            time.sleep(.03)
+            other_started.set()
+            if not failed.wait(5):
+                raise AssertionError("the first chapter never failed")
+            time.sleep(.01)
             checked.append(((self.root / "bundle" / ".audio-render.lock").is_dir(),
                             (self.root / "work" / ".render.lock").is_dir()))
             return original(text, *args, **kwargs)
@@ -835,17 +890,24 @@ class PoolWorkflowTests(unittest.TestCase):
         with patch.object(self.pool, "synthesize", side_effect=generation):
             with self.assertRaises(KeyboardInterrupt):
                 self.chapters()
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(checked, [(True, True)])
+        # The failed chapter starts nothing after its failure; the already
+        # started chapter drains while the book and cache locks stay held.
+        self.assertEqual(calls.count(first_text), 1)
+        self.assertEqual(len(calls), 1 + len(following_texts))
+        self.assertEqual(checked, [(True, True)] * len(following_texts))
         self.assertFalse((self.root / "bundle" / ".audio-render.lock").exists())
         self.assertFalse((self.root / "work" / ".render.lock").exists())
         before = self.accepted()
-        self.assertEqual(len(before), 1)
+        self.assertEqual(len(before), len(following_texts))
+        generated = sum(len(engine.speech_calls) for engine in self.engines)
         self.chapters()
         after = self.accepted()
         for path, record in before.items():
             self.assertEqual(after[path], record)
-
+        # Resume renders only the failed chapter; the drained chapter is reused.
+        first_spoken = [chunk for chunk in plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
+        self.assertEqual(sum(len(engine.speech_calls) for engine in self.engines) - generated,
+                         len(first_spoken))
 
 if __name__ == "__main__":
     unittest.main()

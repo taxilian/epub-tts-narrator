@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import tempfile
+import time
 from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 import unittest
@@ -25,9 +26,11 @@ TOKEN = "fixture-secret-must-not-appear"
 SCRIPT = "Private unreleased text must not appear in worker progress."
 
 
-def configuration(*names, local=False):
+def configuration(*names, local=False, scheduler=None):
     config = deepcopy(DEFAULTS)
     config["engine"]["checkpoint"] = "/unused/drama-3"
+    if scheduler is not None:
+        config["render_pool"]["scheduler"] = scheduler
     config["render_pool"]["workers"] = [
         {"name": name, "type": "local", "concurrency": 1}
         if local else
@@ -60,8 +63,8 @@ class WorkerActivityTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
-    def make_pool(self, *names, local=False):
-        pool = RenderPool(configuration(*names, local=local))
+    def make_pool(self, *names, local=False, scheduler=None):
+        pool = RenderPool(configuration(*names, local=local, scheduler=scheduler))
         self.addCleanup(pool.close)
         return pool
 
@@ -102,7 +105,9 @@ class WorkerActivityTests(unittest.TestCase):
         self.assertNotEqual(results[0]["render_worker"], results[1]["render_worker"])
 
     def test_waiting_for_slot_is_not_reported_as_started(self):
-        pool = self.make_pool("second-mac")
+        # Legacy dispatch waits for the endpoint slot on the caller's thread.
+        pool = self.make_pool("second-mac", scheduler="legacy")
+        self.assertIsNone(pool._resources)
         started, release, second_waiting = Event(), Event(), Event()
         pool._workers[0]._engine = Engine(lambda: (started.set(), self.assertTrue(release.wait(5))))
         first, second = [], []
@@ -127,6 +132,46 @@ class WorkerActivityTests(unittest.TestCase):
                     with guard:
                         second_events = [event for notify, event, _ in events if notify == second_notify]
                     self.assertEqual(second_events, ["waiting"])
+                finally:
+                    release.set()
+                self.assertEqual(first_job.result(5)["render_worker"], "second-mac")
+                self.assertEqual(second_job.result(5)["render_worker"], "second-mac")
+        for callback in (first_notify, second_notify):
+            selected = [(event, info) for notify, event, info in events if notify == callback]
+            self.assertEqual([event for event, _ in selected], ["waiting", "assigned", "started", "completed"])
+            self.assertGreaterEqual(selected[-1][1]["elapsed"], 0)
+
+    def test_pipeline_job_queued_behind_the_lane_is_not_reported_as_started(self):
+        # The default pipeline scheduler queues a job on the synthesis lane;
+        # it claims no slot and reports nothing until a lane thread runs it.
+        pool = self.make_pool("second-mac")
+        self.assertIsNotNone(pool._resources)
+        started, release = Event(), Event()
+        pool._workers[0]._engine = Engine(lambda: (started.set(), self.assertTrue(release.wait(5))))
+        first, second = [], []
+        first_notify, second_notify = first.append, second.append
+        events, guard = [], Lock()
+
+        def record(notify, event, worker=None, elapsed=None):
+            kwargs = {"worker": worker, "elapsed": elapsed}
+            with guard:
+                events.append((notify, event, kwargs))
+            return report_worker_activity(notify, event, **kwargs)
+
+        with patch("epub_tts_narrator.renderer.pool.report_worker_activity", side_effect=record):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_job = executor.submit(self.generate, pool, first_notify, filename="first.wav")
+                self.assertTrue(started.wait(5))
+                second_job = executor.submit(self.generate, pool, second_notify, filename="second.wav")
+                try:
+                    lane = pool._resources.tts
+                    deadline = time.monotonic() + 5
+                    while lane._pending < 1 and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                    self.assertEqual(lane._pending, 1)
+                    with guard:
+                        second_events = [event for notify, event, _ in events if notify == second_notify]
+                    self.assertEqual(second_events, [])
                 finally:
                     release.set()
                 self.assertEqual(first_job.result(5)["render_worker"], "second-mac")

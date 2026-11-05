@@ -6,6 +6,7 @@ import unittest
 from epub_tts_narrator.renderer.chapter_executor import ChapterExecutor
 from epub_tts_narrator.renderer.common import digest, file_hash
 from epub_tts_narrator.renderer.workflow import _render_chapter_with_recovery
+from shared_fixtures import HISTORY_CAPABILITY
 import test_renderer_paragraph_pronunciation as fixtures
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 
@@ -14,7 +15,7 @@ from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 class ParagraphSplitCapabilityTests(unittest.TestCase):
     def setUp(self):
         fixtures.ParagraphPronunciationIntegrationTests.setUp(self)
-        self.engine.capabilities = {"multi_speaker": True}
+        self.engine.capabilities = {"multi_speaker": True, **HISTORY_CAPABILITY}
         reference = self.work / "reference.wav"
         write_tone(reference)
         self.voice.update(reference_audio=str(reference), reference_sha256=file_hash(reference))

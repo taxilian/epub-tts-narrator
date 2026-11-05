@@ -160,6 +160,15 @@ def stop_if_requested() -> None:
             raise error
 
 
+def stop_if_owner_requested() -> None:
+    """Only the scoped owner condition: a global Ctrl-C lets started takes drain."""
+    check = _scoped_stop.get()
+    if check is not None:
+        error = check()
+        if error is not None:
+            raise error
+
+
 @contextmanager
 def scoped_stop_condition(predicate, error):
     """Raise ``error()`` at safe task boundaries while ``predicate()`` holds.

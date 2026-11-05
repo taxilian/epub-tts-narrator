@@ -102,7 +102,8 @@ distinct analyzer character records.
 
 The upstream `accept` callback returns the final rejected take if all retries
 fail. This adapter does not use that callback. It calls `generate` exactly once
-with `single_chunk=True`, rejects missing or multiple segments, requires
+with `single_chunk=True` and the chapter history as `previous_takes` (see
+"Chapter history" below), rejects missing or multiple segments, requires
 `finish_reason == "eos"`, and rejects short, malformed, or non-finite audio.
 Successful inference is **not** proof of correct speech: the renderer must
 perform silence/content validation and decide whether to retry before accepting
@@ -131,3 +132,29 @@ sampling settings, and output encoding. Model file hashes are cached only while
 size, nanosecond modification/change times, and inode remain unchanged. The
 Hugging Face revision is recorded when local download metadata establishes it;
 arbitrary local checkpoints are not labelled as the recommended release.
+
+## Chapter history
+
+Every engine carries Drama 3's performance context across a chapter's
+requests (RENDERER.md, "Chapter continuity"). The shared
+`engines.HistorySynthesis` mixin tags each request's speakers, adds the
+chapter's pinned-narration and latest accepted turns through
+`continuity.compose`, and attaches the generated codec tokens to the take's
+metadata. An engine implements only `_generate_wire(text, references, history,
+output, seed)` and returns `(metadata, codes, codebook_size)`:
+
+- **Sogni (`drama3_mlx`)**: public `generate(previous_takes=...)`; overflow is
+  the runtime's `PromptTooLongError`.
+- **MLX-Audio**: its public `generate` takes neither history nor returns codes,
+  so the adapter drives the internals `generate` itself uses (`_voice`,
+  `build_frames`, `_frames`, `codec.streaming_step`) for one chunk, pinned by the
+  `mlx-audio` requirement and checked before use. Prompts are capped at 8,192
+  rows like Sogni.
+- **`fish_http`**: sends the composed request to an `audiobook-render serve`
+  worker, which runs its own engine's `synthesize_fish(..., history=...)` and
+  returns the codes with the WAV.
+- **`fish_speech_cuda`** (Runpod): Fish's unmodified library on CUDA
+  (`build_drama3_prompt(history=...)`, `generate_drama3`, `set_seed`), loaded like
+  Fish's stock server.
+
+Plugins that do not advertise `chapter_continuity` cannot render.

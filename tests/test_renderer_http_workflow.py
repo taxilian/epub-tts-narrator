@@ -14,11 +14,13 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.continuity_codes import history_digest
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.server import make_server
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import assemble, make_render_plan, render
+from shared_fixtures import fixture_codes
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
 
@@ -28,19 +30,23 @@ class HTTPFixtureEngine(FixtureEngine):
     top_k = 30
     max_new_tokens = 2048
 
-    def synthesize_fish(self, text, voices, path, *, seed):
-        self.speech_calls.append({"text": text, "references": voices})
+    def synthesize_fish(self, text, voices, path, *, seed, history=()):
+        history = list(history)
+        self.speech_calls.append({"text": text, "references": voices, "history": history})
+        codes = fixture_codes(text, voices)["generated_codes"]
         # Test tones register a transcript for the test recognizer. Production
         # verification receives audio only, and never receives this fixture map.
         text = re.sub(r"<\|speaker:\d+\|> ?|</?whisper>", "", text)
         text = re.sub(r"\[(nervous|sighs|laughs)\]", "", text)
-        return self._write(text, path, seed)
+        return {**self._write(text, path, seed), "codes": codes["codes"],
+                "codebook_size": codes["codebook_size"], "history_turns": len(history),
+                "history_sha256": history_digest(history)}
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE and importlib.util.find_spec("msgpack")
                      and importlib.util.find_spec("soundfile"), "requires renderer dependencies")
 class HTTPWorkflowTests(unittest.TestCase):
-    def test_two_http_workers_render_verify_package_and_resume_without_servers(self):
+    def test_two_http_workers_pin_the_chapter_render_verify_package_and_resume_without_servers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             export_bundle(read_json(EXAMPLE / "reviewed.json"), root / "bundle")
@@ -90,13 +96,24 @@ class HTTPWorkflowTests(unittest.TestCase):
                     first = render(bundle, config, pool, verifier, chapters_only=True,
                                    notify=client_messages.append)
                     self.assertEqual(first["status"], "chapters_complete")
-                    self.assertTrue(all(engine.speech_calls for engine in engines))
+                    # The fixture book has one chapter. Its takes run in order on the
+                    # worker of its first take, so history and audio share one backend.
+                    used = [index for index, engine in enumerate(engines) if engine.speech_calls]
+                    self.assertEqual(len(used), 1)
+                    name = f"mac-{used[0]}"
+                    other = f"mac-{1 - used[0]}"
+                    # Chapter history crosses HTTP: later takes carry earlier accepted codes.
+                    calls = [call for engine in engines for call in engine.speech_calls]
+                    self.assertTrue(any(call["history"] for call in calls))
+                    self.assertTrue(all(len(call["history"]) <= 2 for call in calls))
+                    self.assertTrue(all(turn_text.startswith("<|speaker:") and len(codes) == 10
+                                        for call in calls for turn_text, codes in call["history"]))
                     self.assertFalse(any(engine.voice_calls for engine in engines))
-                    for name in ("mac-0", "mac-1"):
-                        self.assertTrue(any("Chunk " in line and f"Generating speech on {name}" in line
-                                            for line in client_messages), client_messages)
-                        self.assertTrue(any(f"{name}: speech generation completed" in line
-                                            for line in client_messages), client_messages)
+                    self.assertTrue(any("Chunk " in line and f"Generating speech on {name}" in line
+                                        for line in client_messages), client_messages)
+                    self.assertTrue(any(f"{name}: speech generation completed" in line
+                                        for line in client_messages), client_messages)
+                    self.assertFalse(any(f"Generating speech on {other}" in line for line in client_messages))
                     self.assertTrue(any("inference started" in line for line in server_messages))
                     self.assertTrue(any("completed in" in line for line in server_messages))
                     self.assertNotIn("test-server-key", "\n".join(client_messages + server_messages))

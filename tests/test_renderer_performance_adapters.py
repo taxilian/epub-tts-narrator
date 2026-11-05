@@ -26,13 +26,14 @@ class PerformanceAdapterTests(unittest.TestCase):
         plan = record(text, delivery(text), pronunciation(text, 2, 5))
         voice = reference()
         expected = prepare_synthesis(text, performance=plan, traits="Measured consonants")[1]
+        wire_text = f"<|speaker:0|> {expected}"
+        generated = ({"synthesis_text": wire_text}, [[1, 2]] * 10, 1024)
         sogni = object.__new__(Drama3MLXEngine)
-        sogni._reference = Mock(return_value="encoded-reference")
-        sogni._generate_audio = Mock(return_value={"synthesis_text": expected})
+        sogni._generate_wire = Mock(return_value=generated)
         mlx = object.__new__(MLXAudioDrama3Engine)
-        mlx._generate_audio = Mock(return_value={"synthesis_text": expected})
+        mlx._generate_wire = Mock(return_value=generated)
         fish = object.__new__(FishHTTPEngine)
-        fish._request = Mock(return_value={})
+        fish._request = Mock(return_value=generated)
         for engine in (sogni, mlx, fish):
             with self.subTest(engine=type(engine).__name__), patch(
                     "epub_tts_narrator.renderer.fish_http.read_reference", return_value=(b"reference", "Reference text.")):
@@ -40,8 +41,9 @@ class PerformanceAdapterTests(unittest.TestCase):
                                            performance=plan, traits="Measured consonants")
                 self.assertEqual(result["synthesis_text"], expected)
                 self.assertEqual(result["expressive_performance"]["expected_text"], "Jas, stay.")
-                call = engine._request if engine is fish else engine._generate_audio
-                self.assertEqual(call.call_args.args[0], expected)
+                # Every adapter sends the shared compiler's text, speaker-tagged.
+                call = engine._request if engine is fish else engine._generate_wire
+                self.assertEqual(call.call_args.args[0], wire_text)
 
     def test_stale_plan_is_rejected_before_reference_encoding(self):
         engine = object.__new__(Drama3MLXEngine)

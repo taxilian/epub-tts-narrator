@@ -91,16 +91,18 @@ class ChapterStyleUpgradeTests(unittest.TestCase):
         result = self.run_render()
 
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 1, counts[2] + 1))
-        self.assertEqual(self.engine.speech_calls[-1]["text"], self.document["segments"][1]["text"])
-        self.assertEqual(self.engine.speech_calls[-1]["direction"], "tremulous and shaken")
+        # The styled passage is new; the following take in its chapter
+        # continues that passage's history, so it is generated again too.
+        styled, following = self.document["segments"][1], self.document["segments"][2]
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 2, counts[2] + 2))
+        self.assertEqual([(call["text"], call["direction"]) for call in self.engine.speech_calls[-2:]],
+                         [(styled["text"], "tremulous and shaken"), (following["text"], "")])
         self.assertNotEqual(self.checkpoint(1).read_bytes(), first_checkpoint)
         self.assertEqual(self.checkpoint(2).read_bytes(), other_checkpoint)
         new_records = [read_json(path) for path in (self.work / "clips").glob("*/accepted.json")
                        if path not in old_accepted]
-        self.assertEqual(len(new_records), 1)
-        self.assertEqual(new_records[0]["engine_metadata"]["synthesis_text"],
-                         "[tremulous and shaken] " + self.document["segments"][1]["text"])
+        self.assertEqual(sorted(record["engine_metadata"]["synthesis_text"] for record in new_records),
+                         sorted(["[tremulous and shaken] " + styled["text"], following["text"]]))
         for path, contents in old_accepted.items():
             self.assertEqual(path.read_bytes(), contents)
 

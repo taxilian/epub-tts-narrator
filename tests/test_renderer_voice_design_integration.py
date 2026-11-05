@@ -11,7 +11,7 @@ import wave
 
 from epub_tts_narrator.renderer.bundle import load_bundle
 from audition_fixtures import prepare_bundle
-from shared_fixtures import pcm_hash
+from shared_fixtures import HISTORY_CAPABILITY, fixture_codes, pcm_hash
 from epub_tts_narrator.renderer.casting import CastingSession
 from epub_tts_narrator.renderer.common import digest, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
@@ -64,6 +64,7 @@ class ReferencePlaybackEngine(ReferenceDesigner):
     identity = {"engine": "drama_fixture", "model": "drama-reference-v1"}
     capabilities = {
         "reference_voice": True, "voice_design": False, "unconditioned_voice_creation": True,
+        **HISTORY_CAPABILITY,
     }
 
     def __init__(self, transcripts):
@@ -80,7 +81,7 @@ class ReferencePlaybackEngine(ReferenceDesigner):
             "asset_hash": voice["asset_hash"], "reference_audio": voice["reference_audio"],
         })
         self.write_audio(text, path, seed)
-        return {}
+        return fixture_codes(text, [voice])
 
 
 class TranscriptVerifier:

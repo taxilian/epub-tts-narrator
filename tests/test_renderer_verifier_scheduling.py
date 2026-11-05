@@ -21,6 +21,7 @@ from epub_tts_narrator.renderer.render_resource_context import (
 from epub_tts_narrator.renderer.verification import (
     RecurringSpeechVerifier, ReferenceCorroboratingVerifier, ReferenceTextJudgingVerifier,
 )
+from shared_fixtures import HISTORY_CAPABILITY
 
 
 class Recognizer:
@@ -44,7 +45,9 @@ class Recognizer:
 class VerifierSchedulingTests(unittest.TestCase):
     def setUp(self):
         config = deepcopy(DEFAULTS)
-        config["render_pool"] = {"workers": [{"name": "local", "type": "local"}]}
+        # These cases pin the legacy review thread; pipeline routing has its own class.
+        config["render_pool"] = {"workers": [{"name": "local", "type": "local"}],
+                                 "scheduler": "legacy"}
         self.pool = RenderPool(config)
         self.addCleanup(self.pool.close)
         self.events = []
@@ -52,6 +55,7 @@ class VerifierSchedulingTests(unittest.TestCase):
 
         class Engine:
             identity = {"engine": "fixture"}
+            capabilities = dict(HISTORY_CAPABILITY)
             def synthesize(self, *args, **kwargs):
                 events.append(("speech", get_ident()))
                 return {}
@@ -301,6 +305,7 @@ class PipelineModelThreadRoutingTests(unittest.TestCase):
 
         class Engine:
             identity = {"engine": "fixture"}
+            capabilities = dict(HISTORY_CAPABILITY)
             def synthesize(self, *args, **kwargs):
                 return {}
             def close(self):

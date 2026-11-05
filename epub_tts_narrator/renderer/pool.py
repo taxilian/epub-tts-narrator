@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
-from queue import Queue
 from threading import BoundedSemaphore, Condition, RLock, get_ident
 from time import monotonic, sleep
 
@@ -22,6 +21,46 @@ _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
 
 # Bounded backpressure poll while the synthesis lane's declared backlog is full.
 _LANE_RETRY_SECONDS = 0.005
+
+
+class _Slots:
+    """Endpoint slots with chapter affinity.
+
+    A chapter's first take uses any free worker; the chapter then stays on
+    that worker so its history and audio come from one backend. Other
+    chapters keep the remaining workers busy.
+    """
+
+    def __init__(self, workers):
+        self._free = {id(worker): worker.settings.get("concurrency", 1) for worker in workers}
+        self._workers = list(workers)
+        self._ready = Condition()
+
+    def qsize(self):
+        with self._ready:
+            return sum(self._free.values())
+
+    def acquire(self):
+        from .continuity import current
+        scope = current()
+        chapter = scope["chapter"] if scope is not None else None
+        with self._ready:
+            while True:
+                pinned = None if chapter is None else chapter.worker
+                choices = [worker for worker in self._workers if self._free[id(worker)]
+                           and (pinned is None or worker.settings["name"] == pinned)]
+                if choices:
+                    worker = max(choices, key=lambda item: self._free[id(item)])
+                    self._free[id(worker)] -= 1
+                    if chapter is not None and chapter.worker is None:
+                        chapter.worker = worker.settings["name"]
+                    return worker
+                self._ready.wait()
+
+    def release(self, worker):
+        with self._ready:
+            self._free[id(worker)] += 1
+            self._ready.notify_all()
 
 
 def pool_sampling(config):
@@ -211,10 +250,7 @@ class RenderPool:
                          for worker in settings["workers"]]
         if not self._workers:
             raise EngineError("A render pool needs at least one worker")
-        self._slots = Queue()
-        for worker in self._workers:
-            for _ in range(worker.settings.get("concurrency", 1)):
-                self._slots.put(worker)
+        self._slots = _Slots(self._workers)
         self.max_parallel = self._slots.qsize()
         from .render_pipeline_config import effective_scheduling
         self._effective = effective_scheduling(config)
@@ -253,17 +289,24 @@ class RenderPool:
                 or w.settings.get("protocol") == "fish_sglang_drama3" for w in self._workers),
             "unconditioned_voice_creation": False,
             "structured_performance": True,
-            "chapter_continuity": all(w.local for w in self._workers),
+            "chapter_continuity": True,
         }
+        self._continuity_checked = False
 
     def check_continuity(self):
+        """Every worker must carry chapter history; checked once per pool."""
+        if self._continuity_checked:
+            return
         from .continuity import require_support
         def check():
             for worker in self._workers:
-                if not worker.local:
-                    raise EngineError("Chapter continuity requires local pool workers")
-                require_support({"render": {"continuity": "chapter"}}, worker.engine())
+                if worker.local:
+                    require_support(worker.engine())
         self._local_runtime.run(check)
+        for worker in self._workers:
+            if not worker.local:
+                require_support(worker.engine())
+        self._continuity_checked = True
 
     @property
     def identity(self):
@@ -362,7 +405,7 @@ class RenderPool:
         notify = generation_notifier()
         report_worker_activity(notify, "waiting")
         with METRICS.waiting("synthesis_slot"):
-            worker = self._slots.get()
+            worker = self._slots.acquire()
         try:
             name = worker.settings["name"]
             report_worker_activity(notify, "assigned", name)
@@ -395,7 +438,7 @@ class RenderPool:
                 return self._local_runtime.run(local_run)
             return run()
         finally:
-            self._slots.put(worker)
+            self._slots.release(worker)
 
     def _execute_on_lane(self, method, args, kwargs):
         """Pipeline mode: one bounded lane job per declared endpoint slot.
@@ -415,7 +458,7 @@ class RenderPool:
         def run_on_lane():
             report_worker_activity(notify, "waiting")
             with METRICS.waiting("synthesis_slot"):
-                worker = self._slots.get()
+                worker = self._slots.acquire()
             try:
                 name = worker.settings["name"]
                 report_worker_activity(notify, "assigned", name)
@@ -446,7 +489,7 @@ class RenderPool:
                     return self._local_runtime.run(local_run)
                 return run()
             finally:
-                self._slots.put(worker)
+                self._slots.release(worker)
 
         while True:
             try:
@@ -527,12 +570,14 @@ class RenderPool:
                     self._local_runtime.close()
 
 
-def create_render_engine(config, *, shared_inference=False):
-    """Keep the original single-engine path unless workers are configured.
+def create_render_engine(config, *, shared_inference=True):
+    """Render Drama 3 through a pool, even with no configured workers.
 
-    With shared_inference, a drama3_mlx coordinator without configured workers
-    renders through a one-slot local pool so concurrent chapter jobs share one
-    persistent MLX inference thread, including lazy model initialization.
+    A drama3_mlx coordinator without configured workers renders through a
+    one-slot local pool: several chapter coordinators queue their next take
+    for one persistent MLX inference thread while others verify, so the model
+    stays busy although each chapter is sequential. Plugins keep their own
+    single-engine path.
     """
     workers = config.get("render_pool", {}).get("workers")
     if (not workers and shared_inference

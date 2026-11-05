@@ -1,6 +1,8 @@
 """Failed paragraph performances recover through verified original source turns."""
 
 from copy import deepcopy
+from threading import Lock
+from time import sleep
 import unittest
 from unittest.mock import patch
 
@@ -190,7 +192,9 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertEqual(self.chapters()["status"], "chapters_complete")
         self.assert_individual_plan(original)
         self.assertEqual(len(self.engine.dialogue_calls), 4)  # original pair + two recast rejections
-        self.assertEqual(len(self.engine.speech_calls), 6)
+        # Four original singles, the two recast source turns, and the two later
+        # narrator takes whose chapter history followed the recast paragraph.
+        self.assertEqual(len(self.engine.speech_calls), 8)
         self.assert_snapshot_unchanged(before)
         child = next(record for path, record in self.accepted_clips().items()
                      if path not in before and record["request"]["chunk"]["segment"]["voice_id"] == "voice_lena")
@@ -240,11 +244,31 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.target_calls()), 1)  # original saved waveform was reverified
         self.assertEqual(len(self.grouped_clips()), 2)
 
-    def test_parallel_fallback_keeps_order_and_does_not_duplicate_accepted_requests(self):
+    def test_parallel_capacity_still_runs_chapter_fallback_sequentially_in_order(self):
         original = deepcopy(self.target())
         self.verifier.wrong_texts.add(original["spoken_text"])
+        # Engine capacity never overlaps takes within one chapter: each take
+        # is conditioned on the accepted takes before it.
         self.engine.max_parallel = self.engine.max_inflight = 2
-        completed = self.chapters()
+        guard, active, peak = Lock(), [0], [0]
+
+        def exclusive(method):
+            def call(*args, **kwargs):
+                with guard:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                try:
+                    sleep(0.01)
+                    return method(*args, **kwargs)
+                finally:
+                    with guard:
+                        active[0] -= 1
+            return call
+
+        with patch.object(self.engine, "synthesize", side_effect=exclusive(self.engine.synthesize)), \
+             patch.object(self.engine, "synthesize_dialogue", side_effect=exclusive(self.engine.synthesize_dialogue)):
+            completed = self.chapters()
+        self.assertEqual(peak[0], 1)
         self.assertEqual(completed["status"], "chapters_complete")
         self.assertEqual(len(self.target_calls()), 2)
         self.assertEqual(len(self.engine.dialogue_calls), 3)

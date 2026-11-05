@@ -17,7 +17,7 @@ from epub_tts_narrator.renderer.speech_identity import generation_identity
 from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
-from shared_fixtures import renderer_config
+from shared_fixtures import HISTORY_CAPABILITY, fixture_codes, renderer_config
 from test_renderer_recurring_resolution import PlanClient
 from test_renderer_speech_identity import reference
 from test_renderer_speech_recovery_integration import RecoveryEngine, RecoveryVerifier, TEXT, FIRST, LAST
@@ -26,13 +26,17 @@ from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
 
 class UniformEngine(RecoveryEngine):
     identity = {"engine": "fish_http", "model": "offline-paragraph-recovery"}
-    capabilities = {"multi_speaker": True}
+    capabilities = {"multi_speaker": True, **HISTORY_CAPABILITY}
+
+    def synthesize(self, text, voice, path, *, seed, direction=""):
+        return {**super().synthesize(text, voice, path, seed=seed, direction=direction),
+                **fixture_codes(text, [voice])}
 
     def synthesize_dialogue(self, turns, path, *, seed):
         self.dialogue_calls.append(deepcopy(turns))
         metadata = self._write("".join(turn["text"] for turn in turns), path, seed)
-        formatted, _, formatting = format_dialogue(turns)
-        return {**metadata, "synthesis_text": formatted, **formatting}
+        formatted, voices, formatting = format_dialogue(turns)
+        return {**metadata, "synthesis_text": formatted, **formatting, **fixture_codes(formatted, voices)}
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required")

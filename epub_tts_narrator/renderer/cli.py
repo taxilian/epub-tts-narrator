@@ -278,6 +278,14 @@ def main(argv=None):
                 if value is not None:
                     config["server"][key] = value
             validate_distributed_settings(config)
+            if config["engine"]["type"] == "fish_speech_cuda":
+                # The Runpod inference service: private loopback, models already
+                # prepared by the worker, no key shared with the chapter service.
+                from .server import serve
+                if config["server"]["host"] not in {"127.0.0.1", "::1", "localhost"}:
+                    raise ValueError("serve with engine.type = fish_speech_cuda listens on loopback only")
+                serve(config)
+                return 0
             if config["engine"]["type"] != "drama3_mlx" or not config["engine"]["checkpoint"]:
                 raise ValueError("serve requires engine.type = drama3_mlx and a local engine.checkpoint")
             config["server"]["api_key"], generated = ensure_server_api_key(config_path)

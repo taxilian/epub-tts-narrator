@@ -110,9 +110,13 @@ class LaneRoutingTests(unittest.TestCase):
             self.assertEqual([future.result(5) for future in (first, second, third)],
                              ["one", "two", "three"])
         self.assertEqual({thread for _, thread, _ in record} & {get_ident()}, set())
-        snapshot = threading.enumerate()
-        self.assertEqual(sum(1 for thread in snapshot
-                             if thread.name.startswith("render-preparation")), 2)
+        # Count this runtime's lane threads, not every live thread: other
+        # pools in the same process own preparation lanes of their own.
+        lane_threads = {thread.ident for thread in self.runtime.preparation._threads}
+        self.assertEqual(len(lane_threads), 2)
+        self.assertTrue(all(thread.name.startswith("render-preparation")
+                            for thread in self.runtime.preparation._threads))
+        self.assertEqual({thread for _, thread, _ in record}, lane_threads)
 
     def test_recognition_lane_is_a_single_serial_owner(self):
         started, gate, record = Event(), Event(), []

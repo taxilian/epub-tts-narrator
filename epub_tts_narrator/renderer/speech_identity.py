@@ -69,7 +69,7 @@ def _common_sampling(engine):
     if not isinstance(settings, Mapping):
         raise ValueError("Speech sampling settings must be an object")
     return {key: settings.get(key, value) for key, value in (
-        ("temperature", 1.0), ("top_p", .9), ("top_k", 30), ("max_new_tokens", 2048))}
+        ("temperature", .7), ("top_p", .7), ("top_k", 30), ("max_new_tokens", 2048))}
 
 
 def engines_compatible(saved_engine, current_engine, *, engine_metadata=None):

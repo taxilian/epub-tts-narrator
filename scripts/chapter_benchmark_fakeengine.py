@@ -50,7 +50,7 @@ class FakeBenchmarkEngine:
     """Writes deterministic tone fixtures and registers their exact text."""
 
     identity = {"engine": "chapter-benchmark-fake", "model": "offline-tone-fixture", "fixture": True}
-    capabilities = {"reference_voice": True, "multi_speaker": True}
+    capabilities = {"reference_voice": True, "multi_speaker": True, "chapter_continuity": True}
     calls = []
     fail_texts = set()
     _engine_ids = itertools.count(1)
@@ -75,14 +75,27 @@ class FakeBenchmarkEngine:
         TRANSCRIPTS[_pcm_key(path)] = text
         return {"fixture": True, "seed_requested": seed, "seed_applied": False}
 
+    @staticmethod
+    def _codes(text, voices):
+        """Deterministic generated codes: every renderer engine returns its codes."""
+        from epub_tts_narrator.renderer.continuity import current, generated_codes
+        if current() is None:
+            return {}
+        speakers = []
+        for voice in voices:
+            if voice not in speakers:
+                speakers.append(voice)
+        value = int(digest({"text": text})[:4], 16) % 1024
+        return generated_codes([[value] * 4 for _ in range(10)], 1024, f"<|speaker:0|> {text}", speakers)
+
     def synthesize(self, text, voice, path, *, seed, direction=""):
         self._record("speech", text)
-        return self._write(text, path, seed)
+        return {**self._write(text, path, seed), **self._codes(text, [voice])}
 
     def synthesize_dialogue(self, turns, path, *, seed):
         text = "".join(turn["text"] for turn in turns)
         self._record("dialogue", text)
-        return self._write(text, path, seed)
+        return {**self._write(text, path, seed), **self._codes(text, [turn["voice"] for turn in turns])}
 
     def close(self):
         pass

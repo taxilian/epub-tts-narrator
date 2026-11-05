@@ -12,8 +12,11 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.cache_report import cache_report
 from epub_tts_narrator.renderer.common import digest, file_hash, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
+from epub_tts_narrator.renderer.continuity import ChapterContinuity
+from epub_tts_narrator.renderer.continuity_codes import persist
 from epub_tts_narrator.renderer.speech_cache import SpeechCache
 from epub_tts_narrator.renderer.workflow import make_render_plan, _speech_request
+from shared_fixtures import fixture_codes
 
 
 class CacheReportTests(unittest.TestCase):
@@ -47,19 +50,39 @@ class CacheReportTests(unittest.TestCase):
             output.setparams((1, 2, 44100, 0, "NONE", "not compressed"))
             output.writeframes(b"\x01\x00" * 100)
 
-    def save(self, request=None, *, indexed=False, metadata=None, passed=True):
-        request = deepcopy(request or self.request)
-        key = digest(request)
-        audio = Path(self.config["render"]["work_dir"]) / "clips" / key / "attempt-001.wav"
-        self.wave(audio)
-        record = {"request": request, "request_hash": key,
-                  "audio_file": audio.name, "audio_sha256": file_hash(audio),
-                  "validation_key": digest("successful verification"),
-                  "engine_metadata": metadata or {}, "report": {"passed": passed}}
-        write_json(audio.parent / "accepted.json", record)
+    def save(self, request=None, *, indexed=False, metadata=None, passed=True, runtime=None,
+             continuity=None):
+        """Save one accepted take of the chapter as the renderer does.
+
+        Chapter continuity is mandatory: the request is bound to the chapter's
+        history (empty for a first take) by ``runtime``'s engine identity, and
+        the accepted take carries its generated codec evidence. Passing a
+        chapter ``continuity`` saves the next take and accepts it as history.
+        """
+        cache = SpeechCache(self.config["render"]["work_dir"], {self.voice_id: self.voice})
+        chapter = continuity or ChapterContinuity(runtime or self.engine, {self.voice_id: self.voice})
+        with chapter.transaction(deepcopy(request or self.request)) as request:
+            try:
+                chapter.bind(digest(cache.identity(request)))
+            except ValueError:
+                # A legacy record whose voice no longer resolves keeps the
+                # transaction's raw binding; it can never be reused anyway.
+                pass
+            key = digest(request)
+            audio = Path(self.config["render"]["work_dir"]) / "clips" / key / "attempt-001.wav"
+            self.wave(audio)
+            text = f"<|speaker:0|> {request['chunk']['spoken_text'].strip()}"
+            metadata = persist(audio.parent, audio, {**(metadata or {}), **fixture_codes(text, [self.voice])})
+            metadata["continuity_codes"]["accepted_audio_sha256"] = file_hash(audio)
+            record = {"request": request, "request_hash": key,
+                      "audio_file": audio.name, "audio_sha256": file_hash(audio),
+                      "validation_key": digest("successful verification"),
+                      "engine_metadata": metadata, "report": {"passed": passed}}
+            write_json(audio.parent / "accepted.json", record)
+            if continuity is not None:
+                continuity.accept(audio, record)
         if indexed:
-            cache = SpeechCache(self.config["render"]["work_dir"], {self.voice_id: self.voice})
-            cache.remember(cache.identity(request), record)
+            cache.remember(cache.identity(request, engine_metadata=metadata), record)
         return audio, record
 
     def report(self, engine=None):
@@ -69,11 +92,24 @@ class CacheReportTests(unittest.TestCase):
         return {str(path.relative_to(self.root)): (file_hash(path), path.stat().st_mtime_ns)
                 for path in self.root.rglob("*") if path.is_file()}
 
-    def test_runtime_and_position_changes_reuse_saved_audio_without_writes(self):
+    def test_position_change_reuses_saved_audio_without_writes(self):
         saved = deepcopy(self.request)
         saved["chunk"]["segment"]["sequence"] += 100
         saved["chunk"]["chunk_id"] = "previous-position"
         self.save(saved)
+        before = self.snapshot()
+
+        report = self.report()
+
+        self.assertEqual(report["summary"]["hits"], 1)
+        self.assertEqual(report["summary"]["misses"], 0)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((Path(self.config["render"]["work_dir"]) / "speech-cache").exists())
+
+    def test_compatible_runtime_change_reuses_history_without_writes(self):
+        # History uses the speech cache's generation identity, so a runtime or
+        # version bump with the same model and sampling keeps accepted takes.
+        self.save()
         before = self.snapshot()
 
         report = self.report(dict(self.engine, runtime="vendored", installed_version="0.1.1+epub.1"))
@@ -81,7 +117,6 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["hits"], 1)
         self.assertEqual(report["summary"]["misses"], 0)
         self.assertEqual(self.snapshot(), before)
-        self.assertFalse((Path(self.config["render"]["work_dir"]) / "speech-cache").exists())
 
     def test_current_speech_traits_match_verified_audio_in_read_only_report(self):
         from epub_tts_narrator.renderer.engines import _directed_text
@@ -103,6 +138,31 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["misses"], 0)
         self.assertEqual(self.snapshot(), before)
 
+    def test_history_replay_hits_in_order_and_first_miss_invalidates_later_takes(self):
+        rows = load_bundle(self.root / "book")["chapters"][0]["rows"][:2]
+        self.assertEqual({row["voice_id"] for row in rows}, {self.voice_id})
+        self.bundle["chapters"][0]["rows"] = rows
+        chunks = make_render_plan(self.bundle, self.config)["chapters"][0]["chunks"]
+        self.assertEqual(len(chunks), 2)
+        requests = [_speech_request(chunk, self.voice, self.engine, self.config) for chunk in chunks]
+        chapter = ChapterContinuity(self.engine, {self.voice_id: self.voice})
+        first, _ = self.save(requests[0], continuity=chapter)
+        self.save(requests[1], continuity=chapter)
+        before = self.snapshot()
+
+        report = self.report()
+
+        self.assertEqual((report["summary"]["hits"], report["summary"]["misses"]), (2, 0))
+        self.assertEqual(self.snapshot(), before)
+
+        # The second take was conditioned on the first; without the first
+        # accepted take it is a miss too, even though its own record is intact.
+        first.unlink()
+        report = self.report()
+
+        self.assertEqual((report["summary"]["hits"], report["summary"]["misses"]), (0, 2))
+        self.assertEqual(report["reasons"]["earlier_take_in_chapter_changed"], 1)
+
     def test_changed_weights_explain_miss_without_exposing_raw_engine_metadata(self):
         _, record = self.save()
         current = dict(self.engine, checkpoint_files_sha256={"weights": "changed"},
@@ -117,10 +177,10 @@ class CacheReportTests(unittest.TestCase):
 
     def test_alias_mismatch_does_not_invent_sampling_changes(self):
         saved = deepcopy(self.request)
-        saved["engine"].update(engine="drama3_mlx_audio",
-            model="mlx-community/fish-audio-drama-3-4bit", temperature=1.0,
-            top_p=.9, top_k=30, max_new_tokens=2048)
-        self.save(saved)
+        changes = dict(engine="drama3_mlx_audio", model="mlx-community/fish-audio-drama-3-4bit",
+                       temperature=.7, top_p=.7, top_k=30, max_new_tokens=2048)
+        saved["engine"].update(changes)
+        self.save(saved, runtime=dict(self.engine, **changes))
         self.config["engine"]["cache_model_alias"] = "fishaudio/drama-3"
 
         report = self.report()
@@ -129,8 +189,9 @@ class CacheReportTests(unittest.TestCase):
 
     def test_alias_reports_only_sampling_values_that_actually_changed(self):
         saved = deepcopy(self.request)
-        saved["engine"].update(temperature=.75, top_p=.9, top_k=30, max_new_tokens=2048)
-        self.save(saved)
+        changes = dict(temperature=.75, top_p=.7, top_k=30, max_new_tokens=2048)
+        saved["engine"].update(changes)
+        self.save(saved, runtime=dict(self.engine, **changes))
         self.config["engine"]["cache_model_alias"] = "fishaudio/drama-3"
 
         report = self.report()

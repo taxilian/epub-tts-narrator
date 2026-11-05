@@ -83,8 +83,8 @@ type = "drama3_mlx"
 model = "fishaudio/drama-3"
 checkpoint = "./models/drama-3"
 experts = "q8"
-temperature = 1.0
-top_p = 0.9
+temperature = 0.7
+top_p = 0.7
 top_k = 30
 max_new_tokens = 2048
 
@@ -174,8 +174,8 @@ For example, change the existing engine table to:
 type = "drama3_mlx"
 model = "mlx-community/fish-audio-drama-3-4bit"
 checkpoint = "./models/fish-audio-drama-3-4bit"
-temperature = 1.0
-top_p = 0.9
+temperature = 0.7
+top_p = 0.7
 top_k = 30
 max_new_tokens = 2048
 ```
@@ -315,21 +315,19 @@ The client names the worker for each new generation, for example `Chunk 25: Gene
 
 The server prints timestamped request IDs as requests queue, start inference, complete, fail, or disconnect. Completion includes elapsed time and returned audio duration. Queue wait is separate from actual inference; logs include character/reference counts but never book passages, reference transcripts, or API keys. Output is flushed immediately even when redirected. Update and restart `serve` on the remote Mac to enable these logs; client progress uses the coordinator's code.
 
-For a compatible hosted deployment, add another `fish_http` worker with its full HTTPS TTS URL and key. For example, Fish's hosted API uses `https://api.fish.audio/v1/tts` with `model = "drama-3"`. The adapter sends the Fish MessagePack request format, bearer authentication, a `model` header, inline reference audio, and `format = "wav"`. It also supports Drama 3's tagged multi-speaker paragraphs. Set `multi_speaker = false` on a worker if its deployment only supports single-speaker requests; the planner then uses single-speaker chunks throughout the pool. [Fish HTTP API](https://github.com/fishaudio/fish-audio-python/blob/main/_autodocs/endpoints.md), [Drama 3 speaker tags](https://huggingface.co/fishaudio/drama-3)
+Every worker must be an `audiobook-render serve` process (protocol `audiobook-history-wav-v2`): each request carries the chapter's history turns with their codec tokens and each response returns the WAV with the generated codes. The controlling machine owns sampling: every request carries its `[engine]` temperature, top_p, top_k, max_new_tokens and seed, the worker applies exactly those (its own config's sampling never applies), and the response echoes the applied values, which the client checks before accepting the take. Worker-table sampling keys are ignored in favour of the coordinator's `[engine]` values. Stock Fish servers, Fish's hosted API and SGLang-Omni accept neither and are rejected; the client checks each worker's `/health` before rendering. The adapter sends MessagePack with bearer authentication, a `model` header, speaker-tagged references and Drama 3's tagged multi-speaker paragraphs. Set `multi_speaker = false` on a worker only if it must receive single-speaker requests; the planner then uses single-speaker chunks throughout the pool. Saved character references remain local to the coordinator, and only the voice recordings and requested passages are sent to configured workers.
 
-The built-in server implements this reference-based WAV rendering subset, including JSON/base64 requests. It does not implement Fish's voice-management API, top-level saved remote `reference_id` lookup, or streaming PCM. A cloud deployment must accept this same wire format; merely having a route named `/v1/tts` is insufficient. Some SGLang/vLLM deployments use a different reference-audio schema and need an adapter. Saved character references remain local to the coordinator, and only the voice recordings and requested passages are sent to configured workers.
-
-Between this client and the built-in `serve` endpoint, the first successful synthesis response advertises content-addressed reference reuse. Later takes send a per-reference SHA-256 ID and transcript instead of uploading the same audio again, without a separate capability request. The server retains validated reference bytes in a bounded in-memory cache (64 entries, 256 MiB). After eviction or restart, an unknown ID is rejected before synthesis and the client resends inline once. Existing inline-only endpoints and the pinned native Fish/SGLang protocols are unchanged; this optimization does not invalidate accepted speech. Chapter-service uploads already register compressed voices once, so Runpod's public chapter hop does not resend reference audio per take; its private upstream inference hop retains the pinned inline contract.
+Between this client and the built-in `serve` endpoint, the first successful synthesis response advertises content-addressed reference reuse. Later takes send a per-reference SHA-256 ID and transcript instead of uploading the same audio again, without a separate capability request. The server retains validated reference bytes in a bounded in-memory cache (64 entries, 256 MiB). After eviction or restart, an unknown ID is rejected before synthesis and the client resends inline once. This optimization does not invalidate accepted speech. Chapter-service uploads already register compressed voices once, so Runpod's public chapter hop does not resend reference audio per take.
 
 Local book rendering overlaps one chapter's CPU composition/encoding with the next chapter's synthesis, using the same chapter preparation and quality gates as before. At most one assembly is pending, checkpoints remain source-ordered, and active assembly drains before run locks are released. Progress from adjacent chapters can interleave. Within a chapter, `render_pool.max_inflight` bounds complete operations including verification and recovery; a small window or a persistently slower verifier can still leave synthesis slots idle. The chapter service separately overlaps two chapter coordinators and bounded assembly. These are bounded pipelines, not a guarantee of full GPU utilization for every workload; compare verified audio per wall second with the pipeline benchmark rather than counting generated takes.
 
-### Scheduling modes (experimental pipeline opt-in)
+### Scheduling modes
 
-`[render_pool] scheduler` selects how clip work is scheduled. `"legacy"` is the default and remains the default until the measured live benchmark gate passes; `"pipeline"` is an explicit opt-in experiment. Both modes reuse every already accepted clip, report, and cache identity: scheduling never changes what is synthesized or accepted, so rolling back is a one-line config change (`scheduler = "legacy"`) with no cache moves or regeneration.
+`[render_pool] scheduler` selects how clip work is scheduled. `"pipeline"` is the default: chapter continuity makes each chapter sequential, so several chapter coordinators share one fair logical scheduler and keep the model busy. `"legacy"` renders one chapter at a time. Both modes reuse every already accepted clip, report, and cache identity: scheduling never changes what is synthesized or accepted.
 
 | Setting (`[render_pool]`) | Default | Meaning |
 | --- | --- | --- |
-| `scheduler` | `"legacy"` | `"pipeline"` runs one fair logical scheduler shared by all chapters. |
+| `scheduler` | `"pipeline"` | One fair logical scheduler shared by all chapters; `"legacy"` renders chapters one at a time. |
 | `chapter_concurrency` | `0` | Chapter coordinators; `0` is automatic: 4 under pipeline, 2 effective in legacy. Hard ceiling 16. |
 | `max_inflight` | `0` | `0` is automatic. Pipeline: a global transaction ceiling — 16 local, `min(256, max(64, 16 × slots))` remote. Legacy: a per-chapter window of total slots + 1 (an explicit value is shared across chapters). |
 | `synthesis_backlog` | `0` | Queued synthesis bound; `0` is automatic: `min(256, 4 × total TTS slots)`. Also the exact attempt backlog bound. |
@@ -344,64 +342,59 @@ Changing worker addresses, credentials, order, or concurrency retains compatible
 
 Validation includes two real HTTP requests to the local Drama 3 model using the existing demonstration voices: a 2.60-second single-voice passage and a 4.04-second two-character passage. Both passed strict Whisper text and acoustic checks, and the original reference checksums were unchanged. The report is `output/distributed-render-pilot-paoj0g29/report.json`. Automated tests additionally exercise two HTTP workers through chapter/M4B assembly and offline resume. The real-model pilot used loopback on one Mac; a second machine and hosted Fish service have not yet been exercised.
 
-### Accepted chapter continuity (local, opt-in)
+### Chapter continuity (always on)
 
-To carry Drama 3's generated performance context across chunk requests, set
-`continuity = "chapter"` in the existing `[render]` table. The default is `"off"`.
-The selected voice-cloning recording and transcript stay fixed on every request.
-Continuity supplies earlier generated text and codec tokens as completed turns;
-it never replaces the saved cloning reference or changes loudness processing.
+Drama 3 sets a passage's pace, energy and intonation from what is already in
+its prompt. Every chapter therefore carries its own performance history across
+requests; there is no setting to turn it off.
 
-```toml
-[render]
-continuity = "chapter"
+- **References say who is speaking.** Each voice's saved recording and
+  transcript are sent unchanged on every request and are never replaced by
+  generated audio.
+- **History says where the performance is.** Following Fish's own long-text
+  policy (`fish_omni/chunking.py`), each request carries two completed
+  user/assistant turns: the chapter's first accepted single-voice narration take
+  (pinned) and the latest accepted take. A heading or opening dialogue does not
+  become the pin; the first real narration does.
+- **Mixed-voice paragraphs take part.** Their speaker tags are renumbered per
+  request, and every voice heard in the history is sent as a reference
+  (Drama 3 allows 16 speakers per request).
+- **Only accepted takes advance history.** Rejected attempts never do. Joined,
+  repaired and best-effort takes stay accepted audio but leave the history as
+  it was, because they are not one generation of the exact text. Simultaneous
+  speaker lanes share the same history and do not advance it.
+- **Prompt overflow** follows Fish's fallback: drop the latest turn, then the
+  pinned one. Each take records how many turns it actually used
+  (`history_turns`).
+- **Chapters start fresh.** Silent controls do not reset history.
 
-[render_pool]
-workers = [{ name = "local", type = "local", concurrency = 1 }]
-scheduler = "pipeline"
-chapter_concurrency = 4
-```
+Each chapter is strictly sequential: its next take starts only after its
+predecessor is accepted. Throughput comes from overlapping chapters. Drama 3
+always renders through a pool (a one-slot local pool when no workers are
+configured), and the default `[render_pool] scheduler = "pipeline"` runs four
+chapter coordinators (`chapter_concurrency`) that queue their next take for the
+single model while other chapters verify. In a pool with several workers, a
+chapter stays on the worker that produced its first take, so one chapter's
+audio and history come from one backend.
 
-Merge these keys into existing tables rather than declaring duplicate tables.
-Run the ordinary `audiobook-render render BOOK` command. A local pool with the
-pipeline scheduler keeps independent chapters active while each chapter admits
-only one complete generation/verification transaction at a time. The next chunk
-starts after its predecessor is accepted; failed attempts never advance history.
-The same single model-affine MLX thread and bounded resource lanes are retained.
-With legacy scheduling or direct `--local` rendering, continuity still works,
-but chapter generation remains sequential. No throughput improvement is promised.
+Every engine returns the codec tokens it generated. The renderer saves them as
+hash-validated `*.codes.json` artifacts beside each take and rebuilds history
+from them on resume; codes are never reconstructed from WAV files. Each take's
+cache identity includes its history, so changing a take makes the rest of that
+chapter stale: the next render regenerates from the changed take to the end of
+the chapter (`cache-report` shows these as `earlier_take_in_chapter_changed`).
 
-Each voice asset has its own first/latest accepted context, with no duplicate
-first entry. Single-voice paragraphs participate. Chapter boundaries and silent
-controls reset context; mixed-voice paragraphs and simultaneous passages are
-explicit barriers rather than guessed per-speaker codec slices. Their existing
-generation and mixing behavior is preserved. Joined/repaired and best-effort
-selected takes remain accepted audio but reset the corresponding voice history.
-Passage directions remain in effect; continuity does not certify voice identity
-or prevent emotional carryover, so listen before enabling it for a whole book.
+Sampling defaults are Fish's own evaluation settings: `temperature = 0.7`,
+`top_p = 0.7`, `top_k = 30`. Stalls and off-voice takes are caught by the
+normal verification and retried.
 
-This mode currently supports the pinned vendored `drama3_mlx` adapter, directly
-or through an all-supported local pool. The optional `mlx_audio` runtime, remote
-inference workers, remote chapter clients/Runpod, and plugins without the explicit
-capability reject it before rendering instead of silently dropping context.
-`cache-report` also rejects this mode because it does not replay accepted history.
-
-Accepted context is saved as hash-validated `*.codes.json` artifacts alongside
-take records. Rerunning reconstructs history from accepted evidence in source
-order. Missing/corrupt artifacts block reuse; they are never reconstructed from
-WAV files. Normal cleanup preserves them, while explicit render-cache discard
-removes them. Context and runtime identity participate in speech reuse even when
-a model-cache alias is configured. Changing an earlier take can require rendering
-its dependent suffix again until a reset boundary. Keep the same continuity mode
-for `render` and `assemble`; switching it changes synthesis identity, so rerender
-affected chapters rather than assembling stale checkpoints. Existing off-mode
-speech remains available and unchanged in its own cache.
-
-Selected history is never silently shortened to fit a prompt. Context overflow
-fails with a continuity diagnostic; shorten the configured chunk/paragraph limits
-and rerun if needed. Offline tests prove history, resume, rejection, cleanup, and
-chapter overlap mechanics. They do not establish an audible consistency gain;
-that still requires a paired live-model listening comparison.
+Supported engines: the vendored Sogni runtime, the MLX-Audio quantized models,
+`audiobook-render serve` workers (another Mac, or Runpod's inference service),
+remote chapter services and Runpod. Plugins must advertise the
+`chapter_continuity` capability, accept history through `continuity.compose`
+and return `generated_codes`; otherwise rendering stops before synthesis. Stock
+Fish and SGLang servers cannot accept history turns or return codes and are not
+supported as render workers.
 
 ## Compare legacy and expressive chapter generation
 

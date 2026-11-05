@@ -58,7 +58,7 @@ class PrimaryModelConfigurationTests(unittest.TestCase):
         self.assertIn("ignoring unknown configuration key engine.temperatur", diagnostics.getvalue())
         self.assertNotIn("temperatur", config["engine"])
         self.assertEqual(config["engine"]["model"], FOUR_BIT.repo)
-        self.assertEqual(config["engine"]["temperature"], 1.0)
+        self.assertEqual(config["engine"]["temperature"], 0.7)  # Fish's default sampling.
 
     def test_cache_alias_loads_without_replacing_selected_model_or_checkpoint(self):
         diagnostics = io.StringIO()

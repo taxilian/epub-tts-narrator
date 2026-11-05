@@ -21,7 +21,7 @@ import wave
 
 from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import EngineError
-from epub_tts_narrator.renderer.fish_http import FishHTTPEngine, FishHTTPError
+from epub_tts_narrator.renderer.fish_http import PROTOCOL, FishHTTPEngine, FishHTTPError
 from epub_tts_narrator.renderer.fish_http import trim_wire_text
 from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.server import make_server, serve
@@ -38,6 +38,57 @@ def wav_bytes():
     return output.getvalue()
 
 
+_DEFAULT = object()
+
+
+def echo(request):
+    """The sampling and seed a correct worker applies: exactly the client's."""
+    import msgpack
+    sent = msgpack.unpackb(request.data, raw=False)
+    headers = {key.lower(): value for key, value in request.header_items()}
+    return {"sampling": {"temperature": sent["temperature"], "top_p": sent["top_p"],
+                         "top_k": int(headers["x-audiobook-top-k"]),
+                         "max_new_tokens": sent["max_new_tokens"]},
+            "seed": int(headers["x-audiobook-seed"])}
+
+
+def wire_body(*, audio=None, codes=_DEFAULT, codebook_size=1024, history_turns=0, request=None,
+              sampling=None, seed=None):
+    """A serve-protocol response body: WAV, generated codes, history and sampling used."""
+    import msgpack
+    body = {"audio": wav_bytes() if audio is None else audio, "codebook_size": codebook_size,
+            "history_sha256": "0" * 64,
+            **(echo(request) if request is not None else
+               {"sampling": sampling or {"temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048},
+                "seed": seed})}
+    if codes is _DEFAULT:
+        codes = [[1] * 3 for _ in range(10)]
+    if codes is not None:
+        body["codes"] = codes
+    if history_turns is not None:
+        body["history_turns"] = history_turns
+    return msgpack.packb(body, use_bin_type=True)
+
+
+def wire_response(*, raw=None, content_type="application/msgpack", headers=None,
+                  declared_length=_DEFAULT, **body):
+    """A mocked ``build_opener().open`` response carrying ``wire_body``."""
+    from email.message import Message
+    blob = wire_body(**body) if raw is None else raw
+    response = io.BytesIO(blob)
+    response.status = 200
+    message = Message()
+    message["Content-Type"] = content_type
+    if declared_length is _DEFAULT:
+        declared_length = len(blob)
+    if declared_length is not None:
+        message["Content-Length"] = str(declared_length)
+    for key, value in (headers or {}).items():
+        message[key] = value
+    response.headers = message
+    return response
+
+
 class FakeEngine:
     def __init__(self):
         self.calls = []
@@ -52,19 +103,20 @@ class FakeEngine:
         self.close_thread = None
         self.warmup_thread = None
 
-    def synthesize_fish(self, text, voices, path, *, seed):
+    def synthesize_fish(self, text, voices, path, *, seed, history=()):
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
             self.calls.append({"text": text, "seed": seed, "temperature": self.temperature,
-                               "thread": threading.get_ident(),
+                               "thread": threading.get_ident(), "history": list(history),
                                "references": [(Path(v["reference_audio"]).read_bytes(), v["reference_text"], v["speaker"])
                                               for v in voices]})
             time.sleep(0.02)
             if self.error:
                 raise EngineError(self.error)
             path.write_bytes(wav_bytes())
-            return {"seed": seed}
+            return {"seed": seed, "codes": [[len(self.calls) % 1024] * 3 for _ in range(10)],
+                    "codebook_size": 1024, "history_turns": len(history), "history_sha256": "0" * 64}
         finally:
             self.active -= 1
 
@@ -200,8 +252,8 @@ class FishHTTPErrorBodyTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("msgpack") and importlib.util.find_spec("soundfile"),
                      "requires renderer HTTP dependencies")
-class NativeDrama3TransportTests(unittest.TestCase):
-    """Exercise the native wire contract without downloading a model or using a GPU."""
+class HistoryWireTransportTests(unittest.TestCase):
+    """Exercise the chapter-history wire contract without a server, model or GPU."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -213,14 +265,14 @@ class NativeDrama3TransportTests(unittest.TestCase):
                       "reference_text": "Reference words.", "voice_id": "one"}
         self.requests = []
         self.response_headers = {}
+        self.applied = None  # a misbehaving worker's own sampling/seed, if set
         opener = Mock()
 
         def respond(request, **kwargs):
             self.requests.append(request)
-            response = io.BytesIO(wav_bytes())
-            response.status = 200
-            response.headers = {"Content-Length": str(len(wav_bytes())), **self.response_headers}
-            return response
+            if self.applied is not None:
+                return wire_response(headers=self.response_headers, **self.applied)
+            return wire_response(headers=self.response_headers, request=request)
 
         opener.open.side_effect = respond
         patcher = patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener)
@@ -235,207 +287,63 @@ class NativeDrama3TransportTests(unittest.TestCase):
         request = self.requests[-1]
         return msgpack.unpackb(request.data, raw=False), dict(request.header_items())
 
-    def test_native_profile_preserves_paragraph_enables_cache_and_sends_seed(self):
-        client = self.client(protocol="fish_native_drama3")
-        result = client.synthesize("One sentence. Another sentence.", self.voice,
-                                   self.root / "native.wav", seed=19)
-        payload, headers = self.payload()
-        self.assertEqual(payload, {
-            "text": "One sentence. Another sentence.",
-            "references": [{"audio": wav_bytes(), "text": "Reference words."}],
-            "format": "wav", "normalize": False, "temperature": 1.0, "top_p": 0.9,
-            "max_new_tokens": 2048, "seed": 19, "single_chunk": True, "use_memory_cache": "on",
-        })
-        self.assertNotIn("top_k", payload)  # Native schema fixes it at 30.
-        self.assertNotIn("X-audiobook-top-k", headers)
-        self.assertNotIn("X-audiobook-seed", headers)
-        self.assertEqual(result["seed_requested"], 19)
-        self.assertEqual(result["seed_effective"], 19)
-        # Native Fish does not acknowledge the seed; do not claim verification.
-        self.assertFalse(result["seed_applied"])
-        self.assertEqual((self.root / "native.wav").read_bytes(), wav_bytes())
-        self.assertEqual(client.identity["protocol"], "fish-native-drama3-wav-v1")
-        self.assertEqual(client.identity["request_options"]["fixed_top_k"], 30)
-
-    def test_native_upper_half_retries_remain_distinct_after_upstream_seed_clamp(self):
-        client = self.client(protocol="fish_native_drama3")
-        applied = []
-        for attempt in range(12):
-            seed = 3_000_000_000 + attempt
-            result = client.synthesize("A new take.", self.voice,
-                                       self.root / f"retry-{attempt}.wav", seed=seed)
-            payload, _ = self.payload()
-            wire_seed = payload["seed"]
-            # Model-free simulation of pinned native set_seed's upper bound.
-            applied.append(min(wire_seed, 1 << 31))
-            self.assertEqual(result["seed_requested"], seed)
-            self.assertEqual(result["seed_effective"], wire_seed)
-            self.assertGreaterEqual(wire_seed, 0)
-            self.assertLess(wire_seed, 1 << 31)
-            self.assertFalse(result["seed_applied"])
-        self.assertEqual(len(set(applied)), 12)
-
-    def test_native_seed_mapping_handles_boundaries_without_changing_cache_identity(self):
-        client = self.client(protocol="fish_native_drama3")
-        expected_identity = {
-            "engine": "fish_http", "model": "drama-3", "protocol": "fish-native-drama3-wav-v1",
-            "sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
-            "multi_speaker": True,
-            "request_options": {"single_chunk": True, "use_memory_cache": "on",
-                                "seed_transport": "body", "fixed_top_k": 30},
-        }
-        cases = ((0, 0), (1, 1), ((1 << 31) - 1, (1 << 31) - 1),
-                 (1 << 31, 0), ((1 << 31) + 1, 1),
-                 (0xFFFFFFFE, (1 << 31) - 2), (0xFFFFFFFF, (1 << 31) - 1))
-        for seed, effective in cases:
-            with self.subTest(seed=seed):
-                result = client.synthesize("Hello.", self.voice,
-                                           self.root / f"boundary-{seed}.wav", seed=seed)
-                payload, headers = self.payload()
-                self.assertEqual(payload["seed"], effective)
-                self.assertNotIn("X-audiobook-seed", headers)
-                self.assertEqual(result["seed_requested"], seed)
-                self.assertEqual(result["seed_effective"], effective)
-                self.assertEqual(client.identity, expected_identity)
-
-    def test_native_seed_acknowledgement_compares_effective_seed(self):
-        client = self.client(protocol="fish_native_drama3")
-        seed, effective = (1 << 31) + 7, 7
-        for index, (acknowledged, expected) in enumerate(((seed, False), (effective, True))):
-            self.response_headers["X-Audiobook-Seed-Applied"] = str(acknowledged)
-            result = client.synthesize("Hello.", self.voice,
-                                       self.root / f"acknowledged-{index}.wav", seed=seed)
-            self.assertEqual(result["seed_requested"], seed)
-            self.assertEqual(result["seed_effective"], effective)
-            self.assertEqual(result["seed_applied"], expected)
-
-    def test_seed_diagnostics_do_not_invalidate_accepted_speech_identity(self):
-        from epub_tts_narrator.renderer.common import digest
-        from epub_tts_narrator.renderer.speech_identity import generation_identity
-
-        client = self.client(protocol="fish_native_drama3")
-        voice = {**self.voice, "asset_hash": digest("saved-voice"),
-                 "reference_sha256": hashlib.sha256(wav_bytes()).hexdigest()}
-        request = {"kind": "speech", "engine": client.identity, "base_seed": 42,
-                   "sample_rate": 44100, "voice_asset_hash": voice["asset_hash"],
-                   "chunk": {"spoken_text": "Hello.", "segment": {"delivery": {"direction": ""}}}}
-        request_hash = digest(request)
-        current = client.synthesize("Hello.", voice, self.root / "identity.wav", seed=0xFFFFFFFF)
-        legacy = {key: value for key, value in current.items() if key != "seed_effective"}
-        voices = {voice["asset_hash"]: voice}
-        expected = generation_identity(request, voices)
-        self.assertEqual(generation_identity(request, voices, engine_metadata=legacy), expected)
-        self.assertEqual(generation_identity(request, voices, engine_metadata=current), expected)
-        self.assertEqual(digest(request), request_hash)
-
-    def test_inline_protocol_keeps_full_uint32_seed_and_acknowledgement(self):
+    def test_request_is_speaker_tagged_msgpack_with_history_and_full_uint32_seed_header(self):
         seed = 0xFFFFFFFF
         self.response_headers["X-Audiobook-Seed-Applied"] = str(seed)
-        result = self.client().synthesize("Hello.", self.voice,
-                                          self.root / "inline-seed.wav", seed=seed)
+        client = self.client()
+        result = client.synthesize("Hello.", self.voice, self.root / "inline-seed.wav", seed=seed)
         payload, headers = self.payload()
-        self.assertNotIn("seed", payload)
+        self.assertEqual(payload, {
+            "text": "<|speaker:0|> Hello.",
+            "references": [{"audio": wav_bytes(), "text": "Reference words.", "speaker": 0}],
+            "history": [], "format": "wav", "normalize": False,
+            "temperature": 0.7, "top_p": 0.7, "max_new_tokens": 2048,
+        })
+        self.assertEqual(headers["Content-type"], "application/msgpack")
+        self.assertEqual(headers["Accept"], "application/msgpack")
         self.assertEqual(headers["X-audiobook-seed"], str(seed))
+        self.assertEqual(headers["X-audiobook-top-k"], "30")
         self.assertEqual(result["seed_requested"], seed)
         self.assertTrue(result["seed_applied"])
         self.assertNotIn("seed_effective", result)
-
-    def test_sglang_json_speech_preserves_voice_and_reports_unsupported_seed(self):
-        client = self.client(protocol="fish_sglang_drama3", concurrency=4)
-        self.response_headers["X-Audiobook-Seed-Applied"] = "99"
-        result = client.synthesize("Hello, world.", self.voice,
-                                   self.root / "sglang.wav", seed=99, direction="whisper")
-        request = self.requests[-1]
-        self.assertEqual(request.get_header("Content-type"), "application/json")
-        payload = json.loads(request.data)
-        self.assertEqual(payload, {
-            "input": "<whisper>Hello, world.</whisper>",
-            "references": [{"data": base64.b64encode(wav_bytes()).decode("ascii"),
-                            "media_type": "audio/wav", "text": "Reference words."}],
-            "response_format": "wav", "stream": False, "temperature": 1.0,
-            "top_p": .9, "top_k": (1 << 31) - 1, "max_new_tokens": 2048,
+        self.assertEqual((result["history_turns"], result["history_available"]), (0, 0))
+        self.assertEqual((self.root / "inline-seed.wav").read_bytes(), wav_bytes())
+        self.assertEqual(client.identity, {
+            "engine": "fish_http", "model": "drama-3", "protocol": PROTOCOL,
+            "sampling": {"temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048},
+            "multi_speaker": True,
         })
-        self.assertEqual(result["seed_requested"], 99)
-        self.assertIsNone(result["seed_effective"])
-        self.assertFalse(result["seed_applied"])
-        self.assertEqual(result["seed_mode"], "unsupported")
-        self.assertEqual(result["sampling_requested"]["top_k"], 30)
-        self.assertEqual(result["sampling_effective"], {
-            "temperature": 1.0, "top_p": .9, "max_new_tokens": 2048,
-            "main_token_top_k": (1 << 31) - 1, "residual_codebook_top_k": 30})
-        self.assertEqual(client.identity["sampling_effective"], result["sampling_effective"])
-        self.assertFalse(client.capabilities["multi_speaker"])
-        self.assertTrue(client.capabilities["single_speaker_paragraph"])
-        self.assertEqual(client.identity["request_options"]["seed_transport"], "unsupported")
-        self.assertNotEqual(client.identity, self.client(protocol="fish_native_drama3").identity)
+        self.assertTrue(client.capabilities["chapter_continuity"])
 
-    def test_sglang_uniform_paragraph_preserves_styles_and_rejects_multiple_voices(self):
-        client = self.client(protocol="fish_sglang_drama3")
-        client.synthesize_dialogue([
-            {"text": "Hello. ", "voice": self.voice},
-            {"text": "Stay here.", "voice": self.voice, "direction": "whisper"},
-        ], self.root / "sglang-paragraph.wav", seed=8)
-        payload = json.loads(self.requests[-1].data)
-        self.assertEqual(payload["input"], "<|speaker:0|> Hello.\n<|speaker:0|> <whisper>Stay here.</whisper>")
-        self.assertEqual(payload["references"][0]["text"], "<|speaker:0|> Reference words.")
-        previous = len(self.requests)
-        with self.assertRaisesRegex(EngineError, "one reference voice"):
-            client.synthesize_dialogue([
-                {"text": "Hello.", "voice": self.voice},
-                {"text": "Goodbye.", "voice": {**self.voice, "reference_text": "Another voice."}},
-            ], self.root / "unsupported.wav", seed=9)
-        self.assertEqual(len(self.requests), previous)
-
-    def test_sglang_references_remain_lossless_flac_bytes(self):
-        import soundfile as sf
-        reference = self.root / "reference.flac"
-        sf.write(reference, [0.1] * 100, 16000, format="FLAC")
-        voice = {**self.voice, "reference_audio": str(reference)}
-        self.client(protocol="fish_sglang_drama3").synthesize(
-            "Hello.", voice, self.root / "flac-input.wav", seed=1)
-        payload = json.loads(self.requests[-1].data)
-        self.assertEqual(payload["references"][0]["media_type"], "audio/flac")
-        self.assertEqual(base64.b64decode(payload["references"][0]["data"]), reference.read_bytes())
-
-    def test_sglang_transport_allows_concurrent_requests_without_shared_seed_state(self):
-        client = self.client(protocol="fish_sglang_drama3", concurrency=4)
-        barrier = threading.Barrier(4, timeout=5)
-        seen = []
-        opener = Mock()
-        def respond(request, **kwargs):
-            seen.append(json.loads(request.data))
-            barrier.wait()  # All requests must enter before any can finish.
-            response = io.BytesIO(wav_bytes())
-            response.status, response.headers = 200, {}
-            return response
-        opener.open.side_effect = respond
-        with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(client.synthesize, f"Take {number}.", self.voice,
-                           self.root / f"parallel-{number}.wav", seed=number) for number in range(4)]
-                results = [future.result(10) for future in futures]
-        self.assertEqual({item["input"] for item in seen}, {f"Take {n}." for n in range(4)})
-        self.assertEqual([result["seed_requested"] for result in results], list(range(4)))
-        self.assertTrue(all("seed" not in item for item in seen))
-
-    def test_sglang_unsupported_options_and_oversized_reference_fail_before_request(self):
-        for settings in ({"multi_speaker": True}, {"concurrency": 0}, {"concurrency": 17},
-                         {"top_k": True}, {"top_k": 20}, {"top_k": 30.0},
-                         {"temperature": float("nan")}, {"max_new_tokens": 4096}):
-            with self.subTest(settings=settings), self.assertRaises(EngineError):
-                self.client(protocol="fish_sglang_drama3", **settings)
-        with patch("epub_tts_narrator.renderer.fish_http.MAX_SGLANG_REFERENCE_BYTES", 4):
-            with self.assertRaisesRegex(EngineError, "10 MiB"):
-                self.client(protocol="fish_sglang_drama3").synthesize(
-                    "Hello.", self.voice, self.root / "oversized.wav", seed=1)
-        self.assertEqual(self.requests, [])
+    def test_controlling_sampling_is_sent_and_proven_by_the_worker(self):
+        client = self.client(temperature=0.3)  # worker-table values never override the controller
+        engine = FishHTTPEngine({"url": "http://127.0.0.1:8080/v1/tts"},
+                                sampling={"temperature": 0.55, "top_p": 0.65, "top_k": 25, "max_new_tokens": 900})
+        result = engine.synthesize("Hello.", self.voice, self.root / "controlled.wav", seed=8)
+        payload, headers = self.payload()
+        self.assertEqual((payload["temperature"], payload["top_p"], payload["max_new_tokens"]), (0.55, 0.65, 900))
+        self.assertEqual((headers["X-audiobook-top-k"], headers["X-audiobook-seed"]), ("25", "8"))
+        self.assertTrue(result["seed_applied"])
+        self.assertEqual(client.sampling["temperature"], 0.3)
+        cases = [("own sampling", {"sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
+                                   "seed": 8}),
+                 ("own seed", {"sampling": {"temperature": 0.55, "top_p": 0.65, "top_k": 25, "max_new_tokens": 900},
+                               "seed": 9}),
+                 ("no echo", {"sampling": None, "seed": None})]
+        for index, (name, applied) in enumerate(cases):
+            with self.subTest(case=name):
+                self.applied = applied
+                output = self.root / f"uncontrolled-{index}.wav"
+                with self.assertRaisesRegex(FishHTTPError, "did not apply the controlling sampling"):
+                    engine.synthesize("Hello.", self.voice, output, seed=8)
+                self.assertFalse(output.exists())
 
     def test_http_target_quotes_are_trimmed_before_controls_but_reference_is_unchanged(self):
         voice = {**self.voice, "reference_text": ' “Saved reference.” '}
-        self.client().synthesize(' \u2003“ Don\'t call it "easy". ” ', voice,
+        self.client().synthesize('  “ Don\'t call it "easy". ” ', voice,
                                  self.root / "trimmed.wav", seed=3, direction="whisper")
         payload, _ = self.payload()
-        self.assertEqual(payload["text"], '<whisper>Don\'t call it "easy".</whisper>')
+        self.assertEqual(payload["text"], '<|speaker:0|> <whisper>Don\'t call it "easy".</whisper>')
         self.assertEqual(payload["references"][0]["text"], ' “Saved reference.” ')
 
     def test_http_style_prefix_retains_reference_voice(self):
@@ -443,8 +351,8 @@ class NativeDrama3TransportTests(unittest.TestCase):
         self.client().synthesize("Well, I do not know.", self.voice,
                                  self.root / "styled.wav", seed=3, direction=direction)
         payload, _ = self.payload()
-        self.assertEqual(payload["text"], "[a strong rural drawl] Well, I do not know.")
-        self.assertEqual(payload["references"], [{"audio": wav_bytes(), "text": "Reference words."}])
+        self.assertEqual(payload["text"], "<|speaker:0|> [a strong rural drawl] Well, I do not know.")
+        self.assertEqual(payload["references"], [{"audio": wav_bytes(), "text": "Reference words.", "speaker": 0}])
 
     def test_http_parenthesis_fragments_are_cleaned_without_changing_reference(self):
         voice = {**self.voice, "reference_text": "(A saved reference)."}
@@ -457,13 +365,13 @@ class NativeDrama3TransportTests(unittest.TestCase):
                     seed=3, direction="whisper",
                 )
                 payload, _ = self.payload()
-                self.assertEqual(payload["text"], f"<whisper>{target}</whisper>")
+                self.assertEqual(payload["text"], f"<|speaker:0|> <whisper>{target}</whisper>")
                 self.assertEqual(payload["references"][0]["text"], "(A saved reference).")
                 self.assertEqual(payload["references"][0]["audio"], wav_bytes())
                 self.assertEqual(voice, original)
 
-    def test_native_dialogue_keeps_individual_reference_speaker_bindings(self):
-        client = self.client(protocol="fish_native_drama3")
+    def test_dialogue_keeps_individual_reference_speaker_bindings(self):
+        client = self.client()
         other = {**self.voice, "voice_id": "two", "reference_text": "Another voice."}
         client.synthesize_dialogue([
             {"text": "First speaker.", "voice": self.voice},
@@ -471,34 +379,76 @@ class NativeDrama3TransportTests(unittest.TestCase):
             {"text": "First again.", "voice": self.voice},
         ], self.root / "dialogue.wav", seed=7)
         payload, _ = self.payload()
-        self.assertEqual([reference["text"] for reference in payload["references"]],
-                         ["<|speaker:0|> Reference words.", "<|speaker:1|> Another voice."])
+        self.assertEqual([(reference["text"], reference["speaker"]) for reference in payload["references"]],
+                         [("Reference words.", 0), ("Another voice.", 1)])
         self.assertEqual(payload["text"],
                          "<|speaker:0|> First speaker.\n<|speaker:1|> Second speaker.\n<|speaker:0|> First again.")
-        self.assertTrue(payload["single_chunk"])
+        self.assertEqual(payload["history"], [])
 
-    def test_default_profile_retains_existing_wire_and_identity(self):
-        client = self.client()
-        client.synthesize("Hello.", self.voice, self.root / "default.wav", seed=3)
-        payload, headers = self.payload()
-        self.assertFalse({"seed", "single_chunk", "use_memory_cache"}.intersection(payload))
-        self.assertEqual(headers["X-audiobook-seed"], "3")
-        self.assertEqual(headers["X-audiobook-top-k"], "30")
-        self.assertEqual(client.identity, {
-            "engine": "fish_http", "model": "drama-3", "protocol": "fish-inline-reference-wav-v1",
-            "sampling": {"temperature": 1.0, "top_p": 0.9, "top_k": 30, "max_new_tokens": 2048},
-            "multi_speaker": True,
-        })
-        self.assertEqual(client.identity, self.client(protocol="fish_inline").identity)
-        self.assertNotEqual(client.identity, self.client(protocol="fish_native_drama3").identity)
+    def test_response_without_valid_codes_or_history_count_is_never_published(self):
+        cases = (
+            ("non-msgpack", wire_response(content_type="audio/wav", raw=wav_bytes()), "chapter-history output"),
+            ("undecodable", wire_response(raw=b"\xc1not msgpack"), "invalid response body"),
+            ("no audio", wire_response(audio=b""), "WAV audio and generated codes"),
+            ("no codes", wire_response(codes=None), "invalid generated codes"),
+            ("ragged codes", wire_response(codes=[[1, 2], [3]] + [[1, 2]] * 8), "invalid generated codes"),
+            ("code out of range", wire_response(codes=[[1024] * 2] * 10), "invalid generated codes"),
+            ("missing turns", wire_response(history_turns=None), "history turns"),
+            ("too many turns", wire_response(history_turns=1), "history turns"),
+        )
+        for index, (label, response, message) in enumerate(cases):
+            with self.subTest(case=label):
+                output = self.root / f"invalid-{index}.wav"
+                opener = Mock()
+                opener.open.return_value = response
+                with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
+                    with self.assertRaisesRegex(FishHTTPError, message):
+                        self.client().synthesize("Hello.", self.voice, output, seed=1)
+                self.assertFalse(output.exists())
+                self.assertFalse(list(self.root.glob(".fish-*")))
 
-    def test_native_contract_rejects_unsupported_settings_without_sending(self):
+    def test_oversized_declared_or_received_response_is_refused(self):
+        with patch("epub_tts_narrator.renderer.fish_http.MAX_AUDIO_BYTES", 64 * 1024):
+            cases = (("declared", wire_response(declared_length=64 * 1024 + 1), "Content-Length"),
+                     ("received", wire_response(declared_length=None, audio=wav_bytes() * 10), "100 MiB"))
+            for index, (label, response, message) in enumerate(cases):
+                with self.subTest(case=label):
+                    opener = Mock()
+                    opener.open.return_value = response
+                    output = self.root / f"oversized-{index}.wav"
+                    with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
+                        with self.assertRaisesRegex(FishHTTPError, message):
+                            self.client().synthesize("Hello.", self.voice, output, seed=1)
+                    self.assertFalse(output.exists())
+
+    def test_continuity_check_reads_health_once_and_requires_history_protocol(self):
+        opener = Mock()
+        health = {"status": "ready", "protocol": PROTOCOL}
+        def respond(request, **kwargs):
+            self.requests.append(request)
+            response = io.BytesIO(json.dumps(health).encode())
+            response.status = 200
+            return response
+        opener.open.side_effect = respond
+        with patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener):
+            client = self.client(api_key="private-test-key")
+            client.check_continuity()
+            client.check_continuity()
+            self.assertEqual([request.full_url for request in self.requests], ["http://127.0.0.1:8080/health"])
+            self.assertEqual(self.requests[0].get_method(), "GET")
+            health["protocol"] = "fish-inline-reference-wav-v1"
+            with self.assertRaisesRegex(EngineError, "does not support chapter history"):
+                self.client().check_continuity()
+
+    def test_transport_rejects_unsupported_settings_without_sending(self):
         for settings in ({"protocol": []}, {"protocol": "unknown"},
-                         {"concurrency": 2}, {"concurrency": True}, {"top_k": 20},
-                         {"top_k": 30.0}, {"temperature": 1.1}, {"temperature": 0},
-                         {"top_p": 0.01}, {"top_p": True}, {"max_new_tokens": 2049}):
+                         {"protocol": "fish_native_drama3"}, {"protocol": "fish_sglang_drama3"},
+                         {"multi_speaker": "yes"}, {"model": ""}, {"timeout_seconds": 0},
+                         {"timeout_seconds": True}, {"name": "bad\nname"},
+                         {"url": "http://user:pass@127.0.0.1:8080/v1/tts"},
+                         {"url": "http://127.0.0.1:8080/v1/tts?key=1"}, {"url": "ftp://host/v1/tts"}):
             with self.subTest(settings=settings), self.assertRaises(EngineError):
-                self.client(**{"protocol": "fish_native_drama3", **settings})
+                self.client(**settings)
         self.assertFalse(self.requests)
 
 
@@ -540,12 +490,14 @@ class FishHTTPTests(unittest.TestCase):
         self.server.server_close()
 
     def post(self, body, *, headers=None):
-        values = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key"}
+        values = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key",
+                  "X-Audiobook-Seed": "5", "X-Audiobook-Top-K": "30"}
         values.update(headers or {})
         return urlopen(Request(self.url, data=json.dumps(body).encode(), headers=values), timeout=5)
 
     def json_body(self):
         return {"text": "Hello.", "format": "wav", "normalize": False,
+                "temperature": 0.7, "top_p": 0.7, "max_new_tokens": 2048,
                 "references": [{"audio": base64.b64encode(wav_bytes()).decode(), "text": "Reference."}]}
 
     def wait_activity(self, marker, count=1):
@@ -559,12 +511,15 @@ class FishHTTPTests(unittest.TestCase):
         output = self.root / "take.wav"
         metadata = self.client.synthesize("Hello.", self.voice, output, seed=19, direction="whisper")
         self.assertEqual(output.read_bytes(), wav_bytes())
-        self.assertEqual(self.engine.calls[0]["text"], "<whisper>Hello.</whisper>")
-        self.assertEqual(self.engine.calls[0]["references"], [(wav_bytes(), "The reference words.", None)])
+        self.assertEqual(self.engine.calls[0]["text"], "<|speaker:0|> <whisper>Hello.</whisper>")
+        self.assertEqual(self.engine.calls[0]["references"], [(wav_bytes(), "The reference words.", 0)])
         self.assertEqual(self.engine.calls[0]["seed"], 19)
+        self.assertEqual(self.engine.calls[0]["history"], [])
         self.assertTrue(metadata["seed_applied"])
         self.assertEqual(metadata["worker"], "other-mac")
         self.assertEqual(metadata["sample_count"], 4000)
+        self.assertEqual((metadata["history_turns"], metadata["history_available"]), (0, 0))
+        self.assertEqual(metadata["history_sha256"], "0" * 64)
         self.assertFalse(list(self.root.glob(".fish-*")))
 
     def test_dialogue_matches_reference_tags_and_reuses_same_voice(self):
@@ -612,17 +567,35 @@ class FishHTTPTests(unittest.TestCase):
         for request_id in ("request-000001", "request-000002"):
             events = [event for event in self.activity if request_id in event]
             self.assertEqual(len(events), 3, events)
-            self.assertRegex(events[0], r"^\[\d{4}-\d{2}-\d{2}T.+\] request-\d{6}: queued: \d+ characters, 1 reference\(s\)(?:, 1 reused)?$")
+            self.assertRegex(events[0], r"^\[\d{4}-\d{2}-\d{2}T.+\] request-\d{6}: queued: \d+ characters, 1 reference\(s\), 0 history turn\(s\)(?:, 1 reused)?$")
             self.assertIn("inference started (queued ", events[1])
             self.assertIn("completed in ", events[2])
-            self.assertIn("0.25s audio, 16000 Hz, 8044 bytes", events[2])
+            self.assertRegex(events[2], r"0\.25s audio, 16000 Hz, \d+ bytes$")
         combined = "\n".join(self.activity)
         for secret in ("Private first passage", "Private second passage", "The reference words.",
                        "private-test-key", base64.b64encode(wav_bytes()).decode()):
             self.assertNotIn(secret, combined)
 
     def test_disconnect_is_logged_without_claiming_delivery(self):
-        with patch("epub_tts_narrator.renderer.server.shutil.copyfileobj", side_effect=BrokenPipeError("private text")):
+        from epub_tts_narrator.renderer.server import _Handler
+
+        class Disconnected:
+            """The client vanished after the headers: body writes break the pipe."""
+
+            def __init__(self, stream):
+                self.stream = stream
+
+            def write(self, data):
+                raise BrokenPipeError("private text")
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        original = _Handler.end_headers
+        def end_headers(handler):
+            original(handler)
+            handler.wfile = Disconnected(handler.wfile)
+        with patch.object(_Handler, "end_headers", end_headers):
             with self.assertRaises(FishHTTPError):
                 self.client.synthesize("Private passage.", self.voice, self.root / "disconnect.wav", seed=1)
             self.wait_activity("client disconnected")
@@ -713,9 +686,16 @@ class FishHTTPTests(unittest.TestCase):
     def test_json_base64_and_sampling_overrides_restore_engine_defaults(self):
         body = self.json_body()
         body["temperature"] = 0.2
+        import msgpack
         with self.post(body) as response:
-            self.assertEqual(response.read(), wav_bytes())
+            self.assertEqual(response.headers.get_content_type(), "application/msgpack")
+            result = msgpack.unpackb(response.read(), raw=False)
+        self.assertEqual(result["audio"], wav_bytes())
+        self.assertEqual((result["codebook_size"], result["history_turns"]), (1024, 0))
+        self.assertEqual(len(result["codes"]), 10)
         self.assertEqual(self.engine.calls[0]["temperature"], 0.2)
+        self.assertEqual(result["sampling"], {"temperature": 0.2, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048})
+        self.assertEqual(result["seed"], 5)
         self.assertEqual(self.engine.temperature, 1.0)
 
     def test_invalid_options_references_controls_and_models_are_400(self):
@@ -788,8 +768,9 @@ class FishHTTPTests(unittest.TestCase):
             def do_POST(self):
                 # Drain inbound bytes so closing sends EOF rather than a reset.
                 self.rfile.read(int(self.headers["Content-Length"]))
-                payload = wav_bytes()
+                payload = wire_body()
                 self.send_response(200)
+                self.send_header("Content-Type", "application/msgpack")
                 self.send_header("Content-Length", str(len(payload) + 100))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -849,10 +830,12 @@ class FishHTTPTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
+                payload = wire_body(audio=b"oops")
                 self.send_response(200)
-                self.send_header("Content-Length", "4")
+                self.send_header("Content-Type", "application/msgpack")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(b"oops")
+                self.wfile.write(payload)
 
             def log_message(self, *args):
                 pass

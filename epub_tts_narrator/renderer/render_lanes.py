@@ -46,7 +46,7 @@ from concurrent.futures import Future
 from contextvars import copy_context
 from threading import Condition, Thread, get_ident
 
-from .interrupts import stop_if_requested
+from .interrupts import stop_if_owner_requested, stop_if_requested
 from .render_metrics import METRICS, STAGES, classify_outcome
 
 
@@ -69,7 +69,7 @@ class _Job:
 class ResourceLane:
     """Fixed-worker bounded queue with owner fairness and scoped cancellation."""
 
-    def __init__(self, *, name, workers, stage, max_pending):
+    def __init__(self, *, name, workers, stage, max_pending, stop_at_dequeue=True):
         if not isinstance(name, str) or not name:
             raise ValueError("name must be a nonempty resource lane name")
         if not isinstance(workers, int) or workers < 1:
@@ -81,6 +81,10 @@ class ResourceLane:
             raise ValueError("stage must be one of the render_metrics.STAGES names")
         self._name = name
         self._stage = stage
+        # New expensive work (synthesis) refuses to start after any stop;
+        # lanes finishing an already-generated take drain through a global
+        # Ctrl-C but still drop work whose scoped owner was lost.
+        self._stop_at_dequeue = stop_at_dequeue
         self._max_pending = max_pending
         self._cond = Condition()
         self._owners = {}
@@ -211,7 +215,7 @@ class ResourceLane:
                         continue
                     job.operation.start()
                 try:
-                    job.context.run(stop_if_requested)
+                    job.context.run(stop_if_requested if self._stop_at_dequeue else stop_if_owner_requested)
                 except BaseException as stop:
                     job.operation.end(classify_outcome(stop))
                     job.future.set_exception(stop)

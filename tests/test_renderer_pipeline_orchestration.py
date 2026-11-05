@@ -6,17 +6,21 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+import io
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.chapter_executor import MAX_PARALLEL_CHAPTERS, ChapterExecutor
 from epub_tts_narrator.renderer.chapter_jobs import ChapterJobs
+from epub_tts_narrator.renderer.fish_http import PROTOCOL
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.render_chapter_flow import (
     ChapterRunAdmission, collect_chapter, retire_owner, run_units,
 )
 from epub_tts_narrator.renderer.workflow import _render_chapter_chunks
+from shared_fixtures import HISTORY_CAPABILITY
 
 
 def configuration(scheduler="pipeline", chapter_concurrency=4, max_inflight=2,
@@ -32,9 +36,31 @@ def configuration(scheduler="pipeline", chapter_concurrency=4, max_inflight=2,
 
 
 def chapter(number, count):
-    chunks = [{"chunk_id": f"{number}-{index}", "spoken_text": f"Words {index}."}
+    chunks = [{"chunk_id": f"{number}-{index}", "spoken_text": f"Words {index}.",
+               "segment": {"kind": "narration", "voice_id": "narrator", "text": f"Words {index}."}}
               for index in range(count)]
     return {"number": number, "chunks": chunks}
+
+
+class HealthResponse(io.BytesIO):
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def history_health(test):
+    """Fake the HTTP boundary: every fixture worker is a history-capable serve."""
+    opener = Mock()
+    opener.open.side_effect = lambda request, timeout=None: HealthResponse(
+        json.dumps({"status": "ready", "protocol": PROTOCOL}).encode())
+    patcher = patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return opener
 
 
 class RecordingChunks:
@@ -48,6 +74,7 @@ class RecordingChunks:
         self.active = 0
         self.peak = 0
         self.per_owner = {}
+        self.owner_peak = {}
 
     def record(self, name, owner):
         with self.lock:
@@ -56,6 +83,7 @@ class RecordingChunks:
             self.active += 1
             self.peak = max(self.peak, self.active)
             self.per_owner[owner] = self.per_owner.get(owner, 0) + 1
+            self.owner_peak[owner] = max(self.owner_peak.get(owner, 0), self.per_owner[owner])
             return self.events[name]
 
     def finish(self, name, owner):
@@ -81,9 +109,11 @@ def chunk_runner(recorder, gates=None, failures=None):
 
     def fake(chunk, number, total, voices, engine, engine_identity, verifier,
              config, work, take_locks, take_locks_guard, *, notify,
-             retry_budget=None, speech_cache=None, paragraph_split_available=False):
+             retry_budget=None, speech_cache=None, paragraph_split_available=False,
+             continuity=None):
         name = chunk["chunk_id"]
-        owner = ("run", number)
+        # ``number`` is the chunk's position; the chapter owns the share.
+        owner = ("run", int(name.split("-")[0]))
         recorder.record(name, owner)
         gate = gates.get(name)
         if gate is not None:
@@ -103,6 +133,7 @@ class OrchestrationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
         self.recorder = RecordingChunks(self)
+        self.health = history_health(self)
 
     def pool(self, **kwargs):
         pool = RenderPool(configuration(**kwargs))
@@ -181,19 +212,23 @@ class OrchestrationTests(unittest.TestCase):
         self.assertNotIn("error", outcome, outcome)
         self.recorder.expect("4-2")
         self.assertEqual(self.recorder.peak, 2)  # global logical cap
-        for owner, active in self.recorder.per_owner.items():
-            self.assertLessEqual(active, 1, owner)  # non-borrowable share of 1
+        self.assertEqual(len(self.recorder.owner_peak), 4)
+        for owner, active in self.recorder.owner_peak.items():
+            self.assertEqual(active, 1, owner)  # one chapter transaction at a time
         result = outcome["result"]
         for chapter_index, unit_result in enumerate(result, 1):
             clips = unit_result[0]
             self.assertEqual([clip["chunk_id"] for clip in clips],
                              [f"{chapter_index}-{i}" for i in range(3)])
 
-    def test_terminal_failure_cancels_queued_siblings_and_drains_started(self):
-        self.gates = {"1-0": threading.Event()}
+    def test_terminal_failure_stops_its_chapter_and_new_chapters_while_started_ones_drain(self):
+        # A wide global window: only chapter history keeps a chapter serial.
+        self.gates = {"1-0": threading.Event(), "2-0": threading.Event()}
         self.failures = {"1-1": RuntimeError("terminal clip failure")}
-        pool = self.pool(chapter_concurrency=1)
+        pool = self.pool(chapter_concurrency=1, max_inflight=4, workers_concurrency=4)
         admission = ChapterRunAdmission()
+        for event in self.gates.values():
+            self.addCleanup(event.set)
 
         def first(index):
             return self.render_chapter(pool, chapter(1, 3))
@@ -201,11 +236,14 @@ class OrchestrationTests(unittest.TestCase):
         def second(index):
             return self.render_chapter(pool, chapter(2, 2))
 
+        def third(index):
+            return self.render_chapter(pool, chapter(3, 1))
+
         errors = []
 
         def run():
             try:
-                run_units([first, second], 2, admission)
+                run_units([first, second, third], 2, admission)
             except BaseException as error:
                 errors.append(error)
 
@@ -213,37 +251,53 @@ class OrchestrationTests(unittest.TestCase):
                    side_effect=chunk_runner(self.recorder, self.gates, self.failures)):
             thread = threading.Thread(target=run)
             thread.start()
-            self.recorder.expect("2-1")  # the healthy chapter completes fully
-            self.recorder.expect_absent("1-2")  # queued sibling cancelled before start
-            self.gates["1-0"].set()  # the already-started take drains
+            self.recorder.expect("1-0")
+            self.recorder.expect("2-0")  # chapters overlap beside each other
+            # Free slots never start a sibling before its predecessor is accepted.
+            self.recorder.expect_absent("1-1", "2-1")
+            self.gates["1-0"].set()
+            self.recorder.expect("1-1")  # fails terminally while 2-0 is still running
+            wait_until(lambda: admission.failure is not None)
+            self.recorder.expect_absent("1-2", "3-0")
+            self.gates["2-0"].set()  # the already-started chapter drains
             thread.join(30)
         self.assertFalse(thread.is_alive())
         self.assertIsInstance(errors[0], RuntimeError)
-        self.recorder.expect_absent("1-2")
+        self.recorder.expect("2-1")
+        self.recorder.expect_absent("1-2", "3-0")
         with self.assertRaises(RuntimeError):
             admission.enter()
 
-    def test_results_keep_source_order_when_completions_are_out_of_order(self):
-        self.gates = {"1-0": threading.Event(), "1-1": threading.Event()}
+    def test_chapter_results_keep_source_order_while_another_chapter_completes_first(self):
+        self.gates = {"1-0": threading.Event()}
         self.failures = {}
+        self.addCleanup(self.gates["1-0"].set)
         pool = self.pool(chapter_concurrency=2, max_inflight=4, workers_concurrency=4)
-        results = []
+        admission = ChapterRunAdmission()
+        outcome = {}
+
+        def unit(index):
+            return self.render_chapter(pool, chapter(index + 1, 3))
 
         def attempt():
-            results.append(self.render_chapter(pool, chapter(1, 3)))
+            outcome["result"] = run_units([unit, unit], 2, admission)
 
-        thread = threading.Thread(target=attempt)
-        thread.start()
-        self.recorder.expect("1-0")
-        self.recorder.expect("1-1")
-        self.recorder.expect_absent("1-2")  # share bounds outstanding transactions
-        self.gates["1-1"].set()
-        self.recorder.expect("1-2")  # later chunk starts before the first finishes
-        self.gates["1-0"].set()
-        thread.join(30)
+        with patch("epub_tts_narrator.renderer.workflow._render_chunk",
+                   side_effect=chunk_runner(self.recorder, self.gates, self.failures)):
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            self.recorder.expect("1-0")
+            self.recorder.expect("2-2")  # the second chapter finishes entirely first
+            self.recorder.expect_absent("1-1", "1-2")  # history keeps chapter 1 serial
+            self.gates["1-0"].set()
+            thread.join(30)
         self.assertFalse(thread.is_alive())
-        clips, _ = results[0]
-        self.assertEqual([clip["chunk_id"] for clip in clips], ["1-0", "1-1", "1-2"])
+        self.assertLess(self.recorder.order.index("2-2"), self.recorder.order.index("1-1"))
+        self.assertEqual(self.recorder.owner_peak, {("run", 1): 1, ("run", 2): 1})
+        for number, (clips, _) in enumerate(outcome["result"], 1):
+            self.assertEqual([clip["chunk_id"] for clip in clips],
+                             [f"{number}-{index}" for index in range(3)])
+
     def test_replan_gets_a_fresh_generation_and_owners_leave_no_residue(self):
         self.gates = {}
         self.failures = {"1-0": RuntimeError("terminal")}
@@ -301,7 +355,8 @@ class OrchestrationTests(unittest.TestCase):
         self.assertFalse(third_started.is_set())
 
     def test_unknown_plugins_stay_serial_without_scheduler_or_scope(self):
-        engine = type("UnknownEngine", (), {"identity": {"engine": "unknown"}})()
+        engine = type("UnknownEngine", (), {"identity": {"engine": "unknown"},
+                                            "capabilities": dict(HISTORY_CAPABILITY)})()
         calls = []
 
         def fake(chunk, number, total, *args, **kwargs):
@@ -314,6 +369,20 @@ class OrchestrationTests(unittest.TestCase):
                 self.work, notify=lambda _: None)
         self.assertEqual(calls, ["1-0", "1-1", "1-2"])
         self.assertIsNone(getattr(engine, "logical", None))
+
+    def test_plugins_without_chapter_history_are_refused_before_any_chunk(self):
+        engine = type("HistorylessEngine", (), {"identity": {"engine": "unknown"}})()
+        calls = []
+
+        def fake(chunk, *args, **kwargs):
+            calls.append(chunk["chunk_id"])
+            return dict(chunk, wav_path=None), None
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chunk", side_effect=fake):
+            with self.assertRaisesRegex(ValueError, "does not support chapter continuity"):
+                _render_chapter_chunks(chapter(1, 2), {}, engine, engine.identity, object(),
+                                       configuration(), self.work, notify=lambda _: None)
+        self.assertEqual(calls, [])
 
     def test_chapter_executor_and_jobs_follow_configured_parallel_with_sixteen_ceiling(self):
         legacy_pool = RenderPool(configuration(scheduler="legacy", chapter_concurrency=0))

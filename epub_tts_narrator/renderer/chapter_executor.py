@@ -160,14 +160,13 @@ class ChapterExecutor:
                 "verifier": deepcopy(verifier.identity), "quality_version": QUALITY_VERSION,
                 "quality": deepcopy(self.config["quality"]),
                 "render_defaults": {key: deepcopy(value) for key, value in self.config["render"].items()
-                                    if key in SAFE_RENDER_KEYS and not (key == "continuity" and value == "off")}}
+                                    if key in SAFE_RENDER_KEYS}}
 
     def _settings(self, spec):
         from .chapter_protocol import validate_spec
         validate_spec(spec)
         config = deepcopy(self.config)
         config["render"].update(spec.get("render", {}))
-        config["render"]["continuity"] = spec.get("render", {}).get("continuity", "off")
         from .censorship import DEFAULT_POLICY, validate_policy
         # The client owns the edition policy. An absent key must preserve
         # legacy behavior even if the worker's local config enables muting.
@@ -182,7 +181,7 @@ class ChapterExecutor:
         config = self._settings(spec)
         engine, verifier = self._components()
         from .continuity import require_support
-        require_support(config, engine)
+        require_support(engine)
         if retry_budget is None:
             # A restarted service lost its in-memory submission registry; each
             # recovered execution is bounded like a fresh local CLI run.

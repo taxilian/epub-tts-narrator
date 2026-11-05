@@ -269,9 +269,10 @@ class SelectedModelHTTPTests(unittest.TestCase):
         self.server.server_close()
 
     def post(self, model=None):
-        body = {"text": "Hello.", "format": "wav", "normalize": False,
+        body = {"text": "Hello.", "format": "wav", "normalize": False, "temperature": 0.7, "top_p": 0.7, "max_new_tokens": 2048,
                 "references": [{"audio": base64.b64encode(wav_bytes()).decode(), "text": "Reference."}]}
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key"}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer private-test-key",
+                  "X-Audiobook-Seed": "5", "X-Audiobook-Top-K": "30"}
         if model is not None:
             headers["model"] = model
         request = Request(self.url + "/v1/tts", data=json.dumps(body).encode(), headers=headers)
@@ -280,8 +281,9 @@ class SelectedModelHTTPTests(unittest.TestCase):
     def test_configured_model_and_omitted_header_both_reach_inference(self):
         for model in (FOUR_BIT, None):
             with self.subTest(model=model), self.post(model) as response:
+                import msgpack
                 self.assertEqual(response.status, 200)
-                self.assertEqual(response.read(), wav_bytes())
+                self.assertEqual(msgpack.unpackb(response.read(), raw=False)["audio"], wav_bytes())
 
         self.assertEqual([call["text"] for call in self.engine.calls], ["Hello.", "Hello."])
 

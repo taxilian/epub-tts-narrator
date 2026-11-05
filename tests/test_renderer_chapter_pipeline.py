@@ -140,7 +140,9 @@ class ChapterPipelineTests(unittest.TestCase):
                 verifier.release.set()
             self.assertEqual(self.terminal(service, job1["id"])["state"], "complete")
             self.assertEqual(self.terminal(service, job2["id"])["state"], "complete")
-        self.assertEqual(service.capabilities()["parallel_chapters"], 2)
+        # The pipeline scheduler is the default: chapters are sequential, so
+        # several chapter coordinators keep the shared worker busy.
+        self.assertEqual(service.capabilities()["parallel_chapters"], 4)
         service.close()
         self.assertTrue(all(not thread.is_alive() for thread in service._threads))
 
@@ -195,7 +197,7 @@ class ChapterPipelineTests(unittest.TestCase):
             return backend
 
         with patch("epub_tts_narrator.renderer.pool.create_engine", side_effect=create_model) as factory:
-            self.assertEqual(executor.parallel_chapters, 2)
+            self.assertEqual(executor.parallel_chapters, 4)
             self.assertIsInstance(executor._engine, RenderPool)
             self.assertEqual(executor._engine.max_parallel, 1)
             factory.assert_not_called()
@@ -234,7 +236,7 @@ class ChapterPipelineTests(unittest.TestCase):
         spec["chapter"]["chunks"] = chunks
         return spec
 
-    def test_disconnect_stops_parallel_chunk_dispatch_and_resume_reuses_cached_takes(self):
+    def test_disconnect_stops_parallel_chapter_dispatch_and_resume_reuses_cached_takes(self):
         config, backend = settings(2), CountingEngine()
         release = backend.generation_release = Event()
         verifier = FixtureVerifier(backend.fixture_transcripts)
@@ -242,10 +244,16 @@ class ChapterPipelineTests(unittest.TestCase):
         service = ChapterJobs(self.root / "server", executor)
         self.addCleanup(service.close)
         service.register_voice(self.voice_hash, self.manifest, self.audio)
-        spec = self.two_chunk_spec(executor, self.voice_hash,
-                                   ["First parallel chunk keeps its take.", "Second parallel chunk too."])
+        # Each chapter is sequential; the two slots are used by two chapters.
+        specs = []
+        for number in (1, 2):
+            spec = self.two_chunk_spec(executor, self.voice_hash,
+                                       [f"Opening take of chapter {number} keeps its audio.",
+                                        f"Closing take of chapter {number} follows it."])
+            spec["chapter"].update(number=number, id=f"chapter-{number:04d}", title=f"Chapter {number}")
+            specs.append(spec)
         session = service_session(service)
-        job = service.submit(spec, digest(spec), None, session)
+        jobs = [service.submit(spec, digest(spec), None, session) for spec in specs]
         self.addCleanup(release.set)
         with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend):
             service.start()
@@ -254,30 +262,43 @@ class ChapterPipelineTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(len(backend.thread_ids), 2)
             self.assertEqual(backend.maximum, 2)
+            self.assertEqual(sorted(call["text"] for call in backend.speech_calls),
+                             ["Opening take of chapter 1 keeps its audio.",
+                              "Opening take of chapter 2 keeps its audio."])
             service.sessions.revoke(session)
             # In-flight GPU work is never killed: both takes finish, verify,
-            # and save before the run is abandoned.
+            # and save before the run is abandoned; no chapter starts its
+            # next take for a departed client.
             release.set()
             until = time.monotonic() + 8
             while time.monotonic() < until:
-                try:
-                    service.status(job["id"])
-                except KeyError:
+                remaining = 0
+                for job in jobs:
+                    try:
+                        service.status(job["id"])
+                        remaining += 1
+                    except KeyError:
+                        pass
+                if not remaining:
                     break
                 time.sleep(0.02)
             else:
-                self.fail("The abandoned run's row was not removed")
+                self.fail("The abandoned runs' rows were not removed")
             self.assertEqual(len(backend.speech_calls), 2)
             self.assertEqual(len(list((self.root / "server" / "render-work" / "clips").glob("*/accepted.json"))), 2)
-            # The explicit resubmission reuses the cached takes: no further
-            # engine dispatch, same job identity, verified acceptance.
-            resumed = service.submit(spec, digest(spec), None, service_session(service))
-            self.assertEqual(resumed["id"], job["id"])
+            # The explicit resubmission reuses the cached opening takes and
+            # generates only each chapter's remaining take.
+            resumed_session = service_session(service)
+            resumed = [service.submit(spec, digest(spec), None, resumed_session) for spec in specs]
+            self.assertEqual([job["id"] for job in resumed], [job["id"] for job in jobs])
             until = time.monotonic() + 8
-            while time.monotonic() < until and service.status(job["id"])["state"] != "complete":
+            while time.monotonic() < until and any(
+                    service.status(job["id"])["state"] != "complete" for job in jobs):
                 time.sleep(0.02)
-            self.assertEqual(service.status(job["id"])["state"], "complete")
-            self.assertEqual(len(backend.speech_calls), 2)
+            self.assertEqual([service.status(job["id"])["state"] for job in jobs], ["complete", "complete"])
+            self.assertEqual(len(backend.speech_calls), 4)
+            self.assertEqual(sorted(call["text"] for call in backend.speech_calls[2:]),
+                             ["Closing take of chapter 1 follows it.", "Closing take of chapter 2 follows it."])
 
     def test_a_chunk_waiting_for_a_pool_slot_never_starts_after_disconnect(self):
         config, backend = settings(1), CountingEngine()
@@ -287,17 +308,76 @@ class ChapterPipelineTests(unittest.TestCase):
         service = ChapterJobs(self.root / "server", executor)
         self.addCleanup(service.close)
         service.register_voice(self.voice_hash, self.manifest, self.audio)
+        first = chapter_spec(executor, 1, "First chapter holds the only worker slot.", self.voice_hash)
+        second = chapter_spec(executor, 2, "Second chapter waits for the slot.", self.voice_hash)
+        session = service_session(service)
+        job1 = service.submit(first, digest(first), None, session)
+        self.addCleanup(release.set)
+        with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend):
+            service.start()
+            self.assertTrue(backend.generation_entered.wait(5))
+            job2 = service.submit(second, digest(second), None, session)
+            # The second chapter's coordinator reaches the pool and waits
+            # for the single slot the first chapter holds.
+            deadline = time.monotonic() + 5
+            while service.status(job2["id"])["state"] != "generating" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(service.status(job2["id"])["state"], "generating")
+            time.sleep(0.05)
+            self.assertEqual(len(backend.speech_calls), 1)
+            service.sessions.revoke(session)
+            release.set()
+            until = time.monotonic() + 8
+            while time.monotonic() < until:
+                remaining = 0
+                for job in (job1, job2):
+                    try:
+                        service.status(job["id"])
+                        remaining += 1
+                    except KeyError:
+                        pass
+                if not remaining:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("The abandoned runs' rows were not removed")
+            # The queued take checked its stop condition at the slot boundary
+            # instead of starting a new generation for a departed client.
+            self.assertEqual([call["text"] for call in backend.speech_calls],
+                             ["First chapter holds the only worker slot."])
+            resumed_session = service_session(service)
+            for spec, job in ((first, job1), (second, job2)):
+                self.assertEqual(service.submit(spec, digest(spec), None, resumed_session)["id"], job["id"])
+            until = time.monotonic() + 8
+            while time.monotonic() < until and any(
+                    service.status(job["id"])["state"] != "complete" for job in (job1, job2)):
+                time.sleep(0.02)
+            self.assertEqual([service.status(job["id"])["state"] for job in (job1, job2)],
+                             ["complete", "complete"])
+            # The first chapter's accepted take is reused; only the waiting
+            # chapter generates.
+            self.assertEqual([call["text"] for call in backend.speech_calls],
+                             ["First chapter holds the only worker slot.", "Second chapter waits for the slot."])
+
+    def test_a_chapters_next_take_never_starts_after_disconnect(self):
+        config, backend = settings(2), CountingEngine()
+        release = backend.generation_release = Event()
+        verifier = FixtureVerifier(backend.fixture_transcripts)
+        executor = ChapterExecutor(config, verifier=verifier)
+        service = ChapterJobs(self.root / "server", executor)
+        self.addCleanup(service.close)
+        service.register_voice(self.voice_hash, self.manifest, self.audio)
         spec = self.two_chunk_spec(executor, self.voice_hash,
-                                   ["First chunk holds the only worker slot.", "Second chunk waits for the slot."])
+                                   ["First chunk is the chapter's current take.", "Second chunk waits for its history."])
         session = service_session(service)
         job = service.submit(spec, digest(spec), None, session)
         self.addCleanup(release.set)
         with patch("epub_tts_narrator.renderer.fish_http.FishHTTPEngine", return_value=backend):
             service.start()
             self.assertTrue(backend.generation_entered.wait(5))
-            deadline = time.monotonic() + 2
-            while len(backend.speech_calls) < 1 and time.monotonic() < deadline:
-                time.sleep(0.01)
+            # A free slot does not let the chapter run ahead of its history.
+            time.sleep(0.05)
+            self.assertEqual(len(backend.speech_calls), 1)
             service.sessions.revoke(session)
             release.set()
             until = time.monotonic() + 8
@@ -309,8 +389,6 @@ class ChapterPipelineTests(unittest.TestCase):
                 time.sleep(0.02)
             else:
                 self.fail("The abandoned run's row was not removed")
-            # The queued chunk checked its stop condition at the slot boundary
-            # instead of starting a new generation for a departed client.
             self.assertEqual(len(backend.speech_calls), 1)
             resumed = service.submit(spec, digest(spec), None, service_session(service))
             self.assertEqual(resumed["id"], job["id"])
@@ -319,6 +397,7 @@ class ChapterPipelineTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(service.status(job["id"])["state"], "complete")
             self.assertEqual(len(backend.speech_calls), 2)
+            self.assertEqual(backend.maximum, 1)
 
 
 class AtomicChapterClaimTests(unittest.TestCase):

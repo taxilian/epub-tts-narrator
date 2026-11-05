@@ -14,6 +14,7 @@ from epub_tts_narrator.renderer.config import DEFAULTS, resolve_voice_design, se
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import ensure_voice, render
 from epub_tts_narrator.cli import export_bundle
+from shared_fixtures import HISTORY_CAPABILITY
 from test_renderer_voice_design_integration import (
     EXAMPLE, FFMPEG, FFPROBE, ReferenceDesigner, ReferencePlaybackEngine, TranscriptVerifier,
 )
@@ -56,7 +57,7 @@ class DefaultDesignerConfigurationTests(unittest.TestCase):
 
 
 class LocalDesignerEngine(ReferencePlaybackEngine):
-    capabilities = {"voice_design": True, "reference_voice": True}
+    capabilities = {"voice_design": True, "reference_voice": True, **HISTORY_CAPABILITY}
     create_voice = ReferenceDesigner.create_voice
 
 

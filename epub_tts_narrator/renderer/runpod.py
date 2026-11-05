@@ -243,7 +243,7 @@ class Deployment:
             raise ValueError("Set runpod.image to a verified Runpod SSH image in the override file")
         centers = self.api.datacenters().get("dataCenters", [])
         rows = self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud="SECURE", count=1,
-                                     minCudaVersion="13.0" if self.cfg["tts_backend"] == "sglang" else "12.9").get("gpus", [])
+                                     minCudaVersion="12.9").get("gpus", [])
         placement = select_placement(rows, centers, fallback_id=self.cfg["gpu_type_id"],
                                      prefer_h100=self.cfg["prefer_h100"],
                                      max_hourly_price=self.cfg["max_hourly_price"],
@@ -657,7 +657,7 @@ class Deployment:
     def _pod_spec(self, name, volume_id):
         return {"name": name, "image": self.cfg["image"], "cloud": "SECURE",
                 "gpu": {"id": self.gpu_type_id, "count": 1,
-                        "minCudaVersion": "13.0" if self.cfg["tts_backend"] == "sglang" else "12.9"},
+                        "minCudaVersion": "12.9"},
                 "dataCenterIds": [self.data_center_id],
                 "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
                 "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
@@ -984,7 +984,7 @@ class Deployment:
                     continue
                 # v1's accepted CUDA enum lags the live GPU catalog. Check
                 # the allocated host rather than excluding newer drivers.
-                minimum = (13, 0) if self.cfg["tts_backend"] == "sglang" else (12, 9)
+                minimum = (12, 9)
                 check = ("import re,subprocess; s=subprocess.check_output(['nvidia-smi'],text=True); "
                          "m=re.search(r'CUDA Version: (\\d+)\\.(\\d+)',s); "
                          f"assert m and tuple(map(int,m.groups())) >= {minimum!r}, "
@@ -1167,15 +1167,14 @@ if pidfile.exists():
         self.notify("Installing persistent dependencies…" if full else "Checking the persistent runtime…")
         q = shlex.quote
         self.ssh(f"sh {q(self.cfg['app_dir'] + '/deploy/runpod/install.sh')} {q(self.cfg['app_dir'])} "
-                 f"{'full' if full else 'runtime'} /workspace/.epub-tts-runtime {q(self.cfg['fish_source'])} "
-                 f"{q(self.cfg['tts_backend'])} {q(self.cfg['sglang_source'])}", timeout=2400)
+                 f"{'full' if full else 'runtime'} /workspace/.epub-tts-runtime {q(self.cfg['fish_source'])}",
+                 timeout=2400)
 
     def worker_command(self, action):
         q = shlex.quote
         return (f"{q(self.cfg['app_dir'] + '/.venv/bin/python')} -u "
                 f"{q(self.cfg['app_dir'] + '/deploy/runpod/worker.py')} --config {q(self.cfg['remote_config'])} "
-                f"--fish-source {q(self.cfg['fish_source'])} "
-                f"--sglang-source {q(self.cfg['sglang_source'])} {action}")
+                f"--fish-source {q(self.cfg['fish_source'])} {action}")
 
     def launch(self, *, prepare=False):
         # A cold worker must prove run-scoped ownership support in maintenance

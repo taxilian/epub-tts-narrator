@@ -100,12 +100,21 @@ def wait_for_queued_lane_job(lane, minimum=1, timeout=10):
 
 
 class PipelinePoolConstructionTests(unittest.TestCase):
-    def test_legacy_default_pool_builds_no_resource_runtime(self):
+    def test_explicit_legacy_pool_builds_no_resource_runtime(self):
+        config = deepcopy(DEFAULTS)
+        config["render_pool"]["workers"] = [{"name": "local", "type": "local"}]
+        config["render_pool"]["scheduler"] = "legacy"
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        self.assertIsNone(pool.resources)
+
+    def test_default_pool_uses_the_pipeline_resource_runtime(self):
         config = deepcopy(DEFAULTS)
         config["render_pool"]["workers"] = [{"name": "local", "type": "local"}]
         pool = RenderPool(config)
         self.addCleanup(pool.close)
-        self.assertIsNone(pool.resources)
+        self.assertIsNotNone(pool.resources)
+        self.assertEqual(len(pool.resources.tts._threads), 1)
 
     def test_pipeline_pool_builds_declared_lanes_from_effective_scheduling(self):
         pool = RenderPool(pipeline_config(slots=8))
@@ -353,6 +362,9 @@ class PipelineVerifierRoutingTests(unittest.TestCase):
 class PipelinePoolCloseTests(unittest.TestCase):
     def test_close_cancels_queued_synthesis_drains_and_closes_engines_once(self):
         state = gate_state()
+        # Only this pool's threads matter; an unrelated pool elsewhere in the
+        # process must not mask or fake a leak here.
+        before = set(threading.enumerate())
         pool = RenderPool(pipeline_config(slots=1, backlog=4))
         self.addCleanup(pool.close)
         for worker in pool._workers:
@@ -401,7 +413,7 @@ class PipelinePoolCloseTests(unittest.TestCase):
         self.assertTrue(pool._closed)
         self.assertEqual(state["closed"], 1)
         self.assertEqual([text for text, _ in state["calls"]], ["first"])
-        remaining = {thread.name for thread in threading.enumerate()
+        remaining = {thread.name for thread in set(threading.enumerate()) - before
                      if thread.name.startswith("render-")}
         self.assertEqual(remaining, set(), "resource lane threads leaked past pool close")
         with self.assertRaises(EngineError):

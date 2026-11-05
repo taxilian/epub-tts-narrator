@@ -246,7 +246,59 @@ def _checkpoint_fingerprints(checkpoint: Path, *, extra_names=(), write_cache=Tr
     return fingerprints, revision
 
 
-class Drama3MLXEngine:
+class HistorySynthesis:
+    """Shared request composition for every engine that carries chapter history.
+
+    Requests are always speaker-tagged. ``continuity.compose`` adds the
+    chapter's history turns and their voices; subclasses implement only
+    ``_generate_wire``, which local runtimes run directly and HTTP clients
+    send to a worker's ``synthesize_fish``.
+    """
+
+    def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
+        # Validate the full request before encoding a voice/loading a model.
+        _, directed, delivery = prepare_synthesis(text, direction, performance=performance, traits=traits)
+        _seed(seed)
+        metadata = self._compose_and_generate(f"<|speaker:0|> {directed}", [voice], output_path, seed=seed)
+        return {**metadata, "synthesis_text": directed, **delivery}
+
+    def synthesize_dialogue(self, turns, output_path, *, seed):
+        """Speak a paragraph's ordered turns with request-local speaker references.
+
+        It is sequential dialogue, not simultaneous voices. The planner must
+        split oversized paragraphs; an incomplete take is never published.
+        """
+        _seed(seed)
+        if not isinstance(turns, list) or not turns:
+            raise EngineError("dialogue turns must be a nonempty list")
+        if Path(output_path).exists():
+            raise EngineError(f"Audio output already exists: {output_path}")
+        engine_text, voices, metadata = format_dialogue(turns)
+        return {**self._compose_and_generate(engine_text, voices, output_path, seed=seed), **metadata}
+
+    def _compose_and_generate(self, text, voices, output_path, *, seed):
+        from .continuity import compose, current, generated_codes
+        references, history = compose(text, voices)
+        metadata, codes, codebook_size = self._generate_wire(text, references, history, output_path, seed=seed)
+        if current() is None:
+            # Casting and preview takes are never chapter history.
+            return metadata
+        return {**metadata, **generated_codes(codes, codebook_size, text, voices)}
+
+    def synthesize_fish(self, text, voices, output_path, *, seed, history=()):
+        """Serve one composed wire request; the client owns chapter history."""
+        from .fish_http import trim_wire_text
+        _seed(seed)
+        text = trim_wire_text(text, {voice.get("speaker") for voice in voices})
+        if len(voices) == 1 and voices[0].get("speaker") is None:
+            voices = [dict(voices[0], speaker=0)]
+            if not text.lstrip().startswith("<|speaker:"):
+                text = f"<|speaker:0|> {text}"
+        metadata, codes, codebook_size = self._generate_wire(text, voices, list(history), output_path, seed=seed)
+        return {**metadata, "codes": codes, "codebook_size": codebook_size}
+
+
+class Drama3MLXEngine(HistorySynthesis):
     """One lazy model instance, with content-addressed reference conditioning.
 
     A described, single-character scene creates a reference voice. Subsequent
@@ -256,7 +308,7 @@ class Drama3MLXEngine:
 
     def __init__(
         self, checkpoint: str | Path, *, experts: str = "q8",
-        temperature: float = 1.0, top_p: float = 0.9, top_k: int = 30,
+        temperature: float = 0.7, top_p: float = 0.7, top_k: int = 30,
         max_new_tokens: int = 2048, min_audio_seconds: float = 0.1,
     ) -> None:
         self.checkpoint = Path(checkpoint).expanduser().resolve()
@@ -438,50 +490,63 @@ class Drama3MLXEngine:
                 raise EngineError(f"Could not encode reference audio: {exc}") from exc
         return self._reference_cache[key]
 
-    def _generate(
-        self, text: str, output_path: Path, *, seed: int,
-        references: list[Any], direction: str = "", performance=None, traits: str = "",
-    ) -> dict[str, Any]:
-        _seed(seed)
-        _, engine_text, delivery = prepare_synthesis(text, direction, performance=performance, traits=traits)
-        return {
-            **self._generate_audio(engine_text, output_path, seed=seed, references=references),
-            **delivery,
-        }
+    def _generate_wire(
+        self, text: str, references: list[dict[str, Any]], history: list, output_path: Path,
+        *, seed: int,
+    ) -> tuple[dict[str, Any], list[list[int]], int]:
+        """Generate tagged ``text`` after ``history`` turns with tagged references.
 
-    def _generate_audio(
-        self, engine_text: str, output_path: Path, *, seed: int, references: list[Any],
-    ) -> dict[str, Any]:
-        """Render adapter-built text; public entry points validate source text first."""
+        Prompt overflow follows Fish's fallback order (drop the latest turn,
+        then the pinned one). The metadata records how many turns were used.
+        """
         output_path = Path(output_path)
         if output_path.exists():
             raise EngineError(f"Audio output already exists: {output_path}")
         model = self._load()
+        from .continuity import candidates
+        from .continuity_codes import history_digest
+        encoded = {}
+        overflow = None
         try:
-            from .continuity_codes import previous_takes, save_codes
-            history = previous_takes(self, model)
-            iterator = iter(model.generate(
-                engine_text, references=references, temperature=self.temperature,
-                top_p=self.top_p, top_k=self.top_k,
-                max_new_tokens=self.max_new_tokens, single_chunk=True,
-                seed=seed, attempts=1, **history,
-            ))
-            segment = next(iterator, None)
-            if segment is None or next(iterator, None) is not None:
-                raise EngineError("Drama 3 must return exactly one audio segment")
-            metadata = self._save_segment(segment, model, engine_text, output_path)
-            metadata.update(save_codes(self, model, segment, output_path))
+            import numpy as np
+            for selected, kept in candidates(text, references, history):
+                prompt_references = []
+                for voice in selected:
+                    key = voice["speaker"]
+                    if key not in encoded:
+                        reference = self._reference(voice)
+                        encoded[key] = replace(reference, text=f"<|speaker:{key}|> {reference.text}")
+                    prompt_references.append(encoded[key])
+                previous = [(turn_text, np.array(codes, dtype=np.int64)) for turn_text, codes in kept]
+                iterator = iter(model.generate(
+                    text, references=prompt_references, previous_takes=previous,
+                    temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
+                    max_new_tokens=self.max_new_tokens, single_chunk=True,
+                    seed=seed, attempts=1,
+                ))
+                try:
+                    segment = next(iterator, None)
+                except Exception as exc:
+                    # The pinned runtime validates the full prompt before sampling.
+                    if type(exc).__name__ != "PromptTooLongError":
+                        raise
+                    overflow = exc
+                    continue
+                if segment is None or next(iterator, None) is not None:
+                    raise EngineError("Drama 3 must return exactly one audio segment")
+                codes = segment.codes
+                if (getattr(codes, "ndim", None) != 2 or getattr(codes.dtype, "kind", None) not in ("i", "u")
+                        or codes.shape[0] != model.model.config.audio_decoder.num_codebooks):
+                    raise EngineError("Drama 3 returned invalid generated codec tokens")
+                metadata = self._save_segment(segment, model, text, output_path)
+                metadata.update(seed=seed, synthesis_text=text, history_turns=len(kept),
+                                history_available=len(history), history_sha256=history_digest(kept))
+                return metadata, codes.tolist(), model.model.config.audio_decoder.vocab_size
         except EngineError:
             raise
         except Exception as exc:
-            from .continuity import current
-            policy = " (chapter continuity keeps all selected first/latest context; overflow is fatal)" if current() else ""
-            raise EngineError(f"Drama 3 generation failed{policy}: {exc}") from exc
-        return {
-            **metadata,
-            "seed": seed,
-            "synthesis_text": engine_text,
-        }
+            raise EngineError(f"Drama 3 generation failed: {exc}") from exc
+        raise EngineError(f"Drama 3 prompt is too long even without chapter history: {overflow}")
 
     def _save_segment(self, segment: Any, model: Any, expected_text: str,
                       output_path: Path) -> dict[str, Any]:
@@ -562,66 +627,6 @@ class Drama3MLXEngine:
             "design_template_sha256": DESIGN_TEMPLATE_SHA256,
             "design_prompt": prompt_audit,
         }
-
-    def synthesize(
-        self, text: str, voice: dict[str, Any], output_path: Path, *,
-        seed: int, direction: str = "", performance=None, traits: str = "",
-    ) -> dict[str, Any]:
-        # Validate the full request before encoding a voice/loading a model.
-        prepare_synthesis(text, direction, performance=performance, traits=traits)
-        _seed(seed)
-        return self._generate(
-            text, output_path, seed=seed, references=[self._reference(voice)],
-            direction=direction, performance=performance, traits=traits,
-        )
-
-    def synthesize_dialogue(
-        self, turns: list[dict[str, Any]], output_path: Path, *, seed: int,
-    ) -> dict[str, Any]:
-        """Speak a paragraph's ordered turns with request-local speaker references.
-
-        This uses the installed runtime's ordinary public ``generate`` API and
-        one model instance. It is sequential dialogue, not simultaneous voices.
-        The planner must split oversized paragraphs; runtime context and output
-        limits still apply, and an incomplete take is never published.
-        """
-        _seed(seed)
-        if not isinstance(turns, list) or not turns:
-            raise EngineError("dialogue turns must be a nonempty list")
-        if Path(output_path).exists():
-            raise EngineError(f"Audio output already exists: {output_path}")
-        engine_text, voices, metadata = format_dialogue(turns)
-        references = []
-        for speaker_id, voice in enumerate(voices):
-            reference = self._reference(voice)
-            references.append(replace(
-                reference, text=f"<|speaker:{speaker_id}|> {reference.text}",
-            ))
-        return {
-            **self._generate_audio(engine_text, output_path, seed=seed, references=references),
-            **metadata,
-        }
-
-    def synthesize_fish(
-        self, text: str, voices: list[dict[str, Any]], output_path: Path, *, seed: int,
-    ) -> dict[str, Any]:
-        """Serve the validated Fish inline-reference rendering subset.
-
-        Only the HTTP adapter uses this entry point. It validates the limited
-        control vocabulary before allowing request text into the model.
-        """
-        from .fish_http import trim_wire_text
-        _seed(seed)
-        text = trim_wire_text(text, {voice.get("speaker") for voice in voices})
-        references = []
-        for voice in voices:
-            reference = self._reference(voice)
-            speaker = voice.get("speaker")
-            if speaker is not None:
-                reference = replace(reference, text=f"<|speaker:{speaker}|> {reference.text}")
-            references.append(reference)
-        return self._generate_audio(text, output_path, seed=seed, references=references)
-
 
 def format_dialogue(turns: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Build identical request-local speaker tags for local and HTTP rendering."""
@@ -727,6 +732,20 @@ def engine_entry_points(name: str) -> list[importlib.metadata.EntryPoint]:
 def create_engine(config: Mapping[str, Any]) -> TTSEngine:
     """Resolve an explicitly configured provider without a silent fallback."""
     name = config.get("type", config.get("name", "drama3_mlx"))
+    if name == "fish_speech_cuda":
+        # The Runpod inference service: Fish's library on CUDA, run by serve.
+        from .fish_speech_engine import FishSpeechCudaEngine
+        allowed = {"type", "checkpoint", "temperature", "top_p", "top_k", "max_new_tokens",
+                   "min_audio_seconds", "device"}
+        settings = {key: value for key, value in config.items() if value is not None and key in allowed}
+        unknown = {key for key, value in config.items() if value not in (None, {}, "") and key not in allowed
+                   and key not in {"name", "model", "options", "experts"}}
+        if unknown:
+            raise EngineError(f"Unknown fish_speech_cuda options: {', '.join(sorted(unknown))}")
+        if not isinstance(settings.get("checkpoint"), (str, Path)):
+            raise EngineError("engine.checkpoint must specify the Drama 3 model directory")
+        settings.pop("type")
+        return FishSpeechCudaEngine(**settings)
     if name != "drama3_mlx":
         entries = engine_entry_points(name)
         if len(entries) != 1:

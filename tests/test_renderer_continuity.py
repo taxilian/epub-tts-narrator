@@ -65,6 +65,18 @@ class Verifier:
         return timed_transcript(text)
 
 
+class PromptTooLongError(ValueError):
+    """Same class name as the pinned runtime's prompt overflow error."""
+
+
+def tagged(text, speaker=0):
+    return f"<|speaker:{speaker}|> {text}"
+
+
+def histories(model):
+    return [[text for text, codes in options["previous_takes"]] for text, options in model.calls]
+
+
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
 class ContinuityTests(unittest.TestCase):
     def setUp(self):
@@ -73,7 +85,6 @@ class ContinuityTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.config = renderer_config(self.root)
-        self.config["render"]["continuity"] = "chapter"
         self.engine = Drama3MLXEngine(self.root)
         self.engine._identity = {"engine": "drama3_mlx", "model": "fixture", "revision": "one"}
         self.model = self.engine._model = Model()
@@ -84,59 +95,97 @@ class ContinuityTests(unittest.TestCase):
         self.voices = {"v1": {"kind": "reference", "voice_id": "v1", "asset_hash": "a" * 64,
             "reference_audio": str(reference), "reference_sha256": file_hash(reference),
             "reference_text": "A fixed reference."}}
+        self.voices["v2"] = dict(self.voices["v1"], voice_id="v2", asset_hash="b" * 64,
+                                 reference_text="Another fixed reference.")
         self.chunks = passages(["First words.", "Second words.", "Third words.", "Fourth words."])
         for chunk in self.chunks:
             chunk["segment"]["delivery"]["direction"] = ""
+            chunk["segment"]["kind"] = "narration"
 
     def run_chapter(self, chunks=None):
         return _render_chapter_chunks({"number": 1, "chunks": chunks or self.chunks}, self.voices,
             self.engine, self.engine.identity, self.verifier, self.config, self.root / "work",
             notify=lambda message: None)
 
-    def test_fixed_reference_and_first_latest_survive_resume(self):
+    def test_pinned_first_narration_and_latest_with_fixed_references_survive_resume(self):
         original = deepcopy(self.voices)
         self.run_chapter()
-        histories = [[text for text, codes in options.get("previous_takes", [])]
-                     for text, options in self.model.calls]
-        self.assertEqual(histories, [[], ["First words."], ["First words.", "Second words."],
-                                    ["First words.", "Third words."]])
-        self.assertTrue(all(options["references"][0].text == "A fixed reference."
-                            for text, options in self.model.calls))
+        self.assertEqual(histories(self.model), [
+            [], [tagged("First words.")], [tagged("First words."), tagged("Second words.")],
+            [tagged("First words."), tagged("Third words.")]])
+        self.assertTrue(all([reference.text for reference in options["references"]]
+                            == [tagged("A fixed reference.")] for text, options in self.model.calls))
         self.assertEqual(self.voices, original)
         self.run_chapter()
         self.assertEqual(len(self.model.calls), 4)
 
+    def test_fish_sampling_defaults_apply_to_every_take(self):
+        self.run_chapter(self.chunks[:1])
+        options = self.model.calls[0][1]
+        self.assertEqual((options["temperature"], options["top_p"], options["top_k"]), (0.7, 0.7, 30))
+
     def test_rejected_take_does_not_advance_history(self):
         self.verifier.reject.add(240)
         self.run_chapter()
-        histories = [[text for text, codes in options.get("previous_takes", [])]
-                     for text, options in self.model.calls]
-        self.assertEqual(histories[1:3], [["First words."], ["First words."]])
+        self.assertEqual(histories(self.model)[1:3], [[tagged("First words.")], [tagged("First words.")]])
         self.assertEqual(self.model.calls[3][1]["previous_takes"][-1][1][0, 0], 3)
 
-    def test_predecessor_change_invalidates_following_takes(self):
+    def test_changed_take_makes_the_rest_of_the_chapter_stale(self):
         self.run_chapter()
-        self.chunks[0]["spoken_text"] = "Changed words."
+        self.chunks[2]["spoken_text"] = "Changed words."
+        self.chunks[2]["segment"]["text"] = "Changed words."
         self.run_chapter()
-        self.assertEqual(len(self.model.calls), 8)
+        self.assertEqual([text for text, options in self.model.calls[4:]],
+                         [tagged("Changed words."), tagged("Fourth words.")])
+        self.chunks[0]["spoken_text"] = "Other words."
+        self.chunks[0]["segment"]["text"] = "Other words."
+        self.run_chapter()
+        self.assertEqual(len(self.model.calls), 10)
+
+    def test_pin_waits_for_the_first_narration_take(self):
+        self.chunks[0]["segment"]["kind"] = "dialogue"
+        self.run_chapter()
+        self.assertEqual(histories(self.model), [
+            [], [tagged("First words.")], [tagged("Second words.")],
+            [tagged("Second words."), tagged("Third words.")]])
 
     def test_single_voice_paragraph_participates(self):
         grouped = chunks_of(group_paragraphs(plan(self.chunks[:2])))
         self.run_chapter(grouped + self.chunks[2:])
-        self.assertTrue(self.model.calls[1][1].get("previous_takes"))
+        self.assertEqual(histories(self.model)[1], [self.model.calls[0][0]])
 
-    def test_unsupported_backend_fails_before_synthesis(self):
+    def test_mixed_paragraph_joins_history_with_request_speaker_numbers(self):
+        mixed = passages(["Two voices. ", "One paragraph."], voices=["v1", "v2"], block="b2", offset=100)
+        for chunk in mixed:
+            chunk["segment"]["delivery"]["direction"] = ""
+            chunk["segment"]["kind"] = "dialogue"
+        grouped = chunks_of(group_paragraphs(plan(mixed), multi_speaker=True))
+        reply = deepcopy(self.chunks[3])
+        reply["segment"].update(voice_id="v2", role_id="role-v2", kind="dialogue")
+        self.run_chapter([self.chunks[0], grouped[0], reply])
+        paragraph_text = self.model.calls[1][0]
+        self.assertEqual(paragraph_text, "<|speaker:0|> Two voices.\n<|speaker:1|> One paragraph.")
+        self.assertEqual(histories(self.model)[1], [tagged("First words.")])
+        # v2 speaks the new line, so v2 is speaker 0 and the narrator becomes 1.
+        self.assertEqual(histories(self.model)[2], [
+            tagged("First words.", 1), "<|speaker:1|> Two voices.\n<|speaker:0|> One paragraph."])
+        self.assertEqual([reference.text for reference in self.model.calls[2][1]["references"]],
+                         [tagged("Another fixed reference."), tagged("A fixed reference.", 1)])
+
+    def test_silent_controls_keep_history_and_chapters_start_fresh(self):
+        silent = deepcopy(self.chunks[1])
+        silent.update(silent_control=True, spoken_text="")
+        self.run_chapter([self.chunks[0], silent, self.chunks[2]])
+        self.run_chapter([self.chunks[3]])
+        self.assertEqual(histories(self.model), [[], [tagged("First words.")], []])
+
+    def test_engine_without_history_support_fails_before_synthesis(self):
         from test_renderer_workflow import FixtureEngine
         self.engine = FixtureEngine({})
+        self.engine.capabilities = {"reference_voice": True, "voice_design": True}
         with self.assertRaisesRegex(ValueError, "continuity"):
             self.run_chapter()
         self.assertEqual(self.engine.speech_calls, [])
-
-    def test_off_keeps_legacy_generation_without_codes(self):
-        self.config["render"]["continuity"] = "off"
-        self.run_chapter()
-        self.assertTrue(all("previous_takes" not in options for text, options in self.model.calls))
-        self.assertEqual(list((self.root / "work").rglob("*.codes.json")), [])
 
     def test_corrupt_codes_block_resume_without_regenerating_or_reencoding(self):
         self.run_chapter()
@@ -152,20 +201,6 @@ class ContinuityTests(unittest.TestCase):
         with self.assertRaises((ValueError, OSError)):
             self.run_chapter()
         self.assertEqual(len(self.model.calls), 4)
-
-    def test_chapter_and_silent_control_reset_history(self):
-        silent = deepcopy(self.chunks[1])
-        silent.update(silent_control=True, spoken_text="")
-        self.run_chapter([self.chunks[0], silent, self.chunks[2]])
-        self.run_chapter([self.chunks[3]])
-        self.assertEqual([options["previous_takes"] for text, options in self.model.calls], [[], [], []])
-
-    def test_mixed_paragraph_is_an_explicit_history_barrier(self):
-        self.voices["v2"] = dict(self.voices["v1"], voice_id="v2", asset_hash="b" * 64)
-        mixed = passages(["Two voices. ", "One paragraph."], voices=["v1", "v2"])
-        grouped = chunks_of(group_paragraphs(plan(mixed), multi_speaker=True))
-        self.run_chapter([self.chunks[0], grouped[0], self.chunks[3]])
-        self.assertEqual([options["previous_takes"] for text, options in self.model.calls], [[], [], []])
 
     def test_codec_ranges_and_shapes_are_rejected_even_with_matching_checksum(self):
         from epub_tts_narrator.renderer.continuity_codes import load_codes
@@ -183,7 +218,7 @@ class ContinuityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "dimensions or range"):
                     load_codes(path, dict(marker, sha256=file_hash(path)))
 
-    def test_alias_cannot_hide_changed_history_or_runtime(self):
+    def test_alias_cannot_hide_changed_history(self):
         from epub_tts_narrator.renderer.speech_identity import generation_identity
         self.run_chapter([self.chunks[0]])
         record = read_json(next((self.root / "work").rglob("accepted.json")))
@@ -192,27 +227,33 @@ class ContinuityTests(unittest.TestCase):
         assets = {voice["asset_hash"]: voice for voice in self.voices.values()}
         old = generation_identity(request, assets)
         changed = deepcopy(request)
-        changed["continuity"]["runtime"] = "b" * 64
+        changed["continuity"]["takes"] = [{"codes_sha256": "b" * 64}]
         self.assertNotEqual(old, generation_identity(changed, assets))
 
-    def test_prompt_overflow_never_sheds_selected_history(self):
+    def test_prompt_overflow_follows_fish_fallback_order(self):
         from unittest.mock import patch
-        self.run_chapter([self.chunks[0]])
         generate = self.model.generate
-        seen = []
         def bounded(text, **options):
-            seen.append(options["previous_takes"])
-            if options["previous_takes"]:
-                raise ValueError("prompt has more than 8192 rows")
-            return generate(text, **options)
+            if len(options["previous_takes"]) > 1:
+                raise PromptTooLongError("prompt has more than 8192 rows")
+            yield from generate(text, **options)
         with patch.object(self.model, "generate", side_effect=bounded):
-            with self.assertRaises(ValueError):
-                self.run_chapter(self.chunks[:2])
-        self.assertTrue(seen)
-        self.assertTrue(all(len(history) == 1 for history in seen))
+            self.run_chapter(self.chunks[:3])
+        self.assertEqual(histories(self.model), [[], [tagged("First words.")], [tagged("First words.")]])
+        record = [read_json(path) for path in (self.root / "work").rglob("accepted.json")
+                  if read_json(path)["engine_metadata"].get("history_available") == 2]
+        self.assertEqual([item["engine_metadata"]["history_turns"] for item in record], [1])
 
-    def test_simultaneous_lanes_stay_independent_and_reset_following_history(self):
-        self.voices["v2"] = dict(self.voices["v1"], voice_id="v2", asset_hash="b" * 64)
+    def test_prompt_overflow_without_history_fails(self):
+        from unittest.mock import patch
+        def overflow(text, **options):
+            raise PromptTooLongError("prompt has more than 8192 rows")
+            yield
+        with patch.object(self.model, "generate", side_effect=overflow):
+            with self.assertRaisesRegex(Exception, "too long even without chapter history"):
+                self.run_chapter(self.chunks[:1])
+
+    def test_simultaneous_lanes_share_history_without_advancing_it(self):
         simultaneous = deepcopy(self.chunks[1])
         simultaneous["segment"].update(voice_id=None, role_id=None,
             simultaneous_speakers=[{"role_id": "r1", "voice_id": "v1"},
@@ -220,42 +261,33 @@ class ContinuityTests(unittest.TestCase):
         clips, accepted = self.run_chapter([self.chunks[0], simultaneous, self.chunks[3]])
         self.assertEqual(len(accepted[1]["speaker_lanes"]), 2)
         self.assertIn("mix", clips[1])
-        self.assertTrue(all(not options["previous_takes"] for text, options in self.model.calls))
+        self.assertEqual(histories(self.model), [[], [tagged("First words.")],
+            [tagged("First words.", 1)], [tagged("First words.")]])
 
-    def test_accepted_repair_is_a_barrier_not_a_lexical_rejection(self):
+    def test_accepted_repair_keeps_existing_history(self):
         from epub_tts_narrator.renderer.continuity import ChapterContinuity
         self.run_chapter([self.chunks[0]])
         record = read_json(next((self.root / "work").rglob("accepted.json")))
         request = deepcopy(record["request"])
         request.pop("continuity")
         request.pop("synthesis_identity")
-        state = ChapterContinuity(self.engine.identity)
+        state = ChapterContinuity(self.engine.identity, self.voices, "a" * 64)
+        previous = {"identity": {"previous": True}}
         for barrier in ("recovery", "clip_repair", "exhaustion_selection"):
             with self.subTest(barrier=barrier):
-                state.history["a" * 64] = [{"identity": {"previous": True}}]
+                state.latest = previous
                 with state.transaction(request):
                     repaired = deepcopy(record)
                     repaired["engine_metadata"][barrier] = {}
                     state.accept(Path("not-read-for-a-barrier"), repaired)
                 with state.transaction(request) as bound:
-                    self.assertEqual(bound["continuity"]["takes"], [])
-
-    def test_off_request_identity_and_remote_projection_are_unchanged(self):
-        from epub_tts_narrator.renderer.chapter_client import ChapterClientError, _safe_render, validate_remote_plan
-        from epub_tts_narrator.renderer.continuity import enabled
-        before = deepcopy(self.config["render"])
-        before.pop("continuity")
-        self.assertEqual(_safe_render(before), _safe_render(dict(before, continuity="off")))
-        with self.assertRaisesRegex(ValueError, "continuity"):
-            enabled({"render": {"continuity": "unknown"}})
-        with self.assertRaisesRegex(ChapterClientError, "continuity"):
-            validate_remote_plan({}, self.config, {})
+                    self.assertEqual(bound["continuity"]["takes"], [{"previous": True}])
 
     def test_interrupted_chapter_replays_only_accepted_predecessors(self):
         from unittest.mock import patch
         generate = self.model.generate
         def interrupt(text, **options):
-            if text == "Second words.":
+            if text == tagged("Second words."):
                 raise KeyboardInterrupt("fixture interruption")
             return generate(text, **options)
         with patch.object(self.model, "generate", side_effect=interrupt):
@@ -263,4 +295,25 @@ class ContinuityTests(unittest.TestCase):
                 self.run_chapter()
         self.run_chapter()
         self.assertEqual(len(self.model.calls), 4)
-        self.assertEqual([text for text, codes in self.model.calls[1][1]["previous_takes"]], ["First words."])
+        self.assertEqual(histories(self.model)[1], [tagged("First words.")])
+
+
+class ContinuityPolicyTests(unittest.TestCase):
+    def test_narrator_is_the_voice_with_most_narration(self):
+        from epub_tts_narrator.renderer.continuity import narrator_asset
+        chunks = passages(["Short.", "A much longer narration passage.", "Said."], voices=["v1", "v2", "v1"])
+        for chunk, kind in zip(chunks, ["narration", "narration", "dialogue"]):
+            chunk["segment"]["kind"] = kind
+        voices = {"v1": {"asset_hash": "a" * 64}, "v2": {"asset_hash": "b" * 64}}
+        self.assertEqual(narrator_asset({"chunks": chunks}, voices), "b" * 64)
+        self.assertIsNone(narrator_asset({"chunks": chunks[2:]}, voices))
+
+    def test_candidates_drop_latest_then_pinned_and_respect_speaker_limit(self):
+        from epub_tts_narrator.renderer.continuity import candidates
+        references = [{"speaker": index} for index in range(17)]
+        pinned = ("<|speaker:1|> pinned", [[0]])
+        latest = (" ".join(f"<|speaker:{index}|> x" for index in range(2, 17)), [[0]])
+        options = candidates("<|speaker:0|> new", references, [pinned, latest])
+        self.assertEqual([len(kept) for selected, kept in options], [1, 0])
+        self.assertEqual([[reference["speaker"] for reference in selected] for selected, kept in options],
+                         [[0, 1], [0]])

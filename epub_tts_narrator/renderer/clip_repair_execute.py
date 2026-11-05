@@ -84,6 +84,8 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                 seed = int(digest({'request': request, 'part': number, 'start': saved['starts']})[:8], 16) % 2**32
                 try:
                     metadata = generate(part, folder / saved['raw_file'], seed)
+                    # Repair parts are joined; a join is never chapter history.
+                    metadata = {key: value for key, value in metadata.items() if key != 'generated_codes'}
                     confirm_part(part, metadata)
                 except (OSError, RuntimeError, ValueError) as exc:
                     state.update(phase='failed', error_code='synthesis_or_input_failure', error_type=type(exc).__name__)
