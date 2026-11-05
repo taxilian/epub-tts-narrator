@@ -577,6 +577,8 @@ All edit and regeneration commands offer three fields: the voice description, th
 
 Regeneration verifies, saves, selects, and plays the new voice immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` chooses the local speech engine, `GG` chooses Gemini, and `G11` chooses ElevenLabs for that action; none changes the session's startup setting or global configuration. Use `G 11` with a space to regenerate voice 11 locally, since `G11` is the ElevenLabs command.
 
+If you choose the wrong voice, enter `B` or `/cancel` at any description, sample-script, or vocal-traits prompt to return to the menu. Ctrl-C during these edit prompts also cancels only that edit. All fields are staged until the edit completes: cancellation discards the staged changes, preserves the selected recording, and makes no generation request. Enter still keeps the current field and continues.
+
 `D` saves a book-local `voice-aliases.json` mapping. Character identities remain distinct; no recordings are deleted or generated. Existing roles linked to the source also follow its new target. Description/script edits and recasting operate on the shared voice; vocal traits remain separate for each logical voice/role. Descendants inherit aliases at lookup time, while earlier books and sibling branches stay unchanged. To remove a local duplicate choice, use `voice-aliases BOOK --remove SOURCE_VOICE_ID`; the original recordings remain available, and any inherited mapping resumes.
 
 Menu and text entry use the terminal's standard line editor: arrow keys,

@@ -62,7 +62,7 @@ class Session:
 
     def regenerate(self, voice_id, *, voice_designer=None):
         assert voice_id == "v1"
-        assert voice_designer == "local"
+        assert voice_designer in {"local", "gemini"}
         return self.voice
 
 class Player:
@@ -144,11 +144,11 @@ class CastingLineInputTests(unittest.TestCase):
 
     def edit(self, prompt, script, *, command=b"g 1\r"):
         self.type(command)
-        self.wait_for(b"New prompt (Enter keeps current): ")
+        self.wait_for(b"New prompt (Enter keeps current; B cancels): ")
         self.type(prompt)
-        self.wait_for(b"New script (Enter keeps current): ")
+        self.wait_for(b"New script (Enter keeps current; B cancels): ")
         self.type(script)
-        self.wait_for(b"New vocal traits (Enter keeps current; - clears): ")
+        self.wait_for(b"New vocal traits (Enter keeps current; - clears; B cancels): ")
         self.type(b"\r")
         self.wait_for(b"PLAYBACK_READY")
 
@@ -213,6 +213,22 @@ class CastingLineInputTests(unittest.TestCase):
             "prompt": "Warm voice.",
             "reference_text": "Well, Hello there. Goodbye.",
         }])
+
+    def test_cancel_gemini_at_script_discards_staged_prompt_and_returns_to_menu(self):
+        self.type(b"GG 1\r")
+        self.wait_for(b"New prompt (Enter keeps current; B cancels): ")
+        self.type(b"Unsaved prompt\r")
+        self.wait_for(b"New script (Enter keeps current; B cancels): ")
+        self.type(b"/cancel\r")
+        self.wait_for(b"> ")
+        self.assertEqual(self.finish(), [])
+
+    def test_ctrl_c_at_gemini_edit_returns_to_menu_without_exiting(self):
+        self.type(b"GG 1\r")
+        self.wait_for(b"New prompt (Enter keeps current; B cancels): ")
+        self.type(b"\x03")
+        self.wait_for(b"> ")
+        self.assertEqual(self.finish(), [])
 
 
 if __name__ == "__main__":

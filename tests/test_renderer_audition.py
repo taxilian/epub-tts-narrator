@@ -453,6 +453,27 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 5)
         self.assertTrue(any("GG [number]" in line and "Gemini" in line for line in self.output))
 
+    def test_cancel_at_each_edit_field_discards_staged_changes_without_regeneration(self):
+        for command in ("E 2", "G 2", "GG 2", "G11 2"):
+            for field in range(3):
+                for cancel in ("b", "/cancel", KeyboardInterrupt()):
+                    with self.subTest(command=command, field=field, cancel=cancel):
+                        self.session = SessionDouble()
+                        self.ready()
+                        before = deepcopy(self.session.data)
+                        self.run_ui(command, *(["Unsaved edit"] * field), cancel, "q")
+                        self.assertEqual(self.session.data, before)
+                        self.assertEqual(self.session.events, [])
+
+    def test_cancel_wrong_gemini_voice_then_regenerate_correct_voice(self):
+        self.ready()
+        wrong = deepcopy(self.session.row("vn"))
+        self.run_ui("GG 2", "Unsaved wrong prompt", "/cancel", "GG 1", "", "", "", "q")
+        self.assertEqual(self.session.row("vn"), wrong)
+        self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
+                         [("regenerate", "v1")])
+        self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
+
     def test_compact_gg_then_g_choose_gemini_then_local(self):
         self.ready()
         self.run_ui("gg1", "", "", "", "G 1", "", "", "", "q")

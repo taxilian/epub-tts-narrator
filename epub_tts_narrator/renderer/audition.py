@@ -299,17 +299,28 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 and other.get("canonical_voice_id", other["voice_id"]) == canonical]
 
     def edit(row):
+        def field(text):
+            value = ask(text)
+            if value.lower() in {"b", "/cancel"}:
+                raise KeyboardInterrupt
+            return value
+
+        say("B or /cancel at any field returns to the menu without saving; Ctrl-C also cancels this edit.")
         say("Voice prompt: " + row["prompt"])
-        prompt = ask("New prompt (Enter keeps current): ")
-        say("Sample script: " + row["reference_text"])
-        source = row.get("sample_source", {})
-        if source.get("kind") == "book_excerpt":
-            say("From: " + str(source.get("chapter_title") or "book text"))
-        elif source.get("kind") == "fallback":
-            say("Fallback script: no suitable passage long enough for a voice reference.")
-        script = ask("New script (Enter keeps current): ")
-        say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
-        traits = ask("New vocal traits (Enter keeps current; - clears): ")
+        try:
+            prompt = field("New prompt (Enter keeps current; B cancels): ")
+            say("Sample script: " + row["reference_text"])
+            source = row.get("sample_source", {})
+            if source.get("kind") == "book_excerpt":
+                say("From: " + str(source.get("chapter_title") or "book text"))
+            elif source.get("kind") == "fallback":
+                say("Fallback script: no suitable passage long enough for a voice reference.")
+            script = field("New script (Enter keeps current; B cancels): ")
+            say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
+            traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
+        except KeyboardInterrupt:
+            say("\nEdit cancelled. No changes saved or voice generated.")
+            return None
         edits = {}
         if prompt:
             edits["prompt"] = prompt
@@ -397,6 +408,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                             (" used by " + "; ".join(_label(other) for other in linked) if linked else "") +
                             ". Vocal traits apply only to this character.")
                     edits = edit(row)
+                    if edits is None:
+                        continue
                     last_voice_id = row["voice_id"]
                     if edits:
                         say("Edits saved. The saved sample is unchanged; vocal traits apply to the next render. "
@@ -421,7 +434,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     if (linked_roles(rows, row)
                             or row.get("canonical_voice_id", row["voice_id"]) != row["voice_id"]):
                         say("This voice is shared. Regeneration updates every linked role.")
-                    edit(row)
+                    if edit(row) is None:
+                        continue
                     say(f"Generating and verifying {_label(row)}…")
                     voice = session.regenerate(row["voice_id"], voice_designer=voice_designer)
                     last_voice_id = row["voice_id"]
