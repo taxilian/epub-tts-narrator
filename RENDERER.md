@@ -311,7 +311,7 @@ Then use the usual command:
 
 The configured workers replace the default single renderer. Omit the `local` entry to generate all speech remotely; local Whisper verification is still required, but the coordinator will not download or load Drama 3. Missing voices can still be created with configured Gemini or ElevenLabs, or prepared with `cast` on a machine with the local model. There is at most one local inference slot; set each remote's concurrency to its server's capacity. One is appropriate for another Mac. Faster workers take more jobs as slots become free. Local inference and verification share a persistent execution thread to protect MLX; remote generation can continue while verification runs.
 
-The client names the worker for each new generation, for example `Chunk 25: Generating speech on second-mac`, then logs completion or failure with elapsed time. The live display distinguishes waiting for a worker from generation and marks normalization and verification as local, retaining the audio's worker name. Rejection messages identify the chunk and which worker generated its audio. Cache reuse does not report new worker activity.
+On an interactive terminal, `render` keeps one live row per active chapter at the bottom of the screen, plus a scheduler row, for example `Ch 39/92 | 12/110 blocks (11%) | 02:01 | #13 second-mac gen 2/6 00:37 | ~05:00 left`. Rows show which worker is generating, waiting for a worker, and local normalization or verification with the audio's worker name. Everything else scrolls above the rows, tagged with its chapter: chapters starting, reused or finished, rejections (`Ch 39: Chunk 2 (audio from second-mac): Attempt 1/6 rejected: …`), retries and recovery. Routine per-chunk completions appear only in the rows. Redirected output (a log file or pipe) keeps plain status lines every 30 seconds. Cache reuse does not report new worker activity.
 
 The server prints timestamped request IDs as requests queue, start inference, complete, fail, or disconnect. Completion includes elapsed time and returned audio duration. Queue wait is separate from actual inference; logs include character/reference counts but never book passages, reference transcripts, or API keys. Output is flushed immediately even when redirected. Update and restart `serve` on the remote Mac to enable these logs; client progress uses the coordinator's code.
 
@@ -328,7 +328,7 @@ Local book rendering overlaps one chapter's CPU composition/encoding with the ne
 | Setting (`[render_pool]`) | Default | Meaning |
 | --- | --- | --- |
 | `scheduler` | `"pipeline"` | One fair logical scheduler shared by all chapters; `"legacy"` renders chapters one at a time. |
-| `chapter_concurrency` | `0` | Chapter coordinators; `0` is automatic: 4 under pipeline, 2 effective in legacy. Hard ceiling 16. |
+| `chapter_concurrency` | `0` | Chapter coordinators; `0` is automatic: at least two per TTS slot under pipeline (`max(4, 2 × slots)`, so one slot generates a chapter's take while another chapter's take verifies), 2 effective in legacy. Hard ceiling 16. |
 | `max_inflight` | `0` | `0` is automatic. Pipeline: a global transaction ceiling — 16 local, `min(256, max(64, 16 × slots))` remote. Legacy: a per-chapter window of total slots + 1 (an explicit value is shared across chapters). |
 | `synthesis_backlog` | `0` | Queued synthesis bound; `0` is automatic: `min(256, 4 × total TTS slots)`. Also the exact attempt backlog bound. |
 | `pending_audio_mb` | `256` | Soft high-water on materialized untranscribed audio. New generation claims pause at the mark and resume below half of it. Soft bytes, not RSS or a disk cap: already-running outputs may land and overshoot. |
@@ -371,11 +371,13 @@ requests; there is no setting to turn it off.
 Each chapter is strictly sequential: its next take starts only after its
 predecessor is accepted. Throughput comes from overlapping chapters. Drama 3
 always renders through a pool (a one-slot local pool when no workers are
-configured), and the default `[render_pool] scheduler = "pipeline"` runs four
-chapter coordinators (`chapter_concurrency`) that queue their next take for the
-single model while other chapters verify. In a pool with several workers, a
-chapter stays on the worker that produced its first take, so one chapter's
-audio and history come from one backend.
+configured), and the default `[render_pool] scheduler = "pipeline"` runs at
+least two chapter coordinators per TTS slot (`chapter_concurrency`, minimum
+four) that queue their next take for the shared workers while other chapters
+verify. In a pool with several workers, each new chapter is pinned to the
+worker carrying the fewest active chapters per slot and stays there, so one
+chapter's audio and history come from one backend and chapters spread evenly
+across machines.
 
 Every engine returns the codec tokens it generated. The renderer saves them as
 hash-validated `*.codes.json` artifacts beside each take and rebuilds history

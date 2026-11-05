@@ -20,7 +20,7 @@ SCHEDULERS = ("legacy", "pipeline")
 
 PIPELINE_RENDER_POOL_DEFAULTS = {
     "scheduler": "pipeline",
-    "chapter_concurrency": 0,  # automatic: 4 for pipeline, 2 effective in legacy mode
+    "chapter_concurrency": 0,  # automatic: max(4, 2 per TTS slot) for pipeline, ceiling 16; 2 in legacy
     "synthesis_backlog": 0,    # automatic: min(256, 4 * total TTS slots)
     "pending_audio_mb": 256,   # soft high-water for materialized untranscribed audio
     "review_concurrency": 2,   # total active leaf network review calls
@@ -69,7 +69,10 @@ def effective_scheduling(config):
     slots = sum(worker.get("concurrency", 1) for worker in workers)
     remote = any(worker.get("type") != "local" for worker in workers)
     scheduler = pool.get("scheduler", "pipeline")
-    chapter_concurrency = pool.get("chapter_concurrency") or (4 if scheduler == "pipeline" else 2)
+    # Automatic: at least two chapters per TTS slot, so a slot generates one
+    # chapter's take while another chapter's take verifies (ceiling 16).
+    chapter_concurrency = pool.get("chapter_concurrency") or (
+        min(16, max(4, 2 * slots)) if scheduler == "pipeline" else 2)
     max_inflight = pool.get("max_inflight", 0) or (min(256, max(64, 16 * slots)) if remote else 16)
     backlog = pool.get("synthesis_backlog") or min(256, 4 * slots)
     return {

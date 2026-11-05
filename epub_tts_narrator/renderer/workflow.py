@@ -2116,6 +2116,14 @@ def _publish_chapter_links(config, rendered, *, notify):
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False,
            voice_store_override=None):
+    """Render a book; on a terminal, chapters keep live rows below scrolling logs."""
+    from .progress import live_board
+    with live_board(notify) as notify:
+        return _render(bundle, config, engine, verifier, notify=notify, chapters_only=chapters_only,
+                       voice_store_override=voice_store_override)
+
+
+def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_store_override):
     from .continuity import require_support
     require_support(engine)
     run_started = monotonic()

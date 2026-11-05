@@ -7,6 +7,7 @@ from copy import deepcopy
 from functools import wraps
 from threading import BoundedSemaphore, Condition, RLock, get_ident
 from time import monotonic, sleep
+import weakref
 
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, create_engine
@@ -24,27 +25,41 @@ _LANE_RETRY_SECONDS = 0.005
 
 
 class _Slots:
-    """Endpoint slots with chapter affinity.
+    """Endpoint slots with balanced chapter affinity.
 
-    A chapter's first take uses any free worker; the chapter then stays on
-    that worker so its history and audio come from one backend. Other
-    chapters keep the remaining workers busy.
+    A chapter is pinned on its first take to the worker carrying the fewest
+    live chapters per slot (ties: most free slots, then configuration order)
+    and stays there, so its history and audio come from one backend while
+    chapters spread evenly across machines. Finished chapters drop out of the
+    count automatically (weak references).
     """
 
     def __init__(self, workers):
         self._free = {id(worker): worker.settings.get("concurrency", 1) for worker in workers}
         self._workers = list(workers)
+        self._chapters = {id(worker): weakref.WeakSet() for worker in workers}
         self._ready = Condition()
 
     def qsize(self):
         with self._ready:
             return sum(self._free.values())
 
+    def _pin(self, chapter):
+        def load(item):
+            index, worker = item
+            return (len(self._chapters[id(worker)]) / worker.settings.get("concurrency", 1),
+                    -self._free[id(worker)], index)
+        _, worker = min(enumerate(self._workers), key=load)
+        chapter.worker = worker.settings["name"]
+        self._chapters[id(worker)].add(chapter)
+
     def acquire(self):
         from .continuity import current
         scope = current()
         chapter = scope["chapter"] if scope is not None else None
         with self._ready:
+            if chapter is not None and chapter.worker is None:
+                self._pin(chapter)
             while True:
                 pinned = None if chapter is None else chapter.worker
                 choices = [worker for worker in self._workers if self._free[id(worker)]
@@ -52,8 +67,6 @@ class _Slots:
                 if choices:
                     worker = max(choices, key=lambda item: self._free[id(item)])
                     self._free[id(worker)] -= 1
-                    if chapter is not None and chapter.worker is None:
-                        chapter.worker = worker.settings["name"]
                     return worker
                 self._ready.wait()
 

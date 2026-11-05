@@ -176,7 +176,8 @@ Run one service process per data directory. A process lease prevents competing
 services from recovering the same queue. Inference stays warm across jobs. The
 shared engine pool admits up to the effective
 `render_pool.chapter_concurrency` coordinators (2 by default in legacy mode,
-4 under the experimental pipeline scheduler, capped at 16) so the next chapter
+at least two per TTS slot and minimum four under the default pipeline
+scheduler, capped at 16) so the next chapter
 can generate
 while the previous chapter finishes CPU recognition or remote JEV verification.
 The pool still enforces its configured GPU concurrency and loads each local

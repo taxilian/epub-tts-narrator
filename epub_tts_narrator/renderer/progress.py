@@ -69,6 +69,142 @@ def _scheduling_segment():
     return "sched " + " ".join(parts)
 
 
+class TerminalBoard:
+    """Live status rows pinned to the bottom of a terminal; logs scroll above.
+
+    One row per active chapter (registered by ``ChapterProgress``) plus a
+    scheduler footer. ``log`` is print-compatible: it erases the rows, writes
+    the message where they were, and redraws them below it, so history
+    scrolls up while the bottom lines stay current. Rows are truncated to the
+    terminal width so the erase count is exact. The board never calls back
+    into its producers, so producers may hold their own locks while updating.
+    """
+
+    def __init__(self, stream, *, width=None):
+        self._stream = stream
+        self._width = width
+        self._rows = {}
+        self._drawn = 0
+        self._lock = threading.RLock()
+        self._failed = False
+        self._closed = False
+
+    def log(self, *values, sep=" ", end="\n", file=None, flush=False):
+        if file is not None and file is not self._stream:
+            print(*values, sep=sep, end=end, file=file, flush=flush)
+            return
+        text = sep.join(str(value) for value in values)
+        if not text.endswith("\n"):
+            text += "\n"
+        with self._lock:
+            self._write(self._erase() + text + self._render())
+
+    def set_row(self, key, order, text):
+        with self._lock:
+            if self._closed:
+                return
+            self._rows[key] = (order, text)
+            self._write(self._erase() + self._render())
+
+    def remove_row(self, key):
+        with self._lock:
+            if self._rows.pop(key, None) is not None:
+                self._write(self._erase() + self._render())
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            self._rows.clear()
+            self._write(self._erase())
+
+    def _columns(self):
+        if self._width is not None:
+            return self._width
+        return shutil.get_terminal_size(fallback=(120, 24)).columns
+
+    def _erase(self):
+        if not self._drawn:
+            return ""
+        erase = "\r\033[2K" + "\033[1A\033[2K" * (self._drawn - 1)
+        self._drawn = 0
+        return erase
+
+    def _render(self):
+        if self._closed or not self._rows:
+            return ""
+        width = max(10, self._columns() - 1)
+        lines = [text for _, text in sorted(self._rows.values(), key=lambda row: row[0])]
+        segment = _scheduling_segment()
+        if segment:
+            lines.append(segment)
+        lines = [_fit(line, width) for line in lines]
+        self._drawn = len(lines)
+        return "\n".join(lines)
+
+    def _write(self, text):
+        if self._failed or not text:
+            return
+        try:
+            self._stream.write(text)
+            self._stream.flush()
+        except (OSError, ValueError):
+            self._failed = True
+
+
+def _fit(text, width):
+    text = text.replace("\n", " ").replace("\r", " ")
+    return text if len(text) <= width else text[:max(0, width - 1)] + "…"
+
+
+_BOARD = None
+
+
+@contextmanager
+def live_board(notify, stream=None):
+    """Use a terminal board for ``print`` output on an interactive terminal.
+
+    Yields the notify callable to use: the board's print-compatible ``log``
+    when output is a terminal, otherwise the original callable unchanged.
+    """
+    global _BOARD
+    stream = sys.stdout if stream is None else stream
+    interactive = notify is print and _BOARD is None
+    try:
+        interactive = interactive and stream.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if not interactive:
+        yield notify
+        return
+    board = _BOARD = TerminalBoard(stream)
+    try:
+        yield board.log
+    finally:
+        _BOARD = None
+        board.close()
+
+
+def _board_of(notify):
+    owner = getattr(notify, "__self__", None)
+    return owner if isinstance(owner, TerminalBoard) else None
+
+
+_SHORT_PHASES = (
+    ("generating speech, attempt ", "gen "), ("generating paragraph, attempt ", "gen "),
+    ("verifying speech, attempt ", "verify "), ("verifying saved take ", "verify saved "),
+    ("normalizing speech", "normalize"), ("checking saved audio", "cache"),
+    ("verifying saved audio", "verify cache"), ("preparing paragraph", "prepare"),
+    ("preparing speech", "prepare"),
+)
+
+
+def _short_phase(phase):
+    phase = phase.replace("\n", " ").replace("\r", " ")
+    for long, short in _SHORT_PHASES:
+        phase = phase.replace(long, short)
+    return phase
+
+
 def format_duration(seconds):
     """Format a monotonic duration, including hours for long book renders."""
     seconds = max(0, int(seconds))
@@ -179,9 +315,12 @@ class ChapterProgress:
         self._weights = [0 if chunk.get("silent_control") else len(chunk.get("spoken_text", ""))
                          for chunk in chunks]
         self._notify = notify
-        self._custom_notify = notify is not print
+        # On an interactive terminal the run's board gives this chapter one
+        # persistent row; its messages scroll above all chapters' rows.
+        self._board = _board_of(notify)
+        self._custom_notify = notify is not print and self._board is None
         self._stream = stream if stream is not None else (sys.stdout if notify is print else None)
-        self._tty = bool(self._stream is not None and self._stream.isatty())
+        self._tty = self._board is not None or bool(self._stream is not None and self._stream.isatty())
         self._clock = clock
         self._parallel = max(1, parallel)
         self._heartbeat = not self._custom_notify if heartbeat is None else heartbeat
@@ -225,7 +364,12 @@ class ChapterProgress:
             self._closed = True
             self._clear_line()
             state = "complete" if exc_type is None and len(self._done) == len(self._weights) else "stopped"
-            self._emit(self._status(final=state))
+            if self._board is not None:
+                self._board.remove_row(id(self))
+                self._emit(f"speech {state}: {len(self._done)}/{len(self._weights)} blocks in "
+                           f"{format_duration(self._clock() - self._started)}")
+            else:
+                self._emit(self._status(final=state))
             operation, self._clip_operation = self._clip_operation, None
         if operation is not None:
             operation.end(classify_outcome(exc))
@@ -273,6 +417,9 @@ class ChapterProgress:
                 message = None
             if not self._custom_notify and event == "completed" and elapsed is not None:
                 message = f"{worker} done in {format_duration(elapsed)}"
+            if self._board is not None and event == "completed":
+                # The chapter's live row already shows routine generation.
+                message = None
             if message:
                 self(f"  Chunk {index + 1}: {message}")
             elif self._tty:
@@ -351,6 +498,32 @@ class ChapterProgress:
             return None
         # A large block cannot be divided between workers; account for that tail.
         return max(max(remaining), sum(remaining) / min(self._parallel, len(remaining)))
+
+    def _row(self):
+        """This chapter's live board row: no book percentage or shared segment."""
+        now = self._clock()
+        parts = [f"Ch {self.number}/{self.total_chapters}",
+                 f"{len(self._done)}/{len(self._weights)} blocks "
+                 f"({round(100 * len(self._done) / max(1, len(self._weights)))}%)",
+                 format_duration(now - self._started)]
+        active = []
+        for index, task in sorted(self._active.items()):
+            if task.worker_stage == "generating":
+                phase = f"{task.worker} {_short_phase(task.phase)}"
+            elif task.worker_stage == "waiting":
+                phase = f"waiting for {task.worker or 'a worker'}"
+            elif task.worker_stage == "failed":
+                phase = f"{task.worker} failed"
+            else:
+                phase = _short_phase(task.phase)
+                if task.worker and phase.startswith(("normalize", "verify")):
+                    phase += f" ({task.worker} audio)"
+            active.append(f"#{index + 1} {phase} {format_duration(now - task.phase_started)}")
+        parts.append("; ".join(active) if active else "idle")
+        remaining = self._remaining(now)
+        if remaining is not None:
+            parts.append(f"~{format_duration(math.ceil(remaining))} left")
+        return " | ".join(parts)
 
     def _status(self, *, final=None, compact=False):
         now = self._clock()
@@ -435,6 +608,9 @@ class ChapterProgress:
         return " | ".join(parts)
 
     def _emit(self, message):
+        if self._board is not None:
+            self._board.log(f"Ch {self.number}: {message.strip()}")
+            return
         if self._custom_notify:
             self._notify(message)
         elif not self._output_failed:
@@ -459,6 +635,10 @@ class ChapterProgress:
 
     def _show(self, *, force=False):
         now = self._clock()
+        if self._board is not None:
+            self._board.set_row(id(self), (self.number, id(self)), self._row())
+            self._last_display = now
+            return
         if not force and self._last_display is not None and now - self._last_display < self._log_interval:
             return
         status = self._status()
