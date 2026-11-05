@@ -94,10 +94,6 @@ class ChapterStorageTests(unittest.TestCase):
         self.assertEqual(record["key"], key_for(self.settings, "b" * 64, sha, "sync.json"))
 
     def test_file_credentials_ignore_missing_ambient_profile(self):
-        try:
-            import boto3
-        except ImportError:
-            self.skipTest("optional boto3 dependency")
         with patch.dict(os.environ, {"AWS_PROFILE": "does-not-exist-fixture", "AWS_DEFAULT_REGION": "other-region"}):
             publisher = S3ArtifactPublisher(dict(self.settings, access_key_id="fixture-id", secret_access_key="fixture-secret"))
             self.assertEqual(publisher.client.meta.region_name, "test-1")

@@ -120,8 +120,6 @@ class RunpodWorkerTests(unittest.TestCase):
         files.assert_not_called()
 
     def test_installed_whisper_can_decode_pcm_without_a_model(self):
-        if importlib.util.find_spec("faster_whisper") is None:
-            self.skipTest("faster-whisper is an optional worker dependency")
         self.real_check_audio_decoder()
 
     def test_prepared_models_are_reused_without_download_requests(self):

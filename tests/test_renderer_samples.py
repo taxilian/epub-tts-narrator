@@ -2,13 +2,17 @@
 
 from copy import deepcopy
 from pathlib import Path
+import tempfile
 import unittest
 
+from epub_tts_narrator.cli import export_bundle
+from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.samples import (
     MissingSampleScript, SELECTION_VERSION, select_book_sample, select_sample,
     sample_word_count, strip_speech_wrapper,
 )
+from test_performance import book_with_text
 
 
 TEXT = (
@@ -411,25 +415,26 @@ class SampleSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Invalid prepared casting sample"):
                 self.select(data)
 
-    def test_actual_validated_book_has_traceable_selected_text(self):
-        path = Path(__file__).resolve().parents[1] / "runs" / "soulship-series" / "book-01" / "bundle"
-        if not path.exists():
-            self.skipTest("Local full-book integration fixture is not available")
-        data = load_bundle(path)
-        seen = False
-        for voice in data["cast"]["voices"]:
-            result = select_book_sample(data, voice["id"], canonical_id=lambda value: value)
-            if result is None:
-                continue
-            seen = True
-            source = result["source"]
-            excerpts = source.get("excerpts", [dict(source, text=result["reference_text"])])
-            for excerpt in excerpts:
-                selected = next(row for chapter in data["chapters"] for row in chapter["rows"]
-                                if row["id"] == excerpt["segment_id"])
-                self.assertEqual(excerpt["text"], selected.get("spoken_text", selected["text"])[
-                    excerpt["spoken_start"]:excerpt["spoken_end"]])
-        self.assertTrue(seen)
+    def test_exported_validated_book_has_traceable_samples_for_each_voice(self):
+        document = book_with_text(TEXT, "“" + TEXT + "”")
+        document["segments"][1].update(role_id="mara", voice_id="v1", kind="dialogue")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bundle"
+            export_bundle(document, path)
+            data = load_bundle(path)
+            for voice in data["cast"]["voices"]:
+                with self.subTest(voice=voice["id"]):
+                    result = select_book_sample(data, voice["id"], canonical_id=lambda value: value)
+                    self.assertIsNotNone(result)
+                    source = result["source"]
+                    self.assertEqual(source["source_fingerprint"], fingerprint(document["source"]))
+                    excerpts = source.get("excerpts", [dict(source, text=result["reference_text"])])
+                    for excerpt in excerpts:
+                        selected = next(row for chapter in data["chapters"] for row in chapter["rows"]
+                                         if row["id"] == excerpt["segment_id"])
+                        self.assertEqual(selected["voice_id"], voice["id"])
+                        self.assertEqual(excerpt["text"], selected.get("spoken_text", selected["text"])[
+                            excerpt["spoken_start"]:excerpt["spoken_end"]])
 
 
 if __name__ == "__main__":

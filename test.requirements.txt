@@ -1,0 +1,3 @@
+-r renderer.requirements.txt
+-e .[chapter-server,verification,remote,cuda-verification]
+httpx
