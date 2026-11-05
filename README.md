@@ -62,7 +62,7 @@ epub-tts-narrator analyze book-two.epub -o runs/book-02 --continue-from runs/boo
 epub-tts-narrator refresh-voice-profiles runs/book-01 --workers 1
 ```
 
-Analysis is resumable: after a failure, rerun the same command — validated model responses are reused from the request cache. Interactive speaker choices are journaled to the request cache as you make them and replayed on a rerun, so an interrupted analysis resumes your decisions instead of re-asking, and the dependent spoken-spelling work then reuses the cache instead of recomputing. The output directory is created before the first model request and checkpoints the analysis to a `.analysis-pending/` workspace after each stage, so a rerun resumes from the latest completed stage without repeating finished model or local work; a pending directory never counts as a completed bundle. If speech remains unassigned after bounded automatic work, the CLI asks you to pick speakers in the terminal and exits with status 2; unassigned speech blocks audio generation, advisory notes do not.
+Analysis is resumable: after a failure, rerun the same command. Validated model responses and journaled interactive speaker choices are reused. The output directory contains a `.analysis-pending/` workspace until publication, so an interrupted run resumes completed stages rather than starting over. Unassigned speech requires an explicit speaker choice and blocks rendering; advisory notes do not.
 
 `refresh-voice-profiles` never touches source text, segments, attribution, characters, roles, voice identity or order, audition scripts, reference recordings, or render caches. It rebinds the hidden `cast_fingerprint` records (analysis provenance and the book-local `audition-scripts.json`) so casting keeps working, backs up the originals, and refreshes descendant continuation links in the same transaction. The next render picks up the new profiles automatically; rerunning after everything is current makes no changes.
 
@@ -82,7 +82,9 @@ audiobook-render assemble book.audiobook    # package the .m4b
 
 Optional [audio censorship](RENDERER.md#optional-audio-censorship) preserves a short opening sound and silences the rest of configured vulgar words without changing the dialogue's timing. Use `render BOOK --censor` for new output, or `assemble BOOK --censor --chapters 13 --chapters-only` to rebuild a saved chapter from its original verified clips. `--no-censor` overrides the global setting for an uncensored output. The feature is off by default; saved speech and voices remain unchanged.
 
-Directory analysis also collects character and place names and prepares CMU Arpabet suggestions for [pronunciation review](RENDERER.md#pronunciation-review). Run `audiobook-render pronunciations BOOK` to listen and accept them, correct a name with a readable hint, or edit CMU directly. Existing books can add candidates and proposals with `epub-tts-narrator discover-pronunciations BOOK`, without reanalysis. Confirmed choices are per-book and inherit recursively through `--continue-from`; guesses never change narration automatically.
+Analysis designs the whole voice cast and assigns speakers using compact, source-linked annotations rather than copying the book into model responses. Attribution can propose targeted spoken-spelling edits and local delivery, emotion, or vocalization controls where the passage calls for them. Canonical text remains unchanged; semantic changes receive a focused review. There is no separate whole-book spelling scan, pronunciation discovery, phoneme suggestion, or name-annotation stage. General pronunciation overrides remain optional explicit edits afterward; see [manual pronunciation overrides](RENDERER.md#pronunciation-review).
+
+Casting adapts automatically to the book. It starts with large source regions, subdivides only when request or response capacity requires it, resolves independent evidence-backed candidates, and separately checks the source for overlooked speakers. Work bounds grow with the actual source units and distinct findings; there is no partition quota to tune for longer books. Exact evidence and independent identity review remain mandatory when identity consensus is enabled. `plan` reports source-derived bounds and conditional work, not a promise of an exact model-call count.
 
 ## What analysis produces
 
@@ -106,12 +108,15 @@ epub-tts-narrator validate examples/last-lantern/reviewed.json --ready
 python3.11 examples/build_example.py /tmp/new-audiobook-example   # rebuilds the bundle offline
 ```
 
-The test suite (unittest, offline) exercises the renderer verification stack, so install the extras first:
+Run the full offline unittest suite in `.venv-renderer`. Its test requirements include the renderer runtime, server/storage SDKs, and the worker's real audio decoder; no model downloads or cloud credentials are needed:
 
 ```sh
-.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile
-.venv/bin/python -m unittest discover -s tests -q
+uv venv --python 3.12 .venv-renderer  # first setup only
+uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
+.venv-renderer/bin/python -m unittest discover -s tests -q
 ```
+
+For an existing environment, rerun only the install command to update missing dependencies. The full suite should finish without skips on this supported environment. Tests use tracked fixtures or create their own temporary bundles, never saved books under `runs/`.
 
 ## Documentation
 
@@ -128,21 +133,3 @@ The test suite (unittest, offline) exercises the renderer verification stack, so
 
 - Run directories (`runs/`, `dist-runs/`, `*.audiobook/`) and the request cache can contain full book text; keep them out of version control.
 - Exit codes: `0` success; `1` invalid input, contract, I/O, or API failure; `2` saved analysis with unassigned spoken passages (after `analyze`, `resolve-speakers`, or `export`, or when `validate --ready` finds missing speakers); `130` interrupted.
-
-### Speech-spelling output limits
-
-`Repairing validation` means a complete model answer failed local checks; it is different from `The model output was truncated`, which means the provider exhausted its response budget. Speech-spelling scans recover from that output limit by dividing the target segments in half, at most two levels (four final groups). Child scans retain all original context and run sequentially within the existing worker limit. Every result still needs exact-source validation and the normal independent per-edit review; source text and attribution do not change. Successful requests keep their existing cache keys. Separate truncation hints allow a rerun to skip known failed parent scans and reuse validated children.
-
-If a single-segment scan, a depth-limited child scan, or a jury response still exceeds the output limit, analysis stops without applying unvalidated edits. The error identifies the stage and batch. Check `provider.max_output_tokens` and the provider/model output ceiling; no token limit is raised automatically. Keep the reported resume cache and rerun the same command with the same input, output, and configuration to reuse completed work. Raising the provider token cap changes provider request identity and can invalidate existing request-cache entries, so do not discard the cache or change settings merely to retry the new subdivision recovery.
-
-### Speech-spelling request efficiency
-
-New spelling requests use compact, stage-specific instructions and JSON. Repeated role records are sent once in a role table. A context block references existing segment text only when those segments reconstruct the complete original block exactly and the reference form is smaller; partial, repeated, or truncated context stays verbatim. Reviewers receive proposed-edit segments as targets and all unchanged segments as read-only context, retaining their full text, roles, and nonempty delivery evidence. Established names and all three independent review calls are preserved. Reviewer-specific fields follow the shared request content, allowing prefix caching where supported by the provider.
-
-Validated v1 scan and review caches are checked before making compact v2 requests. Failed responses are never promoted, old truncation hints remain usable, and already-completed normalization does not rescan merely because the wire representation became smaller. Output schemas, validation, retry limits, token ceilings, and acceptance rules are unchanged. These changes reduce redundant input; actual token savings and model accuracy depend on the endpoint and should be measured separately from serialized request size.
-
-### Contextual spelling review
-
-The local spelling heuristic is not a pronunciation dictionary. A plausible unfamiliar normalization now reaches contextual review instead of repeatedly asking the scanner to repair it. Exact source spans, nonoverlap, bounds, protected names/numbers/negation, and complete ordered word coverage remain local requirements. Unknown one-to-one word correspondences cannot absorb unchanged words; mechanically recognized joins/splits retain their existing rules. No book-specific spelling exceptions are added.
-
-Only proposals needing this extra judgment use the extended review contract: all three blind reviewers receive the exact ordered word pairs, and at least two complete reviews must approve every pair as well as the edit. A generic approval without word evidence cannot apply it. Rejection or uncertainty leaves the source spelling unchanged with an explicit unresolved audit/progress message, rather than a scanner repair loop. Reviewer judgments can still share errors; word coverage alone does not prove lexical equivalence. Applied edit format and already-validated ordinary scan/review caches stay unchanged; new contextual reviews have distinct request identities.

@@ -19,6 +19,15 @@ uv pip install --python .venv-renderer/bin/python -e .
 
 FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
 
+For development and the full offline test suite, install `test.requirements.txt` instead of only the runtime requirements. It includes the runtime plus server/storage and worker-decoder test dependencies, including `boto3` and `faster-whisper`:
+
+```sh
+uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
+.venv-renderer/bin/python -m unittest discover -s tests -q
+```
+
+Rerun the install command when test dependencies change; do not recreate an existing environment. Tests require no model downloads, cloud credentials, or previously generated book bundles.
+
 Unknown configuration keys, such as `engine.old_option`, warn and are ignored. Engine selection uses `engine.type`, `engine.model`, and `engine.checkpoint`; plugin-specific settings belong in `engine.options`. Invalid recognized values and unknown configuration sections still stop with an error. Ignored fields do not participate in audio cache identity.
 
 Both original and prequantized Drama 3 models use this environment, with stable MLX-Audio `>=0.6.1,<0.7` and MLX Whisper `0.4.3`. The vendored Sogni port retains the inference code from commit `3b76bf84714d3766d7872f3409639a438e296cc8`; version `0.1.1+epub.1` updates its dependency metadata for the shared runtime. See [provenance](vendor/drama3-mlx/PROVENANCE.md). Upgrade an existing environment by rerunning the requirements install command above; there is no need to recreate it.
@@ -442,118 +451,66 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 ## Pronunciation review
 
-### Names versus special words (compact scoped mode)
+Initial analysis can carry reviewed, source-linked spoken-spelling edits and inline `performance_controls`. These are consumed during default rendering without `prepare-performance`; a whisper, emotion, or laughing delivery may cover only part of a segment. Point vocalizations and pauses remain separate from lexical text. Optional external records merge only when compatible; conflicting overlaps fail rather than silently replacing an instruction. Actual adherence to a cue still depends on the selected model.
 
-Analysis automatically creates or resumes the name script; rerun
-`epub-tts-narrator analyze BOOK --config CONFIG.toml` to backfill an older book.
-The explicit `epub-tts-narrator prepare-name-script BOOK --config CONFIG.toml`
-command remains available. Inspect name IDs with
-`epub-tts-narrator prepare-name-script BOOK --action list`. The derived script
-uses markers such as `(N1:Ally) greeted her ally.` Canonical scripts stay unchanged.
-N1 identifies a named entity, not its voice; another speaker can mention it.
+Pronunciation work is optional and manual. The renderer never discovers candidates, creates CMU suggestions or estimates, converts readable hints with a model, or generates name annotations. These commands need no analysis-provider configuration or network access. Existing confirmed and keep-default choices remain valid, including inherited choices and saved literal respellings.
 
-```sh
-# Read-only overview of entities, aliases, and scoped choices.
-audiobook-render pronunciations BOOK --action list
-
-# Prepare CMU proposals, then use the existing listening queue for this entity.
-audiobook-render pronunciations BOOK --class name --name-id N1 --action discover
-audiobook-render pronunciations BOOK --class name --name-id N1
-
-# Advanced explicit overrides; --phonemes is a deliberate direct confirmation.
-audiobook-render pronunciations BOOK --class name --name-id N1 \
-  --action set --word Ally --phonemes "AE1 L IY0"
-audiobook-render pronunciations BOOK --class special \
-  --action set --word zorb --phonemes "Z AO1 R B"
-```
-
-Names apply only to occurrences marked with the selected entity ID. Special
-rules apply to complete ordinary occurrences of the spelling, excluding marked
-names. A marked name with no override uses the engine default, never a Special
-override for that spelling. No override or an explicit `ignore` keeps default
-pronunciation. Different entities sharing an alias can have different choices;
-their drafts, estimates, previews, playback receipts, acceptance and reopen state
-are isolated. All aliases for one entity remain separate pronunciation words.
-`list`, `discover`, `review`, `play`, `set`, `ignore`, and `reset` accept scope;
-`--name-id` requires `--class name`. Editing candidate name spellings or opening
-the scoped review queue requires an explicit class rather than guessing a scope.
-Word-only corrections for unrelated ordinary spellings retain legacy behavior.
-
-Conflicting/uncertain classifications can be corrected with
-`epub-tts-narrator prepare-name-script BOOK --action resolve --mention-id HASH --decision N1`
-(or `ordinary`/`unresolved`). A confirmed rule affecting unresolved mentions is
-blocked; Special previews never treat unresolved names as ordinary. Use the
-derived sidecar and original block/offset locations when reviewing the listing.
-Model agreement is not a guarantee of correct contextual attribution.
-
-Legacy global choices are retained, not silently converted. If one collides with
-a cast name after activation, explicitly choose its scope:
-
-```sh
-audiobook-render pronunciations BOOK --action migrate --word Ally \
-  --class name --name-id N1
-# Or --class special to retain a spelling-wide rule for ordinary occurrences.
-```
-
-Migration leaves `pronunciations.json` byte-identical and saves scoped intent in
-`scoped-pronunciations.json`. Resetting a migrated choice does not revive the old
-unsafe global rule. Migration follows existing capitalization-family boundaries,
-so converting `Polish` does not discard a distinct `polish` choice. An ancestor's
-migration cannot silently suppress a newer descendant choice. Books without
-activation retain the existing legacy workflow below. Rendering uses frozen
-validated annotations/choices, needs no annotation LLM call, and preserves audio
-parallelism. Only clips with changed effective controls need new synthesis;
-already-recorded audio is not rewritten by editing a sidecar.
-
-### Legacy discovery and listening
-
-Automatic review focuses on unexpected words: dictionary-known candidates are filtered using the packaged offline CMUdict. Character names/aliases established by the cast remain eligible even on a dictionary hit, since their reading must be chosen consistently rather than inferred from an ordinary word's sense. Existing automatic pending records may disappear from the default list, but are not deleted. Confirmed/keep-default decisions, saved drafts, explicit manual review and conflicting case-family choices remain visible; `--word` can still select a filtered word directly.
-
-CMU suggestions use all available dictionary pronunciations plus story/name context and a strengthened phoneme-writing guide. Your readable correction overrides the dictionary; no first-reading shortcut silently locks a name. Suggestions remain pending until the existing listening/confirmation flow accepts them. No new configuration, dictionary installation, or runtime network lookup is required. Existing saved proposals and reference voices are preserved.
-
-Before opening the menu, review prepares missing CMU suggestions for every kind of pending word, including invented words and unusual spellings, then caches both isolated-word and excerpt audio previews for the current choices. Preparation reports progress and saves each result; rerun the same command after interruption to reuse completed suggestions and audio. Preparation does not approve a pronunciation or mark a preview as heard. Existing drafts and confirmed or keep-default decisions remain in effect. New edits and alternate baseline playback can require a new preview.
-
-If an entry lacks a usable saved voice or its preview fails validation, preparation reports that entry as unavailable and continues preparing the rest. The menu remains available for editing and retrying; unavailable entries have a `!` marker in the compact list. API outages, unexpected engine failures, and interruption stop preparation with completed work retained for the next run.
-
-The current CMU sequence is shown during listening, in the interrupted last-five list, and before the pronunciation editor asks for changes. An explicit keep-default choice displays `default pronunciation: … (CMU estimate)`; a readable spelling also shows its estimated CMU. These text-based estimates do not expose the engine's internal pronunciation or change its speech input. Pending proposals and explicit CMU choices show the exact phones supplied for their previews. Listing with `--action list` remains read-only and does not generate suggestions or audio.
-
-`audiobook-render pronunciations BOOK` opens a listening queue for words collected by analysis. The menu is count-only: it reports how many entries await listening. `S [N]` starts listening at entry N (default: the saved resume position or the first queued word), `L` prints a compact list (width-aware columns when there are more than ten entries), `O <all|N|N-M>` marks entries for re-listening, a bare number plays that entry's excerpt preview, and `Q` quits. `B` plays the default, `E` takes a readable pronunciation hint, converts it to a CMU proposal with the configured analysis model, and auditions that proposal. `P` edits CMU directly, `C` confirms the auditioned choice, `I` keeps the default, `R` resets a local override.
-
-The queue speaks each queued word's current choice — a draft, a proposed reading, or the default — in isolation, twice, with an interruptible one-second gap after each play, redrawing one bounded terminal line instead of scrolling. Any key during playback or a gap interrupts, shows the last five words with their list indices for adjustment, and positions the queue at the first of them; `Enter` resumes. A pair heard without interruption auto-accepts that choice durably, binding the hash-bound played receipt of the exact isolated preview; a heard default is recorded as keep-default. Failed or cancelled playback never accepts, and the resume position is saved before each word's preview work so an interruption or failure picks up at the current word. Isolated previews use their own cache identity (`isolated: true`) and purpose, distinct from the excerpt previews used by numbered playback and `C`. Queue progress — the resume position and per-word accepted flags bound to the accepted choice — lives in the book-local `review-state.json` sidecar next to the preview cache; changing a draft or decision invalidates its acceptance, and a new draft on a confirmed word puts it back in the queue. Reopening only writes the sidecar: marked entries (local or inherited) replay with their registry decisions byte-identical until a pair is actually accepted. Auto-acceptance requires an interactive terminal: with piped input the queue refuses to walk, and the explicit commands and `--action` forms remain available.
-
-Excerpt previews never change canonical rows: correction previews work on a copy that omits only the analyzer normalization edits overlapping an exact occurrence of the target word, preserving every other approved edit, and a word whose occurrences are all covered by multiword edits still previews — as the exact word with the selected saved voice. Production rendering keeps its strict ambiguity guards; a pronunciation that genuinely overlaps a multiword edit still stops rendering with an actionable error.
-
-Commands can include an entry number or use the last selected word. The proposed phonemes are shown before playback and saved as a draft; `C` saves that same sequence without asking the model again. Confirmation requires a played preview for the current choice and saved voice. Edited drafts, preview playback records, and queue progress survive quitting, but drafts apply to the book only after confirmation. Previews are listening aids, not verified audiobook clips. They are cached separately as lossless FLAC and never replace the selected character voice.
-
-For an older book, first run `epub-tts-narrator discover-pronunciations BOOK` (or `audiobook-render pronunciations BOOK --action discover`). This collects candidates and prepares name pronunciations without repeating the cast or speaker analysis. Command-line actions are also available:
+### Manual commands
 
 ```sh
 audiobook-render pronunciations BOOK --action list
 
-# Propose and listen to CMU from a readable hint; approve with C in the menu.
+# Audition an unsaved literal respelling or exact CMU sequence.
 audiobook-render pronunciations BOOK --action play --word Qarm --say-as Quarm
-audiobook-render pronunciations BOOK
-
-# Or audition exact CMU and explicitly save it without model conversion.
 audiobook-render pronunciations BOOK --action play --word Qarm --phonemes "K W AO1 R M"
+
+# Explicitly save a manual choice without audition or model conversion.
+audiobook-render pronunciations BOOK --action set --word Qarm --say-as Quarm
 audiobook-render pronunciations BOOK --action set --word Qarm --phonemes "K W AO1 R M"
 
-# Keep the engine's default in this book, even if an ancestor has a correction.
+# Keep the engine default, or remove the local choice to restore inheritance.
 audiobook-render pronunciations BOOK --action ignore --word Qarm
-
-# Remove this book's choice and restore any inherited choice.
 audiobook-render pronunciations BOOK --action reset --word Qarm
 ```
 
-Both input forms are validated. A readable hint accepts one plain word, optionally hyphenated to suggest syllables; it never accepts model tags. Generated proposals require CMU vowel stress `0`, `1`, or `2`; manual CMU retains support for unstressed symbols. `--action set --say-as` also stages and auditions a CMU draft, requiring confirmation in the menu. Only explicit `--action set --phonemes` directly saves a supplied sequence without an audition. Read-only listing and direct manual CMU saves need no analysis model. Existing confirmed respellings remain valid and are not silently converted.
+A readable hint is one literal respelling, optionally hyphenated; it is passed directly to the existing synthesis compiler and never converted to CMU. Both `--say-as` and `--phonemes` with `--action set` directly save the supplied manual choice. `--action play` does not change the registry. Listing, saving, ignoring, and resetting need no synthesis model. Playback still requires an existing saved character voice and the configured synthesis engine; entering review alone generates no audio.
 
-Arpabet makes pronunciation explicit, but listening still determines whether the model produces the intended sound. Syntax checks and transcript matching cannot certify pronunciation, and a generated name suggestion does not establish the author's intended reading. Recording-to-phoneme import is not implemented by this workflow.
+The former `discover` action is retired. Add or change a word explicitly with `--word` instead of running a scan.
 
-Ordinary capitalization variants such as `quiet`/`Quiet` share one review entry, one preparation pass, and one correction for every complete occurrence. This also applies to existing books when the menu is reopened; no rediscovery or reanalysis is needed. `--word` accepts either observed spelling. Similar names, possessives, and different spelling remain separate. Conservative exceptions keep known pronunciation-changing capitonyms (such as `Polish`/`polish`) and short initialisms (such as `US`/`us`) apart; this is not contextual word-sense analysis. Conflicting saved explicit choices or audition drafts remain visible until an explicit new choice resolves the family. Existing exact preview identities and playback receipts are preserved, never relabeled.
+### Listening review
 
-A correction can be added for a source word that discovery missed. Choices live in the book's `pronunciations.json`; the global TOML stays generic. Saved continuation links are searched from the current book backward, with the nearest explicit correction or keep-default decision taking precedence across ordinary capitalization variants. Pending candidates never override an ancestor's confirmed choice. Set, keep-default, and reset affect the capitalization family in the current book. Ancestor books and voice references are never modified.
+`audiobook-render pronunciations BOOK` opens the saved-entry listening queue. It does not prepare proposals, estimates, or previews before the menu. `S [N]` starts listening at entry N (default: the saved resume position or first queued word), `L` lists entries, `O <all|N|N-M>` marks entries for re-listening, a bare number plays that entry's excerpt, and `Q` quits. `B` plays the default, `E` edits a literal respelling, `P` edits CMU directly, `C` confirms the played draft, `I` keeps the default, and `R` resets a local override.
 
-Confirmed pronunciations apply automatically in both legacy and expressive rendering; no new performance plan or full analysis is required. The renderer maps the source word through approved spelling edits, then adds structured pronunciation controls only to affected speech. Canonical text and synchronization coordinates stay unchanged. Each render snapshots its effective choices so edits made while it runs take effect on the next invocation, including during paragraph recovery. Rerun `render` to generate affected passages and rebuild their chapters; unchanged effective speech remains reusable. `assemble` cannot change a word already recorded. Ambiguous multiword spelling edits and conflicting explicit pronunciation controls stop with an actionable error. Backends that do not support structured performance fail explicitly rather than dropping the correction.
+The queue speaks each queued word's current manual choice or default in isolation, twice, with interruptible gaps. An uninterrupted pair accepts that choice against the exact hash-bound playback receipt; a heard default is recorded as keep-default. Failed or interrupted playback never accepts. Queue progress and drafts survive quitting, but drafts affect rendering only after confirmation. Auto-acceptance requires an interactive terminal.
+
+A saved legacy machine proposal remains readable and can be auditioned explicitly, but the ordinary queue skips it rather than auto-playing or accepting it. Select its entry explicitly with `S N`, or use numbered playback followed by `C`, to accept that exact saved proposal. No replacement proposal is generated.
+
+### Existing scoped annotations and legacy choices
+
+Books with saved `name-script.json` annotations retain entity-scoped review. Use `--class name --name-id N1` for one named entity or `--class special` for ordinary occurrences. Scoped commands read the stored annotations only; if required annotations are absent, they fail clearly instead of generating them or widening a rule. `--name-id` requires `--class name`.
+
+```sh
+audiobook-render pronunciations BOOK --class name --name-id N1 \
+  --action set --word Ally --phonemes "AE1 L IY0"
+audiobook-render pronunciations BOOK --class special \
+  --action set --word zorb --say-as zawrb
+
+# Explicitly migrate an existing confirmed/ignored legacy choice.
+audiobook-render pronunciations BOOK --action migrate --word Ally \
+  --class name --name-id N1
+```
+
+Name rules apply only to occurrences marked with that entity; Special rules exclude marked or unresolved names. Drafts, previews, receipts, and queue state remain scope-isolated. Migration leaves `pronunciations.json` byte-identical and saves scoped intent in `scoped-pronunciations.json`; resetting it does not revive an unsafe global rule. Existing scoped reads and rendering do not require name-script generation.
+
+### Saved-choice behavior
+
+Default review rows retain the existing offline dictionary filter for legacy pending candidates. Cast names, explicit drafts or decisions, conflicts, and `--word` selections remain reviewable; filtering never deletes registry records. Descriptions show only the actual default, literal respelling, or supplied CMU sequence—never a newly estimated pronunciation.
+
+Explicit previews are cached lossless listening aids, not accepted audiobook clips or voice references. Confirmation requires a played preview for the current choice and saved voice. Excerpt correction previews omit only analyzer spelling edits overlapping the target word on a row copy; canonical rows and production ambiguity guards stay unchanged.
+
+Ordinary capitalization variants share review and confirmed runtime choices, with conservative capitonym/initialism exceptions. Existing exact preview identities and playback receipts are preserved. Choices live in the book's `pronunciations.json` or scoped sidecar and inherit through continuation links, nearest explicit decision first. Pending candidates and proposals never override an ancestor's confirmed choice.
+
+Confirmed pronunciations apply in legacy and expressive rendering without reanalysis. Only affected speech needs regeneration on the next `render`; unchanged effective speech remains reusable, and already assembled audio is not rewritten. Backends that do not support structured pronunciation controls fail explicitly.
 
 This experimental mode keeps the existing paragraph and speaker boundaries. It supports the documented paired delivery controls, scoped freeform styles, CMU Arpabet, inline vocalizations, and approximate pauses through the Drama 3 adapters. Standalone sound effects, language switching, audio infilling, and history-conditioned continuation are not implemented. Spoken-word checks remain active; an inline laugh or sigh is not yet acoustically certified. Explicit pauses are allowed through silence checks only when their measured position and duration match the requested ASR word boundary.
 
@@ -1159,7 +1116,7 @@ For directed Drama 3 speech, `plain_delivery` lets the model remove an acting in
 
 Recovery and pronunciation-review requests start with up to 8,192 output tokens, including any model reasoning. A truncated response retries the same decision with up to 32,768 tokens, then the configured `provider.max_output_tokens` ceiling, for at most three requests. A smaller configured ceiling is always respected; the default ceiling when unset is 32,768. These retries do not generate audio or repeat already completed sound votes. Progress messages show the increased budget. If the ceiling is still exhausted, the error identifies the output limit and leaves the candidate saved for resume.
 
-Visibly stretched spellings such as `Wheerrre issss sheeee?` can reach sound review against `Where is she?`, including stretched function words and negation (`Noooo` / `No`). This eligibility requires the same letters and words in order, with at least one run of three repeated letters in each changed source word; it does not automatically accept audio. Recovery can instead request the ordinary spelling for the next take and verify the complete reviewed wording. Dropping `is` or `she`, changing a pronoun, or replacing `Noooo` with `Yes` remains invalid. For proactive preparation with separate delivery instructions, rerun `epub-audiobook analyze BOOK_DIRECTORY`; this preserves the original book text and adds reviewed spoken spellings and acting directions.
+Visibly stretched spellings such as `Wheerrre issss sheeee?` can reach sound review against `Where is she?`, including stretched function words and negation (`Noooo` / `No`). This eligibility requires the same letters and words in order, with at least one run of three repeated letters in each changed source word; it does not automatically accept audio. Recovery can instead request the ordinary spelling for the next take and verify the complete reviewed wording. Dropping `is` or `she`, changing a pronoun, or replacing `Noooo` with `Yes` remains invalid. The separate whole-book spelling-preparation stage is retired; targeted edits may accompany initial attribution, and explicit manual overrides remain available afterward.
 
 Incomplete hyphenated stutters also reach sound review: `B-but Mother` may be recognized as `But Mother`, or respelled as `Buh-but Mother` for synthesis. The complete final word and all other words must remain intact. This exception does not accept `Mother` (missing `but`) or `But but Mother` (an extra complete `but`), and the sound reviewers must still agree before a candidate or respelling is approved.
 

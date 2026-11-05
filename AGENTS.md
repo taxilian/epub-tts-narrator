@@ -36,16 +36,18 @@ epub-tts-narrator/
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add/change analysis behavior | `epub_tts_narrator/pipeline.py` (1323 ln) | `analyze` entry; segmentation, cast/evidence checks, LLM alignment |
+| Add/change analysis behavior | `epub_tts_narrator/pipeline.py` | `analyze` entry; segmentation, cast/evidence checks, LLM alignment |
+| Automatic book-scaled casting | `casting_workflow.py`, `casting_discovery.py`, `casting_coverage.py`, `casting_voices.py`, `adaptive_requests.py`, `cast_scope.py` | Independent source candidates, unanimous identity resolution, source-anchored coverage repair; bounds derive from source, never operator partition quotas |
+| Compact expressive attribution | `attribution_compact.py`, `attribution_performance.py`, `inline_performance.py` | Full-member compact cast, source-anchor reconstruction, sparse reviewed spoken edits and mid-segment controls; source-bound projection through later attribution changes |
 | EPUB ingestion | `epub_tts_narrator/epub.py` | `extract_epub` (45 callers); spine order, safety limits |
 | Original EPUB location | `epub_tts_narrator/source_epub.py` | Book-bound local `source-epub.json`; separate from source fingerprints; final publication rechecks EPUB bytes |
 | Bundle/script schema | `epub_tts_narrator/contracts.py` + `FORMAT.md` | Runtime-validated, not dataclasses/pydantic |
 | Expressive performance planning | `performance_plan.py`, `performance_planning.py`, `performance_planning_prompts.py` | Optional source/script/cast-bound sidecar; exact spans, independent remove-only review, resumable batches |
-| Pronunciation discovery and inheritance | `pronunciations.py`, `pronunciation_groups.py`, `pronunciation_dictionary.py`, `pronunciation_discovery.py`, `pronunciation_proposals.py`, `pronunciation_workflow.py` | Offline bundled CMUdict filters automatic known words but exempts cast names; all readings inform pending CMU guesses; capitalization families preserve exact IDs and explicit choices; CLI backfill without reanalysis |
-| Compact name script and scoped rules | `name_script*.py`, `scoped_pronunciations.py`, `renderer/name_pronunciation_runtime.py`, `renderer/pronunciation_scope*.py` | Analyze/discover automatically start missing name identification and resume pending/stale work; explicit `prepare-name-script` remains; compact N# wrappers, entity/alias Name versus ordinary Special rules, safe legacy migration |
+| Optional pronunciation choices | `pronunciations.py`, `pronunciation_groups.py`, `renderer/pronunciation_review.py` | Explicit manual overrides and inheritance; no automatic discovery, CMU suggestions, or spelling cleanup |
+| Legacy name annotations and scoped rules | `name_script*.py`, `scoped_pronunciations.py`, `renderer/name_pronunciation_runtime.py`, `renderer/pronunciation_scope*.py` | Persisted scoped choices remain readable; analysis never generates or refreshes annotations; later per-word JEV workflow is deferred |
 | Pronunciation listening queue | `epub_tts_narrator/renderer/pronunciation_review_queue.py` (flow/presentation), `renderer/pronunciation_review_state.py` (review-state sidecar), `renderer/terminal.py` (`play_sample` completion vs interruption + failure, `wait_key`) | Count-only queue, isolated-word pairs with interruptible gaps, receipt-bound auto-accept, last-five window with indices, sidecar-only reopen (registry byte-identical); accepted flags bound to effective choice/draft |
 | Character identity across a series | `epub_tts_narrator/identity.py`, `series.py` | Name resemblance triggers review, never establishes identity |
-| Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass on the resolved cast before attribution; contrast audit is advisory text analysis, never acoustic proof |
+| Whole-cast voice design / contrast | `epub_tts_narrator/voice_ensemble.py`, `voice_contrast.py` | One ensemble pass before attribution; oversized requests losslessly group contrast pairs without trimming cast/evidence; contrast is advisory text analysis, never acoustic proof |
 | Voice profile/prompt refresh | `epub_tts_narrator/voice_prompt_refresh.py` | Casting-description refresh; sends a complete `known_cast` snapshot |
 | LLM transport | `epub_tts_narrator/provider.py` | `OpenAICompatibleClient`; keys from TOML file only |
 | Render orchestration | `epub_tts_narrator/renderer/workflow.py` (2317 ln) | Resumable, checkpointed, quality-gated |
@@ -80,8 +82,10 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 - **Every non-fast command must be resumable.** Persist pending/invalid state before expensive work, checkpoint completed units durably, and resume them on rerun. Do not present stale outputs as valid after a failed refresh. Fast read-only commands need no progress journal. Interactive speaker decisions are journaled to `<cache>/speaker-decisions/` after each choice and replayed on rerun; the journal is pending state, never a substitute for published output. `analyze` creates the output directory's `.analysis-pending/` workspace before the first model request and checkpoints the document after each stage via `analysis_progress.py`; a rerun of a pending directory resumes from the latest completed stage, and publish removes the pending state with the manifest linked last so the directory is never a completed bundle mid-run.
 
 - **Stdlib-only core is an architecture constraint.** `dependencies = []`; no third-party imports in `epub_tts_narrator/` outside optional-extras paths (`verification`, `remote`, `chapter-server`, `cuda-verification`). Renderer ML deps live in root `*.requirements.txt`, NOT pyproject.
+- **Fresh casting is automatic and source-bounded.** Do not restore a whole-book/tiny-batch mode switch, fixed partition ceiling, or unconditional reconciliation rounds. Independent candidates retain source evidence; names only nominate identity review. Exact capacity signals subdivide work; unrelated provider failures do not. Coverage repair stops on repeated findings or no progress, never by silently dropping source/cast evidence.
+- **Candidate collisions must not create quadratic juries.** Adaptive matching uses disjoint waves, preserves negative lineage constraints, and requires three blind source-based approvals per case even when requests batch cases. Retiring uncertain pairs is not proof of distinctness or exhaustive identity certification.
 - **Lazy heavy imports.** ML/HTTP imports (mlx, fastapi, msgpack, websockets) are function-local. New heavy deps go inside functions, never module top level.
-- **unittest, not pytest.** No pytest config, no conftest.py, no markers. Run: `python3.11 -m unittest discover -s tests -q`.
+- **unittest, not pytest.** No pytest config, no conftest.py, no markers. Run: `python3.11 -m unittest discover -s tests -q`. During TDD, run only the tests relevant to the behavior being changed while iterating; save the full suite for the final verification stage to catch side effects.
 - **No formatter/linter/type-checker configured.** Long lines (up to ~700 chars) are intentional — mostly descriptive validation error messages. Do not "fix" them or add black/ruff config.
 - **Partial PEP 604 typing** (`str | Path | None`) where present; parameters often duck-typed. Validation is runtime `ValueError` with field-identifying messages, not static types.
 - **Credentials live in gitignored TOML, never env vars.** `epub-tts-narrator.example.toml` is the tracked template; real config (`epub-tts-narrator.toml`) is gitignored.
@@ -97,13 +101,13 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 - **Never silently bypass acceptance policy.** Ordinary verification remains the default. Exhausted speech may use the explicitly authorized, audited `llm_exhaustion_selection` policy: retain the original failed report and never claim it passed verbatim verification or re-veto a valid chooser selection with the same lexical rules. Corrupt/empty/silent audio remains unusable. Final M4B is never built by re-encoding lossy chapter files.
 - **Never delete lock/lease artifacts.** `.lease` files and ownership records are inspected, not deleted (`run_locks`); only empty legacy locks get `rmdir`.
 - **Never add global `[voices.aliases]`** — rejected; mappings belong in the book's `voice-aliases.json`.
-- **Pronunciation guesses never change synthesis.** Directory analysis seeds observed cast-name words, scans proper names/other uncertain words, and saves pending CMU name/place proposals after publishing the bundle. Discovery and proposal failures resume through cached requests and per-word checkpoints. Confirmed/ignored choices live in `pronunciations.json`, not global configuration or canonical analysis. Effective lookup groups ordinary capitalization variants while preserving exact stored IDs/evidence, known capitonyms, short initialisms, and conflicting explicit choices; never fuzzy-match spellings. Pending descendants never shadow explicit ancestor decisions.
-- `pronunciation_dictionary.py` loads hash-pinned CMUdict data through stdlib resources; `data/CMUDICT-PROVENANCE.md` and `CMUDICT-LICENSE` own its source/license. Ship all three package-data files. Hide only automatic pending dictionary hits, never cast-name exceptions, drafts, conflicts or explicit choices. Manual `review_requested` survives family grouping/checkpointing. Dictionary variants and respelling precedence guide proposals, never auto-approval. Changing pronunciation prompt policy must not bump the global analysis prompt version.
-- Compact name annotations live only in `name-script.json`; validate exact escaped-source roundtrip and derive canonical offsets before applying scoped rules. Never insert wrappers into canonical text or TTS. Numeric IDs map to character identity, not speaker/voice. Name and Special choices live in source-bound `scoped-pronunciations.json`; preserve scope in grouping, drafts, receipts, inheritance and snapshots. Unresolved affected mentions and unmigrated global collisions block overrides. Migrations preserve legacy case-family boundaries and nearest-book precedence; reset never revives a migrated global rule. No LLM calls during synthesis and no global analysis prompt-version bump.
+- **General pronunciation work is optional and separate from analysis.** No independent whole-book spelling scan, candidate discovery, CMU suggestion, or name-annotation preparation runs during `analyze`. `discover-pronunciations` and `prepare-name-script` stay retired. Initial attribution may propose sparse, source-bound stylized-spelling edits and scoped performance controls with focused review. Preserve saved edits and confirmed/ignored overrides on published-book resume; never broaden scoped rules or trigger implicit manual-edit suggestions. Whole-cast ensemble design remains automatic.
+- Existing pronunciation registries retain exact IDs/evidence, capitalization-family safeguards, nearest-book precedence, and confirmed-only application. Legacy dictionaries and name/scoped readers remain for persisted data and explicit library callers; no new automatic preparation entry points. Missing/stale/unresolved name evidence blocks dependent overrides instead of guessing. Never put name wrappers in canonical text or TTS.
 - **Never create both `epub-audiobook.toml` and `epub-tts-narrator.toml`** — they do not merge; the new filename wins silently.
 - **Never fill unassigned speech with a fallback narrator** — explicit speaker choice required before generation.
 - **Never run network/model calls in tests** — FakeClient / build_opener patching / skipUnless gating (see tests/AGENTS.md).
 - **Speech edits must be ordered, nonoverlapping exact source substrings** and must not delete lexical words (`speech_normalization.py`, `spoken_text.py`).
+- `spoken_text.effective_delivery` composes exact same-segment simple angle-bracket source references as parentheses without rewriting saved text/direction; unbound/model-control tags still fail. Individual edit directions stay bounded at 240 characters, combined delivery at 1200; length errors must identify the limit.
 - **No symlinks in bundle inputs**; chapter cache dirs must not be symlinks.
 
 ## COMMANDS
@@ -112,16 +116,16 @@ Python LSP unavailable; centrality from `.codegraph` (source fan-in) + codegraph
 # Setup: analyzer (any Python ≥3.11, zero deps)
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[chapter-server]"
 
-# Setup: test environment (analyzer extras + renderer verification stack)
-.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile
-
 # Setup: renderer (Python 3.12 via uv, Apple Silicon MLX stack + vendored drama3)
 uv venv --python 3.12 .venv-renderer
 uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
 
-# Test (offline, full suite; needs extras venv from setup above + packaging, soundfile)
-.venv/bin/python -m unittest discover -s tests -q
+# Setup/update: complete test environment (includes renderer runtime and all test extras)
+uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
+
+# Test (offline, full suite; zero skips expected on the supported renderer environment)
+.venv-renderer/bin/python -m unittest discover -s tests -q
 
 # Run
 python3.11 -m epub_tts_narrator analyze BOOK.epub        # or: epub-tts-narrator ...
@@ -139,6 +143,7 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 ## NOTES
 
 - **Two environments:** analyzer venv (3.11+) and renderer venv (3.12, uv) are separate by design.
+- **Full test environment:** install/update `test.requirements.txt` with `uv pip --python .venv-renderer/bin/python`; missing test dependencies are failures, not acceptable skips. Fixtures must be tracked or constructed by each test, never depend on saved runs.
 - **External tools:** FFmpeg + FFprobe required for rendering; paths configured in TOML.
 - **No CI, no Makefile.** Docs + unittest suite are the only verification; run tests before handing off.
 - **`renderer/common.py` is 51 lines but imported by 33 files** — changes here touch everything.
@@ -146,8 +151,7 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 - **Run dirs are gitignored and contain full book text** (`runs/`, `dist-runs/`, `*.audiobook/`) — never commit them.
 - **`deploy/runpod/install.sh` asserts Linux/x86_64 root** — never run it on macOS.
 - Renderer subsystems: see `epub_tts_narrator/renderer/AGENTS.md`, `tests/AGENTS.md`, `vendor/drama3-mlx/AGENTS.md`.
-- `speech_scan_recovery.py` subdivides output-truncated spelling scans at whole-segment boundaries (two levels); separate cache hints select children, never accepted edits. Jury requests do not split.
-- `speech_prompts.py` owns compact v2 spelling requests; `speech_prompts_v1.py` owns the frozen v1 prompts, kept byte-exact for validated cache lookup and completed-stage fingerprints. Exact context reconstruction and all three blind reviews remain required.
+- Legacy spelling helpers and frozen prompts remain usable explicitly; do not restore them as whole-book analysis stages. Keep historical `speech-normalized-*` checkpoint labels inert. Compact attribution uses its own prompt/cache identity, never a global analysis prompt-version bump. The published `performance` field remains bracket-only; inline `performance_controls` binds approved spoken text and never stores wire anchors or pending verdicts.
 - LLM prompts live in per-domain modules: `prompts.py` (shared contracts, discovery/reconciliation guidance), `identity_prompts.py`, `attribution_review_prompts.py`, `speaker_completion_prompts.py`, `audition_prompts.py`, `voice_refresh_prompts.py`, `voice_ensemble_prompts.py`, `jev_prompts.py`, and `renderer/verification_prompts.py`. Prompt bytes are cache/policy identity; changes must be intentional.
 - `speech_word_review.py` separates ordered word coverage from spelling heuristics. Unfamiliar aligned pairs require explicit contextual jury evidence; only proposal/provenance metadata changes, never the six-field applied edit schema.
 - `speech_traits.py` validates optional voice-profile `speechTraits`; analysis proposes mood-independent, explicit-accent performance traits separately from creation descriptions. Renderer binding/composition lives in `renderer/speech_traits.py`; absent fields retain legacy conditioning.

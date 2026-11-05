@@ -15,10 +15,12 @@ Bare helper imports work because unittest discover puts `tests/` on `sys.path`.
 The real EPUB fixture is `examples/last-lantern/the-last-lantern.epub`.
 Performance tests fake only planning, synthesis, and ASR boundaries; the comparison integration uses real snapshots, frozen voice stores, verification, FFmpeg assembly, timing exports, and resume. Synthetic audiobook fixtures without an EPUB explicitly set `render.require_cover=False`; production cover policy stays enabled.
 Censorship tests keep whole-word source matching, mask validation, PCM fades, per-lane mixing, frame timing, and cache logic real. Fake only Whisper's alignment/model boundary. Cover repeated/ambiguous words, approved source respellings, missing/unsafe timestamps, streaming PCM equality, unchanged originals, and disabled-policy cache compatibility; never synthesize audio to repair alignment in tests or production.
-Pronunciation tests keep registry inheritance, source evidence, request caching, CLI publication/resume, chunk projection, and preview compression real. Replace only LLM/TTS/playback boundaries. Prove proactive cast-name coverage, independently resumable CMU proposals, exact audition-to-approval binding, confirmed-only application, late parent decisions, exact-name separation, one affected take regenerated, unchanged cache reuse, and source/voice preservation. Syntax validation and synthetic test audio do not prove a live model's pronunciation quality.
+Pronunciation tests keep registry inheritance, source evidence, CLI publication/resume, chunk projection, and preview compression real. Analysis must not restore independent spelling scans, pronunciation discovery, CMU suggestions, or name-classification sidecars. Compact attribution may produce sparse reviewed spoken edits and scoped controls; completed-book resume preserves saved data without preparing new edits. Manual pronunciation UI must not require an LLM or generate suggestions. Legacy helper tests still cover cached proposals and exact audition-to-approval binding; synthetic audio does not prove live pronunciation quality.
+Compact attribution tests cover complete ordered unit coverage, unique source anchors, full cast membership without repeated voice profiles, legacy cache reuse, sparse edit review, rejection dependencies, markup protection, and immutable source. Inline performance tests must drive midstream whisper/emotion spans and vocalizations through chunk/paragraph planning and synthesis compilation, including source resegmentation and exact-once boundary events. Fixtures prove mechanics, not audible performance quality or semantic model accuracy.
+Adaptive casting tests force input/output capacity failures across more than eight leaves, preserve exact source and complete candidate records, reject generic-error subdivision, and retain three-reviewer identity approval. Coverage tests bind findings to exact source anchors and stop repeat/no-progress repairs. Work bounds derive from source size, never fixed book quotas; fake runs prove mechanics, not perfect semantic casting.
 Continuity tests (`test_renderer_continuity*.py`) use real adapters, cache/acceptance records, codec artifacts, FFmpeg composition, cleanup and chapter scheduling with fake model/ASR boundaries. Prove fixed references, first/latest accepted context, rejection/interruption resume, dependent invalidation, barriers, artifact corruption, off-mode compatibility and independent chapter overlap. Synthetic tones prove mechanics, never acoustic voice consistency.
 Casting menu tests cover width-aware full labels, shared-reference edits, duplicate mappings, and the third edit field through real PTY line input. Casting trait tests keep per-book persistence, recursive inheritance, failed-edit rollback, render snapshots, and cache-bound conditioning real; no TTS or model calls are needed for editing.
-Pronunciation review startup prepares every pending word kind plus both preview formats before the first menu prompt. Tests must preserve default/confirmed decisions and prove generated previews are not heard/approved; display-only CMU estimates cannot affect the selected pronunciation or audio identity.
+Pronunciation review startup must not prepare pending guesses or display-only CMU estimates. Explicitly requested previews never count as heard/approved until actual playback and confirmation.
 Dictionary tests use the complete pinned packaged lexicon, alternate readings, license/hash checks and real registry/family behavior. Cover ordinary-word filtering, cast-name exceptions, manual/draft/conflict preservation, legacy pending visibility, inherited intent and proposal cache evidence. Fake only the model boundary; assert machine-consumed payloads/behavior, not linguistic prompt prose. Wheel resource QA must run without the editable checkout or optional dependencies on its import path.
 Capitalization tests preserve exact on-disk IDs and evidence while grouping ordinary source variants in review and rendering. Cover conflicting legacy choices/drafts, conservative capitonym/initialism guards, late ancestor choices with different current spelling, variant-aware queue resume/reopen, and unchanged source/cache identities. Never relabel an old audio receipt as a different exact preview.
 `name_script_fixtures.py` builds series-linked source-bound books and provides a deterministic external classification client. Name/scoped tests cover compact grammar/escaping/Unicode, exhaustive two-pass decisions, unresolved/manual resolution, resume, stable numeric identities, scope-isolated receipts/drafts/queue and actual render/cache reuse. Include same-sentence name/ordinary homographs, shared aliases, Special defaults, owner validation, ancestor migration rank and legacy capitonym/initialism boundaries. Keep canonical files/references byte-identical and validate existing remote controls; fixture speech does not establish live referent or acoustic accuracy.
@@ -31,6 +33,7 @@ Use `subTest` for malformed input matrices and related case tables.
 Use `tempfile.TemporaryDirectory` with cleanup for filesystem tests.
 For started patches, register cleanup: `self.addCleanup(patch.stopall)` or per-patch `self.addCleanup(patcher.stop)` — both are house style.
 Keep tests deterministic, offline, and independent of execution order.
+Never depend on prior analysis/render output under `runs/`, `dist-runs/`, or another developer-local directory. Construct temporary bundles from tracked fixtures or test-owned data and exercise the real exporter/loader.
 Cover failure and resume paths, including files named `test_*_resume.py`, `test_*_retry.py`, and `test_*_recovery.py`.
 
 # FAKING PATTERNS
@@ -61,13 +64,13 @@ Diagnostics redaction is covered by the `DO NOT ECHO` fixtures in `test_cast_evi
 5. Run the focused test, then the relevant subset or full suite before handoff.
 
 # COMMANDS
-The suite needs the optional extras installed: verification tests use `metaphone`, plus `packaging` and `soundfile`; server tests use the chapter-server stack. On a bare interpreter ~1000 tests error instead of skipping. Setup:
+The full suite runs in `.venv-renderer` with all dependencies declared in `test.requirements.txt`, including the real `boto3` client and `faster-whisper` audio decoder. Missing dependencies must be installed, not hidden by skips. No model downloads or cloud credentials are needed. Setup/update:
 ```sh
-python3.11 -m venv .venv
-.venv/bin/pip install -e ".[chapter-server,verification,remote]" packaging soundfile httpx
+uv venv --python 3.12 .venv-renderer  # first setup only
+uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
 ```
-Full suite: `.venv/bin/python -m unittest discover -s tests -q`
-Single file: `.venv/bin/python -m unittest discover -s tests -p "test_epub.py" -q`
-Renderer subset: `.venv/bin/python -m unittest discover -s tests -p "test_renderer_*.py" -q`
+Full suite: `.venv-renderer/bin/python -m unittest discover -s tests -q` (zero skips expected on the supported environment).
+Single file: `.venv-renderer/bin/python -m unittest discover -s tests -p "test_epub.py" -q`
+Renderer subset: `.venv-renderer/bin/python -m unittest discover -s tests -p "test_renderer_*.py" -q`
 
 Always run through discover with `-s tests`: bare helper imports (`from test_contracts import ...`) only resolve that way; `python -m unittest tests.test_epub` fails on files with cross-imports.
