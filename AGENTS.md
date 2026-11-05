@@ -56,7 +56,7 @@ epub-tts-narrator/
 | Accepted chunk continuity | `renderer/continuity.py`, `renderer/continuity_codes.py`, `renderer/workflow.py` | Opt-in `render.continuity="chapter"`; fixed clone references, per-voice first/latest accepted codes, source-order replay; local vendored runtime only; pipeline chapters remain parallel |
 | Scheduling diagnostics | `renderer/render_schedule_status.py`, `renderer/chapter_jobs.py:scheduling_status`, `renderer/runpod_progress.py` | Passive read-only numeric snapshots (mode/basis, logical gauges, backlog with monotonic peaks, per-stage queued/active); observing never initializes resources or mutates state |
 | Output verification | `epub_tts_narrator/renderer/quality.py` (1139 ln) | Fail-closed acceptance gates |
-| Casting workflow | `epub_tts_narrator/renderer/casting.py` | `CastingSession` god-class (~37 methods, 20+ callers) |
+| Casting workflow | `epub_tts_narrator/renderer/casting.py`, `renderer/casting_batch.py` | `CastingSession` owns choices; Gemini bulk jobs use isolated workers under one series lease with model-affine verification |
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |
 | Deployment | `deploy/runpod/README.md`, `renderer/runpod.py` | Pinned inference contract; do not improvise versions |
 | Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one); `scripts/benchmark_chapter_pipeline.py` (prepare/run chapter-pipeline A/B with telemetry) | Standalone; live-model runs need `--config`; fake runs are permanently ineligible |

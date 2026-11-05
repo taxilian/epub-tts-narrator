@@ -342,21 +342,16 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
         missing = sum(not row["candidates"] for row in pending)
         if pending:
             say(f"Preparing voices: {len(pending) - missing} saved, {missing} to generate.")
-        generated = 0
-        for row in pending:
-            if not row["candidates"]:
-                generated += 1
-                say(f"[{generated}/{missing}] Generating {_label(row)}…")
+        if pending:
             try:
-                session.ensure_ready(row["voice_id"])
-            except ModelSetupError as exc:
+                prepared = session.ensure_ready_many([row["voice_id"] for row in pending])
+            except (ModelSetupError, VerificationUnavailable) as exc:
                 say(f"Voice preparation paused: {exc}")
-                break
-            except VerificationUnavailable as exc:
-                say(f"Voice preparation paused: {exc}")
-                break
-            except (ValueError, RuntimeError, OSError) as exc:
-                say(f"Could not prepare {_label(row)}: {exc}")
+            else:
+                by_id = {row["voice_id"]: row for row in pending}
+                for result in prepared:
+                    if result["error"] is not None:
+                        say(f"Could not prepare {_label(by_id[result['voice_id']])}: {result['error']}")
         _prepare_playback_samples(player, session.rows(), say)
         while True:
             rows = session.rows()
@@ -567,27 +562,20 @@ def casting_command(args, bundle, config):
                 print("No voices to regenerate.")
                 return 0
             _warn_regenerate_all(rows, book_local=getattr(session, "config", config).get("_book_local_voices", False))
-            session.begin_regeneration([row["voice_id"] for row in rows])
-            seen, failed = set(), []
-            for row in rows:
-                canonical = row.get("canonical_voice_id", row["voice_id"])
-                if canonical in seen:
-                    continue
-                seen.add(canonical)
-                print(f"Regenerating {display(_label(row))}…")
-                try:
-                    session.regenerate(row["voice_id"])
-                except VerificationUnavailable:
-                    raise
-                except (ValueError, RuntimeError, OSError) as exc:
-                    failed.append(display(_label(row)))
-                    print(f"Could not regenerate {display(_label(row))}: {display(exc)}")
+            results = session.regenerate_many([row["voice_id"] for row in rows])
+            by_id = {row["voice_id"]: row for row in rows}
+            failed = []
+            for result in results:
+                if result["error"] is not None:
+                    label = display(_label(by_id[result["voice_id"]]))
+                    failed.append(label)
+                    print(f"Could not regenerate {label}: {display(result['error'])}")
             if failed:
                 raise ValueError(
                     f"{len(failed)} voices failed regeneration and have no active voice: {', '.join(failed)}. "
                     "Open casting and use G, GG, or G11 to retry them."
                 )
-            print(f"Regenerated {len(seen)} shared character voices.")
+            print(f"Regenerated {len(results)} shared character voices.")
         elif action == "edit":
             print("Casting edits saved. Vocal traits apply to the next render; "
                   "the voice description and script apply to the next generation.")

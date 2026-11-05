@@ -160,10 +160,10 @@ class ModelSetupIntegrationTests(unittest.TestCase):
         session, player = Mock(), Mock()
         row = {"voice_id": "v1", "selected": None, "candidates": [], "label": "Mara"}
         session.rows.return_value = [row, {**row, "voice_id": "v2", "label": "Lena"}]
-        session.ensure_ready.side_effect = ModelSetupError("Download declined")
+        session.ensure_ready_many.side_effect = ModelSetupError("Download declined")
         lines = []
         run_casting(session, player, input_fn=lambda _: "q", output=lines.append)
-        session.ensure_ready.assert_called_once_with("v1")
+        session.ensure_ready_many.assert_called_once_with(["v1", "v2"])
         self.assertTrue(any("Voice preparation paused: Download declined" in line for line in lines))
         self.assertTrue(any("Voice casting — 0/2 ready" in line for line in lines))
 

@@ -16,6 +16,8 @@ from epub_tts_narrator.renderer.audition import AudioPlayer, _cell_width, _menu_
 from epub_tts_narrator.renderer.cli import main
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.diagnostics import safe_error_text
+from epub_tts_narrator.renderer.model_setup import ModelSetupError
+from epub_tts_narrator.renderer.workflow import VerificationUnavailable
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.cli import export_bundle
 from test_contracts import valid_document
@@ -118,7 +120,32 @@ class SessionDouble:
 
     def generate_missing(self):
         return [self.ensure_ready(row["voice_id"]) for row in self.data
-                if row["selected"] is None]
+                 if row["selected"] is None]
+
+    def _many(self, voice_ids, *, regenerate=False):
+        representatives = {}
+        for voice_id in voice_ids:
+            representatives.setdefault(self.canonical(voice_id), voice_id)
+        if regenerate:
+            self.begin_regeneration(voice_ids)
+        results = []
+        for canonical, voice_id in representatives.items():
+            selected, error = None, None
+            try:
+                selected = self.regenerate(voice_id) if regenerate else self.ensure_ready(voice_id)
+            except (ModelSetupError, VerificationUnavailable):
+                raise
+            except (ValueError, RuntimeError, OSError) as exc:
+                error = exc
+            results.append({"voice_id": voice_id, "canonical_voice_id": canonical,
+                            "selected": selected, "error": error})
+        return results
+
+    def ensure_ready_many(self, voice_ids):
+        return self._many(voice_ids)
+
+    def regenerate_many(self, voice_ids):
+        return self._many(voice_ids, regenerate=True)
 
 
 class SharedSessionDouble(SessionDouble):

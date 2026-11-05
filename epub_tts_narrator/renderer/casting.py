@@ -66,7 +66,7 @@ class CastingSession:
     """Series-scoped casting operations shared by CLI and terminal UI."""
 
     def __init__(self, bundle, config, *, engine_factory=None, verifier_factory=None,
-                 designer_factory=None, model_setup_factory=None, notify=print):
+                 designer_factory=None, model_setup_factory=None, notify=print, batch_lease=None):
         from .book_context import resolve_book_config, voice_store
         config = resolve_book_config(bundle, config)
         self.bundle = deepcopy(bundle)
@@ -84,6 +84,7 @@ class CastingSession:
         self._designer = None
         self._samples = {}
         self._cleanup_attempted = set()
+        self._batch_lease = batch_lease
         self._closed = False
         self._profiles = {voice["id"]: deepcopy(voice) for voice in bundle["cast"]["voices"]}
         if len(self._profiles) != len(bundle["cast"]["voices"]):
@@ -135,6 +136,10 @@ class CastingSession:
 
     @contextmanager
     def _locked(self):
+        if self._batch_lease is not None:
+            self._batch_lease.require_active()
+            yield
+            return
         self._validate_paths()
         lock = self.store.lock()
         try:
@@ -530,7 +535,8 @@ class CastingSession:
         """Save a verified candidate without changing the active selection."""
         self._profile(voice_id)
         with self._locked():
-            self._retry_gemini_cleanup(voice_id)
+            if self._batch_lease is None:
+                self._retry_gemini_cleanup(voice_id)
             return self._generate_locked(voice_id)
 
     def _release_gemini_voice(self, designer, directory, request, *, preserve_error=False):
@@ -1076,7 +1082,8 @@ class CastingSession:
         """
         self._profile(voice_id)
         with self._locked():
-            self._retry_gemini_cleanup(voice_id)
+            if self._batch_lease is None:
+                self._retry_gemini_cleanup(voice_id)
             selected = self.store.load(voice_id)
             if selected is not None:
                 return selected
@@ -1114,25 +1121,89 @@ class CastingSession:
                 if callable(close):
                     close()
 
+    def _batch_worker(self, lease, resources):
+        return CastingSession(
+            self.bundle, self.config,
+            engine_factory=lambda _: resources.engine,
+            verifier_factory=lambda *_args, **_kwargs: resources.verifier,
+            designer_factory=self._designer_factory,
+            notify=self.notify, batch_lease=lease,
+        )
+
+    def _batch_representatives(self, voice_ids):
+        representatives = []
+        seen = set()
+        for voice_id in voice_ids:
+            self._profile(voice_id)
+            canonical = self.store.canonical_id(voice_id)
+            if canonical not in seen:
+                seen.add(canonical)
+                representatives.append({"voice_id": voice_id, "canonical_voice_id": canonical})
+        return representatives
+
+    def _serial_many(self, representatives, *, regenerate):
+        if regenerate:
+            self.begin_regeneration([row["voice_id"] for row in representatives])
+        else:
+            with self._locked():
+                self._retry_gemini_cleanup()
+        from .casting_batch import ordinary_error
+        results = []
+        for row in representatives:
+            selected, error = None, None
+            try:
+                selected = (self.regenerate(row["voice_id"]) if regenerate
+                            else self.ensure_ready(row["voice_id"]))
+            except (Exception, KeyboardInterrupt) as exc:
+                if not ordinary_error(exc):
+                    raise
+                error = exc
+            results.append({**row, "selected": selected, "error": error})
+        return results
+
+    def _many(self, voice_ids, *, regenerate):
+        voice_ids = list(voice_ids)
+        parallel = (len(voice_ids) > 1
+                    and self.config.get("voice_design", {}).get("type") == "gemini"
+                    and self.config["casting"]["gemini_concurrency"] > 1)
+        if parallel:
+            with self._locked():
+                representatives = self._batch_representatives(voice_ids)
+                from .casting_batch import run_gemini_batch
+                return run_gemini_batch(
+                    self, representatives, regenerate=regenerate, worker_factory=self._batch_worker)
+        return self._serial_many(self._batch_representatives(voice_ids), regenerate=regenerate)
+
+    def ensure_ready_many(self, voice_ids):
+        """Prepare canonical voices in input order, continuing ordinary failures."""
+        return self._many(voice_ids, regenerate=False)
+
+    def regenerate_many(self, voice_ids):
+        """Invalidate every target before generating any canonical replacement."""
+        return self._many(voice_ids, regenerate=True)
+
     def begin_regeneration(self, voice_ids):
         """Clear all bulk targets before synthesis, preserving their casting edits."""
         self.prepare_models(generation=True)
         with self._locked():
-            drafts = {}
-            for voice_id in voice_ids:
-                self._profile(voice_id)
-                canonical = self.store.canonical_id(voice_id)
-                if canonical not in drafts:
-                    draft = self._draft(voice_id, self.store.load(voice_id))
-                    _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)
-                    _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
-                    drafts[canonical] = draft
-            # Preflight every target before removing any active selection. A
-            # selected reference may be the only source of custom casting edits.
-            for canonical, draft in drafts.items():
-                self._save_draft(canonical, draft)
-            for canonical in drafts:
-                self.store.invalidate(canonical)
+            self._invalidate_regeneration_targets(voice_ids)
+
+    def _invalidate_regeneration_targets(self, voice_ids):
+        drafts = {}
+        for voice_id in voice_ids:
+            self._profile(voice_id)
+            canonical = self.store.canonical_id(voice_id)
+            if canonical not in drafts:
+                draft = self._draft(voice_id, self.store.load(voice_id))
+                _validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS)
+                _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
+                drafts[canonical] = draft
+        # Preflight every target before removing any active selection. A
+        # selected reference may be the only source of custom casting edits.
+        for canonical, draft in drafts.items():
+            self._save_draft(canonical, draft)
+        for canonical in drafts:
+            self.store.invalidate(canonical)
 
     def regenerate(self, voice_id, *, voice_designer=None):
         """Create a fresh voice and select its verified reference under one lock."""
@@ -1142,7 +1213,8 @@ class CastingSession:
         with self._using_voice_designer(voice_designer):
             self.prepare_models(generation=True)
             with self._locked():
-                self._retry_gemini_cleanup(voice_id)
+                if self._batch_lease is None:
+                    self._retry_gemini_cleanup(voice_id)
                 regeneration = self.store.regeneration_status(voice_id)
                 if regeneration and regeneration["inherited"]:
                     # A retry in a descendant owns its new state, never the parent's.
@@ -1271,16 +1343,13 @@ class CastingSession:
 
     def generate_missing(self):
         """Make each unselected voice ready, reusing saved candidates first."""
-        with self._locked():
-            self._retry_gemini_cleanup()
-        selected = []
-        seen = set()
-        for row in self.rows():
-            canonical = row["canonical_voice_id"]
-            if row["selected"] is None and canonical not in seen:
-                seen.add(canonical)
-                selected.append(self.ensure_ready(row["voice_id"]))
-        return selected
+        results = self.ensure_ready_many([
+            row["voice_id"] for row in self.rows() if row["selected"] is None])
+        for result in results:
+            error = result["error"]
+            if error is not None:
+                raise error
+        return [result["selected"] for result in results]
 
     def accept(self, voice_id, candidate_id):
         """Select a saved candidate after checking engine and verification policy."""
@@ -1358,7 +1427,9 @@ class CastingSession:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._designer, self._engine, self._verifier):
+        resources = ((self._designer,) if self._batch_lease is not None
+                     else (self._designer, self._engine, self._verifier))
+        for resource in resources:
             close = getattr(resource, "close", None)
             if callable(close):
                 close()

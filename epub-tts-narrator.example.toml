@@ -113,3 +113,8 @@ bracketed_text = "Give this bracketed text a slight, audible change in delivery 
 # synthesis_backlog = 0       # 0 = automatic: min(256, 4 x total TTS slots)
 # pending_audio_mb = 256      # soft high-water for untranscribed saved audio
 # review_concurrency = 2      # parallel text-review HTTP calls (1-8)
+
+# Gemini bulk casting overlaps remote voice jobs; local verification stays serial.
+# Merge into your existing casting table. Other designers remain sequential.
+# [casting]
+# gemini_concurrency = 4      # 1-8; 1 disables parallel casting

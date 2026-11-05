@@ -549,6 +549,17 @@ Open the interactive casting tool:
 
 Startup automatically prepares all voices: it reuses existing selections, selects previously saved verified samples, and generates missing ones. By default, creation uses Gemini when `gemini.api_key` is configured, otherwise the local speech engine. This preference also applies to `generate`, `generate-missing`, `regenerate-all`, `create-voices`, and any missing references needed during rendering. Audiobook speech continues to use the configured local engine and its saved reference recordings. New voices and successful regenerations are selected automatically. There is no acceptance step. Missing samples show generation progress; an individual failure leaves the other voices available.
 
+When casting uses Gemini, startup, `--action generate-missing`, and `--action regenerate-all` overlap independent voice jobs, with up to four jobs in flight by default. Local transcription and verification stay serialized on one model thread while other Gemini requests continue. Each shared canonical voice is generated only once. Local and ElevenLabs casting remain sequential; `[render_pool]` does not control casting.
+
+To tune Gemini casting, merge this setting into your existing global configuration:
+
+```toml
+[casting]
+gemini_concurrency = 4 # Integer 1–8; 1 disables parallel casting.
+```
+
+The concurrency limit bounds whole voice jobs, including generation, verification, and hosted-voice cleanup; it is not a request-rate quota. Lower it if the Gemini project encounters rate limits. Completed voices are saved as they finish and reused on rerun. Ctrl-C during generation stops new jobs, waits for admitted jobs and their cleanup to finish, then exits; it does not discard their completed recordings. Bulk regeneration still invalidates every targeted selection before creating replacements, and unstarted targets remain explicitly pending.
+
 Voice playback matches perceived loudness automatically, with a default target of -20 LUFS and a -1.5 dB true-peak ceiling. Startup prepares cached playback copies of the selected samples before showing the menu; regenerated samples are prepared before playback. Existing, inherited, imported, and newly generated voices all use the same settings. No reanalysis or voice regeneration is needed.
 
 These are playback copies in the current book's `render-work/voice-previews` directory. The saved cloning references, their transcripts and checksums, voice selections, parent books, and already rendered audio stay unchanged. This setting controls auditions; it does not normalize the final audiobook. To prepare all saved candidates as well as selected voices without loading TTS or transcription models:

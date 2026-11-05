@@ -103,8 +103,9 @@ class DefaultDesignerIntegrationTests(unittest.TestCase):
     def test_missing_samples_use_gemini_and_keep_local_clone_binding(self):
         session = self.session()
         session.generate_missing()
-        self.assertEqual(len(self.factory_calls), 1)
-        self.assertGreater(len(self.designer.calls), 0)
+        canonical_ids = {session.store.canonical_id(voice["id"])
+                         for voice in self.bundle["cast"]["voices"]}
+        self.assertEqual(len(self.designer.calls), len(canonical_ids))
         self.assertEqual(self.engine.calls, [])
         for voice in self.bundle["cast"]["voices"]:
             selected = session.store.load(voice["id"])

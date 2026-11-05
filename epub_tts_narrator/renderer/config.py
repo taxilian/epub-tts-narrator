@@ -142,6 +142,7 @@ DEFAULTS = {
     "casting": {
         "player": ["/usr/bin/afplay"], "normalize_samples": True,
         "sample_loudness_lufs": -20.0, "sample_true_peak_db": -1.5,
+        "gemini_concurrency": 4,
     },
     "render": {
         "work_dir": None, "output_dir": None, "chapter_numbers": [], "epub": None,
@@ -517,6 +518,9 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("casting.player must be a nonempty array of executable and argument strings")
     if type(result["casting"]["normalize_samples"]) is not bool:
         raise ValueError("casting.normalize_samples must be boolean")
+    concurrency = result["casting"]["gemini_concurrency"]
+    if type(concurrency) is not int or not 1 <= concurrency <= 8:
+        raise ValueError("casting.gemini_concurrency must be an integer from 1 through 8")
     for key, low, high in (("sample_loudness_lufs", -40, -10), ("sample_true_peak_db", -9, 0)):
         value = result["casting"][key]
         if (isinstance(value, bool) or not isinstance(value, (int, float))
