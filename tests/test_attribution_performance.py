@@ -1,14 +1,16 @@
 """Inline proposal review: mechanical passes, remove-only review, and publication."""
 
+from concurrent.futures import CancelledError
 from copy import deepcopy
 from pathlib import Path
 import tempfile
+from threading import Event, Lock
 import unittest
 
 from epub_tts_narrator.attribution_compact import parse_proposals
 from epub_tts_narrator.attribution_performance import review_inline_performance
 from epub_tts_narrator.performance_plan import text_sha256, validate_performance
-from epub_tts_narrator.pipeline import CachedRequests
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.spoken_text import build_spoken
 
@@ -31,6 +33,19 @@ def document(rows, *, block_text=None, characters=None):
             "source": {"blocks": [{"id": "b1", "chapter_id": "ch1",
                                    "text": block_text if block_text is not None else "", "source": {}}]},
             "cast": {"characters": characters or []}, "segments": rows, "issues": [], "provenance": {}}
+
+
+def sparse_review_rows(row_count):
+    words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india"]
+    rows = []
+    for index in range(row_count):
+        text = f"“{index} {' '.join(words)}.”"
+        edits = [{"original": word, "replacement": word[:-1], "direction": "clipped ending",
+                  "reason": f"Dialect clipping {word}."} for word in words]
+        controls = [{"kind": "delivery", "tag": "whisper", "original": words[0],
+                     "reason": "The opening word is whispered."}]
+        rows.append(segment("b1", text, proposals={"edits": edits, "controls": controls}))
+    return rows
 
 
 class ReviewClient:
@@ -203,6 +218,77 @@ class InlinePerformanceTests(unittest.TestCase):
         self.assertEqual(len(audit["batches"]), 2)
         self.assertTrue(all("request_cache_fingerprint" in batch for batch in audit["batches"]))
         self.assertEqual(audit["counts"], {"kept": 27})
+
+    def test_worker_counts_reproduce_payloads_output_and_progress_then_replay_cache(self):
+        source = document(sparse_review_rows(3))
+        outcomes = {"r001": "remove", "r011": "uncertain"}
+        serial_client = ReviewClient(outcomes=outcomes)
+        parallel_client = ReviewClient(outcomes=outcomes)
+        serial = review_inline_performance(
+            deepcopy(source), CachedRequests(serial_client, self.cache / "serial", repair_attempts=0), workers=1)
+        progress = []
+        parallel_requests = CachedRequests(parallel_client, self.cache / "parallel", repair_attempts=0)
+        parallel = review_inline_performance(deepcopy(source), parallel_requests, workers=2,
+                                             progress=progress.append)
+
+        self.assertEqual(parallel, serial)
+        self.assertEqual(sorted(fingerprint(payload) for payload in parallel_client.calls),
+                         sorted(fingerprint(payload) for payload in serial_client.calls))
+        self.assertEqual([message for message in progress if message.startswith("Reviewing inline performance")],
+                         ["Reviewing inline performance 0/2 batch(es) complete",
+                          "Reviewing inline performance 1/2 batch(es) complete",
+                          "Reviewing inline performance 2/2 batch(es) complete"])
+
+        replay_client = ReviewClient()
+        replay_requests = CachedRequests(replay_client, self.cache / "serial", repair_attempts=0)
+        replay = review_inline_performance(deepcopy(source), replay_requests, workers=2)
+        self.assertEqual(replay, parallel)
+        self.assertEqual(replay_client.calls, [])
+        self.assertEqual(replay_requests.cache_hits, 2)
+
+    def test_review_failure_stops_dispatch_preserves_cache_and_publishes_nothing(self):
+        source = document(sparse_review_rows(9))
+        delegate = CachedRequests(ReviewClient(), self.cache / "failure", repair_attempts=0)
+        third_started = Event()
+
+        class FailingRequests:
+            def __init__(self):
+                self.calls = []
+                self.lock = Lock()
+
+            def run(self, system, payload, validate, *, cancelled=None):
+                with self.lock:
+                    self.calls.append(deepcopy(payload))
+                first_id = payload["proposals"][0]["id"]
+                if first_id == "r025":
+                    if not third_started.wait(2):
+                        raise AssertionError("The third review batch was not dispatched")
+                    raise ProviderError("Fixture review failure.", retryable=True)
+                if first_id == "r049":
+                    third_started.set()
+                    if cancelled is None or not cancelled.wait(2):
+                        raise AssertionError("The sibling request was not cancelled")
+                    raise CancelledError("Sibling review cancelled")
+                return delegate.run(system, payload, validate, cancelled=cancelled)
+
+        failing = FailingRequests()
+        failed_document = deepcopy(source)
+        with self.assertRaisesRegex(ProviderError, "Fixture review failure"):
+            review_inline_performance(failed_document, failing, workers=2)
+
+        self.assertEqual(sorted(payload["proposals"][0]["id"] for payload in failing.calls),
+                         ["r001", "r025", "r049"])
+        self.assertNotIn("inline_performance", failed_document["provenance"])
+        for row in failed_document["segments"]:
+            self.assertNotIn("speech_normalization", row)
+            self.assertNotIn("performance_controls", row)
+
+        resumed_client = ReviewClient()
+        resumed_requests = CachedRequests(resumed_client, self.cache / "failure", repair_attempts=0)
+        resumed = review_inline_performance(deepcopy(source), resumed_requests, workers=2)
+        self.assertEqual(len(resumed_client.calls), 3)
+        self.assertEqual(resumed_requests.cache_hits, 1)
+        self.assertEqual(len(resumed["provenance"]["inline_performance"]["batches"]), 4)
 
     def test_controls_bind_to_spoken_text_when_source_brackets_are_omitted(self):
         text = "“[Hm],” she said."

@@ -1209,7 +1209,7 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
             row for row in attribution_subdivisions if row is not None
         ]
     from .attribution_performance import review_inline_performance
-    document = review_inline_performance(document, requests, progress=progress)
+    document = review_inline_performance(document, requests, workers=min(5, attribution_workers), progress=progress)
     document = apply_bracket_delivery(document, policy.get("bracketed_text", BRACKET_DIRECTION))
     if attribution_review:
         from .attribution_review import audit_attribution

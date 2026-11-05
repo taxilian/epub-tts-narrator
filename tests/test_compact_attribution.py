@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
+from threading import Barrier, Lock
 import unittest
 
 from epub_tts_narrator.attribution_compact import align_compact_units, compact_cast
@@ -186,6 +187,46 @@ class CompactAttributionTests(unittest.TestCase):
         modes = {payload.get("mode", "attribute") for _, payload in client.calls}
         self.assertEqual(modes, {"casting_discovery", "casting_coverage", "voice_ensemble", "attribute",
                                  "inline_performance_review"})
+
+    def test_inline_review_honors_five_worker_cap_and_replays_identical_output(self):
+        source = deepcopy(self.source)
+        template = source["blocks"][0]
+        source["blocks"] = [dict(template, id=f"b{index:03d}") for index in range(25)]
+        source["chapters"][0]["block_ids"] = [block["id"] for block in source["blocks"]]
+        self.source = source
+
+        class ConcurrentReviewClient(CompactClient):
+            def __init__(self):
+                super().__init__()
+                self.barrier = Barrier(5)
+                self.active_lock = Lock()
+                self.active = self.max_active = 0
+
+            def complete(self, system, payload):
+                if payload.get("mode") != "inline_performance_review":
+                    return super().complete(system, payload)
+                with self.active_lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    self.barrier.wait(timeout=2)
+                    return super().complete(system, payload)
+                finally:
+                    with self.active_lock:
+                        self.active -= 1
+
+        client = ConcurrentReviewClient()
+        document = self.analyze_compact(client, whole_book_discovery=True, attribution_workers=8,
+                                        repair_attempts=0)
+
+        self.assertEqual(client.max_active, 5)
+        self.assertEqual(client.active, 0)
+        self.assertEqual(len(document["provenance"]["inline_performance"]["batches"]), 5)
+        self.assertEqual(document["source"], source)
+        replay = CompactClient()
+        self.assertEqual(self.analyze_compact(replay, whole_book_discovery=True, attribution_workers=8,
+                                              repair_attempts=0), document)
+        self.assertEqual(replay.calls, [])
 
     def test_compact_cast_request_is_smaller_than_the_legacy_full_cast(self):
         client = CompactClient()

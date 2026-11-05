@@ -17,6 +17,7 @@ rows; audits live in provenance and the request cache.
 """
 
 from collections import Counter
+from threading import Lock
 
 from .performance_plan import text_sha256, validate_performance
 from .pipeline import fingerprint
@@ -407,8 +408,10 @@ def _provenance(records, batches):
                          for record in records]}
 
 
-def review_inline_performance(document, requests, *, progress=lambda message: None):
-    """Review and publish private inline proposals; strip them from every row."""
+def review_inline_performance(document, requests, *, workers=1, progress=lambda message: None):
+    """Review independent batches under a bounded cap, then publish all outcomes."""
+    if type(workers) is not int or not 1 <= workers <= 5:
+        raise ValueError("workers must be an integer from 1 to 5")
     rows = document.get("segments")
     if not isinstance(rows, list):
         return document
@@ -431,11 +434,25 @@ def review_inline_performance(document, requests, *, progress=lambda message: No
                                                        if other < place else rows[other]["text"][:_MAX_NEIGHBOR_CHARACTERS])}
             for other in (place - 1, place + 1) if 0 <= other < len(rows) and rows[other] is not row]
     pending = [record for record in records if record["outcome"] is None]
+    batches = _review_batches(pending, neighbor_texts)
+    progress_lock = Lock()
+    completed = 0
+
+    def review(task, cancelled):
+        nonlocal completed
+        payload, proposal_ids = task
+        verdicts = requests.run(INLINE_REVIEW, payload, _decision_validator(proposal_ids), cancelled=cancelled)
+        with progress_lock:
+            completed += 1
+            progress(f"Reviewing inline performance {completed}/{len(batches)} batch(es) complete")
+        return verdicts
+
+    if batches:
+        progress(f"Reviewing inline performance 0/{len(batches)} batch(es) complete")
+    from .attribution_review import _bounded_map
+    all_verdicts = _bounded_map([(payload, proposal_ids) for payload, proposal_ids, _ in batches], review, workers)
     batch_records = []
-    for index, (payload, proposal_ids, batch) in enumerate(_review_batches(pending, neighbor_texts),
-                                                           start=1):
-        progress(f"Reviewing {len(proposal_ids)} inline performance proposal(s) (batch {index})")
-        verdicts = requests.run(INLINE_REVIEW, payload, _decision_validator(proposal_ids))
+    for (payload, proposal_ids, batch), verdicts in zip(batches, all_verdicts):
         for record in batch:
             record["outcome"] = _VERDICT_OUTCOMES[verdicts[record["id"]]]
         batch_records.append({
