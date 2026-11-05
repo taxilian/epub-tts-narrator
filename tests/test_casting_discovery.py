@@ -182,6 +182,26 @@ def _budget_for(source, *, extra_units=0):
 
 
 class DiscoveryCandidatesTests(unittest.TestCase):
+    def test_one_repair_receives_all_invalid_character_evidence_locations(self):
+        class CorrectReportedFields(DiscoveryFake):
+            def discover(self, payload):
+                response = super().discover(payload)
+                feedback = payload.get("correction", {}).get("validator_error", "")
+                for index, character in enumerate(response["characters"]):
+                    if f"characters[{index}].evidence[0]" not in feedback:
+                        character["evidence"][0]["quote"] = "DO NOT ECHO fabricated evidence"
+                return response
+
+        client = CorrectReportedFields(self.source, character_count=2)
+        requests = CachedRequests(client, self.cache, repair_attempts=1)
+        result = discover_candidates(self.source, requests, make_units(self.source, 256), policy=DEFAULT_POLICY)
+        self.assertEqual(len(result["cast"]["characters"]), 2)
+        self.assertEqual(len(client.calls), 2)
+        feedback = client.calls[1][1]["correction"]["validator_error"]
+        self.assertIn("characters[0].evidence[0]", feedback)
+        self.assertIn("characters[1].evidence[0]", feedback)
+        self.assertNotIn("DO NOT ECHO", feedback)
+
     def test_malformed_model_ids_are_not_echoed_in_diagnostics(self):
         secret = "DO NOT ECHO private passage or credential"
 

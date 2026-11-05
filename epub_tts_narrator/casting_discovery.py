@@ -18,7 +18,7 @@ import json
 import re
 
 from .casting_prompts import DISCOVERY_PROMPT_VERSION, DISCOVERY_SYSTEM, ID_ALLOCATION_GUIDANCE, sample_available_ids
-from .pipeline import check_cast, check_evidence, fingerprint, merge_patch, seed_cast
+from .pipeline import _bounded_validation_errors, check_cast, check_evidence, fingerprint, merge_patch, seed_cast
 from .prompts import SERIES_GUIDANCE, TYPOGRAPHY_GUIDANCE
 from .series import series_context, validate_series_proposals
 
@@ -250,39 +250,51 @@ def region_validator(source, base_cast, payload, *, label, strict_canonical, fin
     region_intervals = _unit_intervals(region_atoms)
     supplied_ids = cast_ids(payload["cast_view"]["records"]) if "cast_view" in payload else None
 
-    def require_region_visibility(items, field):
+    def require_region_visibility(items, field, failures, *, nonempty=False):
+        if not isinstance(items, list) or (nonempty and not items):
+            failures.append(field + ": nonempty evidence array required")
+            return
         for index, item in enumerate(items):
             block_id = item.get("block_id") if isinstance(item, dict) else None
-            quote = item.get("quote") if isinstance(item, dict) else None
-            if not isinstance(block_id, str) or block_id not in blocks or not isinstance(quote, str):
+            location = f"{field}[{index}]"
+            if isinstance(block_id, str) and block_id in blocks:
+                location += "@" + block_id
+            try:
+                check_evidence([item], source)
+            except ValueError:
+                failures.append(location)
                 continue
-            if not _quote_visible_in_region(blocks[block_id], quote, region_intervals.get(block_id, [])):
-                raise ValueError(f"{field}[{index}]: quotation is not visible in the supplied units of block "
-                                 f"{block_id} for this region; anchor evidence quotations inside target_units")
+            if not _quote_visible_in_region(blocks[block_id], item["quote"], region_intervals.get(block_id, [])):
+                failures.append(location)
 
     def validate(response):
         scoped, defined, allocated = _scope_ids(response, base_cast, label, token, supplied_ids=supplied_ids)
         if strict_canonical:
             _guard_canonical_records(scoped, base_cast)
-        for record in scoped["characters"]:
+        evidence_failures = []
+        for record_index, record in enumerate(scoped["characters"]):
             if record["id"] not in base_ids["characters"]:
-                check_evidence(record.get("evidence"), source, nonempty=True,
-                               label=f"characters[{record['id']}].evidence", record_id=record["id"])
-                require_region_visibility(record.get("evidence", []), f"characters[{record['id']}].evidence")
+                require_region_visibility(record.get("evidence"), f"characters[{record_index}].evidence",
+                                           evidence_failures, nonempty=True)
                 for trait_index, trait in enumerate(record.get("traits", []) if isinstance(record.get("traits"), list) else []):
                     items = trait.get("evidence") if isinstance(trait, dict) else None
                     if isinstance(items, list) and items:
-                        require_region_visibility(items, f"characters[{record['id']}].traits[{trait_index}].evidence")
+                        require_region_visibility(items, f"characters[{record_index}].traits[{trait_index}].evidence",
+                                                   evidence_failures)
         previous_voices = {record["id"]: record for record in base_cast["voices"]}
         for voice in scoped["voices"]:
             previous_traits = previous_voices.get(voice["id"], {}).get("traits", [])
             traits = voice.get("traits", [])
             for index, trait in enumerate(traits if isinstance(traits, list) else []):
                 if isinstance(trait, dict) and trait not in previous_traits and isinstance(trait.get("evidence"), list):
-                    require_region_visibility(trait["evidence"], f"voices[{voice['id']}].traits[{index}].evidence")
+                    require_region_visibility(trait["evidence"], f"voices[{voice['id']}].traits[{index}].evidence",
+                                               evidence_failures)
         for merge_index, merge in enumerate(scoped["merges"]):
             if isinstance(merge, dict) and isinstance(merge.get("evidence"), list) and merge["evidence"]:
-                require_region_visibility(merge["evidence"], f"merges[{merge_index}].evidence")
+                require_region_visibility(merge["evidence"], f"merges[{merge_index}].evidence", evidence_failures)
+        if evidence_failures:
+            raise ValueError(_bounded_validation_errors(evidence_failures,
+                " Evidence quotations must be exact and visible in the supplied units; correct every listed field."))
         available = {collection: sorted(base_ids[collection] | set(allocated[collection]))
                      for collection in COLLECTIONS}
         updated, issues, summary = merge_patch(source, base_cast, scoped, available, defer_merges=True)
