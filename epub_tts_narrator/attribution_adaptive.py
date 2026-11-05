@@ -15,7 +15,8 @@ speakers unresolved rather than inventing a role or using a fallback narrator.
 
 
 def attribute_adaptively(source, cast, requests, system, payload, *, sequential_prior=False,
-                         cancelled=None, progress=lambda message: None, validator=None, legacy=None):
+                         cancelled=None, progress=lambda message: None, validator=None, legacy=None,
+                         legacy_compact_system=None, repair_protocol=None):
     from .adaptive_requests import capacity_error, request_size, run_partitioned
     from .attribution_compact import compact_cast
     from .attribution_fallback import _validate_combined
@@ -61,8 +62,16 @@ def attribute_adaptively(source, cast, requests, system, payload, *, sequential_
                    for collection in ("characters", "roles", "voices")}
         request_cast = {collection: [record for record in cast[collection] if record["id"] in visible[collection]]
                         for collection in visible}
-        result = requests.run(current_system, current,
-                              lambda response: validate(source, request_cast, selected, response), cancelled=cancelled)
+        checked = lambda response: validate(source, request_cast, selected, response)
+        if legacy_compact_system is not None:
+            previous_system = legacy_compact_system + current_system[len(system):]
+            found, accepted = requests.cached(previous_system, current, checked, cancelled=cancelled)
+            if found:
+                accepted_prior.extend(accepted)
+                scoped.append(current.get("cast_scope"))
+                return accepted
+        result = requests.run(current_system, current, checked, cancelled=cancelled,
+                              repair_protocol=repair_protocol)
         accepted_prior.extend(result)
         scoped.append(current.get("cast_scope"))
         return result

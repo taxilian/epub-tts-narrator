@@ -130,7 +130,7 @@ def _validate_combined(source, cast, units, segments):
 
 def attribute_with_subdivision(source, cast, requests, system, payload, *, sequential_prior=False,
                                 cancelled=None, progress=lambda message: None, validator=None,
-                                legacy=None, adaptive=False):
+                                legacy=None, legacy_compact_system=None, repair_protocol=None, adaptive=False):
     """Return (aligned segments, subdivision provenance or None).
 
     A normal request uses the original system/payload byte-for-byte. Children
@@ -140,12 +140,15 @@ def attribute_with_subdivision(source, cast, requests, system, payload, *, seque
     ``validator`` replaces the response validator for replacement wire formats;
     ``legacy=(system, payload)`` first replays an exact prior-format validated
     cache entry (full payload, byte-identical key) before any new request.
+    ``legacy_compact_system`` replays each identical compact payload under its
+    frozen prompt bytes; ``repair_protocol`` selects explicit repair guidance.
     """
     if adaptive:
         from .attribution_adaptive import attribute_adaptively
         return attribute_adaptively(source, cast, requests, system, payload,
                                     sequential_prior=sequential_prior, cancelled=cancelled,
-                                    progress=progress, validator=validator, legacy=legacy)
+                                    progress=progress, validator=validator, legacy=legacy,
+                                    legacy_compact_system=legacy_compact_system, repair_protocol=repair_protocol)
     positions = {block["id"]: index for index, block in enumerate(source["blocks"])}
 
     def default_validator(source, cast, units, response):
@@ -172,13 +175,20 @@ def attribute_with_subdivision(source, cast, requests, system, payload, *, seque
             if found:
                 record.update(status="validated", segment_count=len(accepted), reused="legacy_cache")
                 return accepted, record
+        if legacy_compact_system is not None:
+            found, aligned = requests.cached(
+                legacy_compact_system, current, lambda response: validate(source, cast, units, response),
+                cancelled=cancelled)
+            if found:
+                record.update(status="validated", segment_count=len(aligned), reused="legacy_compact_cache")
+                return aligned, record
         can_split = depth < MAX_ATTRIBUTION_SPLIT_DEPTH and len(units) > 1
         path, marker, split = _split_marker(requests, system, current) if can_split else (None, None, False)
         replayed_hint = split
         if not split:
             try:
                 aligned = requests.run(system, current, lambda response: validate(source, cast, units, response),
-                                       cancelled=cancelled)
+                                       cancelled=cancelled, repair_protocol=repair_protocol)
             except ProviderError as error:
                 if (not can_split or error.status_code is not None or error.code is not None
                         or str(error) != TRUNCATED_OUTPUT):

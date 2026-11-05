@@ -14,7 +14,7 @@ import tempfile
 from threading import Event, Lock
 from pathlib import Path
 
-from .attribution_compact_prompts import ATTRIBUTE_COMPACT
+from .attribution_compact_prompts import ATTRIBUTE_COMPACT, ATTRIBUTE_COMPACT_V1, COMPACT_ATTRIBUTION_PROTOCOL
 from .contracts import readiness, validate_document
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
 from .prompts import ATTRIBUTE, PROMPT_VERSION, TYPOGRAPHY_GUIDANCE
@@ -739,7 +739,7 @@ class CachedRequests:
                 return "".join(sanitized)
             message = hint[end:]
 
-    def _repair_payload(self, system, payload, result, error):
+    def _repair_payload(self, system, payload, result, error, *, repair_protocol=None):
         # Repair hints do not change the original request identity or its source.
         # Discovery uses upserts and semantic review uses proposals/votes, so only
         # ordinary attribution may be instructed to replace the entire units array.
@@ -747,6 +747,7 @@ class CachedRequests:
                        and isinstance(payload.get("target_units"), list)
                        and all(isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
                                for unit in payload["target_units"]))
+        compact_attribution = attribution and repair_protocol == COMPACT_ATTRIBUTION_PROTOCOL
         speech_spelling = payload.get("mode") == "speech_spelling_scan"
         correction = {
             "validator_error": str(error)[:2000],
@@ -763,12 +764,30 @@ class CachedRequests:
                 target_unit_count=len(payload["target_units"]),
                 target_unit_ids=[unit["unit_id"] for unit in payload["target_units"]],
             )
-            guidance.extend([
-                "Concatenated segment text must reproduce each target unit verbatim, including straight/curly "
-                "quotes, punctuation, whitespace, unusual spelling, and repeated letters. Do not edit source text.",
+            if compact_attribution:
+                correction["compact_contract"] = {
+                    "protocol": COMPACT_ATTRIBUTION_PROTOCOL,
+                    "segment_text": "forbidden",
+                    "evidence_entry": {"block_id": "existing block ID",
+                                       "quote": "short exact nonempty source substring"},
+                    "delivery_evidence": "nonempty_direction_requires_nonempty_object_array",
+                }
+                guidance.extend([
+                    "Use source anchors, never segment text fields or copied full segment text. Every unit needs a "
+                    "nonempty ordered segments array whose anchors reconstruct its complete source unit.",
+                    "Every segment.evidence and delivery.evidence entry must be a canonical object with block_id "
+                    "and a short exact nonempty source quote, never a bare string, tuple, or list. A nonempty "
+                    "delivery.direction requires at least one such object in delivery.evidence.",
+                ])
+            else:
+                guidance.append(
+                    "Concatenated segment text must reproduce each target unit verbatim, including straight/curly "
+                    "quotes, punctuation, whitespace, unusual spelling, and repeated letters. Do not edit source text."
+                )
+            guidance.append(
                 'Check EVERY delivery object. The default is {"direction":"","evidence":[]}; a nonempty '
-                "direction needs exact supporting evidence. Keep unsupported directions empty.",
-            ])
+                "direction needs exact supporting evidence. Keep unsupported directions empty."
+            )
             if any(code in str(error) for code in ("(U+2018)", "(U+2019)", "(U+201C)", "(U+201D)", "(U+2013)", "(U+2014)")):
                 guidance.append(
                     "The source uses typographic punctuation: curly quotes (“ ”), apostrophes (’), and dashes (– —). "
@@ -823,6 +842,9 @@ class CachedRequests:
             if fits(current):
                 return current
         correction["instruction"] = (
+            "Return ALL target units once in input order, with complete source-anchored segment arrays and no text "
+            "fields, including unaffected units; no patches."
+            if compact_attribution else
             "Return ALL target units once in input order, with complete exact text, including unaffected units; no patches."
             if attribution else
             "Return ALL target_segments once in input order, copying each segment_id verbatim with an edits array; no patches."
@@ -907,7 +929,7 @@ class CachedRequests:
                            "system": system, "payload": payload})
         return self._cached_response(self.cache_dir / f"{key}.json", validate)
 
-    def run(self, system, payload, validate, *, cancelled=None):
+    def run(self, system, payload, validate, *, cancelled=None, repair_protocol=None):
         if cancelled is not None and cancelled.is_set():
             raise CancelledError("Analysis was cancelled")
         key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
@@ -926,7 +948,7 @@ class CachedRequests:
                     # ignored, rather than promoted to a successful cache response.
                     validate(copy.deepcopy(failed))
                 except (ValueError, TypeError, KeyError, IndexError) as error:
-                    repaired = self._repair_payload(system, payload, failed, error)
+                    repaired = self._repair_payload(system, payload, failed, error, repair_protocol=repair_protocol)
                     if "correction" in repaired and len(system) + len(json.dumps(repaired, ensure_ascii=False)) <= self.max_request_chars:
                         current = repaired
                         with self.progress_lock:
@@ -974,7 +996,7 @@ class CachedRequests:
                 if attempt == self.repair_attempts:
                     raise ValueError(f"Model output failed validation after {attempt + 1} attempt(s): {self._public_validation_error(exc)}\n"
                                      f"Rejected model response: {failed_path.resolve()}") from exc
-                current = self._repair_payload(system, payload, result, exc)
+                current = self._repair_payload(system, payload, result, exc, repair_protocol=repair_protocol)
                 with self.progress_lock:
                     self.progress(f"Repairing validation {attempt + 1}/{self.repair_attempts}: {self._public_validation_error(exc)}")
                 continue
@@ -1046,9 +1068,11 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
 
     attribution_prompt = ATTRIBUTE
     compact_attribution_prompt = ATTRIBUTE_COMPACT
+    compact_attribution_legacy_prompt = ATTRIBUTE_COMPACT_V1
     if any("inline_spans" in unit or "break_before" in unit for batch in batches for unit in batch):
         attribution_prompt += TYPOGRAPHY_GUIDANCE
         compact_attribution_prompt += TYPOGRAPHY_GUIDANCE
+        compact_attribution_legacy_prompt += TYPOGRAPHY_GUIDANCE
     from .casting_workflow import gather_cast, summary_for_units
     casting = gather_cast(source, requests, batches, policy=policy, series_registry=series_registry,
                           identity_consensus=identity_consensus, workers=attribution_workers,
@@ -1085,7 +1109,9 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
             aligned, subdivision = attribute_with_subdivision(
                 source, cast, requests, compact_attribution_prompt, compact_payload,
                 sequential_prior=attribution_workers == 1, cancelled=cancelled, progress=progress,
-                validator=align_compact_units, legacy=(attribution_prompt, payload), adaptive=True,
+                validator=align_compact_units, legacy=(attribution_prompt, payload),
+                legacy_compact_system=compact_attribution_legacy_prompt,
+                repair_protocol=COMPACT_ATTRIBUTION_PROTOCOL, adaptive=True,
             )
             if subdivision is not None:
                 attribution_subdivisions[index] = dict(subdivision, batch_index=index + 1)

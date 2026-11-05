@@ -1,9 +1,12 @@
-"""Versioned prompt for the compact attribution wire. Prompt bytes are cache identity."""
+"""Versioned compact attribution prompts. Prompt bytes are cache identity."""
 
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE
 
 
-ATTRIBUTE_COMPACT = COMMON + PERFORMANCE_POLICY_GUIDANCE + """
+COMPACT_ATTRIBUTION_PROTOCOL = "compact-attribution-v1"
+
+# Frozen for cache-only replay of responses validated under the original wire.
+ATTRIBUTE_COMPACT_V1 = COMMON + PERFORMANCE_POLICY_GUIDANCE + """
 Assign each target unit's exact text to speaking roles in the final cast. The
 final_cast is compact: character/role/voice IDs, names, aliases, and identity
 or scope descriptions only. Context units and prior_segments are context only:
@@ -136,4 +139,25 @@ gasp, sob, cough, throat_clear. All direction, replacement, and reason text is
 plain words only: never square or angle brackets, never markup, and never
 phonemes, pronunciation keys, or dictionary guidance. Keep proposals sparse;
 omit the whole object when the passage needs none.
+"""
+
+ATTRIBUTE_COMPACT = ATTRIBUTE_COMPACT_V1 + """
+COMPACT ATTRIBUTION WIRE CLARIFICATION v2
+The prohibition on echoing source text means never copy a complete source unit
+or segment and never include a segment "text" field. It does not prohibit the
+exact source substrings required for start_anchor or evidence.quote.
+Every segment.evidence and segment.delivery.evidence value is an array whose
+entries are canonical evidence objects:
+{"block_id":"existing source block ID","quote":"short exact nonempty substring
+of that source block"}. Never use a bare quotation, string, tuple, list, or any
+other non-object as an evidence entry. Use evidence=[] when no evidence is
+supplied. Every nonempty delivery.direction requires a nonempty
+delivery.evidence array containing at least one canonical evidence object that
+supports that direction; do not use a bare quote there either.
+Return EVERY target unit exactly once in input order. Every unit must have a
+nonempty ordered segments array covering its complete source unit through the
+anchor rules above, including the final segment and trailing source characters.
+Never drop a target unit, return only corrected units, or omit source coverage.
+These no-text, canonical-evidence, and complete-coverage rules apply equally to
+initial responses and complete replacement responses after validation errors.
 """
