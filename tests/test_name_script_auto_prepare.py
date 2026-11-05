@@ -1,8 +1,9 @@
-"""Automatic missing/pending/stale name identification through real CLI flows."""
+"""Analysis never auto-prepares pronunciation data; explicit name-script helpers remain resumable."""
 
 import contextlib
 from copy import deepcopy
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,9 +12,12 @@ from unittest.mock import patch
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.name_script import binding
 from epub_tts_narrator.name_script_state import load_name_script, read_state, save_state
-from epub_tts_narrator.pronunciations import preparation_pending
+from epub_tts_narrator.name_script_workflow import prepare_name_script
+from epub_tts_narrator.pronunciations import preparation_pending, save_candidates, set_pronunciation
 from epub_tts_narrator.provider import ProviderError
-from name_script_fixtures import book
+from epub_tts_narrator.scoped_pronunciations import scope_for
+from name_script_fixtures import PHONES, book, requests
+from shared_fixtures import snapshot
 from test_cli import NarrativeClient
 
 
@@ -33,7 +37,7 @@ class AutoNameClient(NarrativeClient):
         return super().complete(system, payload)
 
 
-class NameScriptAutoPrepareTests(unittest.TestCase):
+class AnalysisWithoutPronunciationTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -44,44 +48,47 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
         self.book = self.root / "book"
         self.bundle = book(self.book, two=True)
         self.document = self.bundle
-        self.enterContext(patch("epub_tts_narrator.cli.OpenAICompatibleClient", AutoNameClient))
-        self.enterContext(patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", AutoNameClient))
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, client=None):
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        provider = {"return_value": client} if client is not None else {
+            "side_effect": AssertionError("Completed analysis called the pronunciation provider"),
+        }
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", **provider), \
+                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", **provider), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             code = main([str(item) for item in (*args, "--config", self.config)])
         return code, output.getvalue()
 
-    def test_missing_name_script_is_prepared_automatically_and_completed_resume_needs_no_model(self):
-        self.assertFalse((self.book / "name-script.json").exists())
-        code, output = self.run_cli("discover-pronunciations", self.book)
-        self.assertEqual(code, 0, output)
-        state = read_state(self.book)
-        self.assertEqual(state["status"], "ready")
-        self.assertFalse(preparation_pending(self.book, self.document))
-        self.assertEqual(len(state["windows"]), 2)
-        self.assertEqual(state["windows"][0]["text"],
-                         "(N1:Ally) greeted her ally softly. Ally with your friends. (N1:ALLY) waved.")
-        name_script_bytes = (self.book / "name-script.json").read_bytes()
-        code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=AssertionError("Completed work called provider")), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", side_effect=AssertionError("Completed work called provider")):
-            code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
-        self.assertEqual((self.book / "name-script.json").read_bytes(), name_script_bytes)
+    def prepare(self, client=None):
+        client = client or AutoNameClient("test-model", "http://127.0.0.1:8000/v1")
+        return prepare_name_script(self.book, {}, requests=requests(self.root, client))
 
-    def test_existing_directory_analyze_prepares_missing_name_script(self):
+    def assert_no_sidecars(self, directory):
+        for name in ("pronunciations.json", "name-script.json", "scoped-pronunciations.json"):
+            self.assertFalse((directory / name).exists(), name)
+
+    def test_completed_analysis_does_not_prepare_missing_name_script_or_call_model(self):
+        self.assertFalse((self.book / "name-script.json").exists())
+        before = snapshot(self.book)
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
-        self.assertEqual(read_state(self.book)["status"], "ready")
+        self.assertEqual(snapshot(self.book), before)
+        self.assert_no_sidecars(self.book)
+
+    def test_completed_analysis_preserves_explicit_name_script_and_approved_saved_data(self):
+        self.prepare()
+        set_pronunciation(self.book, self.document, "Ally", PHONES)
+        set_pronunciation(self.book, self.document, "Ally", PHONES, scope=scope_for(self.document, "N1"))
+        before = snapshot(self.book)
+        code, output = self.run_cli("analyze", self.book)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(snapshot(self.book), before)
         self.assertEqual(load_name_script(self.book, self.document)["unresolved"], [])
 
-    def test_fresh_analysis_populates_identified_names_without_confirming_pronunciations(self):
+    def test_fresh_analysis_skips_name_identification_pronunciation_and_spelling_work(self):
         from shared_fixtures import make_epub
         from test_pipeline import FakeClient
-        from epub_tts_narrator.pronunciations import load_pronunciations
 
         self.config.write_text('[provider]\nmodel="fixture"\nbase_url="https://offline.invalid"\n'
                                '[analysis]\nidentity_consensus=false\n')
@@ -90,37 +97,27 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
         client = FakeClient()
         client.model, client.base_url = "fixture", "https://offline.invalid"
         directory = self.root / "fresh"
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", return_value=client):
-            code, output = self.run_cli("analyze", epub, "-o", directory)
+        code, output = self.run_cli("analyze", epub, "-o", directory, client=client)
 
         self.assertEqual(code, 0, output)
-        state = read_state(directory)
-        self.assertEqual(state["status"], "ready")
-        self.assertTrue(any("Mara" in name["aliases"] for name in state["names"].values()))
-        self.assertTrue(any(payload.get("mode") == "name_script" for _, payload in client.calls))
-        self.assertFalse(any(entry["status"] == "confirmed" for entry in load_pronunciations(directory)))
-        self.assertFalse((directory / "scoped-pronunciations.json").exists())
+        self.assert_no_sidecars(directory)
+        retired = {"speech_spelling_scan", "speech_spelling_review", "pronunciation_discovery",
+                   "pronunciation_proposal", "name_script"}
+        self.assertTrue(all(payload.get("mode") not in retired for _, payload in client.calls))
+        analysis = json.loads((directory / "analysis.json").read_text(encoding="utf-8"))
+        self.assertFalse(any("speech_normalization" in row for row in analysis["segments"]))
+        self.assertFalse(any("spoken_text" in row for row in analysis["segments"]))
 
-    def test_no_name_candidates_complete_locally_without_provider_configuration(self):
+    def test_fresh_analysis_without_name_candidates_creates_no_pronunciation_sidecars(self):
         from shared_fixtures import make_epub
-        from epub_tts_narrator.pronunciation_workflow import prepare_book_pronunciations
 
         epub = make_epub(self.root / "empty.epub", "Empty", "empty",
                          '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>The rain stopped.</p></body></html>')
         directory = self.root / "empty"
-        code, output = self.run_cli("analyze", epub, "-o", directory)
+        client = NarrativeClient("test-model", "http://127.0.0.1:8000/v1")
+        code, output = self.run_cli("analyze", epub, "-o", directory, client=client)
         self.assertEqual(code, 0, output)
-        self.assertEqual(read_state(directory)["names"], {})
-        (directory / "name-script.json").unlink()
-
-        with patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient",
-                   side_effect=AssertionError("Empty identification called provider")):
-            prepare_book_pronunciations(directory, {"analysis": {"attribution_workers": 1}},
-                                        progress=lambda message: None)
-
-        self.assertEqual(read_state(directory)["status"], "ready")
-        self.assertEqual(read_state(directory)["names"], {})
+        self.assert_no_sidecars(directory)
 
     def test_ordinary_usage_of_known_alias_still_requires_explicit_rule_scope(self):
         from epub_tts_narrator.renderer.cli import main as renderer_main
@@ -131,10 +128,8 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
                     return {"decisions": ["ordinary"] * len(payload["window"]["candidates"])}
                 return super().complete(system, payload)
 
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", OrdinaryClient), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", OrdinaryClient):
-            code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
+        self.prepare(OrdinaryClient("test-model", "http://127.0.0.1:8000/v1"))
+        save_candidates(self.book, self.document, [])
         registry = self.book / "pronunciations.json"
         before = registry.read_bytes()
         output = io.StringIO()
@@ -147,44 +142,48 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
         self.assertIn("--class", output.getvalue())
         self.assertEqual(registry.read_bytes(), before)
 
-    def test_pending_name_script_resumes_after_provider_failure_without_new_book_analysis(self):
+    def test_pending_name_script_is_ignored_by_analysis_and_resumes_only_explicitly(self):
         class FailingClient(AutoNameClient):
             def complete(self, system, payload):
                 if payload.get("mode") == "name_script":
                     raise ProviderError("offline name identification outage")
                 return super().complete(system, payload)
 
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", FailingClient), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", FailingClient):
-            code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 1, output)
+        with self.assertRaises(ProviderError):
+            self.prepare(FailingClient("test-model", "http://127.0.0.1:8000/v1"))
         self.assertTrue(preparation_pending(self.book, self.document))
         state = read_state(self.book)
         self.assertEqual(state["status"], "pending")
         self.assertEqual(state["windows"], [])
         analysis_bytes = (self.book / "analysis.json").read_bytes()
+        pending_bytes = (self.book / "name-script.json").read_bytes()
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
+        self.assertEqual(read_state(self.book)["status"], "pending")
+        self.assertEqual((self.book / "name-script.json").read_bytes(), pending_bytes)
+        self.assertEqual((self.book / "analysis.json").read_bytes(), analysis_bytes)
+        self.prepare()
         self.assertEqual(read_state(self.book)["status"], "ready")
         self.assertEqual((self.book / "analysis.json").read_bytes(), analysis_bytes)
 
-    def test_stale_binding_reprepares_and_restores_binding(self):
-        code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
-        self.assertFalse(preparation_pending(self.book, self.document))
+    def test_stale_binding_is_ignored_by_analysis_and_repaired_only_explicitly(self):
+        self.prepare()
         state = read_state(self.book)
         stale = deepcopy(state)
         stale["binding"] = {"source": "0" * 64, "identities": "0" * 64, "version": 1}
         save_state(self.book, stale)
+        stale_bytes = (self.book / "name-script.json").read_bytes()
         self.assertTrue(preparation_pending(self.book, self.document))
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
+        self.assertEqual((self.book / "name-script.json").read_bytes(), stale_bytes)
+        self.prepare()
         self.assertEqual(read_state(self.book)["status"], "ready")
         self.assertEqual(read_state(self.book)["binding"], binding(self.document))
 
     def test_absent_or_corrupt_state_is_pending(self):
-        code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
+        self.prepare()
+        save_candidates(self.book, self.document, [])
         self.assertFalse(preparation_pending(self.book, self.document))
         (self.book / "name-script.json").unlink()
         self.assertTrue(preparation_pending(self.book, self.document))
@@ -200,10 +199,8 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
                     return {"decisions": ["unresolved"] * len(target["candidates"])}
                 return super().complete(system, payload)
 
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", DisagreeClient), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", DisagreeClient):
-            code, output = self.run_cli("analyze", self.book)
-        self.assertEqual(code, 0, output)
+        self.prepare(DisagreeClient("test-model", "http://127.0.0.1:8000/v1"))
+        save_candidates(self.book, self.document, [])
         state = read_state(self.book)
         self.assertEqual(state["status"], "ready")
         self.assertTrue(state["windows"][0]["unresolved"])
@@ -219,9 +216,7 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
         remaining = load_name_script(self.book, self.document)["unresolved"]
         self.assertNotIn(selected["mention_id"], [item["mention_id"] for item in remaining])
         resolved_bytes = (self.book / "name-script.json").read_bytes()
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=AssertionError("Manual resolution called provider")), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", side_effect=AssertionError("Manual resolution called provider")):
-            code, output = self.run_cli("analyze", self.book)
+        code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
         self.assertEqual((self.book / "name-script.json").read_bytes(), resolved_bytes)
 
@@ -239,19 +234,17 @@ class NameScriptAutoPrepareTests(unittest.TestCase):
                         raise ProviderError("Interrupted name classification")
                 return super().complete(system, payload)
 
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", InterruptedClient), \
-                patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", InterruptedClient):
-            code, output = self.run_cli("analyze", self.book)
-            self.assertEqual(code, 1, output)
-            state = read_state(self.book)
-            self.assertEqual(state["status"], "pending")
-            self.assertEqual(len(state["windows"]), 1)
-            self.assertEqual(InterruptedClient.events, [("b1", 1), ("b1", 2), ("b2", 1), ("b2", 2)])
-            analysis_bytes = (self.book / "analysis.json").read_bytes()
+        client = InterruptedClient("test-model", "http://127.0.0.1:8000/v1")
+        with self.assertRaises(ProviderError):
+            self.prepare(client)
+        state = read_state(self.book)
+        self.assertEqual(state["status"], "pending")
+        self.assertEqual(len(state["windows"]), 1)
+        self.assertEqual(InterruptedClient.events, [("b1", 1), ("b1", 2), ("b2", 1), ("b2", 2)])
+        analysis_bytes = (self.book / "analysis.json").read_bytes()
 
-            code, output = self.run_cli("analyze", self.book)
+        self.prepare(client)
 
-        self.assertEqual(code, 0, output)
         self.assertEqual(InterruptedClient.events,
                          [("b1", 1), ("b1", 2), ("b2", 1), ("b2", 2), ("b2", 2)])
         self.assertEqual(read_state(self.book)["status"], "ready")

@@ -15,6 +15,7 @@ from threading import Event, Lock
 
 from .attribution_review_prompts import LENSES, REVIEW_VERSION, SCAN, VOTE
 from .contracts import has_assigned_speakers, readiness, validate_document
+from .inline_performance import project_segments
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
 from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
 from .prompts import PROMPT_VERSION
@@ -516,6 +517,13 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
             changes.append(change)
             if approved:
                 replacement = deepcopy(proposal["proposed_segments"])
+                if any("speech_normalization" in row or "performance_controls" in row for row in originals[block_id]):
+                    # Responses are attribution-only: approved inline metadata is
+                    # projected from the original rows, never invented here.
+                    projection_drops = []
+                    replacement = project_segments(originals[block_id], replacement, drops=projection_drops)
+                    if projection_drops:
+                        change["inline_projection_drops"] = projection_drops
                 for item in replacement:
                     prior_reviews = [old for old in originals[block_id] if old["start"] < item["end"] and old["end"] > item["start"]
                                      and (old["attribution"]["review_required"] or old["attribution"]["basis"] == "unresolved"

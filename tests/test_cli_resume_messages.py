@@ -23,7 +23,7 @@ class RecordingClient(NarrativeClient):
 
     def complete(self, system, payload):
         self.modes.append(payload.get("mode", "attribution"))
-        if self.fail and payload.get("mode") == "reconcile":
+        if self.fail and payload.get("mode") == "casting_coverage":
             raise ProviderError("Fixture API timeout", retryable=True)
         return super().complete(system, payload)
 
@@ -83,8 +83,8 @@ class CLIResumeMessageTests(unittest.TestCase):
             self.assertIn("reused automatically", stderr)
             self.assertIn("revalidated locally", stderr)
             self.assertNotIn("Resume cache:", stderr)
-        self.assertIn("discover", clients[0].modes)
-        self.assertNotIn("discover", clients[1].modes)
+        self.assertIn("casting_discovery", clients[0].modes)
+        self.assertNotIn("casting_discovery", clients[1].modes)
         self.assertTrue((output / "manifest.json").exists())
 
     def test_review_failure_reports_config_relative_cache_and_preserves_output(self):

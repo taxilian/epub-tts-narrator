@@ -58,6 +58,9 @@ def _group(chunks):
     first, last = chunks[0], chunks[-1]
     text = "".join(piece[2] for piece in pieces)
     row = deepcopy(first["segment"])
+    # Inline attribution controls are hash-bound to one member's exact spoken
+    # text, never to the joined passage; only member chunks keep them.
+    row.pop("performance_controls", None)
     row.update(id=f"paragraph:{identifier}", start=pieces[0][0], end=pieces[-1][1],
                text=text, spoken_text=text, role_id=None, voice_id=None,
                delivery={"direction": "", "evidence": []})

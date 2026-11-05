@@ -3,10 +3,11 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.cli import main as analysis_main
+from epub_tts_narrator.name_script_cli import run_name_script
 from epub_tts_narrator.name_script_workflow import prepare_name_script, resolve_mention
 from epub_tts_narrator.pronunciations import set_pronunciation
 from epub_tts_narrator.renderer.bundle import make_plan
@@ -141,15 +142,14 @@ class ScopedSafetyTests(unittest.TestCase):
 
     def test_cli_output_projects_identity_without_descriptions_or_evidence(self):
         self.prepare()
-        for action in ("list", "prepare"):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(analysis_main(["prepare-name-script", str(self.directory), "--action", action]), 0)
-            result = json.loads(output.getvalue())
-            for name in result["names"].values():
-                self.assertEqual(set(name), {"character_id", "aliases"})
-            for occurrence in result["occurrences"]:
-                self.assertEqual(set(occurrence), {"mention_id", "block_id", "start", "end", "word", "names", "decision"})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_name_script(SimpleNamespace(directory=self.directory, action="list")), 0)
+        result = json.loads(output.getvalue())
+        for name in result["names"].values():
+            self.assertEqual(set(name), {"character_id", "aliases"})
+        for occurrence in result["occurrences"]:
+            self.assertEqual(set(occurrence), {"mention_id", "block_id", "start", "end", "word", "names", "decision"})
 
     def test_annotation_capacity_is_checked_before_model_work(self):
         client = NameClient()

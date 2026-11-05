@@ -42,6 +42,66 @@ class RendererCLITests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(json.loads(output)["voices"], 2)
 
+    def test_manual_pronunciation_set_and_list_need_no_analysis_provider_or_engine(self):
+        from epub_tts_narrator.pronunciations import load_pronunciations
+
+        with (patch("epub_tts_narrator.pronunciation_workflow.create_pronunciation_proposer",
+                    side_effect=AssertionError("No pronunciation proposer")) as proposer,
+              patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient",
+                    side_effect=AssertionError("No analysis network")) as client,
+              patch("epub_tts_narrator.renderer.engines.create_engine",
+                    side_effect=AssertionError("No TTS")) as engine):
+            status, _, error = self.run_cli("pronunciations", self.bundle, "--config", self.config,
+                                            "--action", "set", "--word", "Mara", "--say-as", "Mahrah")
+            self.assertEqual(status, 0, error)
+            status, _, error = self.run_cli("pronunciations", self.bundle, "--config", self.config,
+                                            "--action", "list")
+
+        self.assertEqual(status, 0, error)
+        self.assertEqual(load_pronunciations(self.bundle)[0]["pronunciation"],
+                         {"alphabet": "respelling", "value": "Mahrah"})
+        proposer.assert_not_called()
+        client.assert_not_called()
+        engine.assert_not_called()
+
+    def test_pronunciation_review_startup_needs_no_provider_and_generates_no_audio(self):
+        with (patch("builtins.input", return_value="q"),
+              patch("epub_tts_narrator.pronunciation_workflow.create_pronunciation_proposer",
+                    side_effect=AssertionError("No pronunciation proposer")) as proposer,
+              patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient",
+                    side_effect=AssertionError("No analysis network")) as client,
+              patch("epub_tts_narrator.renderer.engines.create_engine",
+                    side_effect=AssertionError("No TTS")) as engine):
+            status, _, error = self.run_cli("pronunciations", self.bundle, "--config", self.config)
+
+        self.assertEqual(status, 0, error)
+        self.assertFalse((self.bundle / "pronunciations.json").exists())
+        proposer.assert_not_called()
+        client.assert_not_called()
+        engine.assert_not_called()
+
+    def test_scoped_pronunciation_without_saved_annotations_fails_without_generating_them(self):
+        for scope in (("--class", "special"), ("--class", "name", "--name-id", "N1")):
+            with self.subTest(scope=scope):
+                status, _, error = self.run_cli("pronunciations", self.bundle, "--config", self.config,
+                                                *scope, "--action", "set", "--word", "Mara",
+                                                "--phonemes", "M AA1 R AH0")
+
+                self.assertEqual(status, 2)
+                self.assertIn("saved name-script.json annotations", error)
+                self.assertFalse((self.bundle / "name-script.json").exists())
+                self.assertFalse((self.bundle / "scoped-pronunciations.json").exists())
+
+    def test_retired_pronunciation_discovery_is_rejected_before_provider_or_registry_work(self):
+        with (patch("epub_tts_narrator.pronunciation_workflow.create_pronunciation_proposer",
+                    side_effect=AssertionError("No pronunciation proposer")) as proposer,
+              contextlib.redirect_stderr(io.StringIO())):
+            with self.assertRaises(SystemExit):
+                main(["pronunciations", str(self.bundle), "--action", "discover"])
+
+        proposer.assert_not_called()
+        self.assertFalse((self.bundle / "pronunciations.json").exists())
+
     def test_censorship_is_optional_in_shared_config_and_validated(self):
         from epub_tts_narrator.config import load_config as analyzer_config
         original = self.config.read_text()

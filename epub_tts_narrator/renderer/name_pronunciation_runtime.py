@@ -42,8 +42,8 @@ def name_pronunciation_snapshot(bundle, legacy):
     effective = {key: [entry for entry in load(directory, identity_scope(bundle, key))
                        if entry["word"].lower() in alias_words(table[key])] for key in identities}
     applicable = any(entry["status"] == "confirmed" for rows in effective.values() for entry in rows)
-    needs_script = applicable or (active and (any(entry["word"].lower() in aliases for entry in special)
-                                 or any(word.lower() in aliases for word in legacy if word not in migrated)))
+    needs_script = (applicable or any(entry["word"].lower() in aliases for entry in special)
+                    or (active and any(word.lower() in aliases for word in legacy if word not in migrated)))
     snapshot = load_name_script(directory, bundle) if needs_script else None
     names = {}
     if snapshot is not None:
@@ -56,7 +56,7 @@ def name_pronunciation_snapshot(bundle, legacy):
                     item["word"] in names[key] for key in item["names"]) or any(
                     item["word"] in entry.get("variants", [entry["word"]]) and entry["status"] == "confirmed"
                     for entry in special):
-                raise ValueError("Unresolved name mention affects a pronunciation rule; resolve it with prepare-name-script")
+                raise ValueError("Unresolved saved name mention affects a pronunciation rule; automatic name preparation is retired")
     return {"annotations": snapshot, "names": names, "migrated": sorted(migrated),
             "special": {word: entry for entry in special if entry["status"] == "confirmed"
                         for word in entry.get("variants", [entry["word"]])}}

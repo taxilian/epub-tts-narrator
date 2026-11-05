@@ -73,10 +73,9 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
             piece.update(id=f"{piece['block_id']}:{start}:{end}", start=start, end=end,
                          text=original["text"][start-original["start"]:end-original["start"]])
             piece.pop("performance", None)
+            piece.pop("performance_controls", None)
             piece.pop("spoken_text", None)
             if start != original["start"] or end != original["end"]:
-                # Edits are relative to the original segment; a new boundary
-                # needs a fresh source-bound normalization pass.
                 piece.pop("speech_normalization", None)
             enclosing = next((span for span in spans if span["start"] <= start < end <= span["end"]), None)
             if enclosing:
@@ -93,11 +92,18 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
                 piece["spoken_text"] = build_spoken(piece)[0]
             segments.append(piece)
     result["segments"] = segments
+    projection_drops = []
+    if any("speech_normalization" in row or "performance_controls" in row for row in document["segments"]):
+        from .inline_performance import project_segments
+        result["segments"] = project_segments(document["segments"], segments, drops=projection_drops)
     result.setdefault("provenance", {})["bracket_delivery"] = {
         "version": 1, "basis": "source_delimiters", "direction": direction,
         "groups": len({span["group_id"] for values in ranges.values() for span in values}),
         "warnings": warnings,
     }
+    saved_drops = document.get("provenance", {}).get("bracket_delivery", {}).get("inline_projection_drops", [])
+    if projection_drops or saved_drops:
+        result["provenance"]["bracket_delivery"]["inline_projection_drops"] = projection_drops or deepcopy(saved_drops)
     # Idempotent even when run after a source-bound human correction.
     previous_warnings = {issue["id"]: issue for issue in result.get("issues", [])
                          if isinstance(issue.get("id"), str)

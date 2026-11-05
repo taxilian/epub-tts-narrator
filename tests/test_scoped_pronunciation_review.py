@@ -37,8 +37,7 @@ class ScopedPronunciationReviewTests(unittest.TestCase):
 
     def session(self, key):
         session = PronunciationReviewSession(self.bundle, self.config, scope=scope_for(self.bundle, key),
-            engine_factory=lambda config: self.engine, store=self.store, notify=lambda message: None,
-            proposal_fn=lambda word, respelling=None: PHONES)
+            engine_factory=lambda config: self.engine, store=self.store, notify=lambda message: None)
         self.addCleanup(session.close)
         return session
 

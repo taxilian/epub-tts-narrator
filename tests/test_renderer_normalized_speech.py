@@ -106,6 +106,32 @@ class NormalizedSpeechRendererTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     effective_delivery(passage)
 
+    def test_source_bound_angle_references_are_safe_without_changing_saved_text(self):
+        passage = row('"Stop!" <Crash> "Now!" <Thud>')
+        passage["delivery"]["direction"] = "Pause on <Crash> and resume after <Thud>."
+        original = deepcopy(passage)
+
+        self.assertEqual(effective_delivery(passage), "Pause on (Crash) and resume after (Thud).")
+        self.assertEqual(build_spoken(passage)[0], original["text"])
+        self.assertEqual(passage, original)
+
+    def test_angle_control_tags_stay_invalid_even_when_present_in_source(self):
+        for tag in ("<|speaker:1|>", "</whisper>", "<a href=x>", "<Crash/>",
+                    "<<Crash>>", "<Crash", "Crash>", "<Cra\u200bsh>"):
+            with self.subTest(tag=tag):
+                passage = row("Literal " + tag)
+                passage["delivery"]["direction"] = "Pause on " + tag
+                with self.assertRaises(ValueError):
+                    effective_delivery(passage)
+
+    def test_angle_references_must_match_same_segment_source_exactly(self):
+        for tag in ("<Whisper>", "<crash>"):
+            with self.subTest(tag=tag):
+                passage = row("Literal <Crash>")
+                passage["delivery"]["direction"] = "Pause on " + tag
+                with self.assertRaises(ValueError):
+                    effective_delivery(passage)
+
     def test_chunk_cut_inside_expanded_spelling_retains_complete_original_word(self):
         passage = normalize(row("Denno, Vern.", start=20), "Denno", "Don't know")
         chunks = self.plan(passage, maximum=3)["chapters"][0]["chunks"]

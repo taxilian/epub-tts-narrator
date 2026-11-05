@@ -36,7 +36,6 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
     queue line so a terminal can rewrite the current line instead of scrolling.
     """
     from ..pronunciations import set_pronunciation
-    from ..provider import ProviderError
     from .diagnostics import configured_secrets, safe_error_text
     if interactive is None:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -69,7 +68,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                              "--action play/set instead")
 
     def play_excerpt(row, proposed):
-        description = session.description(row, proposed, prepare=True)
+        description = session.description(row, proposed)
         preview = session.audition(row["word"], proposed)
         say(f"Auditioning {row['word']}: {description}.")
         say("Listening preview — wording and pronunciation are for you to judge; this is not accepted book audio.")
@@ -103,7 +102,11 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         state.record(row["word"], choice, receipt, accepted=True, variants=decision_words(row))
         draw(f"[{index + 1}/{total}] {row['word']} — accepted ({session.description(row, choice)})")
 
-    def walk(start):
+    def pending_proposal(row):
+        return (row["status"] == "pending" and "draft" not in row
+                and row.get("proposal") is not None and _preferred(row) == row["proposal"])
+
+    def walk(start, *, selected_proposal=None):
         nonlocal last
         from .terminal import wait_key
         index = start
@@ -119,7 +122,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                     say("Listening queue complete — every queued word was heard without interruption.")
                     return
                 row = rows[index]
-                if not state.queued(row):
+                explicitly_selected = row["word"] == selected_proposal
+                if (pending_proposal(row) and not explicitly_selected) or not state.queued(row):
                     index += 1
                     continue
                 word = row["word"]
@@ -144,7 +148,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                     if wait_key(gap_seconds) is not None:
                         return interrupted(rows, index)
                     autoaccept(row, choice, session.mark_played(preview), index, len(rows))
-                except (ValueError, RuntimeError, OSError, ProviderError, KeyboardInterrupt):
+                except (ValueError, RuntimeError, OSError, KeyboardInterrupt):
                     stop_draw()
                     raise
                 # Accepting a capitalization choice may collapse earlier
@@ -219,21 +223,25 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             say("? Conflicting capitalization choices remain separate until you choose a pronunciation.")
 
     def queued_count():
-        return sum(1 for row in session.rows() if state.queued(row))
+        return sum(1 for row in session.rows() if not pending_proposal(row) and state.queued(row))
 
     def resume_index(rows):
         if state.resume_word is not None:
             selected = find_pronunciation(rows, state.resume_word)
             if selected is not None:
                 return rows.index(selected)
-        return next((index for index, row in enumerate(rows) if state.queued(row)), None)
+        return next((index for index, row in enumerate(rows) if not pending_proposal(row) and state.queued(row)), None)
 
     def help_text():
         rows = session.rows()
         if not rows:
-            say("No pronunciation entries. Use pronunciations --action discover to find candidates.")
+            say("No saved pronunciation entries. Use --action set or play with --word to choose one manually.")
             return False
         say(f"{queued_count()} of {len(rows)} pronunciation entries await listening.")
+        proposals = sum(pending_proposal(row) for row in rows)
+        if proposals:
+            say(f"{proposals} saved proposal(s) require explicit numbered playback and confirmation; "
+                "the listening queue will not auto-accept them.")
         unavailable = sum(bool(row.get("preparation_error")) for row in rows)
         if unavailable:
             say(f"{unavailable} audio preview(s) unavailable; edits remain available, and numbered playback retries.")
@@ -245,18 +253,21 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
 
     def start_walk(rows, parts):
         require_interactive()
+        selected_proposal = None
         if len(parts) > 1:
             if not parts[1].isdecimal():
                 raise ValueError("Use S, or S N with an entry number from the list (L)")
             start = int(parts[1]) - 1
             if not 0 <= start < len(rows):
                 raise ValueError(f"Start at an entry from 1 to {len(rows)}")
+            if pending_proposal(rows[start]):
+                selected_proposal = rows[start]["word"]
         else:
             start = resume_index(rows)
             if start is None:
                 say("Nothing is awaiting listening.")
                 return
-        walk(start)
+        walk(start, selected_proposal=selected_proposal)
 
     if not help_text():
         return 0
@@ -271,7 +282,7 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             if state.resume_word is not None:
                 try:
                     start_walk(session.rows(), ["s"])
-                except (ValueError, RuntimeError, OSError, ProviderError) as exc:
+                except (ValueError, RuntimeError, OSError) as exc:
                     say("Action stopped: " + safe_error_text(exc, secrets=secrets))
             else:
                 help_text()
@@ -308,17 +319,14 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             elif verb == "b":
                 play_excerpt(row, None)
             elif verb in {"e", "p"}:
-                say(f"Current pronunciation for {word}: {session.description(row, prepare=True)}")
+                say(f"Current pronunciation for {word}: {session.description(row)}")
                 prompt = ("Say it as (plain spelling; empty cancels): " if verb == "e" else
                           "CMU phonemes (for example M AA1 R AH0; empty cancels): ")
                 value = parts[2] if len(parts) > 2 else input_fn(prompt).strip()
                 if not value:
                     continue
-                if verb == "e":
-                    proposed = session.propose(word, value)
-                else:
-                    proposed = _pronunciation(phonemes=value)
-                    session.edit(word, proposed)
+                proposed = _pronunciation(say_as=value) if verb == "e" else _pronunciation(phonemes=value)
+                session.edit(word, proposed)
                 say("Draft saved for audition; C confirms it for future rendering.")
                 play_excerpt(row, proposed)
             elif verb == "c":
@@ -329,10 +337,6 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 session.ignore(word)
                 state.clear(decision_words(row))
                 say("Default pronunciation selected.")
-                try:
-                    say(session.description(row, None, prepare=True))
-                except (ValueError, RuntimeError, OSError, ProviderError) as exc:
-                    say("CMU estimate unavailable; B retries it: " + safe_error_text(exc, secrets=secrets))
             elif verb == "r":
                 session.reset(word)
                 state.clear(decision_words(row))
@@ -343,5 +347,5 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             state.save()
             say("Pronunciation review closed; decisions, drafts, and queue position are saved.")
             return 0
-        except (ValueError, RuntimeError, OSError, ProviderError) as exc:
+        except (ValueError, RuntimeError, OSError) as exc:
             say("Action stopped: " + safe_error_text(exc, secrets=secrets))

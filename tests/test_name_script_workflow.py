@@ -4,9 +4,10 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
-from epub_tts_narrator.cli import main
+from epub_tts_narrator.name_script_cli import run_name_script
 from epub_tts_narrator.name_script import binding
 from epub_tts_narrator.name_script_state import checked_windows, load_name_script, new_state, read_state
 from epub_tts_narrator.name_script_workflow import prepare_name_script, resolve_mention
@@ -87,18 +88,18 @@ class NameScriptWorkflowTests(unittest.TestCase):
         self.assertEqual(list(state["names"]), ["N3"])
         self.assertEqual(state["ids"][:2], first["ids"])
 
-    def test_real_cli_lists_all_correctable_occurrences_without_model(self):
+    def test_legacy_listing_and_resolution_preserve_all_correctable_occurrences(self):
         self.prepare()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = main(["prepare-name-script", str(self.directory), "--action", "list"])
+            code = run_name_script(SimpleNamespace(directory=self.directory, action="list"))
         self.assertEqual(code, 0)
         result = json.loads(output.getvalue())
         self.assertEqual([item["decision"] for item in result["occurrences"]], ["N1", "ordinary", "ordinary", "N1", "N2"])
         selected = result["occurrences"][0]["mention_id"]
         with contextlib.redirect_stdout(io.StringIO()):
-            code = main(["prepare-name-script", str(self.directory), "--action", "resolve",
-                         "--mention-id", selected, "--decision", "ordinary"])
+            code = run_name_script(SimpleNamespace(directory=self.directory, action="resolve",
+                                                   mention_id=selected, decision="ordinary"))
         self.assertEqual(code, 0)
         self.assertEqual(len(load_name_script(self.directory, self.bundle)["mentions"]["b1"]), 1)
 
@@ -128,28 +129,3 @@ class NameScriptWorkflowTests(unittest.TestCase):
             self.prepare(InvalidClient())
         self.assertEqual(read_state(self.directory)["status"], "pending")
         self.assertEqual(read_state(self.directory)["windows"], [])
-
-    def test_normal_pronunciation_discovery_resumes_active_pending_name_script(self):
-        from epub_tts_narrator.analysis_directory import _completed_directory
-        from epub_tts_narrator.pronunciations import preparation_pending, save_candidates
-        from epub_tts_narrator.pronunciation_workflow import prepare_book_pronunciations
-        document = _completed_directory(self.directory)[0]
-        save_candidates(self.directory, document, [])
-        client = NameClient(fail_at=2)
-        with self.assertRaises(RuntimeError):
-            self.prepare(client)
-        self.assertTrue(preparation_pending(self.directory, document))
-        client.fail_at = None
-        prepare_book_pronunciations(self.directory, {"analysis": {"attribution_workers": 1}},
-                                   requests=requests(self.root, client), progress=lambda message: None)
-        self.assertFalse(preparation_pending(self.directory, document))
-        self.assertEqual(read_state(self.directory)["status"], "ready")
-        self.assertEqual(len(client.calls), 5)
-
-    def test_preparation_rejects_symlink_book_directory_before_model_work(self):
-        alias = self.root / "alias"
-        alias.symlink_to(self.directory, target_is_directory=True)
-        client = NameClient()
-        with self.assertRaises(ValueError):
-            prepare_name_script(alias, {}, requests=requests(self.root, client))
-        self.assertEqual(client.calls, [])

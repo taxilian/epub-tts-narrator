@@ -18,12 +18,12 @@ from .contracts import readiness, review_items, validate_document
 from .epub import extract_epub
 from .source_epub import SOURCE_EPUB_HINT, copy_source_epub_hint, remember_source_epub
 from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerprint,
-                       make_units, seed_cast, write_json)
-from .attribution_review import audit_attribution, count_review_batches
+                       seed_cast, write_json)
+from .attribution_review import audit_attribution
 from .speaker_decisions import prompt_speaker_decisions
 from .jev import JevClient
 from .provider import OpenAICompatibleClient, ProviderError
-from .series import link_analysis, load_registry, save_registry, series_context
+from .series import link_analysis, load_registry, save_registry
 from .analysis_directory import (
     default_output, validate_output, continuation_registry, fresh_registry,
     publish_directory, continuation_directories,
@@ -257,7 +257,7 @@ def parser():
 
     extract = input_command("extract", "Extract and inspect source text without model calls")
     output_options(extract)
-    plan = input_command("plan", "Show extraction counts and baseline model request count")
+    plan = input_command("plan", "Show extraction counts and automatic analysis work estimates")
     plan.add_argument("-o", "--output", type=Path,
                       help="Proposed output directory; defaults to ./<input stem>.audiobook")
     run = input_command("analyze", "Analyze an EPUB, or resume unfinished speaker choices in an existing book directory")
@@ -280,15 +280,6 @@ def parser():
                                   help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     refresh_profiles.add_argument("--workers", type=int, default=1,
                                   help="Concurrent model requests, 1-5 (default 1; capped by analysis.attribution_workers)")
-    pronunciations = commands.add_parser("discover-pronunciations", help="Collect names and unusual words and prepare CMU name suggestions without repeating analysis")
-    pronunciations.add_argument("directory", type=Path)
-    pronunciations.add_argument("--config", type=Path, help="Global TOML configuration")
-    names = commands.add_parser("prepare-name-script", help="Prepare or review source-bound compact name annotations")
-    names.add_argument("directory", type=Path)
-    names.add_argument("--config", type=Path)
-    names.add_argument("--action", choices=("prepare", "list", "resolve"), default="prepare")
-    names.add_argument("--mention-id", help="Exact source-bound mention ID from --action list")
-    names.add_argument("--decision", help="N<number>, ordinary, or unresolved")
     for command in (plan, run):
         command.add_argument("--continue-from", type=Path, metavar="DIRECTORY",
                              help="Continue a series from a previous analysis output directory, without modifying it")
@@ -342,7 +333,6 @@ def main(argv=None):
         from .audition_scripts import prepare_document_samples, audition_preparation_pending
         from .narration_boundaries import repair_narration_boundaries
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
-        from .speech_normalization import normalize_document_speech, normalization_pending
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         original = _completed_directory(directory)[0]
@@ -367,17 +357,10 @@ def main(argv=None):
         revised = repair_narration_boundaries(revised, progress=print)
         remaining = unassigned_segments(revised)
         print(f"Resuming saved analysis in {directory}; {len(remaining)} unassigned spoken passage(s).")
-        if (not remaining and revised == original and not normalization_pending(revised)
-                and not audition_preparation_pending(revised)):
+        if not remaining and revised == original and not audition_preparation_pending(revised):
             if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
                 raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
-            from .pronunciations import preparation_pending
-            print("Saved character and passage analysis is complete; preparing name identification "
-                  "and pronunciation suggestions."
-                  if preparation_pending(directory, original) else
-                  "Saved analysis is complete; no model calls or analysis changes are needed.")
-            from .pronunciation_workflow import prepare_book_pronunciations
-            prepare_book_pronunciations(directory, config, document=original, client_factory=OpenAICompatibleClient)
+            print("Saved analysis is complete; no model calls or analysis changes are needed.")
             return _speaker_completion_status(original)
 
         directories = related_directories([directory])
@@ -392,7 +375,7 @@ def main(argv=None):
         if targets:
             print(f"Checking remaining speakers in {len(targets)} source block(s); "
                   "saved assignments will be retained.", file=sys.stderr, flush=True)
-        if targets or normalization_pending(revised) or audition_preparation_pending(revised):
+        if targets or audition_preparation_pending(revised):
             cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
             if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
                 raise ValueError("The cache directory must be outside the existing book and its series directories")
@@ -411,9 +394,6 @@ def main(argv=None):
             revised = repair_narration_boundaries(revised, progress=print)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config),
                                            decisions_cache=decisions_cache)
-        revised = normalize_document_speech(revised, requests,
-            workers=min(5, settings["attribution_workers"]),
-            progress=lambda message: print(message, file=sys.stderr))
         if "voice_samples" in original["provenance"] or audition_preparation_pending(revised):
             # Keep successful auditions and retry only missing ones. Optional
             # casting text must not prevent publishing finished book analysis.
@@ -427,19 +407,9 @@ def main(argv=None):
             print(f"Updated saved analysis and chapter scripts in {directory}.")
         else:
             print("No analysis changes; saved files are unchanged.")
-        from .pronunciation_workflow import prepare_book_pronunciations
-        prepare_book_pronunciations(directory, config, document=revised, requests=requests,
-                                   client_factory=OpenAICompatibleClient)
         return _speaker_completion_status(revised)
 
     try:
-        if args.command == "prepare-name-script":
-            from .name_script_cli import run_name_script
-            return run_name_script(args)
-        if args.command == "discover-pronunciations":
-            from .pronunciation_workflow import prepare_book_pronunciations
-            prepare_book_pronunciations(args.directory, load_config(args.config))
-            return 0
         if args.command == "resolve-speakers":
             from .analysis_directory import _completed_directory
             from .analysis_revision import related_directories, revise_directories
@@ -574,66 +544,8 @@ def main(argv=None):
                     raise ValueError("The series registry must use a separate path from input, output, and configuration")
                 registry = load_registry(series_path)
             if args.command == "plan":
-                batches = make_units(source, config["analysis"]["chunk_chars"])
-                whole_book = config["analysis"]["whole_book_discovery"]
-                reconciliation_rounds = config["analysis"]["cast_reconciliation_rounds"]
-                consensus = config["analysis"]["identity_consensus"]
-                identity_scans = (1 if whole_book else len(batches)) if consensus else 0
-                context = series_context(registry, source) if registry is not None else None
-                series_scans = 1 if consensus and context and context["prior_books"] else 0
-                attribution_review = config["analysis"]["attribution_review"]
-                review_scans = (count_review_batches(source, config["analysis"]["attribution_review_chunk_chars"])
-                                if attribution_review else 0)
-                base_requests = (len(batches) + 1 if whole_book else 2 * len(batches)) + reconciliation_rounds
-                planned = {"book": source["book"], "chapters": len(source["chapters"]),
-                                  "blocks": len(source["blocks"]), "text_characters": sum(len(b["text"]) for b in source["blocks"]),
-                                  "analysis_batches": len(batches),
-                                  "cast_reconciliation_rounds": reconciliation_rounds,
-                                  "identity_consensus": consensus,
-                                  "identity_scan_requests": identity_scans,
-                                  "series_identity_scan_requests_minimum": series_scans,
-                                  "attribution_review": attribution_review,
-                                  "attribution_review_scan_requests": review_scans,
-                                  "voice_ensemble_requests": 1,
-                                  "speech_spelling_scan_requests_minimum": 1 if source["blocks"] else 0,
-                                  "pronunciation_scan_requests_minimum": int(directory_mode and bool(source["blocks"])),
-                                  "baseline_model_requests": (base_requests + identity_scans + series_scans
-                                                              + review_scans + 1 + bool(source["blocks"])
-                                                              + int(directory_mode and bool(source["blocks"]))),
-                                  "note": ("Before cache reuse and bounded validation repairs; character count is not a token estimate. "
-                                           + f"Baseline includes {reconciliation_rounds} cumulative cast reconciliation round(s). "
-                                           + "Baseline includes one whole-cast voice design request after the cast is final; "
-                                             "it is skipped when discovery yields fewer than two distinct voices or only "
-                                             "established series profiles. "
-                                           + ("Baseline includes identity scans. Identity case count is unknown before analysis: "
-                                              "allow three verdict requests per case, including series matches, "
-                                              "plus one preparation request per proposed split."
-                                              if consensus else "Identity consensus is disabled.")
-                                           + ((" Baseline budgets one dedicated series continuity scan assuming a nonempty discovered cast; "
-                                               "an empty cast needs no scan. "
-                                               + ("Whole-book mode uses one complete-source continuity scan."
-                                                  if whole_book else "Bounded mode can require additional character/context scan batches "
-                                                  "if the complete source exceeds the request budget; this count is unknown until cast discovery.")
-                                               + " A series jury without three approvals, or scanner uncertainty with nonempty prior candidates, "
-                                               "can add one additional continuity round "
-                                               "(two rounds maximum): another scan, or bounded-mode scan batches, plus three fresh jury "
-                                               "requests for every match proposed in that round, including previously approved matches. "
-                                               "New-character and uncertain decisions without prior candidates do not trigger this retry.")
-                                              if series_scans else "")
-                                           + (" Baseline includes attribution review scans. Add three jury requests per review batch "
-                                              "that proposes corrections; the number is unknown before review."
-                                              if attribution_review else " Attribution review is disabled.")
-                                           + " Baseline includes one spoken-spelling scan; the final segment count determines additional bounded batches."
-                                             " Add three independent reviews for each batch proposing spelling edits."
-                                           + (" Directory analysis also scans pronunciation candidates in bounded source batches; "
-                                              "the baseline includes one request and long books need more. "
-                                              "Add one cached CMU proposal request per pending character/place-name word without an inherited decision; "
-                                              "this count is unknown before discovery. Guesses are never auto-confirmed."
-                                              if directory_mode else "")),
-                                  "exclusions": source["exclusions"]}
-                if registry is not None:
-                    planned["series"] = {"series_id": registry["series_id"], "books": len(context["prior_books"]),
-                                         "characters": len(context["characters"])}
+                from .analysis_plan import plan_analysis
+                planned = plan_analysis(source, config["analysis"], config["performance_policy"], registry)
                 if directory_mode:
                     planned["output_directory"] = str(args.output)
                     planned["continue_from"] = str(args.continue_from.resolve()) if args.continue_from else None
@@ -687,15 +599,12 @@ def main(argv=None):
                         document = apply_edits(document, edits)
                     complete("analyzed")
                 from .audition_scripts import prepare_document_samples
-                from .speech_normalization import normalize_document_speech
                 sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                                  max_request_chars=settings["max_request_chars"],
                                                  progress=lambda message: print(message, file=sys.stderr))
                 if resume_index <= 1:
+                    # Keep persisted checkpoint names resumable; spelling cleanup is retired.
                     begin("speech-normalized-1")
-                    document = normalize_document_speech(document, sample_requests,
-                        workers=min(5, settings["attribution_workers"]),
-                        progress=lambda message: print(message, file=sys.stderr))
                     complete("speech-normalized-1")
                 if resume_index <= 2:
                     begin("samples-prepared-1")
@@ -710,9 +619,6 @@ def main(argv=None):
                     complete("speakers-decided")
                 if resume_index <= 4:
                     begin("speech-normalized-2")
-                    document = normalize_document_speech(document, sample_requests,
-                        workers=min(5, settings["attribution_workers"]),
-                        progress=lambda message: print(message, file=sys.stderr))
                     complete("speech-normalized-2")
                 if resume_index <= 5:
                     # Human choices may make additional real dialogue available. Keep
@@ -737,9 +643,6 @@ def main(argv=None):
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
-                from .pronunciation_workflow import prepare_book_pronunciations
-                prepare_book_pronunciations(args.output, config, document=document, requests=sample_requests,
-                                           progress=lambda message: print(message, file=sys.stderr))
                 return _speaker_completion_status(document)
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:

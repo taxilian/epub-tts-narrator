@@ -14,15 +14,12 @@ import tempfile
 from threading import Event, Lock
 from pathlib import Path
 
+from .attribution_compact_prompts import ATTRIBUTE_COMPACT
 from .contracts import readiness, validate_document
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
-from .prompts import (ATTRIBUTE, DISCOVER, IDENTITY_CONSENSUS_GUIDANCE, LATER_RECONCILIATION_GUIDANCE,
-                      PROMPT_VERSION, RECONCILIATION_NOTES_GUIDANCE, REVIEW_NOTES_GUIDANCE,
-                      SERIES_GUIDANCE, TYPOGRAPHY_GUIDANCE, WHOLE_BOOK_DISCOVERY_GUIDANCE,
-                      WHOLE_BOOK_RECONCILIATION_GUIDANCE)
+from .prompts import ATTRIBUTE, PROMPT_VERSION, TYPOGRAPHY_GUIDANCE
 from .provider import MAX_RESPONSE_BYTES, ProviderError
-from .series import (add_series_issues, reconcile_series_cast,
-                     series_context, validate_series_proposals)
+from .series import add_series_issues, reconcile_series_cast
 
 
 DEFAULT_POLICY = {
@@ -684,6 +681,13 @@ def restore_repeated_runs(units, response):
 
 def align_attribution_response(source, cast, units, response):
     """Strict alignment, with explicit reviewable recovery of copied stutters."""
+    if isinstance(response, dict) and isinstance(response.get("units"), list):
+        pieces = [piece for unit in response["units"] if isinstance(unit, dict)
+                  and isinstance(unit.get("segments"), list)
+                  for piece in unit["segments"] if isinstance(piece, dict)]
+        if pieces and any("start_anchor" in piece or "text" not in piece for piece in pieces):
+            from .attribution_compact import align_compact_units
+            return align_compact_units(source, cast, units, response)
     try:
         return align_units(source, cast, units, response)
     except ValueError as original_error:
@@ -978,9 +982,8 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
     if cast_reconciliation_notes is _UNSET_RECONCILIATION_NOTES:
         cast_reconciliation_notes = []
     if (not isinstance(cast_reconciliation_notes, list)
-            or any(not isinstance(note, str) for note in cast_reconciliation_notes)
-            or len(cast_reconciliation_notes) > cast_reconciliation_rounds):
-        raise ValueError("cast_reconciliation_notes must be a list of strings with at most cast_reconciliation_rounds entries")
+            or any(not isinstance(note, str) for note in cast_reconciliation_notes)):
+        raise ValueError("cast_reconciliation_notes must be a list of strings")
     cast_reconciliation_notes = list(cast_reconciliation_notes)
     if type(identity_consensus) is not bool:
         raise ValueError("identity_consensus must be a boolean")
@@ -990,15 +993,12 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         raise ValueError("attribution_review_chunk_chars must be an integer of at least 256")
     if not isinstance(attribution_review_notes, str):
         raise ValueError("attribution_review_notes must be a string")
-    prior_series = series_context(series_registry, source) if series_registry is not None else None
     policy = policy or DEFAULT_POLICY
     batches = make_units(source, chunk_chars)
     if not batches:
         raise ValueError("No text blocks were extracted")
     requests = CachedRequests(client, cache_dir, repair_attempts=repair_attempts,
                               max_request_chars=max_request_chars, progress=progress)
-    cast, issues, summaries = seed_cast(), [], []
-    pending_merges = []
     all_units = [unit for batch in batches for unit in batch]
     batch_starts, next_unit = [], 0
     for batch in batches:
@@ -1026,105 +1026,19 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         after = collect(all_units[start + len(batches[index]):])
         return before + after
 
-    discovery_batches = [all_units] if whole_book_discovery else batches
-    discovery_prompt = DISCOVER
     attribution_prompt = ATTRIBUTE
-    if whole_book_discovery:
-        discovery_prompt = DISCOVER.replace(
-            "brief scene/identity/narrator summary, at most 1200 characters",
-            "brief book-wide identity/narrator summary, at most 2400 characters",
-        ) + WHOLE_BOOK_DISCOVERY_GUIDANCE
+    compact_attribution_prompt = ATTRIBUTE_COMPACT
     if any("inline_spans" in unit or "break_before" in unit for batch in batches for unit in batch):
-        discovery_prompt += TYPOGRAPHY_GUIDANCE
         attribution_prompt += TYPOGRAPHY_GUIDANCE
-    if prior_series is not None:
-        discovery_prompt += SERIES_GUIDANCE
-    if identity_consensus:
-        discovery_prompt = discovery_prompt.replace(
-            "Merges are reviewed by the user. Each merge removes the source\ncharacter and redirects its roles to the target character.",
-            "Merges are proposals for the subsequent independent consensus audit;\n"
-            "discovery must not apply them. If unanimously approved, the audit\n"
-            "removes the source character and redirects its roles to the target.",
-        )
-        discovery_prompt += IDENTITY_CONSENSUS_GUIDANCE
-    for index in range(len(discovery_batches) + cast_reconciliation_rounds):
-        reconcile = index >= len(discovery_batches)
-        reconciliation_round = index - len(discovery_batches) + 1 if reconcile else 0
-        id_count = 256 if whole_book_discovery and not reconcile else 64
-        available = {key: [f"{prefix}_{index + 1:04d}_{i:03d}" for i in range(1, id_count + 1)]
-                     for key, prefix in (("characters", "char"), ("roles", "role"), ("voices", "voice"))}
-        payload = {"mode": "reconcile" if reconcile else "discover", "book": source["book"],
-                   "known_cast": cast, "available_ids": available,
-                   "performance_policy": policy,
-                   "target_units": [] if reconcile else discovery_batches[index],
-                   "context_units": [] if reconcile or whole_book_discovery else context(index),
-                   "scene_summaries": summaries if reconcile else summaries[-2:]}
-        if prior_series is not None:
-            payload["series_cast"] = prior_series
-        if identity_consensus:
-            payload["pending_identity_merges"] = copy.deepcopy(pending_merges)
-        request_prompt = discovery_prompt
-        if reconcile and whole_book_discovery:
-            payload["target_units"] = all_units
-            request_prompt += WHOLE_BOOK_RECONCILIATION_GUIDANCE
-        if reconcile and cast_review_notes:
-            payload["review_notes"] = cast_review_notes
-            request_prompt += REVIEW_NOTES_GUIDANCE
-        if reconciliation_round > 1:
-            request_prompt += LATER_RECONCILIATION_GUIDANCE
-        if reconcile and reconciliation_round <= len(cast_reconciliation_notes):
-            note = cast_reconciliation_notes[reconciliation_round - 1]
-            if note:
-                payload["reconciliation_notes"] = note
-                request_prompt += RECONCILIATION_NOTES_GUIDANCE
-        progress((f"Reconciling the book-wide cast {reconciliation_round}/{cast_reconciliation_rounds}"
-                  if cast_reconciliation_rounds > 1 else "Reconciling the book-wide cast")
-                 if reconcile else f"Discovering cast {index + 1}/{len(discovery_batches)}")
-        def accept_cast(response):
-            protected_ids = {merge[field] for merge in pending_merges
-                             for field in ("from_character_id", "into_character_id")}
-            accepted = merge_patch(source, cast, response, available, defer_merges=identity_consensus,
-                                   protected_character_ids=protected_ids)
-            if series_registry is not None:
-                validate_series_proposals(source, accepted[0], series_registry)
-            return (*accepted, copy.deepcopy(response["merges"]) if identity_consensus else [])
-
-        cast, additions, summary, deferred = requests.run(request_prompt, payload, accept_cast)
-        pending_merges.extend(deferred)
-        for issue in additions:
-            issue_id = "issue_" + fingerprint(issue)[:16]
-            if not any(existing["id"] == issue_id for existing in issues):
-                issues.append(dict(issue, id=issue_id, resolved=False))
-        if not reconcile:
-            summaries.append({"batch": index + 1,
-                              "chapter_id": None if whole_book_discovery else batches[index][0]["chapter_id"],
-                              "summary": summary})
-            if whole_book_discovery:
-                summaries[-1]["scope"] = "book"
-
-    identity_provenance = None
-    if identity_consensus:
-        from .identity import audit_identities
-        cast, additions, identity_provenance = audit_identities(
-            source, cast, requests, batches, whole_book=whole_book_discovery,
-            pending_merges=pending_merges, series_registry=series_registry,
-            workers=attribution_workers, progress=progress, review_notes=cast_review_notes,
-        )
-        check_cast(source, cast)
-        # Keep earlier concerns attached to the retained identity after a
-        # consensus merge. Approval of that merge does not resolve the concern.
-        for decision in identity_provenance.get("cases", []):
-            if decision.get("status") != "applied":
-                continue
-            for merge in decision.get("patch", {}).get("merges", []):
-                for issue in issues:
-                    if issue["target"] == merge["from_character_id"]:
-                        issue.setdefault("identity_original_target", issue["target"])
-                        issue["target"] = merge["into_character_id"]
-        for issue in additions:
-            issue_id = "issue_" + fingerprint(issue)[:16]
-            if not any(existing["id"] == issue_id for existing in issues):
-                issues.append(dict(issue, id=issue_id, resolved=False))
+        compact_attribution_prompt += TYPOGRAPHY_GUIDANCE
+    from .casting_workflow import gather_cast, summary_for_units
+    casting = gather_cast(source, requests, batches, policy=policy, series_registry=series_registry,
+                          identity_consensus=identity_consensus, workers=attribution_workers,
+                          review_notes="\n".join(note for note in [cast_review_notes, *cast_reconciliation_notes] if note),
+                          progress=progress)
+    cast, issues = casting["cast"], casting["issues"]
+    summaries = casting["scene_summaries"]
+    identity_provenance = casting["identity"]
     series_provenance = None
     if series_registry is not None:
         cast, additions, series_provenance = reconcile_series_cast(
@@ -1134,20 +1048,26 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
     # inherited voice ownership are final here, attribution has not started, so
     # every downstream stage fingerprints one coherent cast.
     from .voice_ensemble import design_ensemble
-    cast, ensemble_provenance = design_ensemble(source, cast, requests, policy=policy, progress=progress)
+    cast, ensemble_provenance = design_ensemble(source, cast, requests, policy=policy,
+                                              adaptive=True, progress=progress)
     segments = []
     attribution_subdivisions = [None] * len(batches)
 
     def attribute_batch(index, prior_segments, cancelled=None):
+        from .attribution_compact import align_compact_units, compact_cast
         from .attribution_fallback import attribute_with_subdivision
         batch = batches[index]
+        prior = [{key: value for key, value in row.items() if key != "inline_proposals"}
+                 for row in prior_segments]
         payload = {"final_cast": cast, "performance_policy": policy, "target_units": batch,
-                   "context_units": context(index), "prior_segments": prior_segments,
-                   "scene_summary": summaries[0] if whole_book_discovery else summaries[index]}
+                   "context_units": context(index), "prior_segments": prior,
+                    "scene_summary": summary_for_units(summaries, casting["regions"], batch)}
+        compact_payload = dict(payload, final_cast=compact_cast(cast))
         try:
             aligned, subdivision = attribute_with_subdivision(
-                source, cast, requests, attribution_prompt, payload,
+                source, cast, requests, compact_attribution_prompt, compact_payload,
                 sequential_prior=attribution_workers == 1, cancelled=cancelled, progress=progress,
+                validator=align_compact_units, legacy=(attribution_prompt, payload), adaptive=True,
             )
             if subdivision is not None:
                 attribution_subdivisions[index] = dict(subdivision, batch_index=index + 1)
@@ -1225,11 +1145,12 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         "analyzer_version": "0.1.0", "prompt_version": PROMPT_VERSION,
         "source_fingerprint": fingerprint(source), "provider": client.identity,
         "chunk_chars": chunk_chars, "performance_policy": policy,
-        "whole_book_discovery": whole_book_discovery, "attribution_workers": attribution_workers,
+        "whole_book_discovery": len(casting["regions"]) == 1,
+        "attribution_workers": attribution_workers,
         "identity_consensus_enabled": identity_consensus,
         "attribution_review_enabled": attribution_review,
         "cast_review_notes": cast_review_notes,
-        "cast_reconciliation_rounds": cast_reconciliation_rounds,
+        "casting": casting["provenance"],
         "scene_summaries": summaries, "corrections": [],
     })
     if any(cast_reconciliation_notes):
@@ -1243,6 +1164,8 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         document["provenance"]["attribution_subdivisions"] = [
             row for row in attribution_subdivisions if row is not None
         ]
+    from .attribution_performance import review_inline_performance
+    document = review_inline_performance(document, requests, progress=progress)
     document = apply_bracket_delivery(document, policy.get("bracketed_text", BRACKET_DIRECTION))
     if attribution_review:
         from .attribution_review import audit_attribution
@@ -1313,6 +1236,13 @@ def apply_edits(document, edits):
                 pieces[-1]["simultaneous_role_ids"] = copy.deepcopy(piece["simultaneous_role_ids"])
         replacement_segments = align_units(result["source"], result["cast"], [unit],
                                            {"units": [{"unit_id": block["id"], "segments": pieces}]}, allow_user=True)
+        originals = [row for row in result["segments"] if row["block_id"] == block["id"]]
+        if any("speech_normalization" in row or "performance_controls" in row for row in originals):
+            from .inline_performance import project_segments
+            projection_drops = []
+            replacement_segments = project_segments(originals, replacement_segments, drops=projection_drops)
+            if projection_drops:
+                result["provenance"].setdefault("correction_projection_drops", {})[block["id"]] = projection_drops
         first = next(i for i, s in enumerate(result["segments"]) if s["block_id"] == block["id"])
         result["segments"] = [s for s in result["segments"] if s["block_id"] != block["id"]]
         result["segments"][first:first] = replacement_segments

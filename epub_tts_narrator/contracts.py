@@ -256,15 +256,29 @@ class _Validator:
                 overlaps_brackets = any(span["start"] < end and span["end"] > start for span in bracket_spans)
                 if overlaps_brackets and "performance" not in segment:
                     self.error(f"{path}.performance", "required for source bracket text under bracket delivery policy")
+            spoken_form = None
             if "speech_normalization" in segment:
                 from .spoken_text import build_spoken, effective_delivery
                 self.string(segment.get("spoken_text"), f"{path}.spoken_text", nonempty=False)
                 try:
-                    build_spoken(segment)
+                    spoken_form = build_spoken(segment)[0]
                     effective_delivery(segment)
                 except ValueError as exc:
                     self.error(f"{path}.speech_normalization", str(exc))
-            if "performance" in segment or ("spoken_text" in segment and "speech_normalization" not in segment):
+            if "performance_controls" in segment and valid_text:
+                if spoken_form is None and "speech_normalization" in segment:
+                    pass  # the underlying normalization errors are already reported above
+                else:
+                    from .performance_plan import validate_performance
+                    from .spoken_text import build_spoken
+                    try:
+                        validate_performance(segment["performance_controls"],
+                                             spoken_form if spoken_form is not None
+                                             else build_spoken(segment)[0])
+                    except ValueError as exc:
+                        self.error(f"{path}.performance_controls", str(exc))
+            if ("performance" in segment or ("spoken_text" in segment and "speech_normalization" not in segment
+                    and not ("performance_controls" in segment and segment.get("spoken_text") == segment.get("text")))):
                 if not self.require_bracket_delivery:
                     self.error(f"{path}.performance", "requires provenance.bracket_delivery")
                 performance = self.object(segment.get("performance"), f"{path}.performance")

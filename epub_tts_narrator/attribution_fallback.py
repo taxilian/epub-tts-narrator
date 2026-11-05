@@ -89,9 +89,12 @@ def _restrict_payload(payload, selected, positions, prior_segments):
     ids = {unit["unit_id"] for unit in selected}
     context = payload["context_units"] + [unit for unit in payload["target_units"] if unit["unit_id"] not in ids]
     context = {(unit["unit_id"], unit["start"], len(unit["text"])): unit for unit in context}
+    # Private inline proposals are request-scoped; child requests never carry them.
+    clean = [{key: value for key, value in row.items() if key != "inline_proposals"}
+             for row in prior_segments]
     return dict(payload, target_units=selected,
                 context_units=sorted(context.values(), key=lambda unit: (positions[unit["block_id"]], unit["start"])),
-                prior_segments=prior_segments)
+                prior_segments=clean)
 
 
 def _validate_combined(source, cast, units, segments):
@@ -119,21 +122,36 @@ def _validate_combined(source, cast, units, segments):
     if index != len(segments):
         raise ValueError("Subdivided attribution included segments outside its original targets")
     validated = align_units(source, cast, units, response)
-    stripped = [{key: value for key, value in item.items() if key != "source_restoration"} for item in segments]
+    private = ("source_restoration", "inline_proposals")
+    stripped = [{key: value for key, value in item.items() if key not in private} for item in segments]
     if validated != stripped:
         raise ValueError("Subdivided attribution changed previously validated source spans")
 
 
 def attribute_with_subdivision(source, cast, requests, system, payload, *, sequential_prior=False,
-                               cancelled=None, progress=lambda message: None):
+                                cancelled=None, progress=lambda message: None, validator=None,
+                                legacy=None, adaptive=False):
     """Return (aligned segments, subdivision provenance or None).
 
     A normal request uses the original system/payload byte-for-byte. Children
     execute sequentially inside the calling worker. Serial attribution carries
     preceding accepted child segments forward; independent workers never share
     those annotations. At most two split levels (four leaves) are allowed.
+    ``validator`` replaces the response validator for replacement wire formats;
+    ``legacy=(system, payload)`` first replays an exact prior-format validated
+    cache entry (full payload, byte-identical key) before any new request.
     """
+    if adaptive:
+        from .attribution_adaptive import attribute_adaptively
+        return attribute_adaptively(source, cast, requests, system, payload,
+                                    sequential_prior=sequential_prior, cancelled=cancelled,
+                                    progress=progress, validator=validator, legacy=legacy)
     positions = {block["id"]: index for index, block in enumerate(source["blocks"])}
+
+    def default_validator(source, cast, units, response):
+        return align_attribution_response(source, cast, units, response)
+
+    validate = validator or default_validator
 
     def run_part(current, depth):
         if cancelled is not None and cancelled.is_set():
@@ -145,15 +163,22 @@ def attribute_with_subdivision(source, cast, requests, system, payload, *, seque
             "context_units_fingerprint": fingerprint(current["context_units"]),
             "subdivision_depth": depth,
         }
+        if depth == 0 and legacy is not None:
+            legacy_system, legacy_payload = legacy
+            found, accepted = requests.cached(
+                legacy_system, legacy_payload,
+                lambda response: align_attribution_response(source, cast, units, response),
+                cancelled=cancelled)
+            if found:
+                record.update(status="validated", segment_count=len(accepted), reused="legacy_cache")
+                return accepted, record
         can_split = depth < MAX_ATTRIBUTION_SPLIT_DEPTH and len(units) > 1
         path, marker, split = _split_marker(requests, system, current) if can_split else (None, None, False)
         replayed_hint = split
         if not split:
             try:
-                aligned = requests.run(
-                    system, current, lambda response: align_attribution_response(source, cast, units, response),
-                    cancelled=cancelled,
-                )
+                aligned = requests.run(system, current, lambda response: validate(source, cast, units, response),
+                                       cancelled=cancelled)
             except ProviderError as error:
                 if (not can_split or error.status_code is not None or error.code is not None
                         or str(error) != TRUNCATED_OUTPUT):

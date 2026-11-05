@@ -10,6 +10,7 @@ from copy import deepcopy
 import re
 
 from .contracts import readiness, validate_document
+from .inline_performance import project_segments
 from .performance import apply_bracket_delivery
 
 
@@ -171,6 +172,7 @@ unassigned with narration-role candidates. Explicit user decisions always win.
             piece.update(id=f"{piece['block_id']}:{start}:{end}", start=start, end=end,
                          text=blocks[piece["block_id"]]["text"][start:end])
             piece.pop("performance", None)
+            piece.pop("performance_controls", None)
             piece.pop("spoken_text", None)
             piece.pop("speech_normalization", None)
             change = next((row for row in changes if row[0] <= start < end <= row[1]), None)
@@ -195,6 +197,20 @@ unassigned with narration-role candidates. Explicit user decisions always win.
     result["provenance"]["narration_boundaries"] = {"version": VERSION, "repairs": [*previous, *repairs]}
     if "bracket_delivery" in result["provenance"]:
         result = apply_bracket_delivery(result, result["provenance"]["bracket_delivery"]["direction"])
+    repaired = {repair["block_id"] for repair in repairs}
+    if any(row["block_id"] in repaired and ("speech_normalization" in row or "performance_controls" in row)
+           for row in document["segments"]):
+        # The split rows dropped these fields, and apply_bracket_delivery above
+        # only sees them stripped: re-attach from the input document onto the
+        # final spans, leaving the recomputed bracket metadata in place.
+        projection_drops = []
+        projected = iter(project_segments([row for row in document["segments"] if row["block_id"] in repaired],
+                                          [row for row in result["segments"] if row["block_id"] in repaired],
+                                          drops=projection_drops))
+        result["segments"] = [next(projected) if row["block_id"] in repaired else row
+                              for row in result["segments"]]
+        if projection_drops:
+            result["provenance"]["narration_boundaries"]["inline_projection_drops"] = projection_drops
     result["readiness"] = readiness(result)
     errors = validate_document(result)
     if errors:

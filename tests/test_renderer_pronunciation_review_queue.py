@@ -214,16 +214,37 @@ class PronunciationReviewQueueTests(unittest.TestCase):
         self.assertEqual(self.session.rows("Qarm")[0]["draft"], CMU_QARM)
         self.assertEqual(self.row("Qarm")["status"], "pending")
 
-    def test_keep_default_survives_display_estimate_failure(self):
-        from epub_tts_narrator.provider import ProviderError
-        self.session.proposal_fn = Mock(side_effect=ProviderError("proposal service unavailable"))
+    def test_keep_default_needs_no_display_estimate_or_playback(self):
         self.session.edit("Qarm", CMU_QARM)
         index = self.words.index("Qarm") + 1
+
         _, lines, _, played, _ = self.queue([f"i {index}", "q"])
+
         self.assertEqual(self.row("Qarm")["status"], "ignored")
         self.assertNotIn("draft", self.session.rows("Qarm")[0])
         self.assertEqual(played, [])
-        self.assertTrue(any("CMU estimate unavailable" in line for line in lines))
+        self.assertFalse((self.session.directory / "cmu-estimates.json").exists())
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
+    def test_saved_machine_proposal_requires_explicit_selection_before_acceptance(self):
+        for word in self.words:
+            if word != "Qarm":
+                self.session.ignore(word)
+        save_proposal(self.bundle["directory"], self.bundle, "Qarm", CMU_QARM)
+        index = self.words.index("Qarm") + 1
+
+        _, _, _, played, _ = self.queue(["s", "q"])
+
+        self.assertEqual(played, [])
+        self.assertEqual(self.row("Qarm")["status"], "pending")
+        self.assertEqual(self.engine.calls, [])
+
+        _, _, _, played, _ = self.queue([str(index), f"c {index}", "q"])
+
+        self.assertEqual(len(played), 1)
+        self.assertEqual(self.row("Qarm")["status"], "confirmed")
+        self.assertEqual(self.row("Qarm")["pronunciation"], CMU_QARM)
+        self.assertEqual(len(self.engine.calls), 1)
 
     @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
     def test_failed_playback_stops_queue_and_keeps_unheard_words_pending(self):

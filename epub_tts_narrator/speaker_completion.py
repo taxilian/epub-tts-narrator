@@ -13,6 +13,7 @@ from threading import Lock
 
 from .attribution_review import _bounded_map, _evidence, _object, _reason, _unit, _visible
 from .contracts import has_assigned_speakers, readiness, validate_document
+from .inline_performance import project_segments
 from .performance import apply_bracket_delivery
 from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
 from .provider import ProviderError
@@ -630,6 +631,19 @@ def complete_speakers(document, requests, *, workers=5, progress=lambda message:
             decorated_by_block[block_id] = _overlay(items, protected)
         result["segments"] = [deepcopy(item) for block in source["blocks"]
                               for item in decorated_by_block.get(block["id"], by_block[block["id"]])]
+    annotated = {block_id for block_id in replacements
+                 if any("speech_normalization" in row or "performance_controls" in row for row in by_block[block_id])}
+    if annotated:
+        # Votes are attribution-only: approved inline metadata comes from the
+        # saved originals, projected onto the final (decorated) source spans.
+        projection_drops = []
+        projected = iter(project_segments([row for row in original["segments"] if row["block_id"] in annotated],
+                                          [row for row in result["segments"] if row["block_id"] in annotated],
+                                          drops=projection_drops))
+        result["segments"] = [next(projected) if row["block_id"] in annotated else row
+                              for row in result["segments"]]
+        if projection_drops:
+            audit["inline_projection_drops"] = projection_drops
     remaining = unassigned_segments(result)
     resolved_blocks = {case["block_id"] for case in cases if case["status"] == "resolved"}
     resolved_targets = resolved_blocks | {item["id"] for item in missing

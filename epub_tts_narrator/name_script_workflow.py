@@ -1,16 +1,17 @@
 """Resumable independent contextual name classification and exact manual review."""
 
+from pathlib import Path
+
 from .analysis_directory import _completed_directory
 from .name_script import annotate, binding
 from .name_script_prompts import SYSTEM
 from .name_script_state import (check_size_budget, checked_windows, load_name_script, mention_id, new_state,
                                 read_state, save_state, windows)
 from .renderer.run_locks import acquire_directory_lock
-from .pronunciations import _directory
 
 
 def prepare_name_script(directory, config, *, requests=None, progress=print, client_factory=None):
-    directory = _directory(directory)
+    directory = Path(directory).resolve()
     document = _completed_directory(directory)[0]
     lock = acquire_directory_lock(directory / ".name-script.lock")
     try:
@@ -62,7 +63,7 @@ def prepare_name_script(directory, config, *, requests=None, progress=print, cli
 
 
 def resolve_mention(directory, selected, decision):
-    directory = _directory(directory)
+    directory = Path(directory).resolve()
     document = _completed_directory(directory)[0]
     lock = acquire_directory_lock(directory / ".name-script.lock")
     try:

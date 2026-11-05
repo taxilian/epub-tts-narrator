@@ -1,5 +1,3 @@
-"""Real CLI analysis/discovery handoff, with only the remote model replaced."""
-
 import contextlib
 import io
 import json
@@ -58,13 +56,13 @@ class PronunciationWorkflowTests(unittest.TestCase):
             code = main([str(item) for item in (*args, "--config", self.config)])
         return code, output.getvalue()
 
-    def test_fresh_analysis_collects_unconfirmed_candidates_and_completed_resume_needs_no_model(self):
+    def test_fresh_analysis_creates_no_pronunciation_candidates_and_resume_needs_no_model(self):
         code, output = self.run_cli("analyze", self.epub, "-o", self.book)
         self.assertEqual(code, 0, output)
         entries = load_pronunciations(self.book)
-        self.assertEqual([(item["word"], item["status"]) for item in entries], [("Qarm", "pending")])
-        self.assertEqual(entries[0]["proposal"], {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
-        self.assertNotIn("pronunciation", entries[0])
+        self.assertEqual(entries, [])
+        self.assertFalse((self.book / "pronunciations.json").exists())
+        self.assertFalse((self.book / "name-script.json").exists())
         before = snapshot(self.book)
         calls = list(CandidateClient.modes)
         code, output = self.run_cli("analyze", self.book)
@@ -72,34 +70,34 @@ class PronunciationWorkflowTests(unittest.TestCase):
         self.assertEqual(CandidateClient.modes, calls)
         self.assertEqual(snapshot(self.book), before)
 
-    def test_discovery_outage_retains_book_and_resume_does_not_repeat_character_or_passage_analysis(self):
+    def test_discovery_outage_cannot_fail_analysis_or_trigger_backfill_on_resume(self):
         CandidateClient.fail_scan = True
         code, output = self.run_cli("analyze", self.epub, "-o", self.book)
-        self.assertEqual(code, 1, output)
+        self.assertEqual(code, 0, output)
         analysis = (self.book / "analysis.json").read_bytes()
         self.assertTrue(discovery_pending(self.book, json.loads(analysis)))
         CandidateClient.fail_scan = False
         CandidateClient.modes = []
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
-        self.assertEqual(CandidateClient.modes, ["pronunciation_discovery", "pronunciation_proposal"])
+        self.assertEqual(CandidateClient.modes, [])
         self.assertEqual((self.book / "analysis.json").read_bytes(), analysis)
 
-    def test_proposal_outage_resumes_without_repeating_discovery_or_book_analysis(self):
+    def test_proposal_outage_cannot_fail_analysis_or_trigger_suggestions_on_resume(self):
         CandidateClient.fail_proposal = True
         code, output = self.run_cli("analyze", self.epub, "-o", self.book)
-        self.assertEqual(code, 1, output)
+        self.assertEqual(code, 0, output)
         analysis = (self.book / "analysis.json").read_bytes()
         document = json.loads(analysis)
-        self.assertFalse(discovery_pending(self.book, document))
+        self.assertTrue(discovery_pending(self.book, document))
         self.assertTrue(preparation_pending(self.book, document))
-        self.assertEqual(load_pronunciations(self.book)[0]["status"], "pending")
+        self.assertEqual(load_pronunciations(self.book), [])
         CandidateClient.fail_proposal = False
         CandidateClient.modes = []
         code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
-        self.assertEqual(CandidateClient.modes, ["pronunciation_proposal"])
-        self.assertFalse(preparation_pending(self.book, document))
+        self.assertEqual(CandidateClient.modes, [])
+        self.assertTrue(preparation_pending(self.book, document))
         self.assertEqual((self.book / "analysis.json").read_bytes(), analysis)
 
     def test_readable_correction_proposer_is_lazy_cached_and_never_confirms_a_guess(self):
@@ -115,7 +113,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
         self.assertEqual(CandidateClient.modes, ["pronunciation_proposal"])
         self.assertEqual(snapshot(self.book), before)
 
-    def test_backfill_preserves_user_cmu_choice_and_does_not_change_analysis_or_scripts(self):
+    def test_resume_preserves_user_cmu_choice_without_pronunciation_backfill(self):
         CandidateClient.fail_scan = True
         self.run_cli("analyze", self.epub, "-o", self.book)
         document = json.loads((self.book / "analysis.json").read_text())
@@ -125,12 +123,12 @@ class PronunciationWorkflowTests(unittest.TestCase):
                  and path.name not in {"pronunciations.json"}}
         CandidateClient.fail_scan = False
         CandidateClient.modes = []
-        code, output = self.run_cli("discover-pronunciations", self.book)
+        code, output = self.run_cli("analyze", self.book)
         self.assertEqual(code, 0, output)
         entry = load_pronunciations(self.book)[0]
         self.assertEqual(entry["status"], "confirmed")
         self.assertEqual(entry["pronunciation"], value)
-        self.assertEqual(CandidateClient.modes, ["pronunciation_discovery"])
+        self.assertEqual(CandidateClient.modes, [])
         for path, data in files.items():
             self.assertEqual(path.read_bytes(), data)
 
@@ -149,12 +147,9 @@ class PronunciationWorkflowTests(unittest.TestCase):
                          {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
         self.assertEqual(CandidateClient.modes, calls)
 
-    def test_rediscovery_hides_legacy_dictionary_pending_without_requesting_its_proposal(self):
+    def test_resume_preserves_legacy_pending_entries_and_discovery_marker_without_model_work(self):
         from epub_tts_narrator.pipeline import write_json
         from epub_tts_narrator.pronunciations import DISCOVERY_VERSION, save_candidates, word_id
-        from epub_tts_narrator.renderer.bundle import load_bundle
-        from epub_tts_narrator.renderer.config import load_config
-        from epub_tts_narrator.renderer.pronunciation_review import PronunciationReviewSession
         code, output = self.run_cli("analyze", self.epub, "-o", self.book)
         self.assertEqual(code, 0, output)
         document = json.loads((self.book / "analysis.json").read_text())
@@ -165,19 +160,14 @@ class PronunciationWorkflowTests(unittest.TestCase):
         registry = json.loads((self.book / "pronunciations.json").read_text())
         registry["discovery"]["version"] = DISCOVERY_VERSION - 1
         write_json(self.book / "pronunciations.json", registry, overwrite=True)
-        original_proposal = next(row for row in registry["entries"] if row["word"] == "Qarm")["proposal"]
+        before = (self.book / "pronunciations.json").read_bytes()
         CandidateClient.modes = []
 
-        code, output = self.run_cli("discover-pronunciations", self.book)
+        code, output = self.run_cli("analyze", self.book)
 
         self.assertEqual(code, 0, output)
         self.assertEqual(CandidateClient.modes, [])
-        refreshed = json.loads((self.book / "pronunciations.json").read_text())
-        self.assertEqual(refreshed["discovery"]["version"], DISCOVERY_VERSION)
+        self.assertEqual((self.book / "pronunciations.json").read_bytes(), before)
         stored = {row["word"]: row for row in load_pronunciations(self.book)}
         self.assertNotIn("proposal", stored["door"])
-        self.assertEqual(stored["Qarm"]["proposal"], original_proposal)
-        config = load_config(self.config, require_verifier=False, require_engine=False)
-        session = PronunciationReviewSession(load_bundle(self.book), config)
-        self.assertEqual([row["word"] for row in session.rows()], ["Qarm"])
-        self.assertFalse(preparation_pending(self.book, document))
+        self.assertTrue(preparation_pending(self.book, document))

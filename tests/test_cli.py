@@ -41,6 +41,9 @@ class NarrativeClient:
             return {"corrections": []}
         if payload.get("mode") == "identity_scan":
             return {"cases": []}
+        if payload.get("mode") == "casting_coverage":
+            return {"characters": [], "roles": [], "voices": [], "issues": [], "merges": [],
+                    "summary": "Narrative text.", "findings": [], "certified": True}
         if "mode" in payload:
             return {"characters": [], "roles": [], "voices": [], "issues": [], "merges": [], "summary": "Narrative text."}
         return {"units": [{"unit_id": unit["unit_id"], "segments": [{
@@ -96,7 +99,7 @@ class CLITests(unittest.TestCase):
         return make_epub(self.root / "story.epub", "Test Story", "test",
                          f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>One</h1><p>{paragraph}</p></body></html>')
 
-    def test_fresh_analyze_exports_reviewed_spoken_spelling_without_changing_source(self):
+    def test_fresh_analyze_preserves_stylized_spelling_without_automatic_cleanup(self):
         output = self.root / "styled-book"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", StyledNarrativeClient):
             status, _, stderr = self.run_cli("analyze", self.make_epub("Nooooooo!"),
@@ -106,15 +109,18 @@ class CLITests(unittest.TestCase):
         source = next(row for row in analysis["source"]["blocks"] if row["text"] == "Nooooooo!")
         segment = next(row for row in analysis["segments"] if row["block_id"] == source["id"])
         self.assertEqual(segment["text"], "Nooooooo!")
-        self.assertEqual(segment["spoken_text"], "No!")
+        self.assertNotIn("spoken_text", segment)
+        self.assertNotIn("speech_normalization", segment)
         self.assertEqual((segment["start"], segment["end"]), (0, len(source["text"])))
-        decisions = analysis["provenance"]["speech_normalization"]["decisions"]
-        self.assertEqual(len(decisions[0]["votes"]), 3)
+        self.assertNotIn("speech_normalization", analysis["provenance"])
+        for name in ("pronunciations.json", "name-script.json", "scoped-pronunciations.json"):
+            self.assertFalse((output / name).exists())
         manifest = read_json(output / "manifest.json")
         script = [json.loads(line) for entry in manifest["files"]["scripts"]
                   for line in (output / entry["path"]).read_text().splitlines()]
         rendered = next(row for row in script if row["block_id"] == source["id"])
-        self.assertEqual(rendered["spoken_text"], "No!")
+        self.assertEqual(rendered["text"], "Nooooooo!")
+        self.assertNotIn("spoken_text", rendered)
 
     def test_cli_extract_analyze_cached_export_round_trip(self):
         epub = self.make_epub()
@@ -123,19 +129,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(self.run_cli("extract", epub, "-o", source)[0], 0)
         status, stdout, stderr = self.run_cli("plan", source)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 7)
-        self.assertEqual(json.loads(stdout)["pronunciation_scan_requests_minimum"], 1)
-        self.assertEqual(json.loads(stdout)["speech_spelling_scan_requests_minimum"], 1)
-        self.assertEqual(json.loads(stdout)["identity_scan_requests"], 1)
-        self.assertEqual(json.loads(stdout)["voice_ensemble_requests"], 1)
+        self.assertEqual(json.loads(stdout)["baseline_model_requests"], 5)
+        self.assertNotIn("pronunciation_scan_requests_minimum", json.loads(stdout))
+        self.assertNotIn("speech_spelling_scan_requests_minimum", json.loads(stdout))
+        self.assertEqual(json.loads(stdout)["identity_scan_requests_minimum"], 1)
+        self.assertEqual(json.loads(stdout)["voice_ensemble_requests_estimate"], 1)
+        self.assertTrue(json.loads(stdout)["baseline_assumptions"]["ensemble_design_needed"])
         NarrativeClient.calls = 0
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", source, "-o", output, "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 6)
+            self.assertEqual(NarrativeClient.calls, 5)
             status, _, stderr = self.run_cli("analyze", source, "-o", self.root / "second.json", "--config", self.config)
             self.assertEqual(status, 0, stderr)
-            self.assertEqual(NarrativeClient.calls, 6)
+            self.assertEqual(NarrativeClient.calls, 5)
         self.assertEqual(self.run_cli("validate", output, "--ready")[0], 0)
         bundle = self.root / "bundle"
         self.assertEqual(self.run_cli("export", output, "-o", bundle)[0], 0)
@@ -171,14 +178,14 @@ class CLITests(unittest.TestCase):
                     result = json.loads(output)
                     batches = result["analysis_batches"]
                     self.assertGreater(batches, 1)
-                    scans = (1 if whole_book else batches) if consensus else 0
-                    base = batches + 2 if whole_book else 2 * batches + 1
+                    scans = int(consensus)
+                    base = batches + 3
                     self.assertEqual(result["identity_consensus"], consensus)
-                    self.assertEqual(result["identity_scan_requests"], scans)
-                    self.assertEqual(result["baseline_model_requests"], base + scans + 3)
+                    self.assertEqual(result["identity_scan_requests_minimum"], scans)
+                    self.assertEqual(result["baseline_model_requests"], base + scans)
                     if consensus:
-                        self.assertIn("unknown before analysis", result["note"])
-                        self.assertIn("series matches", result["note"])
+                        self.assertEqual(result["identity_verdicts_per_case"], 3)
+                    self.assertTrue(result["request_count_is_estimate"])
 
     def test_file_can_explicitly_disable_identity_consensus(self):
         self.config.write_text('[provider]\nmodel = "test-model"\n'
@@ -189,9 +196,9 @@ class CLITests(unittest.TestCase):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config,
                                            "-o", self.root / "without-consensus.json")
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 5)
+        self.assertEqual(NarrativeClient.calls, 4)
 
-    def test_plan_counts_configured_cumulative_reconciliation_rounds(self):
+    def test_plan_uses_source_bounds_instead_of_legacy_round_and_mode_settings(self):
         source_path = self.root / "long-source.json"
         source = valid_document()["source"]
         for block in source["blocks"]:
@@ -212,12 +219,11 @@ class CLITests(unittest.TestCase):
                         result = json.loads(stdout)
                         batches = result["analysis_batches"]
                         self.assertGreater(batches, 1)
-                        base = batches + 1 if whole_book else 2 * batches
-                        scans = (1 if whole_book else batches) if consensus else 0
-                        self.assertEqual(result["cast_reconciliation_rounds"], rounds)
-                        self.assertEqual(result["baseline_model_requests"], base + rounds + scans + 3)
+                        self.assertNotIn("cast_reconciliation_rounds", result)
+                        self.assertEqual(result["work_limits"], "derived_from_source")
+                        self.assertEqual(result["baseline_model_requests"], batches + 3 + int(consensus))
 
-    def test_analyze_passes_file_configured_reconciliation_rounds(self):
+    def test_legacy_round_setting_does_not_force_work_but_review_notes_survive(self):
         self.config.write_text('[provider]\nmodel = "test-model"\n'
                                'base_url = "http://127.0.0.1:8000/v1"\n'
                                '[analysis]\ncast_reconciliation_rounds = 2\n'
@@ -227,8 +233,8 @@ class CLITests(unittest.TestCase):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
             status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config, "-o", output)
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(NarrativeClient.calls, 7)
-        self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_rounds"], 2)
+        self.assertEqual(NarrativeClient.calls, 5)
+        self.assertEqual(read_json(output)["provenance"]["casting"]["strategy"], "adaptive_evidence_first")
         self.assertEqual(read_json(output)["provenance"]["cast_reconciliation_notes"], ["", "Check source context."])
 
     def test_plan_budgets_series_scan_only_for_prior_books_and_identity_audit(self):
@@ -256,22 +262,13 @@ class CLITests(unittest.TestCase):
                         expected = int(prior_books and consensus)
                         self.assertEqual(result["series_identity_scan_requests_minimum"], expected)
                         self.assertEqual(result["series"]["books"], int(prior_books))
-                        base = result["analysis_batches"] + 2 if whole_book else 2 * result["analysis_batches"] + 1
                         self.assertEqual(result["baseline_model_requests"],
-                                         base + result["identity_scan_requests"] + expected + 2)
+                                         result["analysis_batches"] + 3 + int(consensus) + expected)
                         if expected:
-                            self.assertIn("nonempty discovered cast", result["note"])
-                            self.assertIn("empty cast needs no scan", result["note"])
-                            self.assertIn("one additional continuity round", result["note"])
-                            self.assertIn("two rounds maximum", result["note"])
-                            self.assertIn("three fresh jury requests for every match", result["note"])
-                            self.assertIn("previously approved matches", result["note"])
-                            if whole_book:
-                                self.assertIn("one complete-source continuity scan", result["note"])
-                            else:
-                                self.assertIn("additional character/context scan batches", result["note"])
+                            self.assertEqual(result["series_continuity_rounds_maximum"], 2)
+                            self.assertEqual(result["identity_verdicts_per_case"], 3)
                         else:
-                            self.assertNotIn("additional continuity round", result["note"])
+                            self.assertEqual(result["series_continuity_rounds_maximum"], 0)
         self.assertEqual(registry_path.read_bytes(), registry_before)
         self.assertFalse(new_registry_path.exists())
 
@@ -288,8 +285,8 @@ class CLITests(unittest.TestCase):
         plan = json.loads(stdout)
         self.assertTrue(plan["attribution_review"])
         self.assertEqual(plan["attribution_review_scan_requests"], 1)
-        self.assertEqual(plan["baseline_model_requests"], 8)
-        self.assertIn("three jury requests per review batch", plan["note"])
+        self.assertEqual(plan["baseline_model_requests"], 6)
+        self.assertEqual(plan["attribution_review_verdicts_per_proposal"], 3)
         observed = {}
 
         def review(document, requests, **kwargs):

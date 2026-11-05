@@ -108,6 +108,13 @@ def _leaf(chunk, bindings):
     if "speech_normalization" in row and "spoken_text" not in row:
         raise ValueError("Normalized speech requires its saved spoken text")
     spoken, _ = build_spoken(row)
+    if "performance_controls" in row:
+        from ..performance_plan import validate_performance
+        try:
+            validate_performance(row["performance_controls"], spoken)
+        except ValueError as exc:
+            raise ValueError(f"Segment {row['id']} carries invalid inline performance "
+                             f"controls: {exc}") from exc
     a, b = chunk.get("spoken_start"), chunk.get("spoken_end")
     if (type(a) is not int or type(b) is not int or not 0 <= a <= b <= len(spoken)
             or chunk["spoken_text"] != spoken[a:b]

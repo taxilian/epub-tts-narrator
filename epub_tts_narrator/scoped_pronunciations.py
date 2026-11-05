@@ -34,7 +34,7 @@ def scope_for(document, name_id=None):
     if key.isdecimal():
         key = "N" + key
     if key not in snapshot["names"]:
-        raise ValueError("Unknown --name-id; list prepare-name-script BOOK --action list")
+        raise ValueError("Unknown --name-id in the saved name annotations")
     return identity_scope(document, snapshot["names"][key]["character_id"])
 
 

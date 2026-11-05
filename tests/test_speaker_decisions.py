@@ -698,9 +698,6 @@ class SpeakerDecisionTests(unittest.TestCase):
             events.append("auditions")
             prepared_roles.append(doc["segments"][1]["role_id"])
             return doc
-        def normalize(doc, *args, **kwargs):
-            events.append("spelling")
-            return doc
         with patch("epub_tts_narrator.cli.load_config", return_value=config), \
                 patch("epub_tts_narrator.cli.source_from", return_value=document["source"]), \
                 patch("epub_tts_narrator.cli.validate_output", side_effect=lambda path: path), \
@@ -710,12 +707,10 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.analyze", side_effect=analyze), \
                 patch("epub_tts_narrator.cli.prompt_speaker_decisions", side_effect=decide), \
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
-                patch("epub_tts_narrator.speech_normalization.normalize_document_speech", side_effect=normalize), \
                 patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
-                patch("epub_tts_narrator.pronunciation_workflow.prepare_book_pronunciations"), \
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
             self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
-        self.assertEqual(events, ["automatic", "spelling", "auditions", "decisions", "spelling", "auditions", "publish"])
+        self.assertEqual(events, ["automatic", "auditions", "decisions", "auditions", "publish"])
         self.assertEqual(prepared_roles, [None, "mara"])
         self.assertEqual(published[0]["segments"][1]["role_id"], "mara")
         self.assertEqual(published[0]["segments"][1]["voice_id"], "v1")

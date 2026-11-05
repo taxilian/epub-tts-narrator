@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.cli import main
+from epub_tts_narrator.config import load_config
 from epub_tts_narrator.name_script_workflow import prepare_name_script
 from epub_tts_narrator.pronunciation_workflow import create_pronunciation_proposer
 from epub_tts_narrator.scoped_pronunciations import scope_for
@@ -37,16 +37,16 @@ class ScopedPronunciationProposalTests(unittest.TestCase):
         self.assertEqual([item["block_id"] for item in request["context"]], ["b2"])
         self.assertEqual([item["character_id"] for item in request["cast_context"]], [request["scope"]["character_id"]])
 
-    def test_normal_prepare_cli_uses_configured_client_and_resume_needs_no_calls(self):
+    def test_explicit_legacy_preparation_uses_configured_client_and_resume_needs_no_calls(self):
         client = NameClient()
         client.model, client.base_url = "fixture", "https://offline.invalid"
         config = self.root / "config.toml"
         config.write_text('[provider]\nmodel="fixture"\nbase_url="https://offline.invalid"\n')
         with patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", return_value=client), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(main(["prepare-name-script", str(self.bundle["directory"]), "--config", str(config)]), 0)
+            prepare_name_script(self.bundle["directory"], load_config(config))
             calls = len(client.calls)
-            self.assertEqual(main(["prepare-name-script", str(self.bundle["directory"]), "--config", str(config)]), 0)
+            prepare_name_script(self.bundle["directory"], load_config(config))
         self.assertEqual(calls, 4)
         self.assertEqual(len(client.calls), calls)
 
@@ -64,7 +64,7 @@ class ScopedPronunciationProposalTests(unittest.TestCase):
         self.assertEqual(client.calls[0]["cast_context"], [])
         self.assertEqual([item["evidence"]["start"] for item in client.calls[0]["context"]], [TEXT.index("Ally with")])
 
-    def test_renderer_discover_honors_selected_scope_and_checkpoints_proposal_only(self):
+    def test_renderer_manual_set_honors_saved_scope_without_model_requests(self):
         from epub_tts_narrator.renderer.cli import main as renderer_main
         from epub_tts_narrator.scoped_pronunciations import load
         prepare_name_script(self.bundle["directory"], {}, requests=requests(self.root, NameClient()))
@@ -75,10 +75,11 @@ class ScopedPronunciationProposalTests(unittest.TestCase):
         with patch("epub_tts_narrator.pronunciation_workflow.OpenAICompatibleClient", return_value=client), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = renderer_main(["pronunciations", str(self.bundle["directory"]), "--class", "name", "--name-id", "N2",
-                                  "--action", "discover", "--config", str(config)])
+                                  "--action", "set", "--word", "Ally", "--phonemes", PHONES["value"],
+                                  "--config", str(config)])
         self.assertEqual(code, 0)
         rows = load(self.bundle["directory"], scope_for(self.bundle, "N2"))
-        self.assertEqual(rows[0]["proposal"], PHONES)
-        self.assertEqual(rows[0]["status"], "pending")
+        self.assertEqual(rows[0]["pronunciation"], PHONES)
+        self.assertEqual(rows[0]["status"], "confirmed")
         self.assertEqual(load(self.bundle["directory"], scope_for(self.bundle, "N1")), [])
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls, [])

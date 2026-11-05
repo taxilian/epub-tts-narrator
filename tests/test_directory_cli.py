@@ -147,7 +147,7 @@ class DirectoryCLITests(unittest.TestCase):
         self.assertEqual(len({document["cast"]["characters"][0]["id"] for document in documents}), 1)
         self.assertEqual(len({document["cast"]["characters"][0]["voice_id"] for document in documents}), 1)
         for index, client in enumerate(self.clients):
-            discovery = next(payload for _, payload in client.calls if payload.get("mode") == "discover")
+            discovery = next(payload for _, payload in client.calls if payload.get("mode") == "casting_discovery")
             self.assertEqual(len(discovery["series_cast"]["prior_books"]), index)
         self.assertEqual(registries[-1]["books"][:2], registries[1]["books"])
 
@@ -240,8 +240,8 @@ class DirectoryCLITests(unittest.TestCase):
             status, _, stderr = self.run_cli("analyze", epub, "-o", output)
             self.assertEqual(status, 0, stderr)
         self.assertEqual(len(self.clients), 2)
-        self.assertTrue(any(payload.get("mode") == "discover" for _, payload in self.clients[0].calls))
-        self.assertFalse(any(payload.get("mode") == "discover" for _, payload in self.clients[1].calls))
+        self.assertTrue(any(payload.get("mode") == "casting_discovery" for _, payload in self.clients[0].calls))
+        self.assertFalse(any(payload.get("mode") == "casting_discovery" for _, payload in self.clients[1].calls))
         self.assert_bundle(output, 1)
 
     def test_legacy_json_output_remains_supported(self):

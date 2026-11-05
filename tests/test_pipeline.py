@@ -11,7 +11,7 @@ from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import (
     CachedRequests, DEFAULT_POLICY, align_units, analyze, apply_edits, check_cast, fingerprint, make_units, merge_patch, seed_cast,
 )
-from epub_tts_narrator.provider import ProviderError
+from epub_tts_narrator.provider import OutputTruncatedError, ProviderError
 from test_contracts import valid_document
 from audition_fixtures import script_response
 
@@ -45,6 +45,16 @@ class FakeClient:
             return {"voices": [], "reasons": {}}
         if payload.get("mode") == "discover":
             return self.discover(payload)
+        if payload.get("mode") == "casting_discovery":
+            result = self.discover(payload)
+            if self.duplicate and len(result["characters"]) == 2:
+                first, second = result["characters"]
+                result["merges"] = [{"from_character_id": second["id"], "into_character_id": first["id"],
+                                     "evidence": [{"block_id": first["evidence"][0]["block_id"],
+                                                   "quote": "Mara said softly"}]}]
+            return result
+        if payload.get("mode") == "casting_coverage":
+            return self.coverage(payload)
         if payload.get("mode") == "reconcile":
             return self.reconcile(payload)
         if payload.get("mode") == "speaker_completion":
@@ -78,7 +88,9 @@ class FakeClient:
         if payload["known_cast"]["characters"]:
             return self.patch()
         available = payload["available_ids"]
-        source_unit = next(unit for unit in payload["target_units"] if "Mara" in unit["text"])
+        source_unit = next((unit for unit in payload["target_units"] if "Mara" in unit["text"]), None)
+        if source_unit is None:
+            return self.patch()
         evidence = [{"block_id": source_unit["block_id"], "quote": "Mara"}]
         characters, roles, voices = [], [], []
         count = 2 if self.duplicate else 1
@@ -104,10 +116,28 @@ class FakeClient:
         mara["aliases"] = ["Mara"]
         merges = []
         if self.duplicate:
-            duplicate = next(character for character in characters if character["name"] != "Mara")
-            merges = [{"from_character_id": duplicate["id"], "into_character_id": mara["id"],
-                       "evidence": deepcopy(mara["evidence"])}]
+            duplicate = next((character for character in characters if character["name"] != "Mara"), None)
+            if duplicate is not None:
+                merges = [{"from_character_id": duplicate["id"], "into_character_id": mara["id"],
+                           "evidence": deepcopy(mara["evidence"])}]
         return self.patch(characters=[mara], merges=merges)
+
+    def coverage(self, payload):
+        canonical = payload["cast_view"]["records"]
+        response = self.reconcile(dict(payload, known_cast=canonical, pending_identity_merges=[]))
+        known = {key: {row["id"] for row in canonical[key]} for key in ("characters", "roles", "voices")}
+        for key in known:
+            response[key] = [row for row in response[key] if row["id"] not in known[key]]
+        findings = []
+        for character in response["characters"]:
+            evidence = character["evidence"][0]
+            unit = next(unit for unit in payload["target_units"]
+                        if unit["block_id"] == evidence["block_id"] and evidence["quote"] in unit["text"])
+            start = unit["start"] + unit["text"].index(evidence["quote"])
+            findings.append({"block_id": unit["block_id"], "start": start,
+                             "end": start + len(evidence["quote"]), "quote": evidence["quote"],
+                             "character_id": character["id"], "reason": "A separately named speaker was omitted."})
+        return dict(response, findings=findings, certified=True)
 
     def attribute(self, payload):
         cast = payload["final_cast"]
@@ -132,7 +162,8 @@ class FakeClient:
                     "role_id": None if unresolved else dialogue["id"] if kind == "dialogue" else "narrator_main",
                     "basis": "unresolved" if unresolved else "explicit",
                     "reason": "Speaker needs review." if unresolved else "The narration names Mara as speaker.",
-                    "evidence": deepcopy(mara["evidence"]) if kind == "dialogue" else [],
+                    "evidence": (deepcopy(mara["evidence"]) if "evidence" in mara else
+                                 [{"block_id": unit["block_id"], "quote": exact_text}]) if kind == "dialogue" else [],
                     "candidates": [dialogue["id"]] if unresolved else [],
                     "review_required": unresolved,
                     "delivery": {"direction": "softly" if kind == "dialogue" else "",
@@ -228,27 +259,32 @@ class PipelineTests(unittest.TestCase):
         original = deepcopy(self.source)
         document = self.run_analysis(client, progress=progress.append)
         self.assertEqual([payload.get("mode", "attribute") for _, payload in client.calls],
-                         ["discover", "reconcile", "voice_ensemble", "attribute"])
+                         ["casting_discovery", "casting_coverage", "voice_ensemble", "attribute"])
         self.assertEqual(validate_document(document), [])
         self.assertTrue(document["readiness"]["ready"])
         self.assertEqual(len(document["cast"]["characters"]), 1)
         character = document["cast"]["characters"][0]
         allocated_id = client.calls[0][1]["available_ids"]["characters"][0]
-        self.assertEqual(character["id"], allocated_id)
-        self.assertEqual(character["description"], "Mara, reconciled across the complete book.")
-        self.assertEqual(character["aliases"], ["Mara"])
+        self.assertNotEqual(character["id"], allocated_id)
+        self.assertTrue(character["id"].endswith("_" + allocated_id))
+        self.assertEqual(character["description"], "A character who speaks softly.")
+        self.assertEqual(character["aliases"], [])
         self.assertEqual(document["provenance"]["source_fingerprint"], fingerprint(self.source))
         self.assertEqual(self.source, original)
-        self.assertTrue(any("Reconciling" in message for message in progress))
-        self.assertEqual(len(client.calls[1][1]["scene_summaries"]), 1)
+        self.assertTrue(document["provenance"]["casting"]["coverage"]["regions"])
+        self.assertEqual(client.calls[1][1]["target_units"], client.calls[0][1]["target_units"])
         final_cast_sent = client.calls[3][1]["final_cast"]
-        self.assertEqual(final_cast_sent, document["cast"])
+        for collection in ("characters", "roles", "voices"):
+            self.assertEqual([item["id"] for item in final_cast_sent[collection]],
+                             [item["id"] for item in document["cast"][collection]])
+        self.assertTrue(all("description" not in voice and "traits" not in voice
+                            and "speechTraits" not in voice for voice in final_cast_sent["voices"]))
 
     def test_slim_discovery_gathers_cast_and_ensemble_authors_the_published_profiles(self):
         client = SlimDiscoveryClient()
         document = self.run_analysis(client)
         self.assertEqual([payload.get("mode", "attribute") for _, payload in client.calls],
-                         ["discover", "reconcile", "voice_ensemble", "attribute"])
+                         ["casting_discovery", "casting_coverage", "voice_ensemble", "attribute"])
         self.assertEqual(validate_document(document), [])
         self.assertTrue(document["readiness"]["ready"])
         ensemble_payloads = [payload for _, payload in client.calls if payload.get("mode") == "voice_ensemble"]
@@ -263,8 +299,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(final[slim["id"]]["description"],
                          "A light, reserved voice with an even, unhurried cadence.")
         self.assertEqual(final["voice_narrator_main"]["speechTraits"], "steady conversational pace")
-        self.assertEqual(next(payload for _, payload in client.calls if "mode" not in payload)["final_cast"],
-                         document["cast"])
+        sent = next(payload for _, payload in client.calls if "mode" not in payload)["final_cast"]
+        self.assertEqual([voice["id"] for voice in sent["voices"]], list(final))
+        self.assertTrue(all("description" not in voice and "speechTraits" not in voice
+                            for voice in sent["voices"]))
 
     def test_mixed_narration_and_dialogue_preserve_every_character(self):
         document = self.run_analysis()
@@ -790,10 +828,10 @@ class PipelineTests(unittest.TestCase):
         document = self.run_analysis(client, chunk_chars=256)
         batches = make_units(self.source, chunk_chars=256)
         self.assertGreater(len(batches), 3)
-        self.assertEqual(len(client.calls), 2 * len(batches) + 2)
-        self.assertEqual(len(document["provenance"]["scene_summaries"]), len(batches))
+        self.assertEqual(len(client.calls), len(batches) + 3)
+        self.assertEqual(len(document["provenance"]["scene_summaries"]), 1)
         self.assertTrue(readiness(document)["ready"])
-        self.assertTrue(any(payload["context_units"] for _, payload in client.calls if "target_units" in payload))
+        self.assertTrue(any(payload["context_units"] for _, payload in client.calls if "mode" not in payload))
         for block in self.source["blocks"]:
             spans = [item for item in document["segments"] if item["block_id"] == block["id"]]
             self.assertEqual("".join(item["text"] for item in spans), block["text"])
@@ -804,7 +842,7 @@ class PipelineTests(unittest.TestCase):
                 cursor = item["end"]
             self.assertEqual(cursor, len(block["text"]))
 
-    def test_whole_book_discovery_keeps_original_units_and_one_global_summary(self):
+    def test_automatic_discovery_keeps_original_units_and_whole_source_when_it_fits(self):
         self.source["blocks"][0]["text"] += " 😀 αβγδεζ " * 90
         self.source["blocks"][1]["chapter_id"] = "ch2"
         self.source["chapters"][0]["block_ids"] = ["b1"]
@@ -812,31 +850,23 @@ class PipelineTests(unittest.TestCase):
         batches = make_units(self.source, chunk_chars=256)
         client = FakeClient()
         document = self.run_analysis(client, chunk_chars=256, whole_book_discovery=True)
-        discovery = [payload for _, payload in client.calls if payload.get("mode") == "discover"]
-        reconciliation = [payload for _, payload in client.calls if payload.get("mode") == "reconcile"]
+        discovery = [payload for _, payload in client.calls if payload.get("mode") == "casting_discovery"]
+        reconciliation = [payload for _, payload in client.calls if payload.get("mode") == "casting_coverage"]
         attribution = [payload for _, payload in client.calls if "mode" not in payload]
         self.assertEqual(len(discovery), 1)
         self.assertEqual(len(reconciliation), 1)
         self.assertEqual(len(attribution), len(batches))
         self.assertEqual(discovery[0]["target_units"], [unit for batch in batches for unit in batch])
-        self.assertEqual(discovery[0]["context_units"], [])
-        self.assertEqual(discovery[0]["scene_summaries"], [])
+        self.assertNotIn("context_units", discovery[0])
+        self.assertNotIn("scene_summaries", discovery[0])
         self.assertEqual({unit["chapter_id"] for unit in discovery[0]["target_units"]}, {"ch1", "ch2"})
-        self.assertTrue(all(len(values) == 256 for values in discovery[0]["available_ids"].values()))
-        self.assertIn("book-wide", client.calls[0][0])
-        self.assertIn("2400", client.calls[0][0])
+        self.assertEqual(discovery[0]["id_allocation"]["policy"], "unbounded_response_local")
         summaries = document["provenance"]["scene_summaries"]
         self.assertEqual(len(summaries), 1)
-        self.assertEqual(summaries[0]["scope"], "book")
-        self.assertIsNone(summaries[0]["chapter_id"])
-        self.assertEqual(reconciliation[0]["scene_summaries"], summaries)
+        self.assertEqual(summaries[0]["unit_ids"], [unit["unit_id"] for unit in discovery[0]["target_units"]])
         self.assertEqual(reconciliation[0]["target_units"], discovery[0]["target_units"])
-        self.assertEqual(reconciliation[0]["context_units"], [])
-        reconciliation_prompt = next(system for system, payload in client.calls if payload.get("mode") == "reconcile")
-        self.assertIn("cast completeness", reconciliation_prompt)
-        self.assertIn("chorus or unison", reconciliation_prompt)
-        self.assertIn("their solo turns", reconciliation_prompt)
-        self.assertIn("role's character_id", reconciliation_prompt)
+        self.assertEqual(reconciliation[0]["cast_view"]["full_cast_fingerprint"],
+                         fingerprint(reconciliation[0]["cast_view"]["records"]))
         self.assertTrue(all(payload["scene_summary"] == summaries[0] for payload in attribution))
         self.assertEqual([payload["target_units"] for payload in attribution], batches)
         self.assertTrue(readiness(document)["ready"])
@@ -858,7 +888,11 @@ class PipelineTests(unittest.TestCase):
         attribution = [payload for _, payload in client.calls if "mode" not in payload]
         self.assertEqual(len(attribution), len(batches))
         self.assertTrue(all(payload["prior_segments"] == [] for payload in attribution))
-        self.assertTrue(all(payload["final_cast"] == document["cast"] for payload in attribution))
+        for payload in attribution:
+            for collection in ("characters", "roles", "voices"):
+                self.assertEqual([item["id"] for item in payload["final_cast"][collection]],
+                                 [item["id"] for item in document["cast"][collection]])
+            self.assertTrue(all("description" not in voice for voice in payload["final_cast"]["voices"]))
         by_id = {payload["target_units"][0]["unit_id"]: payload for payload in attribution}
         all_units = [unit for batch in batches for unit in batch]
         for index, batch in enumerate(batches):
@@ -890,31 +924,24 @@ class PipelineTests(unittest.TestCase):
         client = FakeClient()
         self.run_analysis(client, whole_book_discovery=True)
         original_system, original_payload = client.calls[0]
-        # Whole-book mode swaps the batched discovery prompt for one book-wide
-        # pass: distinctive markers, not a verbatim copy of the prompt source.
-        self.assertIn("brief book-wide identity/narrator summary, at most 2400 characters", original_system)
-        self.assertIn("target_units contain the complete book in source order", original_system)
-        self.assertNotIn("brief scene/identity/narrator summary", original_system)
-        self.assertEqual(original_payload["mode"], "discover")
+        self.assertEqual(original_payload["mode"], "casting_discovery")
         self.assertEqual(original_payload["book"], self.source["book"])
         self.assertEqual(original_payload["known_cast"], seed_cast())
         self.assertEqual(original_payload["target_units"],
                          [unit for batch in make_units(self.source) for unit in batch])
-        self.assertEqual(original_payload["context_units"], [])
-        self.assertEqual(original_payload["scene_summaries"], [])
+        self.assertNotIn("context_units", original_payload)
+        self.assertNotIn("scene_summaries", original_payload)
         self.assertEqual(original_payload["performance_policy"], DEFAULT_POLICY)
         self.assertEqual(set(original_payload["available_ids"]), {"characters", "roles", "voices"})
-        self.assertTrue(all(len(ids) == 256 for ids in original_payload["available_ids"].values()))
+        self.assertEqual(original_payload["id_allocation"]["policy"], "unbounded_response_local")
         notes = "Check whether an unnamed voice has a solo turn."
         repeat = FakeClient()
         document = self.run_analysis(repeat, whole_book_discovery=True, cast_review_notes=notes)
         self.assertEqual(len(repeat.calls), 1)
         system, payload = repeat.calls[0]
-        self.assertEqual(payload["mode"], "reconcile")
+        self.assertEqual(payload["mode"], "casting_coverage")
         self.assertEqual(payload["review_notes"], notes)
         self.assertEqual(payload["target_units"], original_payload["target_units"])
-        self.assertIn("untrusted observations", system)
-        self.assertIn("Verify them", system)
         self.assertEqual(document["provenance"]["cast_review_notes"], notes)
         self.assertTrue(document["provenance"]["whole_book_discovery"])
         self.assertEqual(document["provenance"]["attribution_workers"], 1)
@@ -932,7 +959,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(policy, before)
                 self.assertEqual(document["provenance"]["performance_policy"], policy)
                 self.assertEqual({payload.get("mode", "attribute") for _, payload in client.calls},
-                                 {"discover", "reconcile", "voice_ensemble", "attribute"})
+                                 {"casting_discovery", "casting_coverage", "voice_ensemble", "attribute"})
                 self.assertTrue(all(payload["performance_policy"] == policy for _, payload in client.calls))
                 replay = FakeClient()
                 self.assertEqual(self.run_analysis(replay, chunk_chars=256, whole_book_discovery=whole_book, policy=policy),
@@ -991,18 +1018,30 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("".join(item["text"] for item in repaired["segments"] if item["block_id"] == block["id"]),
                              block["text"])
 
-    def test_concurrent_attribution_uses_matching_summaries_with_incremental_discovery(self):
+    def test_concurrent_attribution_uses_matching_adaptive_region_summaries(self):
+        class RegionalClient(FakeClient):
+            def discover(self, payload):
+                if len(payload["target_units"]) > 2:
+                    raise OutputTruncatedError("The model output was truncated. Increase the output token limit or reduce the input.")
+                response = super().discover(payload)
+                response["summary"] = "Source region " + payload["target_units"][0]["unit_id"]
+                return response
+
         self.source["blocks"][0]["text"] += " more source words " * 80
-        client = FakeClient()
+        client = RegionalClient()
         document = self.run_analysis(client, chunk_chars=256, attribution_workers=3)
         batches = make_units(self.source, chunk_chars=256)
         summaries = document["provenance"]["scene_summaries"]
-        self.assertEqual(len(summaries), len(batches))
+        self.assertGreater(len(summaries), 1)
         attribution = {payload["target_units"][0]["unit_id"]: payload
                        for _, payload in client.calls if "mode" not in payload}
-        for index, batch in enumerate(batches):
-            self.assertEqual(attribution[batch[0]["unit_id"]]["scene_summary"], summaries[index])
-        self.assertEqual(len(client.calls), len(batches) * 2 + 2)
+        for batch in batches:
+            unit_ids = {unit["unit_id"] for unit in batch}
+            matching = [summary for summary in summaries if unit_ids.intersection(summary["unit_ids"])]
+            expected = matching[0] if len(matching) == 1 else {"scope": "source_regions", "summaries": matching}
+            self.assertEqual(attribution[batch[0]["unit_id"]]["scene_summary"], expected)
+        discoveries = [payload for _, payload in client.calls if payload.get("mode") == "casting_discovery"]
+        self.assertLessEqual(len(discoveries), 2 * sum(map(len, batches)) - 1)
         self.assertTrue(readiness(document)["ready"])
 
     def test_concurrent_invalid_text_is_rejected_without_caching_bad_attribution(self):

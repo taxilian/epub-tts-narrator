@@ -76,7 +76,7 @@ def new_state(document, previous=None):
 def checked_windows(state, document):
     expected = new_state(document, state)
     if state["binding"] != expected["binding"] or state["names"] != expected["names"]:
-        raise ValueError("Name script is stale; run prepare-name-script BOOK")
+        raise ValueError("Saved name annotations are stale; automatic name preparation is retired")
     targets = list(windows(document, state["names"]))
     if len(state["windows"]) > len(targets):
         raise ValueError("Name script contains excess windows")
@@ -118,10 +118,10 @@ def ordinary_span(snapshot, block_id, start, end):
 def load_name_script(directory, document):
     state = read_state(directory)
     if state is None:
-        raise ValueError("Scoped names require prepare-name-script BOOK")
+        raise ValueError("Scoped names require saved name annotations; automatic name preparation is retired")
     checked = checked_windows(state, document)
     if state["status"] != "ready":
-        raise ValueError("Name script preparation is pending; rerun prepare-name-script BOOK")
+        raise ValueError("Saved name annotations are pending; automatic name preparation is retired")
     mentions, unresolved = {}, []
     for saved, target, spans in checked:
         block_id, offset = saved["block_id"], saved["start"]

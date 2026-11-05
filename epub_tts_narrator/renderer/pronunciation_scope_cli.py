@@ -8,11 +8,11 @@ from ..scoped_pronunciations import identity_scope, scope_for, set_choice
 def command_scope(bundle, args):
     kind, name_id = getattr(args, "pronunciation_class", None), getattr(args, "name_id", None)
     if kind == "name" and name_id is None:
-        raise ValueError("--class name requires --name-id N<number>; list prepare-name-script BOOK --action list")
+        raise ValueError("--class name requires --name-id N<number> from existing name-script annotations")
     if name_id is not None and kind != "name":
         raise ValueError("--name-id requires --class name")
     if kind is None:
-        if (Path(bundle["directory"]) / FILENAME).exists() and args.action not in {"list", "discover"}:
+        if (Path(bundle["directory"]) / FILENAME).exists() and args.action != "list":
             from ..name_script_state import load_name_script
             from ..name_script import alias_words
             snapshot = load_name_script(bundle["directory"], bundle)
@@ -21,6 +21,9 @@ def command_scope(bundle, args):
                 raise ValueError("Scoped mode requires --class name --name-id N<number>, or --class special; "
                                  "word alone cannot identify an entity")
         return None
+    if not (Path(bundle["directory"]) / FILENAME).exists():
+        raise ValueError("Scoped pronunciation requires saved name-script.json annotations; "
+                         "the renderer will not generate them")
     scope = scope_for(bundle, name_id if kind == "name" else None)
     print(f"Pronunciation scope: {name_id or 'special'}")
     if args.action == "migrate":
@@ -45,24 +48,4 @@ def list_scopes(bundle, config, word=None):
                                        name_snapshot=snapshot).rows(word), print)
     print("\nSpecial words (global spelling rules; marked names excluded)")
     _show(PronunciationReviewSession(bundle, config, scope={"class": "special"}, name_snapshot=snapshot).rows(word), print)
-    return 0
-
-
-def prepare_scope(bundle, config, config_path, scope, word=None):
-    from ..pronunciations import save_proposal, set_pronunciation
-    from ..pronunciation_workflow import create_pronunciation_proposer
-    from .pronunciation_review import PronunciationReviewSession
-    session = PronunciationReviewSession(bundle, config, scope=scope)
-    if word and not session.rows(word):
-        set_pronunciation(bundle["directory"], bundle, word, status="pending", scope=scope)
-    rows = session.rows(word)
-    proposer = create_pronunciation_proposer(bundle["directory"], config_path, scope=scope)
-    count = 0
-    for row in rows:
-        if row["status"] == "pending" and "proposal" not in row and "draft" not in row:
-            save_proposal(bundle["directory"], bundle, row["word"], proposer(row["word"]), scope=scope)
-            count += 1
-    print(f"Prepared {count} scoped pronunciation proposal(s); no choices were confirmed.")
-    if not rows:
-        print("No scoped candidates. Use --word, or run pronunciations --action discover to collect special words.")
     return 0

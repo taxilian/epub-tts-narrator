@@ -60,6 +60,43 @@ class ScopedPronunciationRuntimeTests(unittest.TestCase):
         self.assertEqual([item["start"] for item in controls], [TEXT.index("ally"), TEXT.index("Ally with")])
         self.assertNotIn("expressive_performance", chunks[1])
 
+    def test_missing_annotations_never_widen_a_saved_special_rule_to_names(self):
+        set_choice(self.directory, self.bundle, "Ally", PHONES, scope={"class": "special"})
+        saved_choice = (self.directory / "scoped-pronunciations.json").read_bytes()
+        (self.directory / "name-script.json").unlink()
+
+        with self.assertRaisesRegex(ValueError, "saved name annotations"):
+            self.chunks()
+
+        self.assertEqual((self.directory / "scoped-pronunciations.json").read_bytes(), saved_choice)
+        self.assertFalse((self.directory / "name-script.json").exists())
+
+    def test_inherited_special_rule_requires_current_book_name_annotations(self):
+        set_choice(self.directory, self.bundle, "Ally", PHONES, scope={"class": "special"})
+        second = book(self.root / "second", previous=self.directory)
+
+        with self.assertRaisesRegex(ValueError, "saved name annotations"):
+            make_plan(second, self.config)
+
+        self.assertFalse((Path(second["directory"]) / "name-script.json").exists())
+
+    def test_pending_or_stale_annotations_block_dependent_special_rules(self):
+        from copy import deepcopy
+        from epub_tts_narrator.name_script_state import read_state, save_state
+        set_choice(self.directory, self.bundle, "Ally", PHONES, scope={"class": "special"})
+        original = read_state(self.directory)
+        for change in ("pending", "stale"):
+            with self.subTest(change=change):
+                state = deepcopy(original)
+                if change == "pending":
+                    state["status"] = "pending"
+                else:
+                    state["binding"]["identities"] = "stale"
+                save_state(self.directory, state)
+
+                with self.assertRaises(ValueError):
+                    self.chunks()
+
     def test_legacy_collision_requires_explicit_migration_and_preserves_raw_registry(self):
         set_pronunciation(self.directory, self.bundle, "Ally", PHONES)
         raw = (self.directory / "pronunciations.json").read_bytes()
@@ -70,20 +107,13 @@ class ScopedPronunciationRuntimeTests(unittest.TestCase):
         self.assertEqual((self.directory / "pronunciations.json").read_bytes(), raw)
 
     def test_frozen_snapshot_survives_new_choices_during_recovery(self):
-        from epub_tts_narrator.renderer.workflow import _preflight, make_render_plan
-        from copy import deepcopy
-        rows = self.bundle["chapters"][0]["rows"]
-        original = rows[0]
-        split = original["text"].index("ALLY")
-        rows[:1] = [dict(deepcopy(original), id="left", text=original["text"][:split], end=split),
-                    dict(deepcopy(original), id="right", text=original["text"][split:], start=split)]
-        self.config["render"]["paragraph_synthesis"] = True
+        from epub_tts_narrator.renderer.workflow import _preflight
         scope = scope_for(self.bundle, "N1")
         set_choice(self.directory, self.bundle, "Ally", PHONES, scope=scope)
-        config, before, _ = _preflight(self.bundle, self.config, chapters_only=True, voice_store_override=object())
-        self.assertTrue(any("paragraph_turns" in chunk for chunk in before["chapters"][0]["chunks"]))
+        config, _, _ = _preflight(self.bundle, self.config, chapters_only=True, voice_store_override=object())
+        before = self.chunks(config)
         set_choice(self.directory, self.bundle, "Ally", status="ignored", scope=scope)
-        self.assertEqual(make_render_plan(self.bundle, config), before)
+        self.assertEqual(self.chunks(config), before)
         self.assertNotIn("expressive_performance", self.chunks()[0])
 
     def test_real_renderer_cli_set_and_ignore_scoped_rule(self):
@@ -153,29 +183,3 @@ class ScopedPronunciationRuntimeTests(unittest.TestCase):
         scope = scope_for(document, "N1")
         set_choice(directory, document, "Job", PHONES, scope=scope)
         self.assertEqual(set(load(directory, scope)[0]["variants"]), {"Job", "job"})
-
-    def test_scoped_name_maps_normalization_without_changing_expected_words_or_ranges(self):
-        row = self.bundle["chapters"][0]["rows"][0]
-        row["speech_normalization"] = {"version": 1, "edits": [{
-            "start": 0, "end": 4, "original": "Ally", "replacement": "Alli",
-            "direction": "Pronunciation hint", "reason": "Approved spelling."}]}
-        before = self.chunks()[0]
-        set_choice(self.directory, self.bundle, "Ally", PHONES, scope=scope_for(self.bundle, "N1"))
-        after = self.chunks()[0]
-        for key in ("spoken_text", "source_ranges", "segment", "chunk_id"):
-            self.assertEqual(after[key], before[key])
-        controls = [item for item in after["expressive_performance"]["controls"] if item["kind"] == "pronunciation"]
-        self.assertEqual([item["text"] for item in controls], ["Alli", "ALLY"])
-        row["speech_normalization"]["edits"][0].update(end=12, original="Ally greeted", replacement="Alli greeted")
-        with self.assertRaisesRegex(ValueError, "multiword"):
-            self.chunks()
-
-    def test_name_rule_cannot_silently_drop_a_mention_split_across_script_rows(self):
-        from copy import deepcopy
-        rows = self.bundle["chapters"][0]["rows"]
-        original = rows[0]
-        rows[:1] = [dict(deepcopy(original), id="left", text=original["text"][:2], end=2),
-                    dict(deepcopy(original), id="right", text=original["text"][2:], start=2)]
-        set_choice(self.directory, self.bundle, "Ally", PHONES, scope=scope_for(self.bundle, "N1"))
-        with self.assertRaisesRegex(ValueError, "segment boundary"):
-            self.chunks()

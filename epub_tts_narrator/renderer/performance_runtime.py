@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from pathlib import Path
+import json
 
 from ..performance_plan import slice_performance, text_sha256, validate_performance
 from ..spoken_text import build_spoken, effective_delivery
@@ -63,14 +64,71 @@ def _with_normalization_directions(row, record, *, suppressed_normalizations=())
     return validate_performance(record, text)
 
 
-def row_performance(row, records, *, normalization=True):
-    if records is None:
+def _inline_performance(row):
+    """Validate the optional analyzer inline controls bound to this row's spoken text."""
+    record = row.get("performance_controls")
+    if record is None:
         return None
-    if row["id"] not in records:
-        raise ValueError("Performance plan is missing a selected source segment")
+    try:
+        return validate_performance(record, build_spoken(row)[0])
+    except ValueError as exc:
+        raise ValueError(f"Segment {row['id']} has invalid inline performance controls: {exc}") from exc
+
+
+def _merge_performance_records(row, inline, external):
+    """Merge inline attribution controls with a plan record for the same row.
+
+Exact duplicate controls deduplicate. Same-kind overlapping spans and
+differing events at one position fail with the row ID; neither source is
+silently preferred or dropped.
+"""
+    spoken = build_spoken(row)[0]
+    controls, seen = [], set()
+    for record, label in ((inline, "inline"), (external, "plan")):
+        try:
+            canonical = validate_performance(record, spoken)
+        except ValueError as exc:
+            raise ValueError(f"Segment {row['id']} has invalid {label} performance controls: {exc}") from exc
+        for control in canonical["controls"]:
+            key = json.dumps(control, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                controls.append(control)
+    for kind in ("delivery", "pronunciation"):
+        spans = sorted((c for c in controls if c["kind"] == kind), key=lambda c: (c["start"], c["end"]))
+        for left, right in zip(spans, spans[1:]):
+            if left["end"] > right["start"]:
+                raise ValueError(f"Segment {row['id']} has conflicting {kind} controls between "
+                                 "inline attribution and the performance plan")
+    positions = {}
+    for control in controls:
+        if "offset" not in control:
+            continue
+        prior = positions.setdefault((control["kind"], control["offset"]), control)
+        if prior != control:
+            raise ValueError(f"Segment {row['id']} has conflicting {control['kind']} events at one "
+                             "position between inline attribution and the performance plan")
+    try:
+        merged = {"version": 1, "text_sha256": text_sha256(spoken), "controls": controls}
+        return validate_performance(merged, spoken)
+    except ValueError as exc:
+        raise ValueError(f"Segment {row['id']} inline and plan performance controls cannot combine: {exc}") from exc
+
+
+def row_performance(row, records, *, normalization=True):
+    inline = _inline_performance(row)
+    if records is None:
+        record = inline
+    else:
+        if row["id"] not in records:
+            raise ValueError("Performance plan is missing a selected source segment")
+        external = records[row["id"]]
+        record = _merge_performance_records(row, inline, external) if inline is not None else external
+    if record is None:
+        return None
     if normalization:
-        return _with_normalization_directions(row, records[row["id"]])
-    return validate_performance(records[row["id"]], build_spoken(row)[0])
+        return _with_normalization_directions(row, record)
+    return validate_performance(record, build_spoken(row)[0])
 
 
 def protected_spans(text, spans, record, maximum):
@@ -99,7 +157,10 @@ def bind_chunk_performance(chunk, record, *, sparse=False):
     scoped = (slice_performance(
         record, spoken, chunk["spoken_start"], chunk["spoken_end"])
         if spoken else validate_performance(record, spoken))
-    if sparse and not any(control["kind"] == "pronunciation" for control in scoped["controls"]):
+    # Sparse legacy binding keeps control-free chunks byte-identical to plans
+    # without a sidecar. Any scoped control binds, not only pronunciations, so
+    # inline attribution cues reach synthesis in the default mode too.
+    if sparse and not scoped["controls"]:
         return
     chunk["expressive_performance"] = scoped
     scene = deepcopy(row)

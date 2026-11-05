@@ -8,6 +8,7 @@ All offsets use Python/Unicode code points, as the analysis contract does.
 from __future__ import annotations
 
 import unicodedata
+import re
 from collections.abc import Mapping
 
 
@@ -17,9 +18,11 @@ MAX_DELIVERY_CHARACTERS = 1200
 def _plain(value, label, *, maximum=None):
     if (not isinstance(value, str) or not value.strip()
             or any(char in value for char in "[]<>")
-            or any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in value)
-            or maximum is not None and len(value) > maximum):
+            or any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in value)):
         raise ValueError(f"{label} must be nonempty plain text without control syntax")
+    if maximum is not None and len(value) > maximum:
+        raise ValueError(f"{label} exceeds {maximum} characters (received {len(value)}); "
+                         "shorten the wording while retaining the intended delivery")
 
 
 def validate_normalization(row):
@@ -93,6 +96,10 @@ def effective_delivery(row):
         if depth:
             raise ValueError("Speech delivery direction has unmatched brackets")
         value = value.translate(str.maketrans("[]", "()"))
+        source_text = row.get("text", "")
+        if isinstance(source_text, str):
+            value = re.sub(r"<([^\W\d_][\w-]*(?: [^\W\d_][\w-]*)*)>",
+                           lambda match: f"({match[1]})" if match[0] in source_text else match[0], value)
         _plain(value, "Speech delivery direction")
         identity = " ".join(value.casefold().split())
         if identity not in seen:

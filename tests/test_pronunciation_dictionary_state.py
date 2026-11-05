@@ -100,15 +100,10 @@ class PronunciationDictionaryStateTests(unittest.TestCase):
         self.assertEqual([row["word"] for row in entries], ["left"])
         self.assertEqual(entries[0]["proposal"], registry_tests.CMU_MARA)
 
-    def test_legacy_display_estimate_is_replaced_without_changing_choice(self):
+    def test_legacy_display_estimate_is_ignored_without_changing_choice(self):
         directory, document = self.book()
         set_pronunciation(directory, document, "Mara", status="ignored")
-        calls = []
-        fresh = {"alphabet": "cmu_arpabet", "value": "M EH1 R AH0"}
-        def propose(word, respelling):
-            calls.append((word, respelling))
-            return fresh
-        session = PronunciationReviewSession(load_bundle(directory), self.config, proposal_fn=propose)
+        session = PronunciationReviewSession(load_bundle(directory), self.config)
         session.directory.mkdir(parents=True)
         request = {"word": "Mara", "respelling": None}
         entries = {digest(request): {"request": request, "pronunciation": registry_tests.CMU_MARA}}
@@ -117,12 +112,11 @@ class PronunciationDictionaryStateTests(unittest.TestCase):
             "book_id": document["source"]["book"]["id"],
             "source_fingerprint": session.bundle["manifest"]["source_fingerprint"],
             "entries": entries, "sha256": digest(entries)})
-        before = (directory / "pronunciations.json").read_bytes()
+        registry = (directory / "pronunciations.json").read_bytes()
+        estimates = (session.directory / "cmu-estimates.json").read_bytes()
 
-        session.description(session.rows()[0], prepare=True)
-        session.description(session.rows()[0], prepare=True)
+        self.assertEqual(session.description(session.rows()[0]), "default pronunciation")
+        self.assertEqual(session.description(session.rows()[0]), "default pronunciation")
 
-        saved = json.loads((session.directory / "cmu-estimates.json").read_text())
-        self.assertEqual(saved["entries"][digest(request)]["pronunciation"], fresh)
-        self.assertEqual(calls, [("Mara", None)])
-        self.assertEqual((directory / "pronunciations.json").read_bytes(), before)
+        self.assertEqual((session.directory / "cmu-estimates.json").read_bytes(), estimates)
+        self.assertEqual((directory / "pronunciations.json").read_bytes(), registry)

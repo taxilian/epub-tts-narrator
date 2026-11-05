@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from epub_tts_narrator.analysis_directory import _completed_directory
 from epub_tts_narrator.analysis_progress import (
-    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, create_pending, inspect_pending,
+    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, PendingAnalysis, create_pending, inspect_pending,
     is_pending_directory,
 )
 from epub_tts_narrator.audition_scripts import prepare_document_samples
@@ -20,7 +20,6 @@ from epub_tts_narrator.cli import main
 from epub_tts_narrator.pipeline import analyze
 from epub_tts_narrator.speaker_completion import unassigned_segments
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
-from epub_tts_narrator.speech_normalization import normalize_document_speech
 from shared_fixtures import Terminal, make_epub, snapshot
 from test_pipeline import FakeClient
 
@@ -28,25 +27,54 @@ EPUB_BODY = ('<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title
              '<body><h1>One</h1><p>Mara, the lighthouse keeper, said softly, “Hello.”</p>'
              '<p>They left.</p></body></html>')
 
-# Each checkpointed stage is owned by one CLI-visible function; the local imports
-# inside the analyze flow resolve these modules on every run.
 STAGE_FUNCTIONS = {
     "analyzed": "epub_tts_narrator.cli.analyze",
-    "speech-normalized-1": "epub_tts_narrator.speech_normalization.normalize_document_speech",
     "samples-prepared-1": "epub_tts_narrator.audition_scripts.prepare_document_samples",
     "speakers-decided": "epub_tts_narrator.cli.prompt_speaker_decisions",
-    "speech-normalized-2": "epub_tts_narrator.speech_normalization.normalize_document_speech",
     "samples-prepared-2": "epub_tts_narrator.audition_scripts.prepare_document_samples",
 }
 REAL_FUNCTIONS = {
     "epub_tts_narrator.cli.analyze": analyze,
-    "epub_tts_narrator.speech_normalization.normalize_document_speech": normalize_document_speech,
     "epub_tts_narrator.audition_scripts.prepare_document_samples": prepare_document_samples,
     "epub_tts_narrator.cli.prompt_speaker_decisions": prompt_speaker_decisions,
 }
 # Model work that only the `analyzed` stage performs; a resume past it must
 # never repeat these requests.
 ANALYSIS_MODES = {None, "discover", "reconcile", "voice_ensemble", "identity_scan"}
+RETIRED_MODES = {"speech_spelling_scan", "speech_spelling_review", "pronunciation_discovery",
+                 "pronunciation_proposal", "name_script"}
+RETIRED_TARGETS = (
+    "epub_tts_narrator.speech_normalization.normalize_document_speech",
+    "epub_tts_narrator.pronunciation_workflow.prepare_book_pronunciations",
+    "epub_tts_narrator.pronunciation_discovery.discover_pronunciations",
+    "epub_tts_narrator.pronunciation_proposals.propose_name_pronunciations",
+    "epub_tts_narrator.name_script_workflow.prepare_name_script",
+)
+PRONUNCIATION_SIDECARS = ("pronunciations.json", "name-script.json", "scoped-pronunciations.json")
+
+
+def interrupt_stage(stage, call_number=1, error=None):
+    if stage in STAGE_FUNCTIONS:
+        target = STAGE_FUNCTIONS[stage]
+        calls = []
+        real = REAL_FUNCTIONS[target]
+
+        def wrapper(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == call_number:
+                raise error or KeyboardInterrupt
+            return real(*args, **kwargs)
+
+        return patch(target, side_effect=wrapper)
+    real_complete = PendingAnalysis.complete_stage
+
+    def checkpoint(pending, current, document):
+        if current == stage:
+            raise error or KeyboardInterrupt
+        return real_complete(pending, current, document)
+
+    return patch("epub_tts_narrator.analysis_progress.PendingAnalysis.complete_stage", autospec=True,
+                 side_effect=checkpoint)
 
 
 class PipelineClient(FakeClient):
@@ -56,6 +84,11 @@ class PipelineClient(FakeClient):
         super().__init__(unresolved=unresolved)
         self.model, self.base_url = model, base_url
         self.identity = {"model": model, "base_url": base_url}
+
+    def complete(self, system, payload):
+        if payload.get("mode") in RETIRED_MODES:
+            raise AssertionError(f"Retired pronunciation request: {payload['mode']}")
+        return super().complete(system, payload)
 
 
 class AnalyzeCheckpointTests(unittest.TestCase):
@@ -83,7 +116,11 @@ class AnalyzeCheckpointTests(unittest.TestCase):
 
     def run_cli(self, *args):
         stdout, stderr = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        with contextlib.ExitStack() as stack:
+            for target in RETIRED_TARGETS:
+                stack.enter_context(patch(target, side_effect=AssertionError("Automatic pronunciation work is retired")))
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
             status = main([str(arg) for arg in args])
         return status, stdout.getvalue(), stderr.getvalue()
 
@@ -96,18 +133,6 @@ class AnalyzeCheckpointTests(unittest.TestCase):
             return real(*args, **kwargs)
 
         return wrapper, calls
-
-    def interrupter(self, target, call_number):
-        calls = []
-        real = REAL_FUNCTIONS[target]
-
-        def wrapper(*args, **kwargs):
-            calls.append(1)
-            if len(calls) == call_number:
-                raise KeyboardInterrupt
-            return real(*args, **kwargs)
-
-        return wrapper
 
     def analyze_command(self, output):
         return ("analyze", self.epub, "-o", output, "--config", self.config)
@@ -135,12 +160,12 @@ class AnalyzeCheckpointTests(unittest.TestCase):
         for index, stage in enumerate(STAGES):
             with self.subTest(stage=stage):
                 output = self.root / f"book-{index}-{stage}"
-                target = STAGE_FUNCTIONS[stage]
-                call_number = 1 + sum(1 for earlier in STAGES[:index]
-                                      if STAGE_FUNCTIONS[earlier] == target)
+                target = STAGE_FUNCTIONS.get(stage)
+                call_number = (1 + sum(1 for earlier in STAGES[:index]
+                                       if STAGE_FUNCTIONS.get(earlier) == target)) if target else 1
                 factory, _ = self.clients()
                 with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
-                        patch(target, side_effect=self.interrupter(target, call_number)):
+                        interrupt_stage(stage, call_number):
                     status, _, stderr = self.run_cli(*self.analyze_command(output))
                 self.assertEqual(status, 130, stderr)
                 self.assertIn("checkpointed analysis progress", stderr)
@@ -163,8 +188,6 @@ class AnalyzeCheckpointTests(unittest.TestCase):
                 self.assertEqual(status, 0, stderr)
                 expected = {
                     "epub_tts_narrator.cli.analyze": 1 if index == 0 else 0,
-                    "epub_tts_narrator.speech_normalization.normalize_document_speech":
-                        (1 if index <= 1 else 0) + (1 if index <= 4 else 0),
                     "epub_tts_narrator.audition_scripts.prepare_document_samples":
                         (1 if index <= 2 else 0) + 1,
                     "epub_tts_narrator.cli.prompt_speaker_decisions": 1 if index <= 3 else 0,
@@ -176,21 +199,22 @@ class AnalyzeCheckpointTests(unittest.TestCase):
                     modes = {payload.get("mode") for client in made for _, payload in client.calls}
                     self.assertFalse(modes & ANALYSIS_MODES,
                                      f"completed analysis stages issued new model requests: {modes}")
-                _completed_directory(output)
+                document, _, _ = _completed_directory(output)
+                self.assertFalse(any("speech_normalization" in row for row in document["segments"]))
+                self.assertFalse(any((output / name).exists() for name in PRONUNCIATION_SIDECARS))
                 self.assertFalse((output / PENDING_DIRNAME).exists())
 
-    def test_failure_records_failed_status_and_a_rerun_completes(self):
+    def test_failure_at_an_inert_checkpoint_records_failed_status_and_a_rerun_completes(self):
         output = self.root / "book"
         factory, _ = self.clients()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
-                patch("epub_tts_narrator.speech_normalization.normalize_document_speech",
-                      side_effect=ValueError("Fixture normalization failure")):
+                interrupt_stage("speech-normalized-1", error=ValueError("Fixture checkpoint failure")):
             status, _, stderr = self.run_cli(*self.analyze_command(output))
         self.assertEqual(status, 1, stderr)
-        self.assertIn("Fixture normalization failure", stderr)
+        self.assertIn("Fixture checkpoint failure", stderr)
         record = inspect_pending(output)
         self.assertEqual(record["status"], "failed")
-        self.assertIn("Fixture normalization failure", record["error"])
+        self.assertIn("Fixture checkpoint failure", record["error"])
         factory, _ = self.clients()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
             status, _, stderr = self.run_cli(*self.analyze_command(output))
@@ -313,7 +337,11 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
 
     def run_cli(self, *args):
         stdout, stderr = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        with contextlib.ExitStack() as stack:
+            for target in RETIRED_TARGETS:
+                stack.enter_context(patch(target, side_effect=AssertionError("Automatic pronunciation work is retired")))
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
             status = main([str(arg) for arg in args])
         return status, stdout.getvalue(), stderr.getvalue()
 
@@ -327,18 +355,6 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
 
         return wrapper, calls
 
-    def interrupter(self, target, call_number):
-        calls = []
-        real = REAL_FUNCTIONS[target]
-
-        def wrapper(*args, **kwargs):
-            calls.append(1)
-            if len(calls) == call_number:
-                raise KeyboardInterrupt
-            return real(*args, **kwargs)
-
-        return wrapper
-
     def analyze_command(self, output):
         return ("analyze", self.epub, "-o", output, "--config", self.config)
 
@@ -348,10 +364,9 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
 
     def interrupt_after_analyzed(self, output):
         """Checkpoint exactly the analyzed stage, then interrupt the run."""
-        target = "epub_tts_narrator.speech_normalization.normalize_document_speech"
         factory, _ = self.clients()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
-                patch(target, side_effect=self.interrupter(target, 1)):
+                interrupt_stage("speech-normalized-1"):
             status, _, stderr = self.run_cli(*self.analyze_command(output))
         self.assertEqual(status, 130, stderr)
         self.assertEqual(inspect_pending(output)["completed_stages"], ["analyzed"])
@@ -484,7 +499,7 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         _completed_directory(output)
         self.assertFalse((output / PENDING_DIRNAME).exists())
 
-    def test_different_output_gets_fresh_checkpoints_and_reuses_the_sibling_request_cache(self):
+    def test_different_output_gets_fresh_checkpoints_without_pronunciation_work(self):
         first = self.root / "book-01"
         factory, made = self.clients()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
@@ -492,14 +507,14 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         _completed_directory(first)
         first_modes = [payload.get("mode") for payload in self.model_calls(made)]
-        self.assertIn("pronunciation_proposal", first_modes)
+        self.assertTrue(RETIRED_MODES.isdisjoint(first_modes))
+        self.assertFalse(any((first / name).exists() for name in PRONUNCIATION_SIDECARS))
         published = snapshot(first)
         # The second output starts its own pending checkpoints from the first stage.
         second = self.root / "book-02"
-        target = "epub_tts_narrator.speech_normalization.normalize_document_speech"
         factory, second_run = self.clients()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
-                patch(target, side_effect=self.interrupter(target, 1)):
+                interrupt_stage("speech-normalized-1"):
             status, _, stderr = self.run_cli(*self.analyze_command(second))
         self.assertEqual(status, 130, stderr)
         self.assertEqual(inspect_pending(second)["completed_stages"], ["analyzed"])
@@ -509,14 +524,10 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         _completed_directory(second)
         self.assertFalse((second / PENDING_DIRNAME).exists())
+        self.assertFalse(any((second / name).exists() for name in PRONUNCIATION_SIDECARS))
         self.assertEqual(snapshot(first), published, "The first book's published output stays untouched")
-        # The sibling request cache serves every request whose identity does not
-        # depend on the output directory (the CMU pronunciation proposal is not
-        # re-issued). Series-bound analysis requests legitimately differ: the
-        # series identity derives from the output path, so they are new requests.
         rerun_modes = [payload.get("mode") for payload in self.model_calls(second_run + third_run)]
-        self.assertNotIn("pronunciation_proposal", rerun_modes)
-        self.assertLess(len(rerun_modes), len(first_modes))
+        self.assertTrue(RETIRED_MODES.isdisjoint(rerun_modes))
 
 
 if __name__ == "__main__":

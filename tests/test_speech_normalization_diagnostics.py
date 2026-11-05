@@ -97,6 +97,25 @@ class SpeechNormalizationDiagnosticTests(unittest.TestCase):
         self.assertRegex(message.lower(), "identical|equal|same")
         self.assertRegex(message.lower(), "omit|remove")
 
+    def test_overlong_edit_direction_reports_actual_length_and_limit(self):
+        row = document("wull")["segments"][0]
+        change = edit(row["text"], "wull", "well", direction="Softly " * 40)
+
+        message = self.diagnosis({"segments": [{"segment_id": row["id"], "edits": [change]}]}, [row])
+
+        self.assertIn("direction", message)
+        self.assertIn("240", message)
+        self.assertIn(str(len(change["direction"])), message)
+
+    def test_unchanged_scan_can_preserve_source_notation_in_existing_delivery(self):
+        source = document('"Stop!" <Crash> "Now!"')
+        source["segments"][0]["delivery"]["direction"] = "Pause on <Crash> before the next shout."
+        original = deepcopy(source)
+        response = {"segments": [{"segment_id": source["segments"][0]["id"], "edits": []}]}
+
+        self.assertEqual(_validate_scan(response, source["segments"], []), response["segments"])
+        self.assertEqual(source, original)
+
     def test_overlap_error_identifies_both_ranges_and_second_edit(self):
         row = document("wull wull")["segments"][0]
         change = edit(row["text"], "wull", "well")
