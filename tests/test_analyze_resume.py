@@ -324,8 +324,9 @@ class AnalyzeResumeTests(unittest.TestCase):
         before = snapshot(path)
         status, _, error, provider = self.run_cli(other, "-o", path)
         self.assertEqual(status, 1)
-        self.assertIn("Chapter 1", error)
-        self.assertIn("Only chapters appended", error)
+        # The shared "One" heading alone does not make it an edit of this book.
+        self.assertIn("different book", error)
+        self.assertIn("separate output directory", error)
         provider.assert_not_called()
         self.assertEqual(snapshot(path), before)
 

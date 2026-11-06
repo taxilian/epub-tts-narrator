@@ -150,12 +150,18 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual((report["summary"]["hits"], report["summary"]["misses"]), (2, 0))
         self.assertEqual(self.snapshot(), before)
 
-        # The second take was conditioned on the first; without the first
-        # accepted take it is a miss too, even though its own record is intact.
+        # The second take was conditioned on the first. Tolerant history reuse
+        # (the default) keeps its intact record; strict reuse counts it a miss.
         first.unlink()
         report = self.report()
 
+        self.assertEqual((report["summary"]["hits"], report["summary"]["misses"]), (1, 1))
+        self.assertEqual(report["summary"]["history_changed_hits"], 1)
+        self.config["render"]["history_reuse"] = "strict"
+        report = self.report()
+
         self.assertEqual((report["summary"]["hits"], report["summary"]["misses"]), (0, 2))
+        self.assertEqual(report["summary"]["history_changed_hits"], 0)
         self.assertEqual(report["reasons"]["earlier_take_in_chapter_changed"], 1)
 
     def test_changed_weights_explain_miss_without_exposing_raw_engine_metadata(self):

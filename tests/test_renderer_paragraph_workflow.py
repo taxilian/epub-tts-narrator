@@ -287,19 +287,18 @@ class ParagraphWorkflowTests(unittest.TestCase):
             self.package()
         counts = (len(self.engine.dialogue_calls), len(self.engine.speech_calls), len(self.verifier.calls))
         self.chapters()
-        # The mixed paragraph becomes two individual takes; the two later
-        # takes in the chapter followed it in history and render again too.
+        # The mixed paragraph becomes two individual takes. The two later takes
+        # in the chapter followed it in history; tolerant history reuse (the
+        # default) keeps them.
         self.assertEqual(len(self.engine.dialogue_calls), counts[0])
-        self.assertEqual(len(self.engine.speech_calls) - counts[1], 4)
-        self.assertEqual(len(self.verifier.calls) - counts[2], 4)
+        self.assertEqual(len(self.engine.speech_calls) - counts[1], 2)
+        self.assertEqual(len(self.verifier.calls) - counts[2], 2)
         new = {path: record for path, record in self.accepted_clips().items() if path not in before}
-        self.assertEqual(len(new), 4)
+        self.assertEqual(len(new), 2)
         ordered = sorted(new.values(), key=lambda row: (row["request"]["chunk"]["segment"]["block_id"],
                                                         row["request"]["chunk"]["segment"]["start"]))
-        self.assertEqual([record["request"]["chunk"] for record in ordered[:2]],
+        self.assertEqual([record["request"]["chunk"] for record in ordered],
                          old_mixed["request"]["chunk"]["paragraph_turns"])
-        self.assertEqual([record["request"]["chunk"]["segment"]["block_id"] for record in ordered[2:]],
-                         ["b000005", "b000006"])
         for path, record in before.items():
             self.assertEqual(read_json(path), record)
             self.assertEqual(file_hash(path.parent / record["audio_file"]), hashes[path])

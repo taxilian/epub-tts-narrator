@@ -23,6 +23,9 @@ CHAPTER_ONE = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.”",
 CHAPTER_TWO = ("Two", ["Mara said, “The lamp is lit.”"])
 CHAPTER_THREE = ("Three", ["Tobin the ferryman called out, “Wait for me.”",
                            "Mara, the lighthouse keeper, answered, “Hurry.”"])
+LONG_ONE = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.”", "They left.", "The night was cold.",
+                    "Waves broke on the rocks.", "Mara said, “Bring the oil.”", "Morning came.",
+                    "The tide turned.", "Boats came home."])
 # Source context, beyond the shared name, that links a returning character.
 CONTEXT = {"Mara": "Mara, the lighthouse keeper", "Tobin": "Tobin the ferryman"}
 
@@ -30,10 +33,12 @@ CONTEXT = {"Mara": "Mara, the lighthouse keeper", "Tobin": "Tobin the ferryman"}
 class SerialClient(FakeClient):
     """Discovers Mara and Tobin; links Mara to her prior record with source context."""
 
-    def __init__(self, model, base_url, **kwargs):
+    def __init__(self, model, base_url, *, misread=None, **kwargs):
         super().__init__()
         self.model, self.base_url = model, base_url
         self.identity = {"model": model, "base_url": base_url}
+        # Text whose speaker this client reads as plain narration.
+        self.misread = misread
 
     def complete(self, system, payload):
         if payload.get("mode") == "speech_spelling_scan":
@@ -85,6 +90,8 @@ class SerialClient(FakeClient):
         for unit in payload["target_units"]:
             text = unit["text"]
             speaker = next((name for name in ("Tobin", "Mara") if name in text and name in dialogue), None)
+            if self.misread is not None and self.misread in text:
+                speaker = None
             start, finish = text.find("“"), text.find("”")
             spans = [(text, "narration")]
             if speaker is not None and start >= 0 and finish > start:
@@ -118,9 +125,10 @@ class BookUpdateTests(unittest.TestCase):
             'repair_attempts = 0\nattribution_workers = 1\n', encoding="utf-8")
         self.clients = []
         self.book = self.root / "serial"
+        self.misread = None
 
     def client(self, *args, **kwargs):
-        client = SerialClient(*args, **kwargs)
+        client = SerialClient(*args, misread=self.misread, **kwargs)
         self.clients.append(client)
         return client
 
@@ -210,17 +218,122 @@ class BookUpdateTests(unittest.TestCase):
         self.assertIn("Saved analysis is complete", stdout)
         self.assertIsNotNone(first)
 
-    def test_changed_earlier_chapter_is_refused_with_its_location_and_book_unchanged(self):
+    def test_reordered_chapters_are_refused_with_their_location_and_book_unchanged(self):
         self.seed()
         before = snapshot(self.book)
-        edited = ("Two", ["Mara said, “The lamp is out.”"])
-        changed = self.epub("serial-edited", [CHAPTER_ONE, edited, CHAPTER_THREE], "download-3")
+        calls = len(self.model_payloads())
+        changed = self.epub("serial-reordered", [CHAPTER_TWO, CHAPTER_ONE, CHAPTER_THREE], "download-3")
         status, stdout, stderr = self.analyze(changed)
         self.assertEqual(status, 1)
-        self.assertIn("chapter 2", stderr.lower())
-        self.assertIn("Two", stderr)
-        self.assertIn("appended", stderr)
+        self.assertIn("Chapter 1 ('One')", stderr)
+        self.assertIn("removed, inserted or reordered", stderr)
         self.assertEqual(snapshot(self.book), before)
+        self.assertEqual(len(self.model_payloads()), calls)
+
+    def seed_long(self):
+        self.seed_epub = self.epub("serial-v1", [LONG_ONE, CHAPTER_TWO], "download-1")
+        status, _, stderr = self.analyze(self.seed_epub)
+        self.assertEqual(status, 0, stderr)
+        return read_json(self.book / "analysis.json")
+
+    def test_edited_paragraph_is_analyzed_with_its_neighbours_and_everything_else_is_kept(self):
+        original = self.seed_long()
+        before_ids = self.plan_chunk_ids()
+        calls = len(self.model_payloads())
+        paragraphs = list(LONG_ONE[1])
+        paragraphs[4] = "Mara said, “Bring the lamp oil.”"
+        paragraphs.insert(6, "Gulls cried overhead.")
+        edited = self.epub("serial-v2", [("One", paragraphs), CHAPTER_TWO, CHAPTER_THREE], "download-2")
+
+        status, stdout, stderr = self.analyze(edited)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("Edited chapter 1 (One): 1 edited, 1 inserted paragraph(s)", stdout)
+        self.assertIn("Added 1 chapter: Three", stdout)
+        self.assertIn("New character: Tobin", stdout)
+        sent = self.model_payloads()[calls:]
+        # The edit is read with two unchanged paragraphs on each side; the rest
+        # of the chapter and unchanged chapters are never sent again.
+        self.assertTrue(any("Bring the lamp oil" in payload for payload in sent))
+        self.assertTrue(any("Waves broke on the rocks." in payload for payload in sent))
+        self.assertFalse(any("They left." in payload for payload in sent))
+        self.assertFalse(any("The lamp is lit" in payload for payload in sent))
+        document = read_json(self.book / "analysis.json")
+        old_blocks = {block["text"]: block for block in original["source"]["blocks"]}
+        new_blocks = {block["text"]: block for block in document["source"]["blocks"]}
+        old_rows = {row["block_id"]: row for row in original["segments"]}
+        for text, block in old_blocks.items():
+            if text == LONG_ONE[1][4]:
+                self.assertNotIn(text, new_blocks)
+                continue
+            # Unchanged paragraphs keep their IDs and their saved segments.
+            self.assertEqual(new_blocks[text]["id"], block["id"])
+            self.assertEqual([row for row in document["segments"] if row["block_id"] == block["id"]],
+                             [row for row in original["segments"] if row["block_id"] == block["id"]])
+        highest = max(int(block["id"][1:]) for block in original["source"]["blocks"])
+        fresh = [new_blocks[paragraphs[4]]["id"], new_blocks["Gulls cried overhead."]["id"]]
+        self.assertTrue(all(int(identifier[1:]) > highest for identifier in fresh))
+        self.assertNotIn(fresh[0], old_rows)
+        mara_role = next(role["id"] for role in original["cast"]["roles"] if role["kind"] == "dialogue")
+        self.assertIn("“Bring the lamp oil.”",
+                      [row["text"] for row in document["segments"] if row["role_id"] == mara_role])
+        update = document["provenance"]["book_updates"][-1]
+        self.assertEqual(update["edited_chapters"], [{"id": "ch0001", "title": "One", "number": 1,
+            "edited_paragraphs": 1, "inserted_paragraphs": 1, "removed_paragraphs": 0}])
+        # Every unchanged line keeps its render identity, so its audio is reused.
+        after_ids = self.plan_chunk_ids()
+        self.assertTrue(set(before_ids[1]) <= set(after_ids[1]))
+        edited_rows = [row for row in original["segments"]
+                       if row["block_id"] == old_blocks[LONG_ONE[1][4]]["id"]]
+        self.assertEqual(len(set(before_ids[0]) - set(after_ids[0])), len(edited_rows))
+
+    def test_neighbour_read_differently_keeps_its_saved_speakers_and_is_flagged_for_review(self):
+        original = self.seed_long()
+        neighbour = next(block["id"] for block in original["source"]["blocks"] if block["text"] == LONG_ONE[1][4])
+        saved_rows = [row for row in original["segments"] if row["block_id"] == neighbour]
+        self.misread = "Bring the oil"
+        paragraphs = list(LONG_ONE[1])
+        paragraphs[6] = "The tide turned slowly."
+
+        status, stdout, stderr = self.analyze(self.epub("serial-v2", [("One", paragraphs), CHAPTER_TWO], "download-2"))
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("1 unchanged paragraph(s) next to an edit now read differently", stdout)
+        document = read_json(self.book / "analysis.json")
+        self.assertEqual([row for row in document["segments"] if row["block_id"] == neighbour], saved_rows)
+        issue = next(issue for issue in document["issues"] if issue["kind"] == "update_context_attribution")
+        self.assertEqual(issue["target"], saved_rows[0]["id"])
+        self.assertFalse(issue["resolved"])
+        self.assertEqual(document["provenance"]["book_updates"][-1]["context_reviews"], [neighbour])
+
+    def test_removed_paragraph_needs_no_model_and_moves_pronunciation_evidence(self):
+        from epub_tts_narrator import pronunciations
+        from epub_tts_narrator.pipeline import write_json
+        original = self.seed_long()
+        removed_block = next(block["id"] for block in original["source"]["blocks"] if block["text"] == LONG_ONE[1][4])
+        record = pronunciations._empty(original["source"])
+        for word, block_id in (("Mara", removed_block), ("oil", removed_block)):
+            record["entries"].append({"id": pronunciations.word_id(word), "word": word, "status": "confirmed",
+                                      "kind": "other", "reason": "Chosen by the listener.",
+                                      "evidence": [{"block_id": block_id, "quote": word}],
+                                      "pronunciation": {"alphabet": "respelling", "value": word + "a"}})
+        write_json(self.book / pronunciations.FILENAME, record)
+        clients = len(self.clients)
+        paragraphs = [paragraph for index, paragraph in enumerate(LONG_ONE[1]) if index != 4]
+
+        status, stdout, stderr = self.analyze(self.epub("serial-v2", [("One", paragraphs), CHAPTER_TWO], "download-2"))
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("Edited chapter 1 (One): 1 removed paragraph(s)", stdout)
+        self.assertIn("no model is needed", stderr + stdout)
+        self.assertEqual(len(self.clients), clients)
+        document = read_json(self.book / "analysis.json")
+        self.assertNotIn(removed_block, [row["block_id"] for row in document["segments"]])
+        entries = {entry["word"]: entry for entry in pronunciations._load_local(self.book)["entries"]}
+        # "Mara" still occurs, so her choice cites another paragraph; "oil" left the book.
+        self.assertEqual(list(entries), ["Mara"])
+        cited = entries["Mara"]["evidence"][0]["block_id"]
+        self.assertIn("Mara", next(block["text"] for block in document["source"]["blocks"] if block["id"] == cited))
 
     def test_new_download_without_new_chapters_changes_nothing(self):
         self.seed()
@@ -228,7 +341,7 @@ class BookUpdateTests(unittest.TestCase):
         again = self.epub("serial-again", [CHAPTER_ONE, CHAPTER_TWO], "download-4")
         status, stdout, stderr = self.analyze(again)
         self.assertEqual(status, 0, stderr)
-        self.assertIn("No new chapters", stdout)
+        self.assertIn("No new or edited chapters", stdout)
         self.assertEqual(snapshot(self.book), before)
 
     def test_interrupted_publication_resumes_without_repeating_model_work(self):
@@ -384,18 +497,47 @@ class SourceComparisonTests(unittest.TestCase):
         self.assertEqual([chapter["title"] for chapter in comparison["appended_chapters"]], ["Three"])
         self.assertEqual(comparison["unchanged_chapters"], 2)
 
-    def test_removed_reordered_or_rewritten_chapters_are_refused(self):
+    def test_removed_inserted_or_reordered_chapters_are_refused(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
         cases = {
             "removed": [CHAPTER_ONE],
             "reordered": [CHAPTER_TWO, CHAPTER_ONE, CHAPTER_THREE],
-            "rewritten": [CHAPTER_ONE, ("Two", ["Mara said, “The lamp is out.”"]), CHAPTER_THREE],
-            "paragraph added": [CHAPTER_ONE, ("Two", [*CHAPTER_TWO[1], "Night fell."]), CHAPTER_THREE],
+            "inserted": [CHAPTER_ONE, CHAPTER_THREE, CHAPTER_TWO],
         }
         for label, chapters in cases.items():
             with self.subTest(label):
-                with self.assertRaisesRegex(ValueError, "appended"):
-                    compare_sources(saved, self.source(label.replace(" ", "-"), chapters))
+                with self.assertRaisesRegex(ValueError, "removed, inserted or reordered"):
+                    compare_sources(saved, self.source(label, chapters))
+
+    def test_edits_inside_saved_chapters_keep_every_unchanged_paragraph_id(self):
+        saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
+        cases = {
+            "rewritten": ([CHAPTER_ONE, ("Two", ["Mara said, “The lamp is out.”"])], (1, 0, 0)),
+            "paragraph added": ([CHAPTER_ONE, ("Two", [*CHAPTER_TWO[1], "Night fell."])], (0, 1, 0)),
+            "paragraph removed": ([("One", CHAPTER_ONE[1][:1]), CHAPTER_TWO], (0, 0, 1)),
+        }
+        for label, (chapters, counts) in cases.items():
+            with self.subTest(label):
+                comparison = compare_sources(saved, self.source(label.replace(" ", "-"), chapters))
+                (edit,) = comparison["edited_chapters"]
+                self.assertEqual((edit["edited_paragraphs"], edit["inserted_paragraphs"],
+                                  edit["removed_paragraphs"]), counts)
+                old = {block["text"]: block["id"] for block in saved["blocks"]}
+                for block in comparison["source"]["blocks"]:
+                    if block["text"] in old:
+                        self.assertEqual(block["id"], old[block["text"]])
+                    else:
+                        self.assertIn(block["id"], comparison["changed_blocks"])
+                self.assertEqual(comparison["source"]["book"], saved["book"])
+                self.assertEqual([chapter["id"] for chapter in comparison["source"]["chapters"]],
+                                 [chapter["id"] for chapter in saved["chapters"]])
+
+    def test_a_paragraph_moved_to_another_epub_file_is_not_an_edit(self):
+        saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
+        current = deepcopy(saved)
+        for block in current["blocks"]:
+            block["source"]["href"] = "renamed/" + block["source"]["href"]
+        self.assertEqual(compare_sources(saved, current)["edited_chapters"], [])
 
     def test_changed_extraction_policy_is_refused(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])

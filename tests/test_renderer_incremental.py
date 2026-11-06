@@ -100,11 +100,11 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(current["status"], "complete")
         self.assertNotEqual(original["bundle_hash"], current["bundle_hash"])
         self.assertEqual(current["bundle_hash"], self.bundle["bundle_hash"])
-        # The corrected passage is new; the following take in its chapter
-        # continues that passage's history, so it is generated again too.
-        self.assertEqual(self.model_counts(), (before[0], before[1] + 2, before[2] + 2))
-        self.assertEqual([call["text"] for call in self.engine.speech_calls[-2:]],
-                         [self.document["segments"][1]["text"], self.document["segments"][2]["text"]])
+        # Only the corrected passage is new. The following take heard the old
+        # version as history; tolerant history reuse (the default) keeps it.
+        self.assertEqual(self.model_counts(), (before[0], before[1] + 1, before[2] + 1))
+        self.assertEqual([call["text"] for call in self.engine.speech_calls[-1:]],
+                         [self.document["segments"][1]["text"]])
         self.assertNotEqual(old_book, file_hash(self.output / "book.m4b"))
         self.assertNotEqual(old_manifest, (self.output / "audio-manifest.json").read_bytes())
         self.assertNotEqual(first_checkpoint, self.checkpoint(1).read_bytes())
@@ -248,12 +248,11 @@ class IncrementalRendererTests(unittest.TestCase):
 
         # Adding two segments shifts the export sequence for every later row;
         # that bookkeeping change must not be treated as different speech. The
-        # following take in the same chapter continues the new passages'
-        # history, so only it is generated again with them.
-        following = next(segment for segment in self.document["segments"] if segment["block_id"] == "b3")
-        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 4, counts[2] + 4))
+        # following take heard the old passage as history; tolerant history
+        # reuse (the default) keeps it, so only the new passages are generated.
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 3, counts[2] + 3))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]],
-                         [trim_speech_text(segment["text"]) for segment in [*repaired, following]])
+                         [trim_speech_text(segment["text"]) for segment in repaired])
         self.assertEqual(read_json(self.checkpoint(2))["audio_file"], unaffected_chapter)
         self.assertEqual(file_hash(unaffected_chapter), unaffected_audio)
 

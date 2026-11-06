@@ -174,6 +174,10 @@ bracket_pause_ms = 120   # On entering or leaving bracketed text
 # Accepted clips stay reusable; voice samples and pending/failed requests stay intact.
 # Set true only to retain raw engine output for debugging.
 keep_intermediate_audio = false
+# When one take changes, "tolerant" regenerates only that take and keeps later
+# takes that heard the old one as chapter history; "strict" regenerates the
+# rest of that voice's chapter so every take follows exactly the history it heard.
+history_reuse = "tolerant"
 allow_review = false
 # Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
 chapter_numbers = [] # all manifest script entries

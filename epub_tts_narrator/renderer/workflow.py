@@ -1269,6 +1269,18 @@ def _cache_engine_identity(engine_identity, config):
     return identity
 
 
+def history_reuse_tolerant(config):
+    """Whether a take is kept when an earlier take in its chapter changed.
+
+    ``render.history_reuse = "tolerant"`` (the default) keeps a verified take
+    whose own text, voice, delivery, engine and continuity policy are
+    unchanged although an earlier take it heard as history was regenerated;
+    takes generated afterwards hear the current history. ``"strict"``
+    regenerates the rest of that voice's chapter after any change.
+    """
+    return config["render"].get("history_reuse", "tolerant") == "tolerant"
+
+
 def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
     request = {
         "kind": "speech", "engine": _cache_engine_identity(engine_identity, config),
@@ -1468,6 +1480,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         speech_cache = SpeechCache(work, voices)
     from .continuity import ChapterContinuity, is_pinnable
     continuity = ChapterContinuity(context["engine"], voices)
+    tolerant = history_reuse_tolerant(config)
 
     def matches_request(request, accepted, chunk):
         # Identical source requests can prepare different engine inputs after
@@ -1475,9 +1488,10 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         # An obsolete take never enters the replayed history, so the later
         # takes of the same voice that heard it no longer match either, while
         # other voices' takes are unaffected.
+        # Under tolerant history reuse an earlier take's change keeps it.
         with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
-            if not speech_cache.matches(bound, accepted):
+            if not speech_cache.matches(bound, accepted, tolerate_history=tolerant):
                 return False
             directory = Path(work) / "clips" / accepted["request_hash"]
             full = read_json(regular_file(directory / "accepted.json"))
@@ -1485,7 +1499,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
             if rejected_pick(full) is not None:
                 # A best-effort choice that replayed another line is re-rendered.
                 return False
-            continuity.accept(directory / full["audio_file"], full)
+            continuity.accept(directory / full["audio_file"], full, tolerate_history=tolerant)
             return True
 
     if not _same_chapter_audio_context(record["context"], context):
@@ -1785,6 +1799,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
     voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
+    tolerant_history = history_reuse_tolerant(config)
 
     def execute_take(text, generate, request, *, synthesize_part=None, generate_repaired=None,
                      generate_plain=None, generate_direction=None, generate_plan_part=None):
@@ -1819,6 +1834,15 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                    + safe_error_text(exc, secrets=configured_secrets(config)))
                     notify("  Reusing verified speech with matching text, voice, and generation settings.")
                     return cached
+                if continuity is not None and tolerant_history:
+                    earlier = speech_cache.find_earlier_history(identity, request=request,
+                                                                exclude=continuity.accepted_audio())
+                    if earlier is not None:
+                        report_worker_activity(notify, "source",
+                                               earlier[1].get("engine_metadata", {}).get("render_worker"))
+                        notify("  Reusing verified speech; an earlier take in this chapter changed since "
+                               "it was recorded (render.history_reuse = \"tolerant\").")
+                        return earlier
                 # Full original requests remain the IDs of take/provenance
                 # directories. They are not the successful audio lookup key.
                 # Bind preparation semantics too: an old successful take with
@@ -1908,7 +1932,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             result = execute_take(text, generate, bound, **options)
-            continuity.accept(*result)
+            continuity.accept(*result, tolerate_history=tolerant_history)
             return result
 
     if "paragraph_turns" in chunk:

@@ -81,6 +81,20 @@ def is_pinnable(chunk):
     return not all(segment.get("kind") == "heading" for segment in _segments(chunk))
 
 
+def without_history(identity):
+    """A speech identity with its continuity's exact earlier takes removed.
+
+    Tolerant history reuse (``render.history_reuse = "tolerant"``) compares
+    this: the same text, voice, delivery, engine settings and history *policy*,
+    while the particular earlier takes the voice heard may since have changed.
+    Returns ``None`` for an identity without continuity, which is never reused.
+    """
+    context = identity.get("continuity") if isinstance(identity, dict) else None
+    if not isinstance(context, dict) or not isinstance(context.get("takes"), list):
+        return None
+    return dict(identity, continuity={key: value for key, value in context.items() if key != "takes"})
+
+
 def request_speakers(request):
     """The script voice ids speaking this request (a simultaneous lane: its performer)."""
     if "performer" in request:
@@ -98,6 +112,13 @@ class ChapterContinuity:
         # identity; history identity names only the exact accepted takes.
         self.voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
         self.entries = []
+        # Takes reused under tolerant history reuse although an earlier take
+        # they heard has since changed.
+        self.drifted = 0
+
+    def accepted_audio(self):
+        """Audio checksums of the takes this chapter's history already holds."""
+        return {entry["identity"]["audio_sha256"] for entry in self.entries}
 
     def takes(self, speakers):
         """Fish's first + latest, from this chapter's takes by these voice ids only."""
@@ -132,11 +153,23 @@ class ChapterContinuity:
         """Record the final cache identity of this transaction's request."""
         current()["request_binding"] = identity_hash
 
-    def accept(self, path, accepted):
+    def accept(self, path, accepted, *, tolerate_history=False):
+        """Add an accepted take to this chapter's history.
+
+        Its codes must have been generated after exactly the current history.
+        With ``tolerate_history`` (tolerant history reuse) they may instead
+        follow the history recorded in the take's own request, under the same
+        continuity version and policy: an earlier take it heard has changed
+        since, and the take is kept rather than regenerated.
+        """
         from .continuity_codes import load_codes
         scope = current()
         metadata = accepted.get("engine_metadata", {})
+        heard = accepted.get("request", {}).get("continuity")
+        drifted = (tolerate_history and isinstance(heard, dict) and heard != scope["identity"]
+                   and without_history({"continuity": heard}) == without_history({"continuity": scope["identity"]}))
         if not scope["history"] or _NOT_HISTORY.intersection(metadata):
+            self.drifted += drifted
             return
         marker = metadata.get("continuity_codes")
         if marker is None:
@@ -145,11 +178,11 @@ class ChapterContinuity:
                 or file_hash(regular_file(path)) != accepted.get("audio_sha256")):
             raise ValueError("Invalid continuity accepted audio")
         # The speech cache already proved this accepted take is the current
-        # request (possibly through a compatible transport or alias); its
-        # codes must have been generated after exactly the current history.
-        if (marker.get("context") != scope["identity"]
+        # request (possibly through a compatible transport or alias).
+        if (marker.get("context") != (heard if drifted else scope["identity"])
                 or marker.get("accepted_audio_sha256") != accepted["audio_sha256"]):
             raise ValueError("Continuity generation does not match the accepted request")
+        self.drifted += drifted
         unknown = [asset for asset in marker["speakers"] if asset not in self.voices_by_asset]
         if unknown:
             raise ValueError("Continuity history names a voice outside this chapter")

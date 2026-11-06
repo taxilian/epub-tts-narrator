@@ -351,10 +351,11 @@ def main(argv=None):
             same_chapters = (fingerprint(source) == fingerprint(original["source"])
                              or fingerprint(merged_source(original["source"], source)) == fingerprint(original["source"]))
             if not same_chapters:
-                # A serial's new download: append its new chapters, or explain
-                # exactly which saved chapter differs.
+                # A serial's new download: add its new and edited chapters, or
+                # explain exactly which saved chapter cannot be matched.
                 if args.edits:
-                    raise ValueError("--edits cannot be combined with appending new chapters; update the book first")
+                    raise ValueError("--edits cannot be combined with updating the book from a new EPUB; "
+                                     "update the book first")
                 updated = update_book(
                     directory, source, config=config, input_path=args.input,
                     client_factory=OpenAICompatibleClient, speaker_judge=_speaker_judge(config),
@@ -367,8 +368,8 @@ def main(argv=None):
                                          epub_sha256=latest_epub_sha256(original))
                 else:
                     # Identical chapters from a different download of the book.
-                    print("No new chapters: the EPUB's chapters match the saved book. The saved analysis "
-                          "and its recorded EPUB location are unchanged.")
+                    print("No new or edited chapters: the EPUB's chapters match the saved book. The saved "
+                          "analysis and its recorded EPUB location are unchanged.")
 
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]

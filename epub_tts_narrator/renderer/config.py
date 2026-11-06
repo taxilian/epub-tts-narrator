@@ -57,6 +57,8 @@ RENDER_CONTRACT = {
     "normalize_pauses": {"default": True, "kind": "bool",
                          "chapter": True, "checked": True, "remote_safe": True},
     "keep_intermediate_audio": {"default": False, "kind": "bool"},
+    # Local only: a remote chapter service applies its own configuration.
+    "history_reuse": {"default": "tolerant", "kind": "enum", "choices": ("tolerant", "strict")},
     "target_lufs": {"default": -20.0, "kind": "float", "range": (-40, -10),
                     "chapter": True, "checked": True, "remote_safe": True},
     "true_peak_db": {"default": -1.5, "kind": "float", "range": (-9, 0),
@@ -487,6 +489,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("render.chapter_format must be m4a or mp3")
     if render["performance_mode"] not in {"legacy", "expressive"}:
         raise ValueError("render.performance_mode must be legacy or expressive")
+    if render["history_reuse"] not in RENDER_CONTRACT["history_reuse"]["choices"]:
+        raise ValueError("render.history_reuse must be tolerant or strict")
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
     verification = result["verification"]

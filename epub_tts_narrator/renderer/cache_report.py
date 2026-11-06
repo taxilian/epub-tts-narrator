@@ -8,7 +8,7 @@ from .bundle import chunk_speakers
 from .common import digest, file_hash, read_json, regular_file
 from .speech_cache import SpeechCache
 from .speech_identity import engines_compatible, synthesis_engine_identity, _model_alias
-from .workflow import make_render_plan, _paragraph_request, _speech_request
+from .workflow import history_reuse_tolerant, make_render_plan, _paragraph_request, _speech_request
 
 
 class _ReadOnlySpeechCache(SpeechCache):
@@ -169,7 +169,8 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
         if item["identity"] and isinstance(item["identity"].get("text"), str):
             by_text[item["identity"]["text"]].append(index)
     totals = Counter(requests=0, hits=0, misses=0, missing_voice_requests=0,
-                     accepted_records=0, index_records=0)
+                     accepted_records=0, index_records=0, history_changed_hits=0)
+    tolerant = history_reuse_tolerant(config)
     totals.update(inventory)
     reasons, examples = Counter(), []
     from .continuity import ChapterContinuity, is_pinnable, request_speakers
@@ -205,6 +206,16 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                         if found is not None:
                             continuity.accept(*found)
                             totals["hits"] += 1
+                            continue
+                        # Tolerant history reuse keeps this chunk's take when
+                        # only an earlier take it heard has changed.
+                        found = (cache.find_earlier_history(identity, request=bound,
+                                                            exclude=continuity.accepted_audio())
+                                 if tolerant else None)
+                        if found is not None:
+                            continuity.accept(*found, tolerate_history=True)
+                            totals["hits"] += 1
+                            totals["history_changed_hits"] += 1
                             continue
                     speakers = request_speakers(bound)
                     earlier_changed = bool(speakers & changed_voices)

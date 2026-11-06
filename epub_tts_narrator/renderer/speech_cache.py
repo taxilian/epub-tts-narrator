@@ -18,6 +18,9 @@ class SpeechCache:
         self.voices = {voice["asset_hash"]: voice for voice in voices.values()}
         self.entries = {}
         self.performances = {}
+        # Accepted takes by chunk position and identity without the exact
+        # earlier takes heard (tolerant history reuse).
+        self.positions = {}
         self.lock = RLock()
         self.loaded = False
 
@@ -46,6 +49,21 @@ class SpeechCache:
         engine.pop("cache_model_alias", None)
         identity = dict(entry["identity"], engine=synthesis_engine_identity(engine))
         return dict(entry, identity=identity)
+
+    @staticmethod
+    def _position_key(identity, request):
+        from .continuity import without_history
+        tolerant = without_history(identity)
+        chunk_id = request.get("chunk", {}).get("chunk_id") if isinstance(request, dict) else None
+        if tolerant is None or not isinstance(chunk_id, str):
+            return None
+        return digest({"chunk_id": chunk_id,
+                       "identity": {key: value for key, value in tolerant.items() if key != "engine"}})
+
+    def _register_position(self, key, entry, record):
+        position = self._position_key(entry["identity"], record.get("request"))
+        if position is not None:
+            self.positions.setdefault(position, set()).add(key)
 
     def _register_concrete(self, entry, record):
         concrete = self._concrete_entry(entry, record)
@@ -101,6 +119,7 @@ class SpeechCache:
             if saved is None or file_hash(saved[0]) != entry.get("accepted_sha256"):
                 continue
             self._register(path.stem, entry)
+            self._register_position(path.stem, entry, saved[2])
             self._register_concrete(entry, saved[2])
         # Import successful legacy takes without copying audio or changing
         # their provenance. Unresolvable historical voices cannot be guessed.
@@ -121,6 +140,7 @@ class SpeechCache:
             entry = self._entry(identity, saved)
             if key not in self.entries:
                 self._register(key, entry)
+                self._register_position(key, entry, record)
             self._register_concrete(entry, record)
         self.loaded = True
 
@@ -215,6 +235,48 @@ class SpeechCache:
                         return saved[1:]
             return None
 
+    def find_earlier_history(self, identity, *, request, exclude=()):
+        """This chunk's accepted take that heard a since-changed earlier take.
+
+        Tolerant history reuse: the take recorded for the same chunk with the
+        same text, voice, delivery, compatible engine and continuity policy,
+        whose only difference is the exact earlier takes in its history. When
+        several qualify, the one that heard most of the current history wins.
+        ``exclude`` names accepted audio the chapter already used at an earlier
+        position; one take never fills two positions.
+        No lookup alias is published, so strict reuse never mistakes it for a
+        take generated after the current history. Returns ``(audio, record)``.
+        """
+        from .continuity import without_history
+        position = self._position_key(identity, request)
+        if position is None:
+            return None
+        current = {take.get("audio_sha256") for take in identity["continuity"]["takes"]}
+        with self.lock:
+            self._load()
+            ranked = []
+            for key in sorted(self.positions.get(position, ())):
+                entry = self.entries.get(key)
+                if (entry is None or without_history(entry["identity"]) is None
+                        or entry["audio_sha256"] in exclude):
+                    continue
+                saved = self._verified_entry(entry, verify_audio=False)
+                if saved is None:
+                    continue
+                record = saved[2]
+                if not generation_compatible(dict(entry["identity"], continuity=identity["continuity"]), identity,
+                        saved_engine=record["request"]["engine"], current_engine=request["engine"],
+                        engine_metadata=record.get("engine_metadata")):
+                    continue
+                shared = len(current & {take.get("audio_sha256")
+                                        for take in entry["identity"]["continuity"]["takes"]})
+                ranked.append((-shared, entry["request_hash"], key, entry))
+            for _, _, _, entry in sorted(ranked, key=lambda item: item[:3]):
+                saved = self._verified_entry(entry)
+                if saved is not None:
+                    return saved[1:]
+            return None
+
     def remember(self, identity, record):
         with self.lock:
             if record.get("report", {}).get("passed") is not True:
@@ -226,12 +288,18 @@ class SpeechCache:
                 raise ValueError("Speech cache identity does not match the accepted performance")
             entry = self._entry(identity, saved)
             self._publish(digest(identity), entry)
+            self._register_position(digest(identity), entry, record)
             concrete = self._concrete_entry(entry, record)
             if concrete is not None:
                 self._publish(digest(concrete["identity"]), concrete)
 
-    def matches(self, request, accepted):
-        """Validate a chapter's reused performance against its current inputs."""
+    def matches(self, request, accepted, *, tolerate_history=False):
+        """Validate a chapter's reused performance against its current inputs.
+
+        ``tolerate_history`` accepts a take whose only difference is the exact
+        earlier takes its continuity heard (tolerant history reuse).
+        """
+        from .continuity import without_history
         identity = self.identity(request)
         with self.lock:
             self._load()
@@ -254,6 +322,10 @@ class SpeechCache:
                 original = next((entry["identity"] for entry in self.entries.values()
                     if entry["request_hash"] == record["request_hash"]
                     and entry["accepted_sha256"] == file_hash(path)), None)
+            if original is not None and tolerate_history:
+                if without_history(original) is None or without_history(identity) is None:
+                    return False
+                original = dict(original, continuity=identity["continuity"])
             return original is not None and generation_compatible(original, identity,
                 saved_engine=record["request"]["engine"], current_engine=request["engine"],
                 engine_metadata=record.get("engine_metadata"))

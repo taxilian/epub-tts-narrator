@@ -117,6 +117,15 @@ class RendererCLITests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "censorship"):
                     load_config(self.config)
 
+    def test_history_reuse_defaults_to_tolerant_and_accepts_only_known_modes(self):
+        original = self.config.read_text()
+        self.assertEqual(load_config(self.config)["render"]["history_reuse"], "tolerant")
+        self.config.write_text(original + '[render]\nhistory_reuse="strict"\n')
+        self.assertEqual(load_config(self.config)["render"]["history_reuse"], "strict")
+        self.config.write_text(original + '[render]\nhistory_reuse="sometimes"\n')
+        with self.assertRaisesRegex(ValueError, "history_reuse"):
+            load_config(self.config)
+
     def test_assemble_censorship_flags_are_per_run_and_model_free_without_missing_alignment(self):
         self.config.write_text(self.config.read_text() + '[censorship]\nenabled=true\n')
         before = self.config.read_bytes()

@@ -62,23 +62,17 @@ class ScopedPronunciationWorkflowTests(unittest.TestCase):
 
         self.run_render()
 
-        # The changed take is regenerated; the following take in the chapter is
-        # regenerated only because it continues that take's history, and keeps
-        # its unchanged pronunciation.
-        self.assertEqual(len(self.engine.speech_calls), baseline + 2)
-        changed, following = self.engine.speech_calls[-2:]
-        original_following = next(call for call in self.engine.speech_calls[:baseline]
-                                   if call["text"] == following["text"])
-        self.assertNotEqual(following["text"], TEXT)
-        self.assertEqual(following["compiled"], original_following["compiled"])
-        self.assertEqual(following["voice_hash"], original_following["voice_hash"])
+        # Only the changed take is regenerated. The following take heard it as
+        # chapter history; tolerant history reuse (the default) keeps it.
+        self.assertEqual(len(self.engine.speech_calls), baseline + 1)
+        changed = self.engine.speech_calls[-1]
         self.assertEqual(changed["text"], TEXT)
         self.assertEqual([item["start"] for item in changed["performance"]["controls"]], [0, TEXT.index("ALLY")])
         self.assertNotIn("(N1:", changed["compiled"])
         self.assertIn("her ally", changed["compiled"])
         self.assertIn("Ally with", changed["compiled"])
         self.run_render()
-        self.assertEqual(len(self.engine.speech_calls), baseline + 2)
+        self.assertEqual(len(self.engine.speech_calls), baseline + 1)
         self.assertEqual(canonical, {path: file_hash(path) for path in canonical})
         self.assertTrue(references)
         self.assertEqual(references, {path: file_hash(path) for path in references})

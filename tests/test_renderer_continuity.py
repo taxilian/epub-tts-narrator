@@ -130,7 +130,8 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual(histories(self.model)[1:3], [[tagged("First words.")], [tagged("First words.")]])
         self.assertEqual(self.model.calls[3][1]["previous_takes"][-1][1][0, 0], 3)
 
-    def test_changed_take_makes_the_rest_of_the_chapter_stale(self):
+    def test_strict_history_reuse_makes_the_rest_of_the_chapter_stale_after_a_change(self):
+        self.config["render"]["history_reuse"] = "strict"
         self.run_chapter()
         self.chunks[2]["spoken_text"] = "Changed words."
         self.chunks[2]["segment"]["text"] = "Changed words."
@@ -141,6 +142,35 @@ class ContinuityTests(unittest.TestCase):
         self.chunks[0]["segment"]["text"] = "Other words."
         self.run_chapter()
         self.assertEqual(len(self.model.calls), 10)
+
+    def test_tolerant_history_reuse_regenerates_only_the_changed_take(self):
+        self.assertEqual(self.config["render"]["history_reuse"], "tolerant")
+        self.run_chapter()
+        self.chunks[2]["spoken_text"] = self.chunks[2]["segment"]["text"] = "Changed words."
+        self.run_chapter()
+        # Only the changed line is generated, hearing the current history;
+        # the later take that heard the old version is kept.
+        self.assertEqual([text for text, options in self.model.calls[4:]], [tagged("Changed words.")])
+        self.assertEqual(histories(self.model)[4], [tagged("First words."), tagged("Second words.")])
+        self.run_chapter()
+        self.assertEqual(len(self.model.calls), 5)
+        # A changed pinned first take regenerates only itself as well.
+        self.chunks[0]["spoken_text"] = self.chunks[0]["segment"]["text"] = "Other words."
+        self.run_chapter()
+        self.assertEqual([text for text, options in self.model.calls[5:]], [tagged("Other words.")])
+        # A take generated afterwards hears the takes the chapter now has.
+        self.chunks[3]["spoken_text"] = self.chunks[3]["segment"]["text"] = "Final words."
+        self.run_chapter()
+        self.assertEqual([text for text, options in self.model.calls[6:]], [tagged("Final words.")])
+        self.assertEqual(histories(self.model)[6], [tagged("Other words."), tagged("Changed words.")])
+
+    def test_tolerant_history_reuse_never_moves_a_take_to_another_line(self):
+        self.run_chapter()
+        # The second line now says what the fourth said; the fourth line's
+        # take heard a different history at another position, so it is not used.
+        self.chunks[1]["spoken_text"] = self.chunks[1]["segment"]["text"] = "Fourth words."
+        self.run_chapter()
+        self.assertEqual([text for text, options in self.model.calls[4:]], [tagged("Fourth words.")])
 
     def test_heading_never_becomes_the_pinned_take(self):
         self.chunks[0]["segment"]["kind"] = "heading"

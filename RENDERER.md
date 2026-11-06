@@ -450,9 +450,30 @@ affinity or changes to saved-audio identity.
 Every engine returns the codec tokens it generated. The renderer saves them as
 hash-validated `*.codes.json` artifacts beside each take and rebuilds history
 from them on resume; codes are never reconstructed from WAV files. Each take's
-cache identity includes its history, so changing a take makes the rest of that
-chapter stale: the next render regenerates from the changed take to the end of
-the chapter (`cache-report` shows these as `earlier_take_in_chapter_changed`).
+cache identity includes the exact earlier takes it heard.
+
+`[render] history_reuse` decides what happens to the rest of a chapter when one
+take changes (a corrected line, a pronunciation fix, a changed speaker, an
+edited paragraph from a serial update):
+
+- `"tolerant"` (the default) regenerates only the changed take. A later take
+  whose own text, voice, delivery, engine settings and continuity policy are
+  unchanged is kept although an earlier take it heard is now different; only
+  takes generated afterwards hear the current history. Reuse is tied to the
+  take's own line (chunk ID): an identical line elsewhere is never moved into
+  this position, and one take never fills two positions in a chapter. The
+  cost is a possible small seam in delivery right after the changed take.
+  `cache-report` counts these as hits and separately as
+  `history_changed_hits`. A take reused this way is never published under the
+  new history's cache identity, so `strict` still sees it as generated after
+  the old history.
+- `"strict"` regenerates from the changed take to the end of that voice's
+  chapter, so every take was generated after exactly the history it now
+  follows (`cache-report` shows these as `earlier_take_in_chapter_changed`).
+
+A change to the continuity policy itself (which takes a line hears) refreshes
+audio in both modes. Remote chapter services (`serve-chapters`) apply their own
+configuration's setting.
 
 Sampling defaults are Fish's own evaluation settings: `temperature = 0.7`,
 `top_p = 0.7`, `top_k = 30`. Stalls and off-voice takes are caught by the
@@ -918,6 +939,8 @@ To choose separate work and publication directories for one run, add `--work-dir
 Rerun the same `render` command after updating the scripts or selected voices. It reuses matching verified clips and unchanged completed chapters, generates the changed passages, and rebuilds the affected chapter files, synchronization data, and M4B in the existing output directory. Moving speech, renumbering segments, changing source IDs or offsets, and editing attribution explanations do not regenerate an otherwise identical performance. Chapter assembly and synchronization use the current locations. An unchanged local render also skips final encoding. Older published outputs without the new publication key are repackaged once from their compatible cached audio.
 
 After `analyze` appends newly published chapters to a serial (see [ANALYSIS.md](ANALYSIS.md#updating-a-serially-published-book)), the same `render` command designs or casts only the new voices, renders only the new chapters, and reuses every earlier chapter: chunk IDs and chapter checkpoints bind `provenance.chunk_identity_source_fingerprint`, the first publication's source identity, so earlier chapters' plans are byte-identical. Their only change is the chapter count in each chapter file's track tag (`3/95`), which `render` and `assemble` apply by re-encoding the saved, verified chapter PCM; no speech is regenerated, re-verified or re-composed. Either the original EPUB or the update's EPUB supplies the cover and metadata. This retag-only reuse covers local rendering; remote chapter services (`serve-chapters`) are not yet specialized for it.
+
+When the update also edited earlier chapters, their unchanged lines keep their block and segment IDs and so their chunk IDs. Those chapters are recomposed: lines before the first edit match their saved takes exactly, the edited lines are generated, and the lines after them are kept under the default `history_reuse = "tolerant"` (or regenerated for that voice under `"strict"`). An edit that adds or removes segments renumbers later chapters' script `sequence` values; that bookkeeping does not regenerate or recompose their speech.
 
 To investigate unexpected regeneration, run a read-only report on the computer
 that owns the book's render cache:

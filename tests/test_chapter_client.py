@@ -1051,16 +1051,16 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
             revised = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                             notify=lambda _: None, chapters_only=False)
-        # Same-voice chapter history makes every later take by the changed
-        # take's voice depend on it, so those takes of chapter 1 regenerate;
+        # Later takes by the changed take's voice heard it as chapter history.
+        # Tolerant history reuse (the default, from the chapter service's own
+        # configuration) keeps them, so only the changed take regenerates;
         # other voices' takes and chapter 2 are untouched.
         from epub_tts_narrator.renderer.bundle import chunk_speakers
         chunks = [chunk for chunk in self.plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
         voice = {speaker["voice_id"] for speaker in chunk_speakers(chunks[0])}
         spoken = [chunk for chunk in chunks if {speaker["voice_id"] for speaker in chunk_speakers(chunk)} <= voice]
         self.assertGreater(len(spoken), 1)
-        self.assertLess(len(spoken), len(chunks))
-        self.assertEqual(len(engine.speech_calls), calls_before_assembly + len(spoken))
+        self.assertEqual(len(engine.speech_calls), calls_before_assembly + 1)
         self.assertNotEqual(revised["chapter_identities"]["chapter-0001"],
                             previous["chapter_identities"]["chapter-0001"])
         self.assertEqual(revised["chapter_identities"]["chapter-0002"],

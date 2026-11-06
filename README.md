@@ -71,8 +71,8 @@ epub-tts-narrator analyze book.epub
 # Continue a series; the earlier output directory supplies the cast.
 epub-tts-narrator analyze book-two.epub -o runs/book-02 --continue-from runs/book-01
 
-# A serial got new chapters: analyze only those into the same book, report
-# new characters, and keep every existing chapter's audio reusable.
+# A serial got new chapters or revisions: analyze only the new and edited text
+# into the same book, report new characters, and keep unchanged audio reusable.
 epub-tts-narrator analyze serial-latest.epub -o runs/serial
 
 # Refresh existing voice profiles in a completed book directory under the

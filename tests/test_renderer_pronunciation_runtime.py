@@ -275,10 +275,11 @@ class PronunciationPlanTests(unittest.TestCase):
         calls, voice_calls = len(engine.speech_calls), len(engine.voice_calls)
         self.entries = [entry()]
         revised = render(bundle, self.config, engine, verifier, chapters_only=True, notify=lambda _: None)
-        # The narrator's revised take is new, and so is the narrator's later
-        # take that heard it; Mara's line (another voice) is reused.
+        # Only the narrator's revised take is new. The narrator's later take
+        # heard the old one; tolerant history reuse (the default) keeps it,
+        # and Mara's line (another voice) is reused.
         self.assertEqual([call["text"] for call in engine.speech_calls[calls:]],
-                         [engine.speech_calls[0]["text"], engine.speech_calls[2]["text"]])
+                         [engine.speech_calls[0]["text"]])
         self.assertEqual(len({call["voice_hash"] for call in engine.speech_calls[calls:]}), 1)
         self.assertEqual(len(engine.voice_calls), voice_calls)
         self.assertNotEqual(original["chapters"][0]["cache_directory"], revised["chapters"][0]["cache_directory"])
