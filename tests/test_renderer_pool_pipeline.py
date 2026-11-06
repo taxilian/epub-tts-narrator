@@ -236,21 +236,18 @@ class PipelineSynthesisLaneTests(unittest.TestCase):
         self.assertEqual(len(state["calls"]), 6)
 
 
-class PipelinePinnedDispatchTests(unittest.TestCase):
-    """A take for a busy pinned worker never holds a lane thread another worker needs."""
+class PipelineFifoDispatchTests(unittest.TestCase):
+    """TTS takes start in submission order on the first available workers."""
 
-    def test_idle_worker_starts_its_chapter_while_another_worker_has_a_backlog(self):
+    def test_queued_take_uses_the_idle_worker_without_waiting_for_a_named_worker(self):
         from epub_tts_narrator.renderer.continuity import ChapterContinuity
 
         pool = RenderPool(pipeline_config(slots=2, backlog=8))
         self.addCleanup(pool.close)
         busy, idle = gate_state(), gate_state()
-        idle["gate"].set()
         pool._workers[0]._engine = GateEngine(busy)
         pool._workers[1]._engine = GateEngine(idle)
         first, second, other = (ChapterContinuity({"engine": "fixture"}, {}) for _ in range(3))
-        first.worker = second.worker = "worker-0"
-        other.worker = "worker-1"
         request = {"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}
 
         def take(chapter, text):
@@ -262,14 +259,17 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
             running = callers.submit(take, first, "first")
             wait_for(busy["condition"], lambda: busy["active"] == 1)
             queued = callers.submit(take, second, "second")
+            wait_for(idle["condition"], lambda: idle["active"] == 1)
+            waiting = callers.submit(take, other, "other")
             wait_for_queued_lane_job(pool.resources.tts, minimum=1)
-            # The second lane thread must not sit waiting for worker-0.
-            result = callers.submit(take, other, "other").result(5)
-            self.assertEqual(result["render_worker"], "worker-1")
             self.assertEqual([text for text, _ in busy["calls"]], ["first"])
+            self.assertEqual([text for text, _ in idle["calls"]], ["second"])
+            idle["gate"].set()
+            self.assertEqual(queued.result(10)["render_worker"], "worker-1")
+            self.assertEqual(waiting.result(10)["render_worker"], "worker-1")
             busy["gate"].set()
             self.assertEqual(running.result(10)["render_worker"], "worker-0")
-            self.assertEqual(queued.result(10)["render_worker"], "worker-0")
+            self.assertEqual([text for text, _ in idle["calls"]], ["second", "other"])
         self.assertEqual(pool._slots.qsize(), 2)
 
     def test_concurrent_chapters_never_share_a_slot_and_every_take_completes(self):
@@ -306,26 +306,20 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
         request = {"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}
 
         def chapter_takes(index):
-            names = set()
             with resource_scope(pool.resources, ("run", index)):
                 for take in range(25):
                     with chapters[index].transaction(request):
-                        names.add(pool.synthesize(f"{index}:{take}", {}, "unused", seed=take)["render_worker"])
-            return names
+                        pool.synthesize(f"{index}:{take}", {}, "unused", seed=take)
 
         with ThreadPoolExecutor(max_workers=8) as callers:
-            workers = list(callers.map(chapter_takes, range(8), timeout=60))
-        # One worker per chapter for its history, chapters balanced 4/4, no slot
-        # ever used twice at once, no take lost, and every slot returned.
-        self.assertTrue(all(len(names) == 1 for names in workers))
-        self.assertEqual(sorted(name for names in workers for name in names),
-                         ["worker-0"] * 4 + ["worker-1"] * 4)
+            list(callers.map(chapter_takes, range(8), timeout=60))
+        # No slot is used twice at once, no take is lost, and every slot returns.
         self.assertEqual(peak, {"worker-0": 1, "worker-1": 1})
         self.assertEqual(len(ran), 200)
         self.assertEqual(pool._slots.qsize(), 2)
         self.assertEqual(pool.resources.tts._pending, 0)
 
-    def test_waiting_take_names_its_pinned_worker(self):
+    def test_waiting_take_does_not_name_a_preferred_worker(self):
         from epub_tts_narrator.renderer.continuity import ChapterContinuity
         from epub_tts_narrator.renderer.progress import generation_activity
 
@@ -346,8 +340,43 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
              generation_activity(Notify()), \
              chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
             pool.synthesize("words", {}, "unused", seed=1)
-        self.assertEqual(events[0], ("waiting", "worker-0"))
-        self.assertEqual(chapter.worker, "worker-0")
+        self.assertEqual(events[0], ("waiting", None))
+
+
+class PipelineRecognitionDispatchTests(unittest.TestCase):
+    def test_recognition_calls_start_in_fifo_order_across_chapter_owners(self):
+        pool = RenderPool(pipeline_config(slots=2))
+        self.addCleanup(pool.close)
+        release = Event()
+        started = []
+        condition = Condition()
+
+        def recognize(label):
+            with condition:
+                started.append(label)
+                condition.notify_all()
+            if label == "first" and not release.wait(10):
+                raise AssertionError("first recognition was never released")
+            return {"text": label}
+
+        def take(owner, label):
+            with resource_scope(pool.resources, ("run", owner)):
+                return pool._recognize("transcribe", recognize, (label,), {}, initialize_mlx=False)
+
+        with ThreadPoolExecutor(max_workers=6) as callers:
+            first = callers.submit(take, "a", "first")
+            wait_for(condition, lambda: started == ["first"])
+            pending = []
+            for index, (owner, label) in enumerate((
+                    ("b", "second"), ("c", "third"), ("b", "fourth"),
+                    ("b", "fifth"), ("c", "sixth")), 1):
+                pending.append(callers.submit(take, owner, label))
+                wait_for_queued_lane_job(pool.resources.recognition, minimum=index)
+            release.set()
+            first.result(10)
+            for future in pending:
+                future.result(10)
+        self.assertEqual(started, ["first", "second", "third", "fourth", "fifth", "sixth"])
 
 
 class PipelineCancellationBoundaryTests(unittest.TestCase):

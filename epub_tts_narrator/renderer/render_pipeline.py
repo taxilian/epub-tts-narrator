@@ -1,16 +1,9 @@
-"""Shared fair logical-clip scheduling for pooled rendering.
+"""Shared FIFO logical-clip scheduling for pooled rendering.
 
 One bounded global executor runs logical clip transactions across all
-chapter coordinators. Ready work is kept in one FIFO per
-``(run/submission, chapter)`` owner and dispatched round-robin, one
-transaction at a time, so a long chapter cannot starve later chapters.
-
-A chapter occupies at most ``chapter_share(global_limit, chapters) =
-max(1, floor(global_limit / configured_chapter_concurrency))`` logical
-runners at once. The share comes from the *configured* chapter count, so
-the reservation is not borrowed merely because a later chapter has not
-registered work yet. Physical stage lanes may still borrow all unused
-capacity; this executor only bounds logical transactions.
+chapter coordinators in submission order. Owner metadata remains only for
+cancellation and retirement; it never changes dispatch order. Pending
+submissions also wait in FIFO order for capacity.
 
 Chapter coordinators never run on this executor: it executes only
 functions submitted through :meth:`LogicalClipScheduler.submit`, and
@@ -33,7 +26,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import copy_context
-from threading import Condition, Lock, local
+from threading import Condition, local
 
 from .interrupts import stop_if_requested
 
@@ -57,7 +50,7 @@ def _checked(function, args, kwargs):
 
 
 class LogicalClipScheduler:
-    """Globally bounded, chapter-fair executor for logical clip transactions."""
+    """Globally bounded FIFO executor for logical clip transactions."""
 
     def __init__(self, global_limit, chapter_concurrency, *, pending_limit=None,
                  name="render-pipeline-logical"):
@@ -71,7 +64,8 @@ class LogicalClipScheduler:
         self._executor = ThreadPoolExecutor(max_workers=global_limit, thread_name_prefix=name)
         self._cond = Condition()
         self._owners = {}
-        self._cursor = 0
+        self._order = deque()
+        self._submit_waiters = deque()
         self._inflight = 0
         self._pending = 0
         self._closed = False
@@ -94,26 +88,36 @@ class LogicalClipScheduler:
             raise ValueError("function must be callable")
         context = copy_context()
         future = Future()
+        marker = object()
         with self._cond:
-            if self._closed:
-                raise RuntimeError("The logical clip scheduler is closed")
-            while self._pending >= self._pending_limit:
-                self._cond.wait()
-                if self._closed:
-                    raise RuntimeError("The logical clip scheduler is closed")
-            entry = self._owners.get(owner)
-            if entry is not None and entry.get("closed"):
-                # A terminal transaction closed this chapter's admission; a
-                # fresh generation must retire the drained owner first.
-                raise AdmissionClosed(
-                    "The logical clip admission for this owner is closed "
-                    "after a terminal failure")
-            if entry is None:
-                entry = {"queue": deque(), "active": 0}
-                self._owners[owner] = entry
-            entry["queue"].append((future, function, args, kwargs, context))
-            self._pending += 1
-            self._pump()
+            self._submit_waiters.append(marker)
+            try:
+                while True:
+                    if self._closed:
+                        raise RuntimeError("The logical clip scheduler is closed")
+                    if self._submit_waiters[0] is marker and self._pending < self._pending_limit:
+                        self._submit_waiters.popleft()
+                        self._cond.notify_all()
+                        break
+                    self._cond.wait()
+                entry = self._owners.get(owner)
+                if entry is not None and entry.get("closed"):
+                    # A terminal transaction closed this chapter's admission; a
+                    # fresh generation must retire the drained owner first.
+                    raise AdmissionClosed(
+                        "The logical clip admission for this owner is closed "
+                        "after a terminal failure")
+                if entry is None:
+                    entry = {"queue": deque(), "active": 0}
+                    self._owners[owner] = entry
+                entry["queue"].append((future, function, args, kwargs, context))
+                self._order.append((owner, future))
+                self._pending += 1
+                self._pump()
+            finally:
+                if marker in self._submit_waiters:
+                    self._submit_waiters.remove(marker)
+                    self._cond.notify_all()
         return future
 
     def collect(self, futures):
@@ -173,32 +177,20 @@ class LogicalClipScheduler:
                     popped.append(entry["queue"].popleft()[0])
                     self._pending -= 1
             self._owners.clear()
+            self._order.clear()
             self._cond.notify_all()
         for future in popped:
             future.cancel()
         self._executor.shutdown(wait=wait)
 
     def _pump(self):
-        # Caller holds self._cond. Round-robin: each pass serves at most one
-        # transaction per owner, resuming after the last owner served.
-        while self._inflight < self._limit:
-            keys = list(self._owners)
-            count = len(keys)
-            if not count:
-                return
-            last_served = None
-            for offset in range(count):
-                index = (self._cursor + offset) % count
-                entry = self._owners[keys[index]]
-                if (entry["queue"] and entry["active"] < self._share
-                        and self._inflight < self._limit):
-                    self._dispatch(keys[index], entry)
-                    last_served = index
-                    if self._inflight >= self._limit:
-                        break
-            if last_served is None:
-                return
-            self._cursor = (last_served + 1) % count
+        # Caller holds self._cond: dispatch globally in submission order.
+        while self._inflight < self._limit and self._order:
+            owner, future = self._order.popleft()
+            entry = self._owners.get(owner)
+            if entry is None or not entry["queue"] or entry["queue"][0][0] is not future:
+                continue
+            self._dispatch(owner, entry)
 
     def _close_owner_admission_locked(self, entry):
         """Pop and return queued work of a closed owner. Caller holds _cond."""

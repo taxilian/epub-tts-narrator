@@ -114,7 +114,35 @@ class ResourceLaneContractTests(LaneTestCase):
         self.assertEqual([future.result(WORKER_WAIT) for future in queued], [0, 1])
         self.assertEqual(snapshot_gauge("synthesis"), (0, 0))
 
-    def test_round_robin_serves_owners_one_item_at_a_time_fifo_within_an_owner(self):
+    def test_run_capacity_waiters_enter_in_fifo_order(self):
+        lane = self.make_lane(name="capacity-fifo", workers=1, stage="synthesis",
+                              max_pending=1)
+        blocker = Blocker()
+        running = lane.submit(blocker)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        first_queued = Blocker()
+        started = []
+
+        def first_job():
+            started.append("first")
+            return first_queued()
+
+        first = threading.Thread(target=lambda: lane.run(first_job))
+        second = threading.Thread(target=lambda: lane.run(Recorder("second", started)))
+        first.start()
+        self.assertTrue(wait_until(lambda: lane._pending == 1))
+        second.start()
+        self.assertTrue(wait_until(lambda: len(lane._capacity_waiters) == 1))
+        blocker.release.set()
+        self.assertEqual(running.result(WORKER_WAIT), "blocked")
+        self.assertTrue(first_queued.entered.wait(WORKER_WAIT))
+        first_queued.release.set()
+        for thread in (first, second):
+            thread.join(WORKER_WAIT)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(started, ["first", "second"])
+
+    def test_global_fifo_ignores_owner_boundaries(self):
         lane = self.make_lane(name="fair", workers=1, stage="synthesis",
                               max_pending=16)
         order = []
@@ -127,7 +155,7 @@ class ResourceLaneContractTests(LaneTestCase):
         blocker.release.set()
         self.assertEqual(holder.result(WORKER_WAIT), "blocked")
         self.assertTrue(wait_until(lambda: len(order) == 4))
-        self.assertEqual(order, ["b1", "a2", "b2", "a3"])
+        self.assertEqual(order, ["a2", "a3", "b1", "b2"])
         self.assertEqual(snapshot_gauge("synthesis"), (0, 0))
 
     def test_invalid_construction_is_rejected_before_any_worker_starts(self):
@@ -256,6 +284,36 @@ class LaneReservationTests(LaneTestCase):
         waiting = lane.submit(lambda: "never", reserve=gate.reserve)
         lane.close()
         self.assertTrue(waiting.cancelled())
+        self.assertEqual(gate.reservations, 0)
+
+    def test_close_with_drain_reserves_and_releases_queued_jobs_exactly_once(self):
+        lane = self.make_lane(name="reserve-drain", workers=1, stage="synthesis", max_pending=4)
+        gate = Gate()
+        blocker = Blocker()
+        running = lane.submit(blocker, reserve=gate.reserve)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        queued = lane.submit(lambda: "queued", reserve=gate.reserve)
+        closer = threading.Thread(target=lambda: lane.close(drain=True))
+        closer.start()
+        blocker.release.set()
+        self.assertEqual(running.result(WORKER_WAIT), "blocked")
+        self.assertEqual(queued.result(WORKER_WAIT), "queued")
+        closer.join(WORKER_WAIT)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual((gate.reservations, gate.releases), (2, 2))
+
+    def test_cancelling_a_resource_blocked_head_wakes_capacity_waiters(self):
+        lane = self.make_lane(name="reserve-cancel-wake", workers=1, stage="synthesis", max_pending=1)
+        gate = Gate()
+        gate.free = False
+        waiting = lane.submit(lambda: "never", reserve=gate.reserve)
+        self.assertTrue(waiting.cancel())
+        completed = []
+        runner = threading.Thread(target=lambda: completed.append(lane.run(lambda: "completed")))
+        runner.start()
+        runner.join(WORKER_WAIT)
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(completed, ["completed"])
         self.assertEqual(gate.reservations, 0)
 
     def test_reserve_must_be_callable(self):

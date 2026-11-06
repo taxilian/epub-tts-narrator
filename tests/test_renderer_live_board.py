@@ -1,7 +1,6 @@
 """Live terminal board: one persistent row per active chapter, logs scroll above."""
 
 import io
-import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -150,39 +149,20 @@ class SchedulingDefaultsTests(unittest.TestCase):
         self.assertEqual(explicit["chapter_concurrency"], 1)
 
 
-class BalancedPinningTests(unittest.TestCase):
-    def test_new_chapters_spread_across_workers_by_load_not_by_who_is_free(self):
-        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+class FirstAvailableSlotTests(unittest.TestCase):
+    def test_slots_do_not_balance_or_remember_chapters(self):
         from epub_tts_narrator.renderer.pool import _Slots
         local = types.SimpleNamespace(settings={"name": "local", "concurrency": 1})
         remote = types.SimpleNamespace(settings={"name": "second-mac", "concurrency": 1})
         slots = _Slots([local, remote])
-        chapters = [ChapterContinuity({"engine": "fixture"}, {}) for _ in range(4)]
-        busy = []
-        # The first take of chapter 1 occupies local; chapters 2-4 still
-        # balance two per machine instead of all landing on the free one.
-        with chapters[0].transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
-            busy.append(slots.acquire())
-        for chapter in chapters[1:]:
-            chapter_worker = []
-            def take(chapter=chapter):
-                with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
-                    worker = slots.acquire()
-                    chapter_worker.append(worker)
-                    slots.release(worker)
-            thread = threading.Thread(target=take)
-            thread.start()
-            thread.join(0.2)
-            if thread.is_alive():
-                slots.release(busy.pop())
-                thread.join(2)
-        names = [chapter.worker for chapter in chapters]
-        self.assertEqual(names[:2], ["local", "second-mac"])
-        self.assertEqual(sorted(names), ["local", "local", "second-mac", "second-mac"])
-        del chapters[:], chapter, take
-        import gc
-        gc.collect()
-        self.assertEqual([len(slots._chapters[id(worker)]) for worker in (local, remote)], [0, 0])
+        self.assertIs(slots.try_acquire(), local)
+        self.assertIs(slots.try_acquire(), remote)
+        self.assertIsNone(slots.try_acquire())
+        slots.release(local)
+        self.assertIs(slots.try_acquire(), local)
+        slots.release(remote)
+        slots.release(local)
+        self.assertEqual(slots.qsize(), 2)
 
 
 if __name__ == "__main__":

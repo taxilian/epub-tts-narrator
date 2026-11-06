@@ -52,7 +52,7 @@ def validate_pipeline_settings(pool, tts_slots):
 
 
 def chapter_share_for(pool_or_effective):
-    """Logical runners one chapter may occupy: non-borrowable per chapter."""
+    """Bound one chapter coordinator's outstanding logical work."""
     from .render_pipeline import chapter_share
     return chapter_share(pool_or_effective["max_inflight"], pool_or_effective["chapter_concurrency"])
 

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
-from threading import BoundedSemaphore, Condition, RLock, get_ident
-from time import monotonic, sleep
-import weakref
+from threading import Condition, RLock, get_ident
+from time import monotonic
 
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, create_engine
@@ -20,84 +20,113 @@ from .render_resource_context import current_owner
 
 _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
 
-# Bounded backpressure poll while the synthesis lane's declared backlog is full.
-_LANE_RETRY_SECONDS = 0.005
-
-
 class _Slots:
-    """Endpoint slots with balanced chapter affinity.
-
-    A chapter is pinned on its first take to the worker carrying the fewest
-    live chapters per slot (ties: most free slots, then configuration order)
-    and stays there, so its history and audio come from one backend while
-    chapters spread evenly across machines. Finished chapters drop out of the
-    count automatically (weak references).
-
-    Pipeline dispatch pins at submission and reserves a slot with
-    ``try_acquire`` as the TTS lane dequeues, so a take for a busy worker
-    stays queued instead of holding a lane thread an idle worker needs.
-    """
+    """Endpoint slots with FIFO waiters and first-free claims."""
 
     def __init__(self, workers):
         self._free = {id(worker): worker.settings.get("concurrency", 1) for worker in workers}
         self._workers = list(workers)
-        self._chapters = {id(worker): weakref.WeakSet() for worker in workers}
+        self._waiting = deque()
         self._ready = Condition()
 
     def qsize(self):
         with self._ready:
             return sum(self._free.values())
 
-    def _pin(self, chapter):
-        def load(item):
-            index, worker = item
-            return (len(self._chapters[id(worker)]) / worker.settings.get("concurrency", 1),
-                    -self._free[id(worker)], index)
-        _, worker = min(enumerate(self._workers), key=load)
-        chapter.worker = worker.settings["name"]
-        self._chapters[id(worker)].add(chapter)
-
-    def pin(self, chapter):
-        """The chapter's worker name (pinning it now if new); None without a chapter."""
-        if chapter is None:
-            return None
-        with self._ready:
-            if chapter.worker is None:
-                self._pin(chapter)
-            return chapter.worker
-
-    def _claim(self, pinned):
-        choices = [worker for worker in self._workers if self._free[id(worker)]
-                   and (pinned is None or worker.settings["name"] == pinned)]
-        if not choices:
-            return None
-        worker = max(choices, key=lambda item: self._free[id(item)])
-        self._free[id(worker)] -= 1
+    def _claim(self):
+        worker = next((worker for worker in self._workers if self._free[id(worker)]), None)
+        if worker is not None:
+            self._free[id(worker)] -= 1
         return worker
 
-    def try_acquire(self, pinned):
-        """A free slot on ``pinned`` (any worker when None), or None; never blocks."""
+    def try_acquire(self):
+        """Claim the first free slot, or return None without blocking."""
         with self._ready:
-            return self._claim(pinned)
+            return None if self._waiting else self._claim()
 
     def acquire(self):
-        from .continuity import current
-        scope = current()
-        return self.wait_acquire(self.pin(scope["chapter"] if scope is not None else None))
+        return self.wait_acquire()
 
-    def wait_acquire(self, pinned):
-        """Block for a slot on ``pinned`` (any worker when None)."""
+    def wait_acquire(self):
+        """Wait in FIFO order for the first free slot."""
+        marker = object()
         with self._ready:
-            while True:
-                worker = self._claim(pinned)
-                if worker is not None:
-                    return worker
-                self._ready.wait()
+            self._waiting.append(marker)
+            try:
+                while True:
+                    if self._waiting[0] is marker:
+                        worker = self._claim()
+                        if worker is not None:
+                            self._waiting.popleft()
+                            self._ready.notify_all()
+                            return worker
+                    self._ready.wait()
+            finally:
+                if marker in self._waiting:
+                    self._waiting.remove(marker)
+                    self._ready.notify_all()
 
     def release(self, worker):
         with self._ready:
             self._free[id(worker)] += 1
             self._ready.notify_all()
+
+
+class _FifoAdmission:
+    """Bounded legacy admission with FIFO waiters and timeout-safe markers."""
+
+    def __init__(self, limit):
+        self._available = limit
+        self._waiting = deque()
+        self._markers = {}
+        self._cond = Condition()
+
+    def acquire(self, timeout=None):
+        deadline = None if timeout is None else monotonic() + timeout
+        ident = get_ident()
+        with self._cond:
+            marker = self._markers.get(ident)
+            if marker is None:
+                marker = object()
+                self._markers[ident] = marker
+                self._waiting.append(marker)
+            try:
+                while self._waiting[0] is not marker or not self._available:
+                    if deadline is None:
+                        notified = self._cond.wait()
+                    else:
+                        remaining = deadline - monotonic()
+                        if remaining <= 0:
+                            return False
+                        notified = self._cond.wait(remaining)
+                    if not notified:
+                        return False
+                self._waiting.popleft()
+                del self._markers[ident]
+                self._available -= 1
+                self._cond.notify_all()
+                return True
+            except BaseException:
+                self._remove(ident, marker)
+                raise
+
+    def release(self):
+        with self._cond:
+            self._available += 1
+            self._cond.notify_all()
+
+    def cancel(self):
+        with self._cond:
+            ident = get_ident()
+            marker = self._markers.get(ident)
+            if marker is not None:
+                self._remove(ident, marker)
+
+    def _remove(self, ident, marker):
+        self._markers.pop(ident, None)
+        if marker in self._waiting:
+            self._waiting.remove(marker)
+            self._cond.notify_all()
 
 
 def pool_sampling(config):
@@ -332,11 +361,11 @@ class RenderPool:
             # cap the logical scheduler admits; the legacy window keeps its
             # own slots+1 automatic meaning for legacy pools.
             self.max_inflight = self._effective["max_inflight"]
-        self._admission = BoundedSemaphore(max_inflight) if max_inflight else None
+        self._admission = _FifoAdmission(max_inflight) if max_inflight else None
         self._resources = self._build_resources(config)
         self._logical = None
         if self._resources is not None:
-            # One shared, chapter-fair logical clip scheduler for this pool's
+            # One shared FIFO logical clip scheduler for this pool's
             # whole lifetime; a warm server keeps it across books.
             from .render_pipeline import LogicalClipScheduler
             self._logical = LogicalClipScheduler(
@@ -446,7 +475,7 @@ class RenderPool:
         self._recognition_verified = digest
 
     def _recognize(self, name, method, args, kwargs, *, initialize_mlx):
-        """One recognizer model call on the first free recognition slot, local or remote."""
+        """One recognizer model call in FIFO order on the first free slot."""
         def run_on(recognizer):
             if recognizer.local or kwargs or len(args) != 1:
                 def local():
@@ -469,7 +498,7 @@ class RenderPool:
             def reserve():
                 # Under the recognition lane's lock: claim and dequeue are one
                 # step, and the reserving thread runs the call at once.
-                recognizer = self._recognition_slots.try_acquire(None)
+                recognizer = self._recognition_slots.try_acquire()
                 if recognizer is None:
                     return None
                 claimed.append(recognizer)
@@ -477,7 +506,7 @@ class RenderPool:
 
             return self._resources.run_recognition(lambda: run_on(claimed[-1]),
                                                    owner=current_owner(), reserve=reserve)
-        recognizer = self._recognition_slots.wait_acquire(None)
+        recognizer = self._recognition_slots.wait_acquire()
         try:
             with METRICS.active("recognition"):
                 return run_on(recognizer)
@@ -519,6 +548,8 @@ class RenderPool:
         finally:
             if acquired:
                 self._admission.release()
+            else:
+                self._admission.cancel()
 
     def _execute(self, method, *args, **kwargs):
         from .interrupts import stop_if_requested
@@ -566,27 +597,20 @@ class RenderPool:
             self._slots.release(worker)
 
     def _execute_on_lane(self, method, args, kwargs):
-        """Pipeline mode: one bounded lane job per declared endpoint slot.
+        """Pipeline mode: one bounded FIFO job per declared endpoint slot.
 
         The lane owns the synthesis stage gauges, so the job does not wrap
-        them again. The chapter is pinned at submission; the lane reserves
-        the pinned worker's slot only as it dequeues the take, so a queued
-        take never holds an endpoint slot, and a take whose worker is busy
-        never holds a lane thread another worker's take could use. A full
-        declared synthesis backlog makes the caller wait here instead of
-        hiding an unbounded work queue.
+        them again. Each take reserves the first free worker only as it reaches
+        the head of the FIFO queue, so waiting takes hold neither an endpoint
+        slot nor a lane thread. A full declared synthesis backlog makes the
+        caller wait here instead of hiding an unbounded work queue.
         """
-        from .continuity import current
         from .interrupts import stop_if_requested
-        from .render_lanes import LaneFull
 
         notify = generation_notifier()
-        owner = current_owner()
-        scope = current()
-        pinned = self._slots.pin(scope["chapter"] if scope is not None else None)
         claimed = []
-        # Queued time until the pinned worker's slot is reserved. Ended once:
-        # an interrupted caller may race a later reservation of its queued take.
+        # Queued time until a worker slot is reserved. Ended once: an
+        # interrupted caller may race a later reservation of its queued take.
         slot_wait = METRICS.operation("synthesis_slot")
         slot_wait_open = [True]
         slot_wait_lock = RLock()
@@ -598,11 +622,9 @@ class RenderPool:
                     slot_wait.end(outcome)
 
         def reserve():
-            # Called by the lane under its lock as this take reaches the head
-            # of its owner's queue; None keeps it queued without a thread.
-            # Claim and dequeue are one atomic step, and the reserving lane
-            # thread runs the take at once (or releases the slot exactly once).
-            worker = self._slots.try_acquire(pinned)
+            # Claim and dequeue are one atomic step. The reserving lane thread
+            # runs the take at once or releases the slot exactly once.
+            worker = self._slots.try_acquire()
             if worker is None:
                 return None
             claimed.append(worker)
@@ -640,20 +662,9 @@ class RenderPool:
                 return self._local_runtime.run(local_run)
             return run()
 
-        report_worker_activity(notify, "waiting", pinned)
+        report_worker_activity(notify, "waiting")
         try:
-            while True:
-                try:
-                    future = self._resources.tts.submit(run_on_lane, owner=owner, reserve=reserve)
-                except LaneFull:
-                    # Queue-overflow backpressure only: the job was never queued,
-                    # so a retry cannot rerun started synthesis.
-                    stop_if_requested()
-                    if self._closed:
-                        raise EngineError("The render pool is closed") from None
-                    sleep(_LANE_RETRY_SECONDS)
-                    continue
-                return future.result()
+            return self._resources.tts.run(run_on_lane, reserve=reserve)
         except BaseException as error:
             if not claimed:
                 end_slot_wait(classify_outcome(error))

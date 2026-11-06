@@ -307,7 +307,7 @@ recognition_concurrency = 1     # recognition slots on this worker
 
 ### Recognition workers
 
-Speech recognition (Whisper, plus the reference recognizer used for second opinions) can also run on `serve` machines. The controlling machine always recognizes on its own recognition thread; each worker whose `roles` include `"recognition"` adds `recognition_concurrency` more slots, and every take's recognition call goes to whichever slot is free, so several clips are recognized at once across machines. A worker with `roles = ["recognition"]` only recognizes and adds no TTS slots. Everything else in verification (acoustic checks, word comparison, JEV and phonetic review, acceptance) stays on the controller, and censorship alignment and casting always use the local recognizer.
+Speech recognition (Whisper, plus the reference recognizer used for second opinions) can also run on `serve` machines. The controlling machine always recognizes on its own recognition thread; each worker whose `roles` include `"recognition"` adds `recognition_concurrency` more slots, and every take's recognition call joins one FIFO queue and claims the first free slot, so several clips are recognized at once across machines. A worker with `roles = ["recognition"]` only recognizes and adds no TTS slots. Everything else in verification (acoustic checks, word comparison, JEV and phonetic review, acceptance) stays on the controller, and censorship alignment and casting always use the local recognizer.
 
 A `serve` process offers recognition when its own config sets `[verification] model` (and `reference_model` to provide second opinions); its `/health` then lists the `recognition` role and the recognizers' identity: model file hashes, package versions, language and options, never local paths. When rendering starts, the controller requires each recognition worker's identity to equal its own recognizers' exactly; a worker with different models or package versions stops the render with the names of the differing fields (install the same model files and versions there, or remove `recognition` from its roles). Because a matching worker runs exactly the controller's recognizers, saved verification identities do not change and existing accepted takes stay valid. Each response is also checked against the identity verified at startup, so a worker restarted with other models is refused. With remote recognizers configured, each attempt report records `recognized_by` (`local` or the worker name). A Runpod CUDA worker uses faster-whisper, which cannot match an MLX Whisper controller, so it stays TTS-only unless the controller also uses `faster_whisper`.
 
@@ -319,7 +319,7 @@ Then use the usual command:
 
 The configured workers replace the default single renderer. Omit the `local` entry to generate all speech remotely; local Whisper verification is still required, but the coordinator will not download or load Drama 3. Missing voices can still be created with configured Gemini or ElevenLabs, or prepared with `cast` on a machine with the local model. There is at most one local inference slot; set each remote's concurrency to its server's capacity. One is appropriate for another Mac. Faster workers take more jobs as slots become free. Local generation and local recognition each own a persistent MLX thread with its own streams, so verification runs beside generation instead of pausing it (the GPU interleaves both; same-seed Drama 3 audio is not bit-reproducible even alone, so this changes no guarantee). `serve` likewise recognizes on a separate thread from its synthesis.
 
-On an interactive terminal, `render` keeps one live row per active chapter at the bottom of the screen, plus a scheduler row, for example `Ch 39/92 | 12/110 blocks (11%) | 02:01 | #13 second-mac gen 2/6 00:37 | ~05:00 left`. Rows show which worker is generating, which worker a queued block is waiting for (each chapter stays on one worker for its voice history), and local normalization or verification with the audio's worker name. A block waiting for its busy worker never delays another worker's chapters. Everything else scrolls above the rows, tagged with its chapter: chapters starting, reused or finished, rejections (`Ch 39: Chunk 2 (audio from second-mac): Attempt 1/6 rejected: …`), retries and recovery. Routine per-chunk completions appear only in the rows. Redirected output (a log file or pipe) keeps plain status lines every 30 seconds. Cache reuse does not report new worker activity.
+On an interactive terminal, `render` keeps one live row per active chapter at the bottom of the screen, plus a scheduler row, for example `Ch 39/92 | 12/110 blocks (11%) | 02:01 | #13 second-mac gen 2/6 00:37 | ~05:00 left`. Rows show which worker is generating, a generic worker wait when all slots are busy, and local normalization or verification with the audio's worker name. Synthesis takes start in FIFO submission order and each claims the first free worker; chapters have no worker affinity, and a queued take holds no lane thread or worker slot. Everything else scrolls above the rows, tagged with its chapter: chapters starting, reused or finished, rejections (`Ch 39: Chunk 2 (audio from second-mac): Attempt 1/6 rejected: …`), retries and recovery. Routine per-chunk completions appear only in the rows. Redirected output (a log file or pipe) keeps plain status lines every 30 seconds. Cache reuse does not report new worker activity.
 
 The server prints timestamped request IDs as requests queue, start inference, complete, fail, or disconnect. Completion includes elapsed time and returned audio duration. Queue wait is separate from actual inference; logs include character/reference counts but never book passages, reference transcripts, or API keys. Output is flushed immediately even when redirected. Update and restart `serve` on the remote Mac to enable these logs; client progress uses the coordinator's code.
 
@@ -331,11 +331,11 @@ Local book rendering overlaps one chapter's CPU composition/encoding with the ne
 
 ### Scheduling modes
 
-`[render_pool] scheduler` selects how clip work is scheduled. `"pipeline"` is the default: chapter continuity makes each chapter sequential, so several chapter coordinators share one fair logical scheduler and keep the model busy. `"legacy"` renders one chapter at a time. Both modes reuse every already accepted clip, report, and cache identity: scheduling never changes what is synthesized or accepted.
+`[render_pool] scheduler` selects how clip work is scheduled. `"pipeline"` is the default: chapter continuity makes each chapter sequential, so several chapter coordinators share one FIFO logical scheduler and keep the model busy. `"legacy"` renders one chapter at a time. Both modes reuse every already accepted clip, report, and cache identity: scheduling never changes what is synthesized or accepted.
 
 | Setting (`[render_pool]`) | Default | Meaning |
 | --- | --- | --- |
-| `scheduler` | `"pipeline"` | One fair logical scheduler shared by all chapters; `"legacy"` renders chapters one at a time. |
+| `scheduler` | `"pipeline"` | One FIFO logical scheduler shared by all chapters; `"legacy"` renders chapters one at a time. |
 | `chapter_concurrency` | `0` | Chapter coordinators; `0` is automatic: at least two per TTS slot under pipeline (`max(4, 2 × slots)`, so one slot generates a chapter's take while another chapter's take verifies), 2 effective in legacy. Hard ceiling 16. |
 | `max_inflight` | `0` | `0` is automatic. Pipeline: a global transaction ceiling — 16 local, `min(256, max(64, 16 × slots))` remote. Legacy: a per-chapter window of total slots + 1 (an explicit value is shared across chapters). |
 | `synthesis_backlog` | `0` | Queued synthesis bound; `0` is automatic: `min(256, 4 × total TTS slots)`. Also the exact attempt backlog bound. |
@@ -389,10 +389,10 @@ always renders through a pool (a one-slot local pool when no workers are
 configured), and the default `[render_pool] scheduler = "pipeline"` runs at
 least two chapter coordinators per TTS slot (`chapter_concurrency`, minimum
 four) that queue their next take for the shared workers while other chapters
-verify. In a pool with several workers, each new chapter is pinned to the
-worker carrying the fewest active chapters per slot and stays there, so one
-chapter's audio and history come from one backend and chapters spread evenly
-across machines.
+verify. All synthesis takes join one FIFO queue and claim the first free
+worker in configuration order. Each request carries its complete composed
+history and references, so a chapter can continue on any worker without worker
+affinity or changes to saved-audio identity.
 
 Every engine returns the codec tokens it generated. The renderer saves them as
 hash-validated `*.codes.json` artifacts beside each take and rebuilds history

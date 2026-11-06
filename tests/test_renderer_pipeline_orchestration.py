@@ -197,7 +197,7 @@ class OrchestrationTests(unittest.TestCase):
             for event in starts[2:]:
                 event.set()
             # Both global slots are held by gated first clips: siblings and
-            # later chapters stay queued at their non-borrowable shares.
+            # later chapters stay queued behind the bounded global admission limit.
             self.recorder.expect_absent("1-1", "2-1", "3-0", "4-0")
             self.gates["1-0"].set()
             wait_until(lambda: len(self.recorder.order) >= 3)

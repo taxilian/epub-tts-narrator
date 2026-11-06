@@ -1,4 +1,4 @@
-"""Fair logical-clip scheduling: bounded, chapter-fair, cancellable, leak-free."""
+"""FIFO logical-clip scheduling: bounded, cancellable, leak-free."""
 
 from concurrent.futures import CancelledError
 from contextvars import ContextVar
@@ -73,64 +73,66 @@ class ShareTests(unittest.TestCase):
                     chapter_share(limit, chapters)
 
 
-class FairnessTests(SchedulerTestCase):
-    def test_late_chapter_starts_while_first_chapter_fills_its_own_share(self):
-        scheduler = self.start_scheduler(2, 2)  # share = 1
+class FifoTests(SchedulerTestCase):
+    def test_available_slots_fill_in_global_submission_order(self):
+        scheduler = self.start_scheduler(2, 2)
         first_gate, second_gate = Event(), Event()
+        self.addCleanup(first_gate.set)
+        self.addCleanup(second_gate.set)
         first = self.submit("book:1", "1-a", gate=first_gate)
-        self.submit("book:1", "1-b")
-        self.submit("book:2", "2-a", gate=second_gate)
-        self.submit("book:2", "2-b")
+        second = self.submit("book:1", "1-b", gate=first_gate)
+        third = self.submit("book:2", "2-a", gate=second_gate)
+        fourth = self.submit("book:2", "2-b")
         self.starts.expect("1-a")
-        self.starts.expect("2-a")  # a reserved slot remained for the later chapter
-        self.starts.expect_absent("1-b", "2-b")  # each chapter's share is non-borrowable
-        first_gate.set()
         self.starts.expect("1-b")
-        self.starts.expect_absent("2-b")
+        self.starts.expect_absent("2-a", "2-b")
+        first_gate.set()
+        self.starts.expect("2-a")
         second_gate.set()
-        self.starts.expect("2-b")
-        self.assertEqual(first.result(10), "1-a")
+        for future in (first, second, third, fourth):
+            future.result(10)
+        self.assertEqual(self.starts.order, ["1-a", "1-b", "2-a", "2-b"])
 
-    def test_one_worker_slot_rotates_round_robin_across_chapters(self):
-        scheduler = self.start_scheduler(1, 2, pending_limit=8)  # share = 1
+    def test_one_worker_slot_uses_global_submission_order(self):
+        scheduler = self.start_scheduler(1, 2, pending_limit=8)
         gate = Event()
         priming = self.submit("book:0", "0-a", gate=gate)
-        futures = [self.submit("book:1", "1-a", gate=gate), self.submit("book:2", "2-a", gate=gate),
-                   self.submit("book:1", "1-b", gate=gate), self.submit("book:2", "2-b", gate=gate)]
+        futures = [self.submit("book:1", "1-a", gate=gate), self.submit("book:1", "1-b", gate=gate),
+                   self.submit("book:2", "2-a", gate=gate), self.submit("book:2", "2-b", gate=gate)]
         self.starts.expect("0-a")
-        self.assertEqual(self.starts.order, ["0-a"])
         gate.set()
         self.assertEqual(priming.result(10), "0-a")
         for future in futures:
             future.result(10)
-        # Once both chapters hold queued work, the single slot strictly
-        # alternates owners instead of draining one chapter first.
-        self.assertEqual(self.starts.order, ["0-a", "1-a", "2-a", "1-b", "2-b"])
+        self.assertEqual(self.starts.order, ["0-a", "1-a", "1-b", "2-a", "2-b"])
 
     def test_global_limit_never_grows_with_registered_or_configured_chapters(self):
-        scheduler = self.start_scheduler(2, 4)  # share = 1
+        scheduler = self.start_scheduler(2, 4)
         gates = {"1-a": Event(), "2-a": Event()}
         first = self.submit("book:1", "1-a", gate=gates["1-a"])
         second = self.submit("book:2", "2-a", gate=gates["2-a"])
         self.starts.expect("2-a")
         third = self.submit("book:3", "3-a")
-        self.starts.expect_absent("3-a")  # both global slots are occupied
+        self.starts.expect_absent("3-a")
         gates["1-a"].set()
-        self.starts.expect("3-a")  # the freed slot rotates past the idle chapters
+        self.starts.expect("3-a")
         self.assertEqual(first.result(10), "1-a")
         gates["2-a"].set()
         self.assertEqual(second.result(10), "2-a")
         self.assertEqual(third.result(10), "3-a")
 
-    def test_each_chapter_keeps_source_fifo_order(self):
+    def test_global_fifo_never_reorders_owner_sequences(self):
         scheduler = self.start_scheduler(2, 2)
         gate = Event()
         futures = [self.submit("book:1", f"1-{index}", gate=gate) for index in "abcd"]
-        self.submit("book:2", "2-a")
-        self.starts.expect("2-a")
-        self.starts.expect_absent("1-b", "1-c", "1-d")
+        later = self.submit("book:2", "2-a")
+        self.starts.expect("1-a")
+        self.starts.expect("1-b")
+        self.starts.expect_absent("2-a")
         gate.set()
         self.assertEqual([future.result(10) for future in futures], ["1-a", "1-b", "1-c", "1-d"])
+        self.assertEqual(later.result(10), "2-a")
+        self.assertEqual(self.starts.order, ["1-a", "1-b", "1-c", "1-d", "2-a"])
 
 
 class BoundedPendingTests(SchedulerTestCase):
@@ -158,6 +160,36 @@ class BoundedPendingTests(SchedulerTestCase):
         self.assertEqual(accepted, [True])
         self.starts.expect("1-d")
 
+    def test_blocked_submitters_admit_in_fifo_order(self):
+        scheduler = self.start_scheduler(1, 1, pending_limit=1)
+        gate = Event()
+        running = self.submit("book:1", "1-a", gate=gate)
+        queued = self.submit("book:1", "1-b", gate=gate)
+        accepted = []
+        submitted = {}
+        helpers = []
+        for label in ("1-c", "1-d"):
+            def blocked(label=label):
+                submitted[label] = scheduler.submit("book:1", self.body(label, gate=gate))
+                accepted.append(label)
+            helper = Thread(target=blocked)
+            helper.start()
+            helpers.append(helper)
+            from time import monotonic
+            deadline = monotonic() + 10
+            while len(scheduler._submit_waiters) < len(helpers):
+                self.assertLess(monotonic(), deadline)
+        gate.set()
+        self.assertEqual(running.result(10), "1-a")
+        self.assertEqual(queued.result(10), "1-b")
+        for helper in helpers:
+            helper.join(10)
+            self.assertFalse(helper.is_alive())
+        self.assertEqual(accepted, ["1-c", "1-d"])
+        for label in accepted:
+            self.assertEqual(submitted[label].result(10), label)
+        self.assertEqual(self.starts.order, ["1-a", "1-b", "1-c", "1-d"])
+
     def test_cancelling_queued_work_releases_pending_bound(self):
         scheduler = self.start_scheduler(1, 1, pending_limit=1)
         gate = Event()
@@ -184,7 +216,7 @@ class BoundedPendingTests(SchedulerTestCase):
 
 class CancellationAndCloseTests(SchedulerTestCase):
     def test_cancel_owner_cancels_only_queued_siblings_of_that_owner(self):
-        scheduler = self.start_scheduler(2, 2)
+        scheduler = self.start_scheduler(1, 2)
         gate = Event()
         running = self.submit("book:1", "1-a", gate=gate)
         self.starts.expect("1-a")
@@ -208,7 +240,7 @@ class CancellationAndCloseTests(SchedulerTestCase):
 
     def test_close_cancels_queued_work_drains_running_and_stops_submission(self):
         baseline = threading.active_count()
-        scheduler = LogicalClipScheduler(2, 2)
+        scheduler = LogicalClipScheduler(1, 2)
         gate = Event()
         running = scheduler.submit("book:1", self.body("1-a", gate=gate))
         self.starts.expect("1-a")

@@ -1,11 +1,11 @@
-"""Shared fair chapter orchestration for pipeline-scheduled rendering.
+"""Shared FIFO chapter orchestration for pipeline-scheduled rendering.
 
 One ``LogicalClipScheduler`` per pipeline ``RenderPool`` runs every chapter's
 logical clip transactions. This module owns the two coordination shapes built
 on it:
 
 * :func:`collect_chapter` — one chapter coordinator: bounded submissions (the
-  chapter's non-borrowable share), source-ordered results, and fail-fast
+  chapter's bounded outstanding work), source-ordered results, and fail-fast
   admission on the first terminal clip failure (queued siblings cancelled
   before any new transaction starts, started ones drained).
 * :class:`ChapterRunAdmission` + :func:`run_units` — book-level bounded

@@ -21,16 +21,15 @@ Public API for scheduling integration:
   ``contextvars.copy_context()`` at submit time, so scoped stop conditions
   (owner loss, session epochs) travel with the job. Pending work is bounded:
   beyond ``max_pending`` submissions raise ``LaneFull`` and the caller owns
-  backpressure. Owners are served round-robin one job at a time, FIFO within
-  an owner.
+  backpressure. Jobs are considered in global submission order.
 * ``submit(..., reserve=callable)`` gates dequeue on an external resource:
-  the lane calls ``reserve()`` under its own lock when the job reaches the
-  head of its owner's queue; ``None`` leaves the job queued (that owner is
-  skipped, others keep running) and anything else is a release callback the
-  lane calls exactly once after the job finishes or is dropped, then wakes
-  its workers. A job that cannot start therefore never occupies a lane
-  thread another resource's work could use. ``reserve`` must not block or
-  call back into the lane.
+  the lane calls ``reserve()`` under its own lock in submission order;
+  ``None`` leaves that job queued while a later job with an available
+  resource may run, and anything else is a release callback the lane calls
+  exactly once after the job finishes or is dropped, then wakes its workers.
+  Same-resource work therefore stays FIFO without blocking another eligible
+  resource. A job that cannot start never occupies a lane thread.
+  ``reserve`` must not block or call back into the lane.
 * ``run(...)`` is the synchronous adapter: submit, then ``future.result()``.
 * At dequeue every job checks its copied context with
   ``interrupts.stop_if_requested()`` before running; a stopped job or one
@@ -78,7 +77,7 @@ class _Job:
 
 
 class ResourceLane:
-    """Fixed-worker bounded queue with owner fairness and scoped cancellation."""
+    """Fixed-worker bounded FIFO queue with scoped cancellation."""
 
     def __init__(self, *, name, workers, stage, max_pending, stop_at_dequeue=True):
         if not isinstance(name, str) or not name:
@@ -98,8 +97,8 @@ class ResourceLane:
         self._stop_at_dequeue = stop_at_dequeue
         self._max_pending = max_pending
         self._cond = Condition()
-        self._owners = {}
-        self._cursor = None
+        self._jobs = deque()
+        self._capacity_waiters = deque()
         self._pending = 0
         self._closed = False
         self._drain = False
@@ -109,6 +108,23 @@ class ResourceLane:
             thread = Thread(target=self._work, name=f"{name}-{index}", daemon=True)
             self._threads.append(thread)
             thread.start()
+
+    def _enqueue(self, function, args, kwargs, reserve):
+        """Append one job while holding the lane condition."""
+        operation = METRICS.operation(self._stage)
+        future = Future()
+
+        def wake_cancelled(done):
+            if done.cancelled():
+                with self._cond:
+                    self._cond.notify_all()
+
+        future.add_done_callback(wake_cancelled)
+        job = _Job(copy_context(), function, args, kwargs, future, operation, reserve)
+        self._jobs.append(job)
+        self._pending += 1
+        self._cond.notify()
+        return job.future
 
     def submit(self, function, *args, owner=(None, None), reserve=None, **kwargs):
         """Queue the callable and return its Future; raises LaneFull when full."""
@@ -121,46 +137,39 @@ class ResourceLane:
         with self._cond:
             if self._closed:
                 raise RuntimeError("The resource lane is closed")
-            if self._pending >= self._max_pending:
+            if self._capacity_waiters or self._pending >= self._max_pending:
                 raise LaneFull("The resource lane pending queue is full")
-            operation = METRICS.operation(self._stage)
-            job = _Job(copy_context(), function, args, kwargs, Future(), operation, reserve)
-            self._owners.setdefault(owner, deque()).append(job)
-            self._pending += 1
-            self._cond.notify()
-        return job.future
+            return self._enqueue(function, args, kwargs, reserve)
 
-    def run(self, function, *args, owner=(None, None), **kwargs):
-        """Submit and wait synchronously, applying caller backpressure.
-
-        While the pending queue is full the caller blocks until capacity
-        frees, so saturated lanes slow transaction runners instead of
-        failing their transactions with ``LaneFull``. The wait polls the
-        global stop controller and re-checks the closed state; the function
-        itself is submitted exactly once, after capacity exists, so it can
-        never run twice. Same-lane callers are refused like ``submit``.
-        """
+    def run(self, function, *args, owner=(None, None), reserve=None, **kwargs):
+        """Wait in FIFO order for capacity, then wait for the job's result."""
         from .interrupts import stop_if_requested
 
         if get_ident() in self._worker_idents:
             raise RuntimeError("A lane worker must not submit work to its own lane")
         if not callable(function):
-            raise TypeError("submit requires a callable")
+            raise TypeError("run requires a callable")
+        if reserve is not None and not callable(reserve):
+            raise TypeError("reserve must be callable")
+        marker = object()
         with self._cond:
-            while self._pending >= self._max_pending:
-                stop_if_requested()
-                if self._closed:
-                    raise RuntimeError("The resource lane is closed")
-                self._cond.wait(0.1)
-            stop_if_requested()
-            if self._closed:
-                raise RuntimeError("The resource lane is closed")
-            operation = METRICS.operation(self._stage)
-            job = _Job(copy_context(), function, args, kwargs, Future(), operation)
-            self._owners.setdefault(owner, deque()).append(job)
-            self._pending += 1
-            self._cond.notify()
-        return job.future.result()
+            self._capacity_waiters.append(marker)
+            try:
+                while True:
+                    stop_if_requested()
+                    if self._closed:
+                        raise RuntimeError("The resource lane is closed")
+                    if self._capacity_waiters[0] is marker and self._pending < self._max_pending:
+                        self._capacity_waiters.popleft()
+                        self._cond.notify_all()
+                        future = self._enqueue(function, args, kwargs, reserve)
+                        break
+                    self._cond.wait(0.1)
+            finally:
+                if marker in self._capacity_waiters:
+                    self._capacity_waiters.remove(marker)
+                    self._cond.notify_all()
+        return future.result()
 
     def close(self, *, drain=False):
         """Stop submissions; cancel queued work (default) or drain it, then join."""
@@ -173,10 +182,9 @@ class ResourceLane:
             self._closed = True
             self._drain = bool(drain)
             if not drain:
-                for queue in self._owners.values():
-                    for job in queue:
-                        self._cancel(job)
-                self._owners.clear()
+                for job in self._jobs:
+                    self._cancel(job)
+                self._jobs.clear()
                 # Cancelled queued jobs never reach _take; restore the count.
                 self._pending = 0
             self._cond.notify_all()
@@ -191,28 +199,16 @@ class ResourceLane:
             job.operation.cancel()
 
     def _take(self):
-        # The lane condition is held: one job at a time, rotating fair owners.
-        owners = self._owners
-        if not owners:
-            return None
-        keys = list(owners)
-        if self._cursor in owners:
-            start = keys.index(self._cursor)
-            keys = keys[start + 1:] + keys[:start + 1]
-        for key in keys:
-            queue = owners[key]
-            job = queue[0]
-            if job.reserve is not None and not self._closed and not job.future.cancelled():
+        # The lane condition is held: consider jobs in global submission order.
+        for job in self._jobs:
+            if job.reserve is not None and (not self._closed or self._drain) and not job.future.cancelled():
                 release = job.reserve()
                 if release is None:
-                    # Its resource is busy: leave it queued, serve other owners.
                     continue
                 job.release = release
-            queue.popleft()
-            if not queue:
-                del owners[key]
-            self._cursor = key
+            self._jobs.remove(job)
             self._pending -= 1
+            self._cond.notify_all()
             return job
         return None
 
@@ -225,7 +221,7 @@ class ResourceLane:
                     if job is None:
                         # Reserved-resource jobs may still be queued behind a
                         # running job's release; wait for it even when closed.
-                        if self._closed and not self._owners:
+                        if self._closed and not self._jobs:
                             return
                         self._cond.wait()
                         continue

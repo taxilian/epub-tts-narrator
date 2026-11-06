@@ -10,6 +10,10 @@ nor release ever blocks a worker handing off a completed file.
 ``reserve(new_generation=False)`` accounts a joined-audio ASR check or a
 resumed saved-but-unverified take without spending a generation start or
 waiting on the high-water. Cached-accepted work reserves nothing.
+Reservations grant in submission order among eligible waiters. An adopted
+verification ticket may pass a byte-blocked new generation so recognition can
+release the bytes blocking that generation; this never reorders waiters within
+the same eligibility class.
 
 Tickets record absolute sizes via ``materialize`` / ``update_bytes``;
 ``release`` returns the slot and bytes idempotently from any thread. Call
@@ -38,6 +42,7 @@ order relative to take locks is the integrator's concern. Full hook map:
 
 from __future__ import annotations
 
+from collections import deque
 from threading import Condition
 
 from .render_backlog_context import (
@@ -144,7 +149,7 @@ class BacklogBudget:
         self._peak_bytes = 0
         self._blocked = False
         self._closed = False
-        self._waiters = 0
+        self._waiters = deque()
 
     def reserve(self, *, new_generation=True, initial_bytes=0, cancel=None,
                 phase_ok=None):
@@ -171,7 +176,7 @@ class BacklogBudget:
                 "max_materialized_bytes": self._max_bytes,
                 "low_water_bytes": self._low_water,
                 "new_generation_blocked": self._blocked,
-                "waiters": self._waiters,
+                "waiters": len(self._waiters),
                 "closed": self._closed,
             }
 
@@ -195,26 +200,33 @@ class BacklogBudget:
     def _grant(self, *, new_generation, initial_bytes, cancel, phase_ok):
         if not isinstance(initial_bytes, int) or initial_bytes < 0:
             raise ValueError("initial_bytes must be a nonnegative integer")
+        marker = (object(), new_generation)
         with self._cond:
-            while True:
-                if self._closed:
-                    raise BacklogClosed("The backlog budget is closed")
-                if cancel is not None and cancel():
-                    raise BacklogCancelled("cancel")
-                if phase_ok is not None and not phase_ok():
-                    raise BacklogCancelled("phase")
-                if (self._pending < self._max_pending
-                        and not (new_generation and self._blocked)):
-                    self._pending += 1
-                    if self._pending > self._peak_pending:
-                        self._peak_pending = self._pending
-                    self._apply_bytes(initial_bytes)
-                    return BacklogTicket(self, initial_bytes)
-                self._waiters += 1
-                try:
+            self._waiters.append(marker)
+            try:
+                while True:
+                    if self._closed:
+                        raise BacklogClosed("The backlog budget is closed")
+                    if cancel is not None and cancel():
+                        raise BacklogCancelled("cancel")
+                    if phase_ok is not None and not phase_ok():
+                        raise BacklogCancelled("phase")
+                    first_grantable = next(
+                        (candidate for candidate in self._waiters
+                         if not (candidate[1] and self._blocked)), None)
+                    if self._pending < self._max_pending and first_grantable is marker:
+                        self._waiters.remove(marker)
+                        self._pending += 1
+                        if self._pending > self._peak_pending:
+                            self._peak_pending = self._pending
+                        self._apply_bytes(initial_bytes)
+                        self._cond.notify_all()
+                        return BacklogTicket(self, initial_bytes)
                     self._cond.wait(_WAKE_POLL_SECONDS)
-                finally:
-                    self._waiters -= 1
+            finally:
+                if marker in self._waiters:
+                    self._waiters.remove(marker)
+                    self._cond.notify_all()
 
 
 class _Reservation:

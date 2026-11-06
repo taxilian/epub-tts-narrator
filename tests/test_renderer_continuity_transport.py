@@ -88,41 +88,55 @@ class HTTPHistoryTests(unittest.TestCase):
         self.assertEqual(self.engine.calls, [])
 
 
-class PoolAffinityTests(unittest.TestCase):
-    def test_chapter_stays_on_the_worker_of_its_first_take(self):
+class PoolSlotTests(unittest.TestCase):
+    def test_slots_claim_the_first_free_worker_without_chapter_affinity(self):
         from epub_tts_narrator.renderer.pool import _Slots
         workers = [types.SimpleNamespace(settings={"name": "local", "concurrency": 1}),
-                   types.SimpleNamespace(settings={"name": "second-mac", "concurrency": 2})]
+                   types.SimpleNamespace(settings={"name": "second-mac", "concurrency": 1})]
         slots = _Slots(workers)
         chapter = ChapterContinuity({"engine": "fixture"}, {})
         with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
             first = slots.acquire()
+            self.assertEqual(first.settings["name"], "local")
+            second = slots.try_acquire()
+            self.assertEqual(second.settings["name"], "second-mac")
             slots.release(first)
-            self.assertEqual(chapter.worker, "second-mac")
-            other = ChapterContinuity({"engine": "fixture"}, {})
-            other.worker = "local"
-            busy = []
-            with other.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
-                busy.append(slots.acquire())
-            self.assertEqual(busy[0].settings["name"], "local")
-            # The pinned chapter waits for its own worker, never the free one.
-            self.assertIs(slots.acquire(), workers[1])
-        acquired = []
-        waiter = threading.Thread(target=lambda: acquired.append(
-            _pinned_acquire(slots, "local")))
-        waiter.start()
-        waiter.join(0.2)
-        self.assertEqual(acquired, [])
-        slots.release(busy[0])
-        waiter.join(2)
-        self.assertEqual([item.settings["name"] for item in acquired], ["local"])
+            third = slots.try_acquire()
+            self.assertEqual(third.settings["name"], "local")
+        slots.release(second)
+        slots.release(third)
+        self.assertEqual(slots.qsize(), 2)
 
+    def test_blocked_legacy_callers_acquire_in_fifo_order(self):
+        from epub_tts_narrator.renderer.pool import _Slots
+        from time import monotonic
+        worker = types.SimpleNamespace(settings={"name": "local", "concurrency": 1})
+        slots = _Slots([worker])
+        first = slots.acquire()
+        started = []
 
-def _pinned_acquire(slots, name):
-    chapter = ChapterContinuity({"engine": "fixture"}, {})
-    chapter.worker = name
-    with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
-        return slots.acquire()
+        def take(label):
+            acquired = slots.acquire()
+            started.append(label)
+            slots.release(acquired)
+
+        def wait_for_waiters(count):
+            deadline = monotonic() + 2
+            while len(slots._waiting) < count:
+                self.assertLess(monotonic(), deadline)
+
+        second = threading.Thread(target=take, args=("second",))
+        third = threading.Thread(target=take, args=("third",))
+        second.start()
+        wait_for_waiters(1)
+        third.start()
+        wait_for_waiters(2)
+        slots.release(first)
+        second.join(2)
+        third.join(2)
+        self.assertFalse(second.is_alive())
+        self.assertFalse(third.is_alive())
+        self.assertEqual(started, ["second", "third"])
 
 
 class ComposeTests(unittest.TestCase):

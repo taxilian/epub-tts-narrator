@@ -264,6 +264,29 @@ class BacklogBoundTests(unittest.TestCase):
         self.assertEqual(budget.snapshot()["pending_count"], 0)
         self.assertEqual(budget.snapshot()["materialized_bytes"], 0)
 
+    def test_waiters_grant_in_fifo_order(self):
+        budget = BacklogBudget(max_pending=1, max_materialized_bytes=100)
+        first = budget.acquire()
+        started = []
+        threads = []
+
+        def take(label):
+            ticket = budget.acquire()
+            started.append(label)
+            ticket.release()
+
+        for index, label in enumerate(("second", "third", "fourth"), 1):
+            thread = threading.Thread(target=take, args=(label,))
+            thread.start()
+            threads.append(thread)
+            self.assertTrue(wait_until(lambda: len(budget._waiters) == index))
+        first.release()
+        for thread in threads:
+            thread.join(WORKER_WAIT)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(started, ["second", "third", "fourth"])
+        self.assertEqual(budget.snapshot()["pending_count"], 0)
+
     def test_many_failed_but_retained_takes_cannot_exhaust_the_budget(self):
         budget = BacklogBudget(max_pending=2, max_materialized_bytes=256)
         retained_on_disk = []

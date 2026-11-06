@@ -2006,7 +2006,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             return transaction()
 
         if scheduler is not None:
-            # One shared, chapter-fair scheduler admits only this chapter's
+            # One shared FIFO scheduler admits only this chapter's
             # next transaction; other chapters' transactions overlap with it.
             # Results return in source order, and the first terminal failure
             # closes the chapter's admission before new work starts.

@@ -5,7 +5,8 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 import tempfile
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, Thread
+from time import monotonic
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -168,6 +169,53 @@ class AdmissionTests(unittest.TestCase):
                 raise RuntimeError("fixture")
         with pool.admit_chunk():
             self.assertEqual(pool._slots.qsize(), 1)
+
+    def test_legacy_admission_waiters_acquire_in_fifo_order(self):
+        from epub_tts_narrator.renderer.pool import _FifoAdmission
+        admission = _FifoAdmission(1)
+        self.assertTrue(admission.acquire())
+        started = []
+        threads = []
+
+        def take(label):
+            self.assertTrue(admission.acquire(timeout=10))
+            started.append(label)
+            admission.release()
+
+        for index, label in enumerate(("second", "third"), 1):
+            thread = Thread(target=take, args=(label,))
+            thread.start()
+            threads.append(thread)
+            deadline = monotonic() + 5
+            while len(admission._waiting) < index:
+                self.assertLess(monotonic(), deadline)
+        admission.release()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(started, ["second", "third"])
+
+    def test_legacy_admission_timeout_covers_repeated_notifications(self):
+        from epub_tts_narrator.renderer.pool import _FifoAdmission
+        admission = _FifoAdmission(1)
+        self.assertTrue(admission.acquire())
+        stop = Event()
+
+        def churn():
+            while not stop.wait(0.005):
+                with admission._cond:
+                    admission._cond.notify_all()
+
+        notifier = Thread(target=churn)
+        notifier.start()
+        started = monotonic()
+        self.assertFalse(admission.acquire(timeout=0.05))
+        elapsed = monotonic() - started
+        stop.set()
+        notifier.join(5)
+        admission.cancel()
+        admission.release()
+        self.assertLess(elapsed, 0.5)
 
     def test_retrying_take_uses_parent_admission_and_reuses_accepted_bytes(self):
         config, pool = self.pool(capacity=1, limit=1)

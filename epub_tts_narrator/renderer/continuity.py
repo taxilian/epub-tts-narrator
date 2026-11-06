@@ -73,7 +73,7 @@ def request_speakers(request):
 
 
 class ChapterContinuity:
-    """Chapter-owned accepted takes and pool worker affinity."""
+    """Chapter-owned accepted takes for per-request history composition."""
 
     def __init__(self, engine_identity, voices):
         # Engine compatibility (transport, runtime updates, model aliases) is
@@ -81,8 +81,6 @@ class ChapterContinuity:
         # identity; history identity names only the exact accepted takes.
         self.voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
         self.entries = []
-        # A pool keeps a chapter on the worker that produced its first take.
-        self.worker = None
 
     def takes(self, speakers):
         """Fish's first + latest, from this chapter's takes by these voice ids only."""
