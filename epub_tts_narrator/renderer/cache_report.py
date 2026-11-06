@@ -172,7 +172,7 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                      accepted_records=0, index_records=0)
     totals.update(inventory)
     reasons, examples = Counter(), []
-    from .continuity import ChapterContinuity, is_pinnable
+    from .continuity import ChapterContinuity, is_pinnable, request_speakers
     for chapter in plan["chapters"]:
         # Replay accepted history in source order. A missed take never enters
         # the replayed history, so the same voice's later takes miss as well.
@@ -206,7 +206,7 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                             continuity.accept(*found)
                             totals["hits"] += 1
                             continue
-                    speakers = set(bound.get("voice_assets", {}).values()) or {bound.get("voice_asset_hash")}
+                    speakers = request_speakers(bound)
                     earlier_changed = bool(speakers & changed_voices)
                     changed_voices.update(speakers)
                     request = bound

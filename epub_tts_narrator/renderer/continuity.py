@@ -6,7 +6,10 @@ where that voice's performance is. Following Fish's own long-text policy
 (``fish_omni/chunking.py``), a request hears the first accepted take (pinned)
 and the latest accepted take of the same voice in this chapter. Only takes
 whose speakers are all among the request's own speakers are eligible, so no
-other character's audio sits in the prompt: Drama 3 documents history for
+other character's audio sits in the prompt. Speakers are the script's voice
+ids, not recordings: a narrator linked to a character's voice clones the same
+reference but keeps its own history, so narration and that character's
+dialogue stay distinct performances: Drama 3 documents history for
 continuing one voice's script or revising a take, and another voice's recent
 audio competes with the reference for identity and accent. Chapter headings
 never become the pinned take. When a prompt overflows, candidates drop the
@@ -62,9 +65,11 @@ def is_pinnable(chunk):
 
 
 def request_speakers(request):
-    if request.get("kind") == "paragraph_speech":
-        return frozenset(request["voice_assets"].values())
-    return frozenset({request["voice_asset_hash"]})
+    """The script voice ids speaking this request (a simultaneous lane: its performer)."""
+    if "performer" in request:
+        return frozenset({request["performer"]["voice_id"]})
+    from .bundle import chunk_speakers
+    return frozenset(speaker["voice_id"] for speaker in chunk_speakers(request["chunk"]))
 
 
 class ChapterContinuity:
@@ -80,8 +85,8 @@ class ChapterContinuity:
         self.worker = None
 
     def takes(self, speakers):
-        """Fish's first + latest, from this chapter's takes by these speakers only."""
-        eligible = [entry for entry in self.entries if set(entry["identity"]["speakers"]) <= speakers]
+        """Fish's first + latest, from this chapter's takes by these voice ids only."""
+        eligible = [entry for entry in self.entries if set(entry["voices"]) <= speakers]
         if not eligible:
             return []
         pinned = next((entry for entry in eligible if entry["pinnable"]), None)
@@ -90,10 +95,11 @@ class ChapterContinuity:
 
     @contextmanager
     def transaction(self, request, *, pinnable=True):
-        takes = deepcopy(self.takes(request_speakers(request)))
+        voices = request_speakers(request)
+        takes = deepcopy(self.takes(voices))
         identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
-        scope = {"chapter": self, "identity": identity, "takes": takes,
+        scope = {"chapter": self, "identity": identity, "takes": takes, "voices": sorted(voices),
                  "request_binding": digest(bound), "pinnable": pinnable,
                  # Simultaneous lanes overlap in time; none of them is the
                  # next turn of the chapter.
@@ -131,8 +137,10 @@ class ChapterContinuity:
             raise ValueError("Continuity history names a voice outside this chapter")
         codes_path = Path(path).parent / marker["file"]
         load_codes(codes_path, marker)
+        # Selection uses the script voices; the take identity (and so every
+        # request's cache identity) still names only the exact accepted take.
         self.entries.append({"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
-                             "identity": {
+                             "voices": list(scope["voices"]), "identity": {
             "codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
             "speakers": list(marker["speakers"]), "request_hash": accepted["request_hash"],
             "audio_sha256": accepted["audio_sha256"]}})

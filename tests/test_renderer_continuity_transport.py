@@ -95,14 +95,14 @@ class PoolAffinityTests(unittest.TestCase):
                    types.SimpleNamespace(settings={"name": "second-mac", "concurrency": 2})]
         slots = _Slots(workers)
         chapter = ChapterContinuity({"engine": "fixture"}, {})
-        with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+        with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
             first = slots.acquire()
             slots.release(first)
             self.assertEqual(chapter.worker, "second-mac")
             other = ChapterContinuity({"engine": "fixture"}, {})
             other.worker = "local"
             busy = []
-            with other.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+            with other.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
                 busy.append(slots.acquire())
             self.assertEqual(busy[0].settings["name"], "local")
             # The pinned chapter waits for its own worker, never the free one.
@@ -121,7 +121,7 @@ class PoolAffinityTests(unittest.TestCase):
 def _pinned_acquire(slots, name):
     chapter = ChapterContinuity({"engine": "fixture"}, {})
     chapter.worker = name
-    with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+    with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
         return slots.acquire()
 
 

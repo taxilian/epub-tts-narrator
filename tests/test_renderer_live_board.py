@@ -161,12 +161,12 @@ class BalancedPinningTests(unittest.TestCase):
         busy = []
         # The first take of chapter 1 occupies local; chapters 2-4 still
         # balance two per machine instead of all landing on the free one.
-        with chapters[0].transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+        with chapters[0].transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
             busy.append(slots.acquire())
         for chapter in chapters[1:]:
             chapter_worker = []
             def take(chapter=chapter):
-                with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+                with chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
                     worker = slots.acquire()
                     chapter_worker.append(worker)
                     slots.release(worker)

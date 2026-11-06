@@ -366,7 +366,10 @@ requests; there is no setting to turn it off.
   latest accepted take. No other character's audio enters a line's prompt.
   Drama 3 documents history for continuing one voice's script or revising a
   take; another voice's recent audio competes with the reference for identity
-  and accent. A voice's first line in a chapter has no history.
+  and accent. A voice's first line in a chapter has no history. "Voice" means
+  the script's voice id, not the recording: a narrator linked to a character
+  (`voice-aliases.json`) clones the same reference but keeps its own history,
+  so narration and that character's dialogue stay separate performances.
 - **Each voice change is its own request.** The planner groups consecutive
   chunks only for the same performer (since 2026-10-21), because speaker tags
   cannot guarantee an audible switch and transcript verification cannot detect

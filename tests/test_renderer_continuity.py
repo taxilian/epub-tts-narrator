@@ -162,6 +162,22 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual([options["references"][0].text for text, options in self.model.calls],
                          [tagged("A fixed reference."), tagged("Another fixed reference.")] * 2)
 
+    def test_linked_voices_sharing_one_recording_keep_separate_histories(self):
+        # The narrator is often linked to a character's voice (voice-aliases):
+        # both clone the same reference, but narration and that character's
+        # dialogue are different performances and never share history.
+        self.voices["sal"] = dict(self.voices["v1"], voice_id="sal")
+        for chunk, voice in zip(self.chunks, ["v1", "sal", "v1", "sal"]):
+            chunk["segment"].update(voice_id=voice, role_id=f"role-{voice}")
+        self.chunks[1]["segment"]["kind"] = self.chunks[3]["segment"]["kind"] = "dialogue"
+        self.run_chapter()
+        self.assertEqual(histories(self.model), [[], [], [tagged("First words.")], [tagged("Second words.")]])
+        self.assertTrue(all([reference.text for reference in options["references"]]
+                            == [tagged("A fixed reference.")] for text, options in self.model.calls))
+        # Resume replays the same per-voice histories and regenerates nothing.
+        self.run_chapter()
+        self.assertEqual(len(self.model.calls), 4)
+
     def test_mixed_paragraph_hears_only_turns_by_its_own_voices(self):
         mixed = passages(["Two voices. ", "One paragraph."], voices=["v1", "v2"], block="b2", offset=100)
         for chunk in mixed:
@@ -273,7 +289,7 @@ class ContinuityTests(unittest.TestCase):
         request.pop("continuity")
         request.pop("synthesis_identity")
         state = ChapterContinuity(self.engine.identity, self.voices)
-        previous = {"identity": {"previous": True, "speakers": ["a" * 64]}, "pinnable": True}
+        previous = {"identity": {"previous": True, "speakers": ["a" * 64]}, "pinnable": True, "voices": []}
         for barrier in ("recovery", "clip_repair", "exhaustion_selection"):
             with self.subTest(barrier=barrier):
                 state.entries = [previous]

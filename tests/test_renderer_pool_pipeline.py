@@ -251,7 +251,7 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
         first, second, other = (ChapterContinuity({"engine": "fixture"}, {}) for _ in range(3))
         first.worker = second.worker = "worker-0"
         other.worker = "worker-1"
-        request = {"kind": "speech", "voice_asset_hash": "a" * 64}
+        request = {"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}
 
         def take(chapter, text):
             # Production lane owners are per chapter (run, chapter) keys.
@@ -303,7 +303,7 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
         for worker in pool._workers:
             worker._engine = Recording(worker.settings["name"])
         chapters = [ChapterContinuity({"engine": "fixture"}, {}) for _ in range(8)]
-        request = {"kind": "speech", "voice_asset_hash": "a" * 64}
+        request = {"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}
 
         def chapter_takes(index):
             names = set()
@@ -344,7 +344,7 @@ class PipelinePinnedDispatchTests(unittest.TestCase):
 
         with patch("epub_tts_narrator.renderer.progress._TaskNotifier", Notify), \
              generation_activity(Notify()), \
-             chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+             chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64, "chunk": {"segment": {"role_id": "r", "voice_id": "v"}}}):
             pool.synthesize("words", {}, "unused", seed=1)
         self.assertEqual(events[0], ("waiting", "worker-0"))
         self.assertEqual(chapter.worker, "worker-0")
