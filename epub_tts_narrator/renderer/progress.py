@@ -400,7 +400,8 @@ class ChapterProgress:
             if task is None or self._closed:
                 return
             if event == "waiting":
-                task.worker, task.worker_stage = None, "waiting"
+                # Pinned chapters name the machine they are queued for.
+                task.worker, task.worker_stage = worker, "waiting"
             elif event == "assigned":
                 task.worker, task.worker_stage = worker, "waiting"
             elif event == "started":

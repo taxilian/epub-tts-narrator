@@ -14,7 +14,7 @@ from .engines import EngineError, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .local_runtime import LocalRuntime, requires_mlx
 from .progress import generation_notifier, report_worker_activity
-from .render_metrics import METRICS
+from .render_metrics import METRICS, classify_outcome
 from .render_resource_context import current_owner
 
 
@@ -32,6 +32,10 @@ class _Slots:
     and stays there, so its history and audio come from one backend while
     chapters spread evenly across machines. Finished chapters drop out of the
     count automatically (weak references).
+
+    Pipeline dispatch pins at submission and reserves a slot with
+    ``try_acquire`` as the TTS lane dequeues, so a take for a busy worker
+    stays queued instead of holding a lane thread an idle worker needs.
     """
 
     def __init__(self, workers):
@@ -53,20 +57,37 @@ class _Slots:
         chapter.worker = worker.settings["name"]
         self._chapters[id(worker)].add(chapter)
 
+    def pin(self, chapter):
+        """The chapter's worker name (pinning it now if new); None without a chapter."""
+        if chapter is None:
+            return None
+        with self._ready:
+            if chapter.worker is None:
+                self._pin(chapter)
+            return chapter.worker
+
+    def _claim(self, pinned):
+        choices = [worker for worker in self._workers if self._free[id(worker)]
+                   and (pinned is None or worker.settings["name"] == pinned)]
+        if not choices:
+            return None
+        worker = max(choices, key=lambda item: self._free[id(item)])
+        self._free[id(worker)] -= 1
+        return worker
+
+    def try_acquire(self, pinned):
+        """A free slot on ``pinned`` (any worker when None), or None; never blocks."""
+        with self._ready:
+            return self._claim(pinned)
+
     def acquire(self):
         from .continuity import current
         scope = current()
-        chapter = scope["chapter"] if scope is not None else None
+        pinned = self.pin(scope["chapter"] if scope is not None else None)
         with self._ready:
-            if chapter is not None and chapter.worker is None:
-                self._pin(chapter)
             while True:
-                pinned = None if chapter is None else chapter.worker
-                choices = [worker for worker in self._workers if self._free[id(worker)]
-                           and (pinned is None or worker.settings["name"] == pinned)]
-                if choices:
-                    worker = max(choices, key=lambda item: self._free[id(item)])
-                    self._free[id(worker)] -= 1
+                worker = self._claim(pinned)
+                if worker is not None:
                     return worker
                 self._ready.wait()
 
@@ -457,65 +478,95 @@ class RenderPool:
         """Pipeline mode: one bounded lane job per declared endpoint slot.
 
         The lane owns the synthesis stage gauges, so the job does not wrap
-        them again. Worker selection stays inside the job: a queued
-        transaction must never hold an endpoint slot while it waits for a
-        lane thread. A full declared synthesis backlog makes the caller wait
-        here instead of hiding an unbounded work queue.
+        them again. The chapter is pinned at submission; the lane reserves
+        the pinned worker's slot only as it dequeues the take, so a queued
+        take never holds an endpoint slot, and a take whose worker is busy
+        never holds a lane thread another worker's take could use. A full
+        declared synthesis backlog makes the caller wait here instead of
+        hiding an unbounded work queue.
         """
+        from .continuity import current
         from .interrupts import stop_if_requested
         from .render_lanes import LaneFull
 
         notify = generation_notifier()
         owner = current_owner()
+        scope = current()
+        pinned = self._slots.pin(scope["chapter"] if scope is not None else None)
+        claimed = []
+        # Queued time until the pinned worker's slot is reserved. Ended once:
+        # an interrupted caller may race a later reservation of its queued take.
+        slot_wait = METRICS.operation("synthesis_slot")
+        slot_wait_open = [True]
+        slot_wait_lock = RLock()
+
+        def end_slot_wait(outcome):
+            with slot_wait_lock:
+                if slot_wait_open[0]:
+                    slot_wait_open[0] = False
+                    slot_wait.end(outcome)
+
+        def reserve():
+            # Called by the lane under its lock as this take reaches the head
+            # of its owner's queue; None keeps it queued without a thread.
+            # Claim and dequeue are one atomic step, and the reserving lane
+            # thread runs the take at once (or releases the slot exactly once).
+            worker = self._slots.try_acquire(pinned)
+            if worker is None:
+                return None
+            claimed.append(worker)
+            end_slot_wait("completed")
+            return lambda: self._slots.release(worker)
 
         def run_on_lane():
-            report_worker_activity(notify, "waiting")
-            with METRICS.waiting("synthesis_slot"):
-                worker = self._slots.acquire()
-            try:
-                name = worker.settings["name"]
-                report_worker_activity(notify, "assigned", name)
-                def run():
-                    # A job may have waited for the endpoint slot or the local
-                    # model thread. Do not start it after cancellation;
-                    # already-running jobs drain.
-                    stop_if_requested()
-                    started = monotonic()
-                    report_worker_activity(notify, "started", name)
-                    try:
-                        engine = worker.engine()
-                        if worker.local and requires_mlx(engine):
-                            self._local_runtime.initialize_mlx()
-                        metadata = getattr(engine, method)(*args, **kwargs)
-                        if not isinstance(metadata, dict):
-                            raise EngineError("TTS worker returned invalid generation metadata")
-                        result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
-                    except BaseException:
-                        report_worker_activity(notify, "failed", name, monotonic() - started)
-                        raise
-                    report_worker_activity(notify, "completed", name, monotonic() - started)
-                    return result
-                if worker.local:
-                    def local_run():
-                        with self.local_lock:
-                            return run()
-                    return self._local_runtime.run(local_run)
-                return run()
-            finally:
-                self._slots.release(worker)
-
-        while True:
-            try:
-                future = self._resources.tts.submit(run_on_lane, owner=owner)
-            except LaneFull:
-                # Queue-overflow backpressure only: the job was never queued,
-                # so a retry cannot rerun started synthesis.
+            worker = claimed[-1]
+            name = worker.settings["name"]
+            report_worker_activity(notify, "assigned", name)
+            def run():
+                # A job may have waited for the endpoint slot or the local
+                # model thread. Do not start it after cancellation;
+                # already-running jobs drain.
                 stop_if_requested()
-                if self._closed:
-                    raise EngineError("The render pool is closed") from None
-                sleep(_LANE_RETRY_SECONDS)
-                continue
-            return future.result()
+                started = monotonic()
+                report_worker_activity(notify, "started", name)
+                try:
+                    engine = worker.engine()
+                    if worker.local and requires_mlx(engine):
+                        self._local_runtime.initialize_mlx()
+                    metadata = getattr(engine, method)(*args, **kwargs)
+                    if not isinstance(metadata, dict):
+                        raise EngineError("TTS worker returned invalid generation metadata")
+                    result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
+                except BaseException:
+                    report_worker_activity(notify, "failed", name, monotonic() - started)
+                    raise
+                report_worker_activity(notify, "completed", name, monotonic() - started)
+                return result
+            if worker.local:
+                def local_run():
+                    with self.local_lock:
+                        return run()
+                return self._local_runtime.run(local_run)
+            return run()
+
+        report_worker_activity(notify, "waiting", pinned)
+        try:
+            while True:
+                try:
+                    future = self._resources.tts.submit(run_on_lane, owner=owner, reserve=reserve)
+                except LaneFull:
+                    # Queue-overflow backpressure only: the job was never queued,
+                    # so a retry cannot rerun started synthesis.
+                    stop_if_requested()
+                    if self._closed:
+                        raise EngineError("The render pool is closed") from None
+                    sleep(_LANE_RETRY_SECONDS)
+                    continue
+                return future.result()
+        except BaseException as error:
+            if not claimed:
+                end_slot_wait(classify_outcome(error))
+            raise
 
     def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
         options = {"performance": performance, "traits": traits} if performance is not None else {}

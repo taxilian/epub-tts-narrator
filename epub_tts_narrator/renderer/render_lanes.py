@@ -23,6 +23,14 @@ Public API for scheduling integration:
   beyond ``max_pending`` submissions raise ``LaneFull`` and the caller owns
   backpressure. Owners are served round-robin one job at a time, FIFO within
   an owner.
+* ``submit(..., reserve=callable)`` gates dequeue on an external resource:
+  the lane calls ``reserve()`` under its own lock when the job reaches the
+  head of its owner's queue; ``None`` leaves the job queued (that owner is
+  skipped, others keep running) and anything else is a release callback the
+  lane calls exactly once after the job finishes or is dropped, then wakes
+  its workers. A job that cannot start therefore never occupies a lane
+  thread another resource's work could use. ``reserve`` must not block or
+  call back into the lane.
 * ``run(...)`` is the synchronous adapter: submit, then ``future.result()``.
 * At dequeue every job checks its copied context with
   ``interrupts.stop_if_requested()`` before running; a stopped job or one
@@ -55,9 +63,12 @@ class LaneFull(RuntimeError):
 
 
 class _Job:
-    __slots__ = ("context", "function", "args", "kwargs", "future", "operation")
+    __slots__ = ("context", "function", "args", "kwargs", "future", "operation",
+                 "reserve", "release")
 
-    def __init__(self, context, function, args, kwargs, future, operation):
+    def __init__(self, context, function, args, kwargs, future, operation, reserve=None):
+        self.reserve = reserve
+        self.release = None
         self.context = context
         self.function = function
         self.args = args
@@ -99,19 +110,21 @@ class ResourceLane:
             self._threads.append(thread)
             thread.start()
 
-    def submit(self, function, *args, owner=(None, None), **kwargs):
+    def submit(self, function, *args, owner=(None, None), reserve=None, **kwargs):
         """Queue the callable and return its Future; raises LaneFull when full."""
         if get_ident() in self._worker_idents:
             raise RuntimeError("A lane worker must not submit work to its own lane")
         if not callable(function):
             raise TypeError("submit requires a callable")
+        if reserve is not None and not callable(reserve):
+            raise TypeError("reserve must be callable")
         with self._cond:
             if self._closed:
                 raise RuntimeError("The resource lane is closed")
             if self._pending >= self._max_pending:
                 raise LaneFull("The resource lane pending queue is full")
             operation = METRICS.operation(self._stage)
-            job = _Job(copy_context(), function, args, kwargs, Future(), operation)
+            job = _Job(copy_context(), function, args, kwargs, Future(), operation, reserve)
             self._owners.setdefault(owner, deque()).append(job)
             self._pending += 1
             self._cond.notify()
@@ -188,7 +201,14 @@ class ResourceLane:
             keys = keys[start + 1:] + keys[:start + 1]
         for key in keys:
             queue = owners[key]
-            job = queue.popleft()
+            job = queue[0]
+            if job.reserve is not None and not self._closed and not job.future.cancelled():
+                release = job.reserve()
+                if release is None:
+                    # Its resource is busy: leave it queued, serve other owners.
+                    continue
+                job.release = release
+            queue.popleft()
             if not queue:
                 del owners[key]
             self._cursor = key
@@ -203,30 +223,45 @@ class ResourceLane:
                 with self._cond:
                     job = self._take()
                     if job is None:
-                        if self._closed:
+                        # Reserved-resource jobs may still be queued behind a
+                        # running job's release; wait for it even when closed.
+                        if self._closed and not self._owners:
                             return
                         self._cond.wait()
                         continue
-                    if self._closed and not self._drain:
-                        self._cancel(job)
-                        continue
-                    if not job.future.set_running_or_notify_cancel():
-                        job.operation.cancel()
-                        continue
-                    job.operation.start()
                 try:
-                    job.context.run(stop_if_requested if self._stop_at_dequeue else stop_if_owner_requested)
-                except BaseException as stop:
-                    job.operation.end(classify_outcome(stop))
-                    job.future.set_exception(stop)
-                    continue
-                try:
-                    result = job.context.run(job.function, *job.args, **job.kwargs)
-                except BaseException as error:
-                    job.operation.end(classify_outcome(error))
-                    job.future.set_exception(error)
-                    continue
-                job.operation.end("completed")
-                job.future.set_result(result)
+                    self._run(job)
+                finally:
+                    if job.release is not None:
+                        release, job.release = job.release, None
+                        try:
+                            release()
+                        finally:
+                            with self._cond:
+                                self._cond.notify_all()
         finally:
             self._worker_idents.discard(get_ident())
+
+    def _run(self, job):
+        with self._cond:
+            if self._closed and not self._drain:
+                self._cancel(job)
+                return
+            if not job.future.set_running_or_notify_cancel():
+                job.operation.cancel()
+                return
+            job.operation.start()
+        try:
+            job.context.run(stop_if_requested if self._stop_at_dequeue else stop_if_owner_requested)
+        except BaseException as stop:
+            job.operation.end(classify_outcome(stop))
+            job.future.set_exception(stop)
+            return
+        try:
+            result = job.context.run(job.function, *job.args, **job.kwargs)
+        except BaseException as error:
+            job.operation.end(classify_outcome(error))
+            job.future.set_exception(error)
+            return
+        job.operation.end("completed")
+        job.future.set_result(result)

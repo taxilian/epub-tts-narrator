@@ -39,7 +39,7 @@ from .interrupts import RenderPaused
 
 STAGES = frozenset({
     "admission",       # whole-chunk admission window (RenderPool.admit_chunk)
-    "synthesis_slot",  # waiting for a TTS worker slot (RenderPool._execute)
+    "synthesis_slot",  # waiting for a TTS worker slot (legacy RenderPool._execute; pipeline waits are lane-queued)
     "synthesis",       # active synthesis on a slot
     "recognition",     # active serialized model-affine verification
     "review",          # active text-only network review lane

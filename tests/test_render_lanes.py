@@ -185,6 +185,85 @@ class LaneCancellationTests(LaneTestCase):
         self.assertEqual(snapshot_gauge("recognition"), (0, 0))
 
 
+class Gate:
+    """A one-slot external resource: ``reserve`` claims it, its release frees it."""
+
+    def __init__(self):
+        self.free = True
+        self.reservations = self.releases = 0
+
+    def reserve(self):
+        if not self.free:
+            return None
+        self.free = False
+        self.reservations += 1
+        return self._release
+
+    def _release(self):
+        self.free = True
+        self.releases += 1
+
+
+class LaneReservationTests(LaneTestCase):
+    def test_a_job_whose_resource_is_busy_stays_queued_and_other_owners_run(self):
+        lane = self.make_lane(name="reserve", workers=2, stage="synthesis", max_pending=8)
+        busy, idle = Gate(), Gate()
+        blocker = Blocker()
+        running = lane.submit(blocker, owner=("run", "a"), reserve=busy.reserve)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        order = []
+        waiting = lane.submit(Recorder("same resource", order), owner=("run", "b"), reserve=busy.reserve)
+        # The second thread must not take the blocked job and sit on it.
+        other = lane.submit(Recorder("other resource", order), owner=("run", "c"), reserve=idle.reserve)
+        self.assertEqual(other.result(WORKER_WAIT), "other resource")
+        self.assertFalse(waiting.done())
+        self.assertEqual(lane._pending, 1)
+        blocker.release.set()
+        self.assertEqual(waiting.result(WORKER_WAIT), "same resource")
+        self.assertEqual(running.result(WORKER_WAIT), "blocked")
+        self.assertEqual(order, ["other resource", "same resource"])
+        self.assertEqual((busy.reservations, busy.releases, idle.reservations, idle.releases), (2, 2, 1, 1))
+
+    def test_reserved_jobs_release_once_when_stopped_failed_or_cancelled(self):
+        lane = self.make_lane(name="reserve-release", workers=1, stage="synthesis", max_pending=8)
+        gate = Gate()
+        with scoped_stop_condition(lambda: True, RenderPaused):
+            stopped = lane.submit(lambda: "never", reserve=gate.reserve)
+        with self.assertRaises(RenderPaused):
+            stopped.result(WORKER_WAIT)
+
+        def broken():
+            raise RuntimeError("fixture failure")
+        with self.assertRaisesRegex(RuntimeError, "fixture failure"):
+            lane.submit(broken, reserve=gate.reserve).result(WORKER_WAIT)
+
+        blocker = Blocker()
+        running = lane.submit(blocker, reserve=Gate().reserve)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        cancelled = lane.submit(lambda: "never", reserve=gate.reserve)
+        self.assertTrue(cancelled.cancel())
+        blocker.release.set()
+        running.result(WORKER_WAIT)
+        self.assertTrue(wait_until(lambda: lane._pending == 0))
+        # A cancelled queued job never reserves; every reservation released once.
+        self.assertEqual((gate.reservations, gate.releases), (2, 2))
+        self.assertTrue(gate.free)
+
+    def test_close_cancels_jobs_still_waiting_for_their_resource(self):
+        lane = ResourceLane(name="reserve-close", workers=1, stage="synthesis", max_pending=4)
+        gate = Gate()
+        gate.free = False
+        waiting = lane.submit(lambda: "never", reserve=gate.reserve)
+        lane.close()
+        self.assertTrue(waiting.cancelled())
+        self.assertEqual(gate.reservations, 0)
+
+    def test_reserve_must_be_callable(self):
+        lane = self.make_lane(name="reserve-type", workers=1, stage="synthesis", max_pending=4)
+        with self.assertRaises(TypeError):
+            lane.submit(lambda: None, reserve="slot")
+
+
 class LaneFailureTests(LaneTestCase):
     def test_failing_operations_propagate_the_original_exception_and_balance_gauges(self):
         lane = self.make_lane(name="failure", workers=1, stage="synthesis",

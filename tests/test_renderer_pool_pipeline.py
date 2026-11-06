@@ -236,6 +236,120 @@ class PipelineSynthesisLaneTests(unittest.TestCase):
         self.assertEqual(len(state["calls"]), 6)
 
 
+class PipelinePinnedDispatchTests(unittest.TestCase):
+    """A take for a busy pinned worker never holds a lane thread another worker needs."""
+
+    def test_idle_worker_starts_its_chapter_while_another_worker_has_a_backlog(self):
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+
+        pool = RenderPool(pipeline_config(slots=2, backlog=8))
+        self.addCleanup(pool.close)
+        busy, idle = gate_state(), gate_state()
+        idle["gate"].set()
+        pool._workers[0]._engine = GateEngine(busy)
+        pool._workers[1]._engine = GateEngine(idle)
+        first, second, other = (ChapterContinuity({"engine": "fixture"}, {}) for _ in range(3))
+        first.worker = second.worker = "worker-0"
+        other.worker = "worker-1"
+        request = {"kind": "speech", "voice_asset_hash": "a" * 64}
+
+        def take(chapter, text):
+            # Production lane owners are per chapter (run, chapter) keys.
+            with resource_scope(pool.resources, ("run", text)), chapter.transaction(request):
+                return pool.synthesize(text, {}, "unused", seed=1)
+
+        with ThreadPoolExecutor(max_workers=3) as callers:
+            running = callers.submit(take, first, "first")
+            wait_for(busy["condition"], lambda: busy["active"] == 1)
+            queued = callers.submit(take, second, "second")
+            wait_for_queued_lane_job(pool.resources.tts, minimum=1)
+            # The second lane thread must not sit waiting for worker-0.
+            result = callers.submit(take, other, "other").result(5)
+            self.assertEqual(result["render_worker"], "worker-1")
+            self.assertEqual([text for text, _ in busy["calls"]], ["first"])
+            busy["gate"].set()
+            self.assertEqual(running.result(10)["render_worker"], "worker-0")
+            self.assertEqual(queued.result(10)["render_worker"], "worker-0")
+        self.assertEqual(pool._slots.qsize(), 2)
+
+    def test_concurrent_chapters_never_share_a_slot_and_every_take_completes(self):
+        import random
+        import time
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+
+        pool = RenderPool(pipeline_config(slots=2, backlog=16))
+        self.addCleanup(pool.close)
+        lock = threading.Lock()
+        active = {"worker-0": 0, "worker-1": 0}
+        peak = dict(active)
+        ran = []
+
+        class Recording:
+            identity = {"engine": "fixture-stress"}
+
+            def __init__(self, name):
+                self.name = name
+
+            def synthesize(self, text, voice, output_path, *, seed, direction=""):
+                with lock:
+                    active[self.name] += 1
+                    peak[self.name] = max(peak[self.name], active[self.name])
+                time.sleep(random.uniform(0, 0.003))
+                with lock:
+                    active[self.name] -= 1
+                    ran.append((text, self.name))
+                return {}
+
+        for worker in pool._workers:
+            worker._engine = Recording(worker.settings["name"])
+        chapters = [ChapterContinuity({"engine": "fixture"}, {}) for _ in range(8)]
+        request = {"kind": "speech", "voice_asset_hash": "a" * 64}
+
+        def chapter_takes(index):
+            names = set()
+            with resource_scope(pool.resources, ("run", index)):
+                for take in range(25):
+                    with chapters[index].transaction(request):
+                        names.add(pool.synthesize(f"{index}:{take}", {}, "unused", seed=take)["render_worker"])
+            return names
+
+        with ThreadPoolExecutor(max_workers=8) as callers:
+            workers = list(callers.map(chapter_takes, range(8), timeout=60))
+        # One worker per chapter for its history, chapters balanced 4/4, no slot
+        # ever used twice at once, no take lost, and every slot returned.
+        self.assertTrue(all(len(names) == 1 for names in workers))
+        self.assertEqual(sorted(name for names in workers for name in names),
+                         ["worker-0"] * 4 + ["worker-1"] * 4)
+        self.assertEqual(peak, {"worker-0": 1, "worker-1": 1})
+        self.assertEqual(len(ran), 200)
+        self.assertEqual(pool._slots.qsize(), 2)
+        self.assertEqual(pool.resources.tts._pending, 0)
+
+    def test_waiting_take_names_its_pinned_worker(self):
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+        from epub_tts_narrator.renderer.progress import generation_activity
+
+        pool = RenderPool(pipeline_config(slots=2, backlog=8))
+        self.addCleanup(pool.close)
+        state = gate_state()
+        state["gate"].set()
+        for worker in pool._workers:
+            worker._engine = GateEngine(state)
+        chapter = ChapterContinuity({"engine": "fixture"}, {})
+        events = []
+
+        class Notify:
+            def worker_activity(self, event, worker=None, elapsed=None):
+                events.append((event, worker))
+
+        with patch("epub_tts_narrator.renderer.progress._TaskNotifier", Notify), \
+             generation_activity(Notify()), \
+             chapter.transaction({"kind": "speech", "voice_asset_hash": "a" * 64}):
+            pool.synthesize("words", {}, "unused", seed=1)
+        self.assertEqual(events[0], ("waiting", "worker-0"))
+        self.assertEqual(chapter.worker, "worker-0")
+
+
 class PipelineCancellationBoundaryTests(unittest.TestCase):
     """Owner loss blocks new GPU starts but drains started-take verification."""
 
