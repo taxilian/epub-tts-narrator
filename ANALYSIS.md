@@ -91,7 +91,7 @@ Remaining passages are shown separately with wrapped, paragraph-spaced context a
 
 These are human decisions. An agent running the software must leave the menu and unresolved choices for the user, not enter selections or invent performers to make the book pass readiness.
 
-Rerun `analyze` with the same output directory to resume. Cached validated responses are reused, unresolved blocks receive a fresh bounded review, saved identities and unaffected assignments remain, and unresolved passages are never filled by guessing. Interactive speaker decisions are journaled under the request cache (`speaker-decisions/`) as each is made and replayed on a rerun that reaches the same pre-prompt state, including any voices defined during the prompt; a changed book or cast yields a different journal key and asks fresh. An in-progress analysis keeps a `.analysis-pending/` workspace in the output directory and checkpoints the document after each stage, so a rerun resumes from the latest completed stage without repeating its model calls or local work; the directory never counts as a completed bundle until publish finalizes it. Source must match the saved book. Conservative narration-boundary repair splits clear tags such as `"Hello," Mara said, "Again."` into character, narrator, character spans while preserving source text. Ambiguous scopes go through completion. Changes are recorded in `provenance.narration_boundaries`.
+Rerun `analyze` with the same output directory to resume (an EPUB with newly appended chapters instead updates the book; see [Updating a serially published book](#updating-a-serially-published-book)). Cached validated responses are reused, unresolved blocks receive a fresh bounded review, saved identities and unaffected assignments remain, and unresolved passages are never filled by guessing. Interactive speaker decisions are journaled under the request cache (`speaker-decisions/`) as each is made and replayed on a rerun that reaches the same pre-prompt state, including any voices defined during the prompt; a changed book or cast yields a different journal key and asks fresh. An in-progress analysis keeps a `.analysis-pending/` workspace in the output directory and checkpoints the document after each stage, so a rerun resumes from the latest completed stage without repeating its model calls or local work; the directory never counts as a completed bundle until publish finalizes it. Source must match the saved book, apart from appended chapters. Conservative narration-boundary repair splits clear tags such as `"Hello," Mara said, "Again."` into character, narrator, character spans while preserving source text. Ambiguous scopes go through completion. Changes are recorded in `provenance.narration_boundaries`.
 
 To resolve existing directories, use `python3.11 -m epub_tts_narrator resolve-speakers ...`. To review an analysis without rediscovery, use `review-attribution INPUT -o OUTPUT`. Review batches retain complete source blocks and chapter boundaries. Truncated semantic scans subdivide up to two levels; jury requests are not subdivided. Invalid scans or provider failures publish no output, while valid cached calls remain resumable.
 
@@ -176,6 +176,21 @@ General pronunciation changes remain optional explicit edits after analysis. A l
 ## Bracketed delivery
 
 Square-bracket text such as `[Fireball]` receives a separate delivery cue, including inside dialogue. Speaker and voice stay unchanged. The script retains exact source text and supplies `spoken_text` without delimiters for synthesis. Configure `performance_policy.bracketed_text`; balanced nested and multi-paragraph groups are supported, while unmatched delimiters are flagged. See [the format contract](FORMAT.md#bracketed-delivery).
+
+## Updating a serially published book
+
+Books published a chapter at a time (Patreon, Royal Road and similar) can be analyzed as they grow. Download the new EPUB and rerun the same command on the existing book directory:
+
+```sh
+python3.11 -m epub_tts_narrator analyze serial-update.epub -o runs/serial
+python3.11 -m epub_tts_narrator plan serial-update.epub -o runs/serial   # estimate only the new chapters
+```
+
+When the saved chapters are an exact prefix of the new EPUB, only the appended chapters are analyzed and sent to the model. That analysis uses the book's own cast and series history as continuity context, so characters who return keep their identity and voice (through the same three-reviewer identity consensus as series continuation), characters returning from an earlier series book reuse that book's voice, and genuinely new characters get new voice profiles designed against the existing, read-only cast. Unassigned speech in the new chapters goes through the usual completion pass and the interactive speaker prompt. The output reports the added chapters, new characters, returning characters, and how many new voices need casting. The same command with an EPUB that has no new chapters changes nothing.
+
+The saved book identity, every existing chapter script, segment, cast record and voice stay byte-identical, and the update is recorded in `provenance.book_updates`. Rendering reuses all existing verified audio: `audiobook-render render BOOK` casts or designs the new voices, renders only the new chapters, and re-encodes earlier chapters' saved PCM only to update their chapter-count track tag. See [FORMAT.md](FORMAT.md#serial-updates-appended-chapters) for the contract.
+
+An update is refused, with the book unchanged, when an earlier chapter was edited, retitled, removed or reordered, or a paragraph was added to it (chapter and paragraph IDs are positional, so such a change would shift everything after it), when extraction settings changed, while the book is rendering, or when a later book continues from this one. Analyze such an EPUB into a separate output directory. The update is resumable: rerun the same command after an interruption; checkpoints live in `BOOK/.analysis-update/` and originals in `.analysis-revisions/`. In `expressive` performance mode, prepare the performance plan again for the new chapters.
 
 ## Reusing a series cast
 

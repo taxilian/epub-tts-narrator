@@ -917,6 +917,8 @@ To choose separate work and publication directories for one run, add `--work-dir
 
 Rerun the same `render` command after updating the scripts or selected voices. It reuses matching verified clips and unchanged completed chapters, generates the changed passages, and rebuilds the affected chapter files, synchronization data, and M4B in the existing output directory. Moving speech, renumbering segments, changing source IDs or offsets, and editing attribution explanations do not regenerate an otherwise identical performance. Chapter assembly and synchronization use the current locations. An unchanged local render also skips final encoding. Older published outputs without the new publication key are repackaged once from their compatible cached audio.
 
+After `analyze` appends newly published chapters to a serial (see [ANALYSIS.md](ANALYSIS.md#updating-a-serially-published-book)), the same `render` command designs or casts only the new voices, renders only the new chapters, and reuses every earlier chapter: chunk IDs and chapter checkpoints bind `provenance.chunk_identity_source_fingerprint`, the first publication's source identity, so earlier chapters' plans are byte-identical. Their only change is the chapter count in each chapter file's track tag (`3/95`), which `render` and `assemble` apply by re-encoding the saved, verified chapter PCM; no speech is regenerated, re-verified or re-composed. Either the original EPUB or the update's EPUB supplies the cover and metadata. This retag-only reuse covers local rendering; remote chapter services (`serve-chapters`) are not yet specialized for it.
+
 To investigate unexpected regeneration, run a read-only report on the computer
 that owns the book's render cache:
 

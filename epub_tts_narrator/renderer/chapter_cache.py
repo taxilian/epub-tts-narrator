@@ -450,8 +450,12 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
 
 
 def reencode_chapter(chapter, directory, *, book, render_settings, context, notify=print,
-                     censorship_policy=None):
-    """Publish a new encoding checkpoint from existing, validated chapter PCM."""
+                     censorship_policy=None, total_chapters=None):
+    """Publish a new encoding checkpoint from existing, validated chapter PCM.
+
+    ``total_chapters`` retags a chapter after chapters were appended to the
+    book: the verified PCM is reused and only its track tag changes.
+    """
     settings = chapter_settings(render_settings, censorship_policy=censorship_policy)
     source = load_chapter(chapter["cache_directory"], ffprobe=settings["ffprobe"])
     encoding_keys = {"chapter_format", "aac_bitrate", "mp3_bitrate", "ffmpeg", "ffprobe"}
@@ -463,6 +467,10 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
     if identity["book"] != book:
         raise ValueError("Re-encoding requires the original chapter book metadata")
     identity.update(settings=settings, context=deepcopy(context))
+    if total_chapters is not None:
+        if type(total_chapters) is not int or total_chapters < identity["ordinal"]:
+            raise ValueError("A chapter's total must include its own track number")
+        identity["total_chapters"] = total_chapters
     directory = Path(directory)
     if directory.is_symlink() or directory.parent.is_symlink():
         raise ValueError("Chapter cache directories must not be symlinks")
@@ -477,7 +485,7 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
         wav.hardlink_to(regular_file(source["wav_path"]))
         encoded = None
         if source["frames"]:
-            notify(f"Encoding chapter {source['number']} / {source['total_chapters']}: {source['title']}")
+            notify(f"Re-encoding chapter {source['number']} / {identity['total_chapters']}: {source['title']}")
             encoded = encode_chapter(
                 dict(source, wav_path=str(wav)), stage / f"chapter-{identity['chapter']['number']:04d}.{settings['chapter_format']}",
                 book=book, ordinal=identity["ordinal"], total_chapters=identity["total_chapters"],

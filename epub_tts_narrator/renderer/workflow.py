@@ -17,7 +17,7 @@ from .assembly import normalize_clip, package_audio
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .chapter_records import signed_record
-from .bundle import chunk_speakers, make_plan
+from .bundle import chunk_identity_fingerprint, chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .continuity import POLICY as CONTINUITY_POLICY
 from .config import resolve_voice_design
@@ -1222,8 +1222,11 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
             raise RenderBlocked(str(exc)) from exc
         config["_publication_expected"] = digest(previous) if previous is not None else None
     epub = config["render"]["epub"]
-    if epub and not chapters_only and file_hash(epub) != bundle["source"]["book"]["id"]:
-        raise RenderBlocked("Configured EPUB does not match the analyzed book")
+    if epub and not chapters_only:
+        from .book_metadata import accepted_source_epubs
+        # The original EPUB, or the latest download that appended chapters.
+        if file_hash(epub) not in accepted_source_epubs(bundle):
+            raise RenderBlocked("Configured EPUB does not match the analyzed book")
     return config, plan, (voice_store(bundle, config) if voice_store_override is None else voice_store_override)
 
 
@@ -1313,7 +1316,8 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     return {
         "version": 1, "bundle_hash": bundle["bundle_hash"],
         "continuity": CONTINUITY_POLICY,
-        "source_fingerprint": bundle["manifest"]["source_fingerprint"],
+        # Appended chapters leave earlier chapters' source identity unchanged.
+        "source_fingerprint": chunk_identity_fingerprint(bundle["manifest"]),
         "chapter_hash": digest(chapter), "total_chapters": len(bundle["chapters"]),
         "voice_assets": {key: voices[key]["asset_hash"] for key in sorted(used)},
         "engine": engine_identity, "verifier": verifier_identity,
@@ -1343,6 +1347,31 @@ def _same_chapter_audio_context(saved, current):
         ignored.add("engine_config_hash")
     return ({key: value for key, value in saved.items() if key not in ignored}
             == {key: value for key, value in current.items() if key not in ignored})
+
+
+def _total_restore_context(saved, current):
+    """The context to restore a chapter with when only the book's chapter count changed.
+
+    Appending chapters changes ``total_chapters`` (the track tag) of every
+    earlier chapter and nothing else that affects its audio. Such a chapter is
+    restored under its saved total and then retagged; any other difference
+    returns ``current`` unchanged so the ordinary staleness rules apply.
+    """
+    if (saved.get("total_chapters") == current.get("total_chapters")
+            or not isinstance(saved.get("total_chapters"), int)
+            or not _same_chapter_audio_context(dict(saved, total_chapters=current["total_chapters"]), current)):
+        return current
+    return dict(current, total_chapters=saved["total_chapters"])
+
+
+def _retag_chapter_total(work, composed, context, bundle, config, *, notify=print):
+    """Re-encode verified chapter PCM with the book's new chapter count."""
+    from .chapter_cache import reencode_chapter
+    return reencode_chapter(
+        composed, Path(work) / "chapters", book=bundle["source"]["book"],
+        render_settings=config["render"], context=context, notify=notify,
+        censorship_policy=config.get("censorship") if config.get("censorship", {}).get("enabled", False) else None,
+        total_chapters=context["total_chapters"])
 
 
 def _saved_chapter_engines_match(work, record, current_engine):
@@ -2326,16 +2355,25 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
             composed = None
-            if (saved is not None and _same_chapter_audio_context(saved["context"], context)
+            # Chapters appended to the book change only this chapter's track
+            # total: restore its verified audio, then retag the encoding.
+            restore_context = (_total_restore_context(saved["context"], context)
+                               if saved is not None else context)
+            if (saved is not None and _same_chapter_audio_context(saved["context"], restore_context)
                     and _saved_chapter_clips_present(work, saved)
                     and _saved_chapter_engines_match(work, saved, context["engine"])):
                 try:
                     composed, chapter_acceptance = _restore_chapter(
-                        work, chapter, saved, context, voices, config, speech_cache=speech_cache, notify=notify)
+                        work, chapter, saved, restore_context, voices, config, speech_cache=speech_cache, notify=notify)
                 except ChapterNeedsRendering as exc:
                     notify(f"Rebuilding {chapter_label}: {exc.reason}; "
                            "reusing matching verified clips.")
                 else:
+                    if restore_context is not context:
+                        composed = _retag_chapter_total(work, composed, context, bundle, config, notify=notify)
+                        with plan_lock:
+                            _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+                            _publish_work_chapter_link(config, composed, notify=notify)
                     notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             if composed is None:
                 notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
@@ -2479,6 +2517,9 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                 restore_context["settings"]["censorship"] = saved["settings"]["censorship"]
             else:
                 restore_context["settings"].pop("censorship", None)
+            # Appended chapters change only the earlier chapters' track totals.
+            restore_context = _total_restore_context(record["context"], restore_context)
+            total_changed = restore_context["total_chapters"] != context["total_chapters"]
             composed, chapter_acceptance = _restore_chapter(
                 work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
             _publish_work_chapter_link(config, composed, notify=notify)
@@ -2497,13 +2538,14 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                     **({"censorship_policy": config["censorship"]}
                        if config.get("censorship", {}).get("enabled", False) else {}))
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
-            elif any(context["settings"][key] != saved["settings"][key]
-                   for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
+            elif total_changed or any(context["settings"][key] != saved["settings"][key]
+                                      for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
                 from .chapter_cache import reencode_chapter
                 composed = reencode_chapter(
                     composed, work / "chapters", book=bundle["source"]["book"],
                     render_settings=config["render"], context=context, notify=notify,
-                    censorship_policy=config.get("censorship"))
+                    censorship_policy=config.get("censorship"),
+                    total_chapters=context["total_chapters"] if total_changed else None)
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)

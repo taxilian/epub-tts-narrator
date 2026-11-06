@@ -47,6 +47,29 @@ def make_epub(path, title, identifier, body):
     return path
 
 
+def make_serial_epub(path, title, identifier, chapters):
+    """An EPUB with one spine document per (heading, paragraphs) chapter.
+
+    Serial publications grow by appending chapters; writing the same leading
+    chapters again reproduces their extracted blocks exactly.
+    """
+    manifest, spine, documents = [], [], {}
+    for number, (heading, paragraphs) in enumerate(chapters, 1):
+        name = f"chapter-{number:03d}.xhtml"
+        manifest.append(f'<item id="c{number}" href="{name}" media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="c{number}"/>')
+        body = "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs)
+        documents[name] = (f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>{heading}</title></head>'
+                           f'<body><h1>{heading}</h1>{body}</body></html>')
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        archive.writestr("content.opf", f'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{title}</dc:title><dc:identifier id="id">{identifier}</dc:identifier><dc:language>en</dc:language></metadata><manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine></package>')
+        for name, document in documents.items():
+            archive.writestr(name, document)
+    return path
+
+
 def timed_transcript(text):
     words = text.split()
     return {"text": text, "segments": [{

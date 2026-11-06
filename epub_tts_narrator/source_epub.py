@@ -43,11 +43,13 @@ def source_epub_hint(directory, book_id) -> Path | None:
     return Path(record["path"])
 
 
-def remember_source_epub(directory, epub, book_id) -> None:
+def remember_source_epub(directory, epub, book_id, *, epub_sha256=None) -> None:
     """Atomically remember an explicitly supplied, checksum-matching EPUB.
 
     The hint is local metadata, deliberately excluded from the portable source
-    fingerprint, analyzer caches, and chapter/voice generation identities.
+    fingerprint, analyzer caches, and chapter/voice generation identities. A
+    book updated with appended chapters keeps its original ``book_id``; its
+    latest EPUB is accepted by the SHA-256 recorded for that update.
     """
     epub = Path(epub).expanduser().resolve()
     info = epub.stat()
@@ -55,7 +57,7 @@ def remember_source_epub(directory, epub, book_id) -> None:
         raise ValueError("Source EPUB must be a regular file within the archive size limit")
     with epub.open("rb") as stream:
         checksum = hashlib.file_digest(stream, "sha256").hexdigest()
-    if checksum != book_id:
+    if checksum not in {book_id, epub_sha256}:
         raise ValueError("Source EPUB does not match the analyzed book ID")
     _write_source_epub_hint(directory, epub, book_id)
 

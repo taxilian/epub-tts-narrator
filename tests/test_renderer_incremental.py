@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.narration_boundaries import repair_narration_boundaries
-from epub_tts_narrator.renderer.bundle import load_bundle
+from epub_tts_narrator.renderer import chapter_cache
+from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
@@ -335,6 +336,80 @@ class IncrementalRendererTests(unittest.TestCase):
             self.run_render()
         self.assertEqual(counts, self.model_counts())
         self.assertEqual(before, self.output_bytes())
+
+    def append_chapter(self, texts):
+        """Publish appended chapters as an analyzer book update does."""
+        from epub_tts_narrator.pipeline import fingerprint
+        provenance = self.document["provenance"]
+        provenance.setdefault("chunk_identity_source_fingerprint", fingerprint(self.document["source"]))
+        blocks, segments = self.document["source"]["blocks"], self.document["segments"]
+        for text, kind in texts:
+            number = len(blocks) + 1
+            blocks.append(dict(deepcopy(blocks[-1]), id=f"b{number}", text=text))
+            self.document["source"]["chapters"][0]["block_ids"].append(f"b{number}")
+            segments.append(dict(deepcopy(segments[-1]), id=f"s{number}", block_id=f"b{number}",
+                                 text=text, start=0, end=len(text), kind=kind))
+        self.save_revision()
+
+    def chapter_record(self, number):
+        checkpoint = read_json(self.checkpoint(number))
+        return checkpoint, read_json(self.work / "chapters" / checkpoint["cache_key"] / "chapter.json")
+
+    def test_appended_chapter_renders_alone_and_existing_chapters_keep_their_audio(self):
+        self.run_render()
+        counts = self.model_counts()
+        before = {number: self.chapter_record(number) for number in (1, 2)}
+        old_ids = [[chunk["chunk_id"] for chunk in chapter["chunks"]]
+                   for chapter in make_plan(self.bundle, self.config)["chapters"]]
+        self.append_chapter([("CHAPTER THREE", "heading"), ("Night fell over the quiet harbor.", "narration")])
+
+        plan = make_plan(self.bundle, self.config)
+        self.assertEqual([[chunk["chunk_id"] for chunk in chapter["chunks"]] for chapter in plan["chapters"][:2]],
+                         old_ids)
+        with patch.object(chapter_cache, "compose_chapter", wraps=chapter_cache.compose_chapter) as composed:
+            result = self.run_render()
+
+        self.assertEqual(result["status"], "complete")
+        # Only the appended chapter is synthesized, verified and composed.
+        new_speech = self.engine.speech_calls[counts[1]:]
+        self.assertEqual([call["text"] for call in new_speech],
+                         ["CHAPTER THREE", "Night fell over the quiet harbor."])
+        self.assertEqual(len(self.verifier.calls) - counts[2], 2)
+        self.assertEqual(composed.call_count, 1)
+        for number in (1, 2):
+            (old_checkpoint, old_cache), (checkpoint, cache) = before[number], self.chapter_record(number)
+            # Same verified takes and PCM; only the chapter count (track tag) is new.
+            self.assertEqual(checkpoint["acceptance"], old_checkpoint["acceptance"])
+            self.assertEqual(cache["pcm_sha256"], old_cache["pcm_sha256"])
+            self.assertEqual(checkpoint["context"]["total_chapters"], 3)
+            self.assertEqual(cache["identity"]["total_chapters"], 3)
+            self.assertEqual({key: value for key, value in checkpoint["context"].items()
+                              if key not in {"total_chapters", "bundle_hash"}},
+                             {key: value for key, value in old_checkpoint["context"].items()
+                              if key not in {"total_chapters", "bundle_hash"}})
+        self.assertTrue(any("Re-encoding chapter 1 / 3" in message for message in self.messages), self.messages)
+        # A rerun needs nothing at all.
+        counts = self.model_counts()
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("No chapter encoding")):
+            self.assertEqual(self.run_render()["status"], "complete")
+        self.assertEqual(counts, self.model_counts())
+
+    def test_assemble_retags_existing_chapters_for_an_appended_chapter_without_models(self):
+        self.run_render()
+        self.append_chapter([("CHAPTER THREE", "heading"), ("Night fell over the quiet harbor.", "narration")])
+        # Render only the new chapter; assembly then retags the earlier ones.
+        self.config["render"]["chapter_numbers"] = [3]
+        self.run_render(chapters_only=True)
+        self.config["render"]["chapter_numbers"] = []
+        self.assertEqual(self.chapter_record(1)[1]["identity"]["total_chapters"], 2)
+        counts = self.model_counts()
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")):
+            result = self.package()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(counts, self.model_counts())
+        for number in (1, 2, 3):
+            self.assertEqual(self.chapter_record(number)[1]["identity"]["total_chapters"], 3)
 
     def test_modified_published_audio_is_not_silently_overwritten(self):
         self.run_render()

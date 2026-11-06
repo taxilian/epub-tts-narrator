@@ -22,7 +22,7 @@ from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 import test_directory_cli as directory_fixtures
-from shared_fixtures import snapshot
+from shared_fixtures import make_epub, snapshot
 from test_pipeline import FakeClient
 
 
@@ -317,11 +317,15 @@ class AnalyzeResumeTests(unittest.TestCase):
 
     def test_wrong_epub_cannot_overwrite_existing_book_or_call_model(self):
         _, path, _ = self.seed()
-        other = directory_fixtures.DirectoryCLITests.make_epub(self, 2)
+        # A different book: its first chapter's text is not the saved one.
+        other = make_epub(self.root / "Other.epub", "Other", "other-book",
+                          '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body>'
+                          '<h1>One</h1><p>Tobin the ferryman rowed out alone.</p></body></html>')
         before = snapshot(path)
         status, _, error, provider = self.run_cli(other, "-o", path)
         self.assertEqual(status, 1)
-        self.assertIn("Input source does not match", error)
+        self.assertIn("Chapter 1", error)
+        self.assertIn("Only chapters appended", error)
         provider.assert_not_called()
         self.assertEqual(snapshot(path), before)
 

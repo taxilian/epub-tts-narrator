@@ -1051,16 +1051,16 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
             revised = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                             notify=lambda _: None, chapters_only=False)
-        # History is per script voice: the changed first take's voice hears it,
-        # so that voice's later takes in chapter 1 are regenerated; another
-        # voice's take in the chapter (even cloning the same recording) and
-        # chapter 2 are untouched.
-        spoken = [chunk for chunk in self.plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
+        # Same-voice chapter history makes every later take by the changed
+        # take's voice depend on it, so those takes of chapter 1 regenerate;
+        # other voices' takes and chapter 2 are untouched.
+        from epub_tts_narrator.renderer.bundle import chunk_speakers
+        chunks = [chunk for chunk in self.plan["chapters"][0]["chunks"] if not chunk["silent_control"]]
+        voice = {speaker["voice_id"] for speaker in chunk_speakers(chunks[0])}
+        spoken = [chunk for chunk in chunks if {speaker["voice_id"] for speaker in chunk_speakers(chunk)} <= voice]
         self.assertGreater(len(spoken), 1)
-        changed_voice = spoken[0]["segment"]["voice_id"]
-        same_voice = [chunk for chunk in spoken if chunk["segment"]["voice_id"] == changed_voice]
-        self.assertLess(len(same_voice), len(spoken))
-        self.assertEqual(len(engine.speech_calls), calls_before_assembly + len(same_voice))
+        self.assertLess(len(spoken), len(chunks))
+        self.assertEqual(len(engine.speech_calls), calls_before_assembly + len(spoken))
         self.assertNotEqual(revised["chapter_identities"]["chapter-0001"],
                             previous["chapter_identities"]["chapter-0001"])
         self.assertEqual(revised["chapter_identities"]["chapter-0002"],

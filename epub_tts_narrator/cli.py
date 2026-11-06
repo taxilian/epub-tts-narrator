@@ -346,10 +346,29 @@ def main(argv=None):
         if not args.input.is_dir():
             source = source_from(args.input, config["extraction"]["include_auxiliary"]
                                  if args.input.suffix.lower() == ".epub" else False)
-            if fingerprint(source) != fingerprint(original["source"]):
-                raise ValueError("Input source does not match the existing book directory. Choose another output directory; the saved book was not changed")
+            from .book_update import (accepted_epub_digests, epub_digest, latest_epub_sha256,
+                                      merged_source, update_book)
+            same_chapters = (fingerprint(source) == fingerprint(original["source"])
+                             or fingerprint(merged_source(original["source"], source)) == fingerprint(original["source"]))
+            if not same_chapters:
+                # A serial's new download: append its new chapters, or explain
+                # exactly which saved chapter differs.
+                if args.edits:
+                    raise ValueError("--edits cannot be combined with appending new chapters; update the book first")
+                updated = update_book(
+                    directory, source, config=config, input_path=args.input,
+                    client_factory=OpenAICompatibleClient, speaker_judge=_speaker_judge(config),
+                    announce_cache=announce_cache, progress=lambda message: print(message, file=sys.stderr))
+                return _speaker_completion_status(updated if updated is not None else original)
             if args.input.suffix.lower() == ".epub":
-                remember_source_epub(directory, args.input, original["source"]["book"]["id"])
+                accepted = accepted_epub_digests(original)
+                if epub_digest(args.input) in accepted:
+                    remember_source_epub(directory, args.input, original["source"]["book"]["id"],
+                                         epub_sha256=latest_epub_sha256(original))
+                else:
+                    # Identical chapters from a different download of the book.
+                    print("No new chapters: the EPUB's chapters match the saved book. The saved analysis "
+                          "and its recorded EPUB location are unchanged.")
 
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
@@ -520,6 +539,12 @@ def main(argv=None):
                 # Keep explicit registry planning available for legacy JSON
                 # workflows; otherwise plan the same directory run as analyze.
                 directory_mode = series_path is None
+                existing = args.output or default_output(args.input)
+                if directory_mode and args.continue_from is None and (existing / "manifest.json").is_file():
+                    # Estimate only the chapters a serial update would add.
+                    from .book_update import plan_update
+                    print(json.dumps(plan_update(existing, source, config), indent=2, ensure_ascii=False))
+                    return 0
                 if directory_mode:
                     args.output = validate_output(args.output or default_output(args.input))
                 elif args.output is not None:

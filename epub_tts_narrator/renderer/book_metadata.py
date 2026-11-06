@@ -8,6 +8,24 @@ import tempfile
 PUBLICATION_ASSET_VERSION = 2
 
 
+def accepted_source_epubs(bundle):
+    """SHA-256 values of EPUBs that belong to this book.
+
+    The book ID is the original EPUB's SHA-256. A serial updated with appended
+    chapters keeps that ID and records its latest EPUB in
+    ``provenance.book_updates``; either file supplies cover and metadata.
+    """
+    from ..book_update import accepted_epub_digests
+    return accepted_epub_digests(bundle.get("manifest", {})) | {bundle["source"]["book"]["id"]}
+
+
+def source_epub_digest(bundle, epub):
+    """The digest to check ``epub`` against: its own when it belongs to this book."""
+    from .common import file_hash
+    actual = file_hash(epub)
+    return actual if actual in accepted_source_epubs(bundle) else bundle["source"]["book"]["id"]
+
+
 def check_publication_source(bundle, config):
     """Fail before synthesis if required artwork cannot be obtained."""
     from .assembly import extract_cover
@@ -20,15 +38,16 @@ def check_publication_source(bundle, config):
         return
     if not Path(epub).is_file():
         raise ValueError("The original EPUB is no longer available; pass --epub PATH to its current location.")
+    expected = source_epub_digest(bundle, epub)
     with tempfile.TemporaryDirectory(prefix="epub-cover-check-") as temporary:
-        cover = extract_cover(epub, temporary, bundle["source"]["book"]["id"])
+        cover = extract_cover(epub, temporary, expected)
         if cover is None and required:
             raise ValueError("The EPUB has no supported declared JPEG/PNG cover. "
                              "Add a supported cover to the source before analysis, or explicitly set "
                              "render.require_cover = false to publish without artwork.")
         if cover is not None:
             from .book_artwork import prepare_book_artwork
-            prepare_book_artwork(epub, Path(temporary) / "checked", bundle["source"]["book"]["id"],
+            prepare_book_artwork(epub, Path(temporary) / "checked", expected,
                                  ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"])
 
 
@@ -43,14 +62,16 @@ def publication_assets(bundle, config, output_dir, *, notify=lambda message: Non
         return book, None, None
     # An explicit opt-out is only for genuinely absent/unsupported artwork;
     # corrupt archives, wrong books, or conversion failures still stop publication.
+    expected = source_epub_digest(bundle, epub)
     if not config["render"].get("require_cover", True):
         from .assembly import extract_cover
         with tempfile.TemporaryDirectory(prefix="epub-cover-check-") as temporary:
-            if extract_cover(epub, temporary, book["id"]) is None:
-                book.update(read_publication_metadata(epub, book["id"]))
+            if extract_cover(epub, temporary, expected) is None:
+                book.update(read_publication_metadata(epub, expected))
+                book["id"] = bundle["source"]["book"]["id"]
                 notify("Cover requirement explicitly disabled; EPUB has no supported cover.")
                 return book, None, None
-    assets = prepare_book_artwork(epub, output_dir, book["id"],
+    assets = prepare_book_artwork(epub, output_dir, expected,
                                  ffmpeg=config["render"]["ffmpeg"],
                                  ffprobe=config["render"]["ffprobe"])
     book.update(assets["book"])

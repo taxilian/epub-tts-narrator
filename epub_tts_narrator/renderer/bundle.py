@@ -14,6 +14,22 @@ from .common import digest, file_hash, read_json, regular_file
 from .quality import normalize_words
 
 
+def chunk_identity_fingerprint(manifest):
+    """The source identity that chunk IDs and chapter contexts bind to.
+
+    A book updated with appended chapters keeps the source fingerprint of its
+    first publication here (``provenance.chunk_identity_source_fingerprint``),
+    so every earlier chapter keeps its exact chunk IDs, checkpoints and audio.
+    Books that were never updated use their current source fingerprint.
+    """
+    value = manifest.get("provenance", {}).get("chunk_identity_source_fingerprint")
+    if value is None:
+        return manifest["source_fingerprint"]
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("Invalid provenance.chunk_identity_source_fingerprint")
+    return value
+
+
 def load_bundle(directory):
     directory = Path(directory).resolve()
     from ..voice_profile_guard import require_valid_profiles
@@ -217,7 +233,7 @@ def make_plan(bundle, config):
                     "source_ranges": spoken_source_ranges(row, start, end),
                     "silent_control": not normalize_words(speech),
                 }
-                chunk["chunk_id"] = digest({"source": bundle["manifest"]["source_fingerprint"],
+                chunk["chunk_id"] = digest({"source": chunk_identity_fingerprint(bundle["manifest"]),
                                             "segment": row["id"], "start": start, "end": end,
                                             "spoken_text": speech})[:32]
                 bind_chunk_performance(chunk, performance, sparse=performances is None)
