@@ -114,7 +114,10 @@ Each verified remote download also gets a readable relative symlink at
 book finishes, including with `--chapters-only`; rerunning backfills missing
 links from verified downloads without contacting the service. Empty chapters
 have no audio link. Links stay in the work directory so they cannot interfere
-with atomic publication into `BOOK/audiobook`.
+with atomic publication into `BOOK/audiobook`. The remote wire artifact remains
+`chapter.m4a`; independently generated local chapter caches use numbered
+`chapter-NNNN.wav` / `.m4a` filenames, with their work-level links in the same
+`WORK/chapter-links/` directory.
 
 `--chapters-only` skips final book packaging, but downloads M4A, JSON and FLAC
 masters before acknowledging delivery. M4B packaging decodes those lossless masters
