@@ -83,7 +83,10 @@ class _Slots:
     def acquire(self):
         from .continuity import current
         scope = current()
-        pinned = self.pin(scope["chapter"] if scope is not None else None)
+        return self.wait_acquire(self.pin(scope["chapter"] if scope is not None else None))
+
+    def wait_acquire(self, pinned):
+        """Block for a slot on ``pinned`` (any worker when None)."""
         with self._ready:
             while True:
                 worker = self._claim(pinned)
@@ -127,9 +130,15 @@ def _text_review_method(name, method):
 
 
 class _SerializedVerifier:
-    """Keep recognition model-affine while known text reviews use their own lane."""
+    """Keep recognition model-affine while known text reviews use their own lane.
 
-    def __init__(self, verifier, lock, runtime, review_runtime, resources=None):
+    With a ``recognize`` dispatcher (a RenderPool), each recognizer model call
+    (``RECOGNITION_CALLS``) runs on whichever recognition slot is free: the
+    controller's own recognition thread or a matching remote ``serve`` worker.
+    """
+
+    def __init__(self, verifier, lock, runtime, review_runtime, resources=None, recognize=None):
+        self._recognize = recognize
         self._verifier = verifier
         self._lock = lock
         self._runtime = runtime
@@ -155,6 +164,11 @@ class _SerializedVerifier:
                 # the inference thread or its lock during a network request.
                 with METRICS.active("review"):
                     return self._review_runtime.run(method, *args, **kwargs)
+
+            from .recognition_workers import RECOGNITION_CALLS
+            if self._recognize is not None and name in RECOGNITION_CALLS:
+                return self._recognize(name, method, args, kwargs,
+                                       initialize_mlx=requires_mlx(self._verifier))
 
             if self._resources is not None:
                 def recognized():
@@ -254,6 +268,18 @@ class _Worker:
                 close()
 
 
+class _Recognizer:
+    """One recognition endpoint: the controller's own thread (client None) or a serve worker."""
+
+    def __init__(self, name, concurrency, client=None):
+        self.settings = {"name": name, "concurrency": concurrency}
+        self.client = client
+
+    @property
+    def local(self):
+        return self.client is None
+
+
 class RenderPool:
     """A work-conserving pool; transport details do not change saved take identity.
 
@@ -279,11 +305,21 @@ class RenderPool:
         self.local_lock = RLock()
         self._local_runtime = LocalRuntime(metrics_stage="model_thread")
         self._review_runtime = LocalRuntime(name="audiobook-text-review")
+        # Local speech recognition has its own MLX thread (own streams), so it
+        # runs beside local generation instead of pausing it.
+        self._recognition_lock = RLock()
+        self._recognition_runtime = LocalRuntime(name="audiobook-recognition-mlx")
         self._closed = False
         self._workers = [_Worker(worker, config["engine"], self.sampling)
-                         for worker in settings["workers"]]
+                         for worker in settings["workers"] if "tts" in worker.get("roles", ["tts"])]
         if not self._workers:
-            raise EngineError("A render pool needs at least one worker")
+            raise EngineError("A render pool needs at least one TTS worker")
+        from .recognition_workers import RemoteRecognizer
+        self._recognizers = [_Recognizer("local", 1)] + [
+            _Recognizer(worker["name"], worker.get("recognition_concurrency", 1), RemoteRecognizer(worker))
+            for worker in settings["workers"] if "recognition" in worker.get("roles", ())]
+        self._recognition_slots = _Slots(self._recognizers)
+        self._recognition_verified = None
         self._slots = _Slots(self._workers)
         self.max_parallel = self._slots.qsize()
         from .render_pipeline_config import effective_scheduling
@@ -360,6 +396,7 @@ class RenderPool:
             return None
         return RenderResources(
             tts_slots=self.max_parallel,
+            recognition_slots=self._recognition_slots.qsize(),
             synthesis_backlog=self._effective["synthesis_backlog"],
             review_concurrency=self._effective["review_concurrency"],
             max_inflight=self._effective["max_inflight"],
@@ -388,10 +425,64 @@ class RenderPool:
         return self._local_runtime.run(identity)
 
     def wrap_verifier(self, verifier):
-        if isinstance(verifier, _SerializedVerifier) and verifier._lock is self.local_lock:
+        if isinstance(verifier, _SerializedVerifier) and verifier._lock is self._recognition_lock:
             return verifier
-        return _SerializedVerifier(verifier, self.local_lock, self._local_runtime,
-                                   self._review_runtime, self._resources)
+        self.check_recognition(verifier)
+        return _SerializedVerifier(verifier, self._recognition_lock, self._recognition_runtime,
+                                   self._review_runtime, self._resources, recognize=self._recognize)
+
+    def check_recognition(self, verifier):
+        """Remote recognizers must run exactly this verifier's models; checked once per verifier."""
+        remote = [recognizer for recognizer in self._recognizers if not recognizer.local]
+        if not remote:
+            return
+        from .recognition_workers import identity_digest, recognition_identity, recognizers
+        expected = recognition_identity(*recognizers(verifier))
+        digest = identity_digest(expected)
+        if self._recognition_verified == digest:
+            return
+        for recognizer in remote:
+            recognizer.client.verify(expected)
+        self._recognition_verified = digest
+
+    def _recognize(self, name, method, args, kwargs, *, initialize_mlx):
+        """One recognizer model call on the first free recognition slot, local or remote."""
+        def run_on(recognizer):
+            if recognizer.local or kwargs or len(args) != 1:
+                def local():
+                    with self._recognition_lock:
+                        return method(*args, **kwargs)
+                result = self._recognition_runtime.run(local, initialize_mlx=initialize_mlx)
+            else:
+                result = recognizer.client.recognize(name, args[0])
+            if isinstance(result, dict) and len(self._recognizers) > 1:
+                # Provenance only, once remote recognizers share the work.
+                result = {**result, "recognized_by": recognizer.settings["name"]}
+            return result
+
+        # No stop check: a started take's verification drains past owner loss.
+        if self._closed:
+            raise EngineError("The render pool is closed")
+        if self._resources is not None:
+            claimed = []
+
+            def reserve():
+                # Under the recognition lane's lock: claim and dequeue are one
+                # step, and the reserving thread runs the call at once.
+                recognizer = self._recognition_slots.try_acquire(None)
+                if recognizer is None:
+                    return None
+                claimed.append(recognizer)
+                return lambda: self._recognition_slots.release(recognizer)
+
+            return self._resources.run_recognition(lambda: run_on(claimed[-1]),
+                                                   owner=current_owner(), reserve=reserve)
+        recognizer = self._recognition_slots.wait_acquire(None)
+        try:
+            with METRICS.active("recognition"):
+                return run_on(recognizer)
+        finally:
+            self._recognition_slots.release(recognizer)
 
     @contextmanager
     def admit_chunk(self):
@@ -631,7 +722,10 @@ class RenderPool:
                         if not worker.local:
                             worker.close()
                 finally:
-                    self._local_runtime.close()
+                    try:
+                        self._local_runtime.close()
+                    finally:
+                        self._recognition_runtime.close()
 
 
 def create_render_engine(config, *, shared_inference=True):

@@ -95,18 +95,26 @@ bracketed_text = "Give this bracketed text a slight, audible change in delivery 
 
 # Renderer scheduling controls (optional). Chapter history is always on; the default
 # pipeline scheduler overlaps chapters so the single model stays busy.
-# The pipeline scheduler is an explicit opt-in experiment: the default remains
-# "legacy" until the measured live benchmark gate passes. These settings only
-# change how clip work is scheduled — never what is synthesized or accepted —
-# and switching schedulers reuses all already accepted audio.
+# These settings only change how clip work is scheduled — never what is
+# synthesized or accepted — and switching schedulers reuses accepted audio.
 # [render_pool]
-# scheduler = "legacy"        # "legacy" (default) or experimental "pipeline"
-# chapter_concurrency = 0     # 0 = automatic: 4 under pipeline, 2 effective legacy
+# scheduler = "pipeline"      # "pipeline" (default) or "legacy"
+# chapter_concurrency = 0     # 0 = automatic: max(4, 2 per TTS slot) up to 16; 2 legacy
 # max_inflight = 0            # 0 = automatic; pipeline: 16 local, 64-256 remote;
 #                             # legacy: per-chapter window of total slots + 1
 # synthesis_backlog = 0       # 0 = automatic: min(256, 4 x total TTS slots)
 # pending_audio_mb = 256      # soft high-water for untranscribed saved audio
 # review_concurrency = 2      # parallel text-review HTTP calls (1-8)
+#
+# A serve worker can also recognize speech in parallel with this machine when its
+# own config sets [verification] model (same model files and package versions):
+# [[render_pool.workers]]
+# name = "second-mac"
+# type = "fish_http"
+# url = "http://second-mac.local:8080/v1/tts"
+# api_key = "YOUR_SHARED_SERVER_KEY"
+# roles = ["tts", "recognition"]   # default ["tts"]; ["recognition"] adds no TTS slots
+# recognition_concurrency = 1
 
 # Gemini bulk casting overlaps remote voice jobs; local verification stays serial.
 # Merge into your existing casting table. Other designers remain sequential.

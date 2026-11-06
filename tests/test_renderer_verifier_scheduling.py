@@ -107,11 +107,17 @@ class VerifierSchedulingTests(unittest.TestCase):
                     finally:
                         release.set()
                     self.assertEqual(review.result(5), {"decision": "fixture"})
-                inference = {thread for name, thread in self.events if name in {"asr", "reference", "speech"}}
+                # Recognition has its own model thread beside synthesis; text
+                # review uses a third. Each stays on exactly one thread.
+                recognition = {thread for name, thread in self.events if name in {"asr", "reference"}}
+                speech = {thread for name, thread in self.events if name == "speech"}
                 review_threads = {thread for name, thread in self.events if name.startswith("review")}
-                self.assertEqual(len(inference), 1)
+                self.assertEqual(len(recognition), 1)
+                self.assertEqual(len(speech), 1)
                 self.assertEqual(len(review_threads), 1)
-                self.assertTrue(inference.isdisjoint(review_threads))
+                self.assertTrue(recognition.isdisjoint(speech))
+                self.assertTrue(recognition.isdisjoint(review_threads))
+                self.assertTrue(speech.isdisjoint(review_threads))
 
     def test_text_clients_share_one_bounded_review_lane(self):
         started, release, second_queued, all_queued = Event(), Event(), Event(), Event()
@@ -165,7 +171,7 @@ class VerifierSchedulingTests(unittest.TestCase):
         ]
         custom_reviewer = PronunciationReviewer(SimpleNamespace(identity={"custom": True}))
         variants.append(ReferenceTextJudgingVerifier(self.base, self.judge, custom_reviewer))
-        owner = self.pool._local_runtime.run(get_ident)
+        owner = self.pool._recognition_runtime.run(get_ident)
         with patch.object(custom_reviewer, "review", side_effect=lambda *args: get_ident()):
             for verifier in variants:
                 wrapped = self.pool.wrap_verifier(verifier)
@@ -180,7 +186,7 @@ class VerifierSchedulingTests(unittest.TestCase):
             closing.set()
             return original_wait(*args, **kwargs)
 
-        owner = self.pool._local_runtime.run(get_ident)
+        owner = self.pool._recognition_runtime.run(get_ident)
         with patch.object(self.judge, "judge", side_effect=self.blocker("review", started, release)), \
              patch.object(self.wrapped._state, "wait", side_effect=wait), \
              ThreadPoolExecutor(max_workers=3) as callers:
@@ -283,7 +289,7 @@ class VerifierSchedulingTests(unittest.TestCase):
         self.assertEqual(self.wrapped.identity, original_verifier_identity)
 
     def test_close_from_a_worker_is_rejected_instead_of_waiting_on_itself(self):
-        for runtime in (self.pool._local_runtime, self.pool._review_runtime):
+        for runtime in (self.pool._recognition_runtime, self.pool._review_runtime):
             with self.subTest(runtime=runtime):
                 with self.assertRaisesRegex(RuntimeError, "from its owner"):
                     runtime.run(self.wrapped.close)
@@ -366,9 +372,10 @@ class PipelineModelThreadRoutingTests(unittest.TestCase):
                         self.fail("nested corroboration deadlocked the single recognition lane")
         self.assertEqual(primary, {"text": "words"})
         self.assertEqual(reference, {"text": "words"})
-        model_thread = self.pool._local_runtime.run(get_ident)
+        model_thread = self.pool._recognition_runtime.run(get_ident)
         self.assertEqual([entry[2] for entry in observed], [model_thread, model_thread],
-                         "nested corroboration leaves must run inline on the model thread")
+                         "nested corroboration leaves must run inline on the recognition thread")
+        self.assertNotEqual(model_thread, self.pool._local_runtime.run(get_ident))
         self.assertEqual([entry[:2] for entry in observed],
                          [(True, ("run", 1)), (True, ("run", 1))])
         self.assertEqual(len(captured), 2,

@@ -1047,6 +1047,9 @@ def _checked_audio_report(path, expected_text: str, verifier,
             # Keep useful evidence even if an alignment/schema check fails;
             # this unvalidated text never substitutes for a passed transcript.
             report["raw_transcript"] = result["text"]
+        if isinstance(result, dict) and isinstance(result.get("recognized_by"), str):
+            # Pooled recognition names the machine (local or a serve worker).
+            report["recognized_by"] = result["recognized_by"]
         transcript, words, diagnostics = _checked_reference_transcript(result)
         if purpose == "speech":
             try:

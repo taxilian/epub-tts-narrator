@@ -222,6 +222,10 @@ def validate_chapter_settings(config):
                          "runpod_pod_id and runpod_api_key")
 
 
+# Work a render_pool fish_http worker may take: generation and/or speech recognition.
+WORKER_ROLES = ("tts", "recognition")
+
+
 def validate_distributed_settings(config):
     """Validate file-only worker/server settings without importing model packages."""
     pool = config["render_pool"]
@@ -249,12 +253,26 @@ def validate_distributed_settings(config):
             raise ValueError(f"{label}.type must be local or fish_http")
         allowed = {"name", "type", "concurrency"}
         if kind == "fish_http":
-            allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker", "protocol"}
+            allowed |= {"url", "api_key", "model", "timeout_seconds", "multi_speaker", "protocol",
+                        "roles", "recognition_concurrency"}
         supplied = known_settings(supplied, allowed, section=label)
         worker = {"concurrency": 1, **supplied}
         concurrency = worker["concurrency"]
         if type(concurrency) is not int or not 1 <= concurrency <= 16:
             raise ValueError(f"{label}.concurrency must be an integer from 1 to 16")
+        if kind == "fish_http":
+            # The controlling machine always recognizes; a serve worker adds
+            # recognition slots only when its roles say so.
+            roles = worker.setdefault("roles", ["tts"])
+            if (not isinstance(roles, list) or not roles or len(set(map(str, roles))) != len(roles)
+                    or not all(isinstance(role, str) and role in WORKER_ROLES for role in roles)):
+                raise ValueError(f"{label}.roles must be a nonempty list of distinct roles: tts, recognition")
+            worker["roles"] = [role for role in WORKER_ROLES if role in roles]
+            recognition = worker.setdefault("recognition_concurrency", 1)
+            if type(recognition) is not int or not 1 <= recognition <= 8:
+                raise ValueError(f"{label}.recognition_concurrency must be an integer from 1 to 8")
+            if "recognition" in roles and worker.get("protocol", "fish_inline") != "fish_inline":
+                raise ValueError(f"{label}: recognition requires an audiobook-render serve worker (protocol fish_inline)")
         if kind == "local":
             if concurrency != 1 or any(item["type"] == "local" for item in normalized):
                 raise ValueError("Use at most one local renderer, with concurrency = 1")
@@ -294,7 +312,9 @@ def validate_distributed_settings(config):
             if type(worker["multi_speaker"]) is not bool:
                 raise ValueError(f"{label}.multi_speaker must be boolean")
         normalized.append(worker)
-    capacity = sum(worker["concurrency"] for worker in normalized)
+    if normalized and not any("tts" in worker.get("roles", ["tts"]) for worker in normalized):
+        raise ValueError("render_pool.workers needs at least one TTS worker (a local worker or roles including tts)")
+    capacity = sum(worker["concurrency"] for worker in normalized if "tts" in worker.get("roles", ["tts"]))
     if capacity > 32:
         raise ValueError("Renderer worker concurrency must total at most 32")
     if max_inflight and max_inflight < capacity:

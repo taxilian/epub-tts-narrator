@@ -470,7 +470,8 @@ class PipelineVerifierRoutingTests(unittest.TestCase):
         snapshot = METRICS.snapshot()
         self.assertEqual(snapshot["recognition"]["active_count"], 3)
         self.assertEqual(snapshot["recognition"]["active_now"], 0)
-        self.assertEqual(snapshot["model_thread"]["active_count"], 3)
+        # Recognition runs on its own thread, never on the synthesis model thread.
+        self.assertEqual(snapshot["model_thread"]["active_count"], 0)
 
 
 class PipelinePoolCloseTests(unittest.TestCase):

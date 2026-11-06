@@ -3,6 +3,11 @@
 Clients send the composed request: tagged text, speaker-tagged references and
 the chapter's history turns with their codec tokens. The response is one
 MessagePack object with the WAV, the generated codes and the history used.
+
+With a ``[verification]`` model configured the server is also a recognition
+worker: ``POST /v1/recognize`` transcribes one WAV on its own model thread,
+beside synthesis, and ``/health`` reports the recognizers' identity so the
+controller can require exactly its own models before using them.
 """
 
 from __future__ import annotations
@@ -28,6 +33,10 @@ from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .fish_http import MAX_AUDIO_BYTES, PROTOCOL, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
 from .local_runtime import LocalRuntime, requires_mlx
+from .recognition_workers import (
+    RECOGNITION_CALLS, RECOGNITION_PROTOCOL, build_recognizers, identity_digest, plain_transcript,
+    recognition_identity,
+)
 from .reference_cache import UNKNOWN_REFERENCE_MESSAGE, ReferenceCache
 
 
@@ -189,9 +198,15 @@ class _RenderServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = False
 
-    def __init__(self, address, config, engine, *, notify=_print_activity):
+    def __init__(self, address, config, engine, *, recognizers=None, notify=_print_activity):
         self.settings = config["server"]
         self.engine = engine
+        # (primary, reference-or-None) speech recognizers, or None for TTS only.
+        self.recognizers = recognizers
+        self.recognition = (recognition_identity(*recognizers) if recognizers is not None else None)
+        self.recognition_digest = identity_digest(self.recognition) if self.recognition is not None else None
+        # Recognition has its own model thread so it never waits behind synthesis.
+        self.recognition_runtime = LocalRuntime(name="recognition-inference")
         self.notify = notify
         self.references = ReferenceCache()
         self._activity_lock = threading.Lock()
@@ -246,6 +261,17 @@ class _RenderServer(ThreadingHTTPServer):
             self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at,
             initialize_mlx=requires_mlx(self.engine),
         )
+
+    def recognize(self, call, path, *, request_id=None):
+        part, method = RECOGNITION_CALLS[call]
+        recognizer = self.recognizers[0] if part == "primary" else self.recognizers[1]
+        if recognizer is None:
+            raise RequestError("This server has no reference recognizer; set verification.reference_model")
+        if request_id:
+            self.activity(request_id, f"recognition started ({call})")
+        result = self.recognition_runtime.run(getattr(recognizer, method), path,
+                                              initialize_mlx=requires_mlx(recognizer))
+        return plain_transcript(result)
 
     def _warmup(self):
         warmup = getattr(self.engine, "warmup", None)
@@ -313,7 +339,14 @@ class _RenderServer(ThreadingHTTPServer):
                         if close:
                             self.inference_runtime.run(close)
                     finally:
-                        self.inference_runtime.close()
+                        try:
+                            self.inference_runtime.close()
+                        finally:
+                            for recognizer in self.recognizers or ():
+                                close = getattr(recognizer, "close", None)
+                                if callable(close):
+                                    self.recognition_runtime.run(close)
+                            self.recognition_runtime.close()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -346,10 +379,14 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         if self.path != "/health":
-            self._json(404, {"error": {"message": "Use GET /health or POST /v1/tts"}})
+            self._json(404, {"error": {"message": "Use GET /health, POST /v1/tts or POST /v1/recognize"}})
             return
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
-        self._json(200, {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True})
+        health = {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True,
+                  "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else [])}
+        if self.server.recognizers is not None:
+            health.update(recognition_protocol=RECOGNITION_PROTOCOL, recognition=self.server.recognition)
+        self._json(200, health)
 
     def do_POST(self):
         self.request_id = self.server.next_request_id()
@@ -363,8 +400,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _post(self):
         if not self._authorized():
             return
+        if self.path == "/v1/recognize":
+            self._recognize()
+            return
         if self.path != "/v1/tts":
-            self._json(404, {"error": {"message": "Use POST /v1/tts"}})
+            self._json(404, {"error": {"message": "Use POST /v1/tts or POST /v1/recognize"}})
             return
         try:
             if self.headers.get("Transfer-Encoding"):
@@ -446,7 +486,77 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": {"message": redact(f"{type(exc).__name__}: {exc}", self.server.settings.get("api_key", ""))}})
 
 
-def make_server(config, engine=None, *, notify=_print_activity):
+    def _body(self):
+        if self.headers.get("Transfer-Encoding"):
+            raise RequestError("Chunked request bodies are unsupported; send Content-Length")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isdigit():
+            raise RequestError("Provide one numeric Content-Length")
+        length = int(lengths[0])
+        if not 0 < length <= self.server.settings.get("max_request_bytes", MAX_AUDIO_BYTES):
+            return None
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise RequestError("Incomplete request body")
+        return data
+
+    def _recognize(self):
+        if self.server.recognizers is None:
+            self._json(404, {"error": {"message": "This server does not offer recognition; set its [verification] model"}})
+            return
+        try:
+            data = self._body()
+            if data is None:
+                self._json(413, {"error": {"message": "Request body exceeds the configured size limit"}})
+                return
+            if self.headers.get_content_type() != "application/msgpack":
+                raise RequestError("Recognition requests must be MessagePack")
+            import msgpack
+            try:
+                body = msgpack.unpackb(data, raw=False, strict_map_key=True)
+            except (ValueError, TypeError) as exc:
+                raise RequestError("Invalid MessagePack body") from exc
+            if (not isinstance(body, dict) or set(body) != {"call", "audio"}
+                    or body["call"] not in RECOGNITION_CALLS or not isinstance(body["audio"], bytes)
+                    or not body["audio"]):
+                raise RequestError("Send {call, audio} with call transcribe, transcribe_reference or corroborate_reference")
+        except RequestError as exc:
+            self._json(400, {"error": {"message": str(exc)}})
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="audiobook-asr-") as directory:
+                path = Path(directory) / "take.wav"
+                path.write_bytes(body["audio"])
+                try:
+                    inspect_wav(path)
+                except EngineError as exc:
+                    self._json(400, {"error": {"message": f"Invalid recognition audio: {exc}"}})
+                    return
+                self.server.activity(self.request_id, f"recognition queued ({body['call']})")
+                transcript = self.server.recognize(body["call"], path, request_id=self.request_id)
+            import msgpack
+            payload = msgpack.packb({"call": body["call"], "transcript": transcript,
+                                     "identity_sha256": self.server.recognition_digest}, use_bin_type=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/msgpack")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            self.wfile.write(payload)
+            self.wfile.flush()
+            self.server.activity(self.request_id, f"recognition completed in {time.monotonic() - self.request_started:.2f}s")
+        except RequestError as exc:
+            self._json(400, {"error": {"message": str(exc)}})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            raise
+        except Exception as exc:
+            # Recognizer errors may quote audio-derived text; log only the type.
+            self.server.activity(self.request_id, f"recognition failed ({type(exc).__name__}); returning HTTP 500")
+            self._json(500, {"error": {"message": redact(f"{type(exc).__name__}: {exc}", self.server.settings.get("api_key", ""))}})
+
+
+def make_server(config, engine=None, *, recognizers=None, notify=_print_activity):
     """Bind an endpoint; an injected engine enables hardware-free integration tests."""
     settings = config["server"]
     host = settings.get("host", "127.0.0.1")
@@ -460,7 +570,17 @@ def make_server(config, engine=None, *, notify=_print_activity):
         if config["engine"].get("type", "drama3_mlx") not in {"drama3_mlx", "fish_speech_cuda"}:
             raise EngineError("The renderer server requires engine.type='drama3_mlx' or 'fish_speech_cuda'")
         engine = create_engine(config["engine"])
-    return _RenderServer((host, settings.get("port", 8080)), config, engine, notify=notify)
+    if recognizers is None:
+        # A configured [verification] model makes this a recognition worker too.
+        # An unusable one leaves it TTS-only; controllers that ask this worker
+        # for recognition are then refused at their startup check.
+        try:
+            recognizers = build_recognizers(config.get("verification"))
+        except (ValueError, OSError, EngineError, ImportError) as exc:
+            recognizers = None
+            notify(f"Speech recognition is not offered: {exc}")
+    return _RenderServer((host, settings.get("port", 8080)), config, engine,
+                         recognizers=recognizers, notify=notify)
 
 
 def serve(config, notify=_print_activity):
@@ -472,6 +592,9 @@ def serve(config, notify=_print_activity):
         server.warmup()
         notify(f"Drama 3 renderer listening at http://{rendered_host}:{port}/v1/tts")
         notify("One inference request runs at a time; the model stays loaded between requests.")
+        if server.recognizers is not None:
+            notify(f"Speech recognition offered at http://{rendered_host}:{port}/v1/recognize, "
+                   "on its own model thread beside synthesis.")
         server.serve_forever()
     except KeyboardInterrupt:
         notify("Stopping renderer server.")

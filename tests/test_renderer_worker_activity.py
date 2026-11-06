@@ -143,7 +143,8 @@ class WorkerActivityTests(unittest.TestCase):
 
     def test_pipeline_job_queued_behind_the_lane_is_not_reported_as_started(self):
         # The default pipeline scheduler queues a job on the synthesis lane;
-        # it claims no slot and reports nothing until a lane thread runs it.
+        # it claims no slot and reports only that it waits until a lane
+        # thread reserves its worker and runs it.
         pool = self.make_pool("second-mac")
         self.assertIsNotNone(pool._resources)
         started, release = Event(), Event()
@@ -171,7 +172,7 @@ class WorkerActivityTests(unittest.TestCase):
                     self.assertEqual(lane._pending, 1)
                     with guard:
                         second_events = [event for notify, event, _ in events if notify == second_notify]
-                    self.assertEqual(second_events, [])
+                    self.assertEqual(second_events, ["waiting"])
                 finally:
                     release.set()
                 self.assertEqual(first_job.result(5)["render_worker"], "second-mac")

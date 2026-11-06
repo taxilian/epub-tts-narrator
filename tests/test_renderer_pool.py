@@ -6,7 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
-from threading import Event, Lock
+from threading import get_ident, Event, Lock
 import time
 from types import SimpleNamespace
 import unittest
@@ -196,8 +196,11 @@ class PoolUnitTests(unittest.TestCase):
             self.assertEqual(first.result(5)["render_worker"], "slow")
         self.assertEqual(calls, [("slow", "first"), ("fast", "second"), ("fast", "third")])
 
-    def test_local_synthesis_and_all_optional_verifier_methods_share_one_lock(self):
+    def test_local_recognition_and_plugin_verifier_methods_run_beside_local_synthesis(self):
+        # Recognition has its own model thread: it never waits for local
+        # generation, and plugin verifier methods stay on that thread.
         pool = RenderPool(pool_config(worker("local", local=True)))
+        self.addCleanup(pool.close)
         local_started, release = Event(), Event()
         events = []
 
@@ -213,10 +216,10 @@ class PoolUnitTests(unittest.TestCase):
         class Verifier:
             identity = {"backend": "fixture"}
             def transcribe(self, path):
-                events.append("asr")
+                events.append(("asr", get_ident()))
                 return {"text": "words"}
             def judge_reference(self, *args):
-                events.append("judge")
+                events.append(("judge", get_ident()))
                 return {}
 
         pool._workers[0]._engine = Local()
@@ -226,17 +229,17 @@ class PoolUnitTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=3) as executor:
             generation = executor.submit(pool.synthesize, "text", {}, self.root / "unused", seed=1)
             self.assertTrue(local_started.wait(5))
-            asr = executor.submit(wrapped.transcribe, self.root / "unused")
-            judge = executor.submit(wrapped.judge_reference, "words", "words")
             try:
-                self.assertEqual(events, [])
+                self.assertEqual(executor.submit(wrapped.transcribe, self.root / "unused").result(5),
+                                 {"text": "words"})
+                executor.submit(wrapped.judge_reference, "words", "words").result(5)
+                self.assertFalse(generation.done())
             finally:
                 release.set()
             generation.result(5)
-            asr.result(5)
-            judge.result(5)
-        self.assertEqual(events[0], "synthesis")
-        self.assertEqual(set(events[1:]), {"asr", "judge"})
+        recognition = pool._recognition_runtime.run(get_ident)
+        self.assertEqual(events, [("asr", recognition), ("judge", recognition), "synthesis"])
+        self.assertNotEqual(recognition, pool._local_runtime.run(get_ident))
 
     def two_slot_pool(self):
         engine = RenderPool(pool_config(worker("fixture", concurrency=2)))

@@ -66,7 +66,9 @@ def effective_scheduling(config):
     """
     pool = config["render_pool"]
     workers = pool.get("workers") or []
-    slots = sum(worker.get("concurrency", 1) for worker in workers)
+    # Recognition-only workers add no TTS slots.
+    slots = sum(worker.get("concurrency", 1) for worker in workers
+                if "tts" in worker.get("roles", ["tts"]))
     remote = any(worker.get("type") != "local" for worker in workers)
     scheduler = pool.get("scheduler", "pipeline")
     # Automatic: at least two chapters per TTS slot, so a slot generates one

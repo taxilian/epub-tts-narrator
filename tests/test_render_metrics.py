@@ -373,7 +373,7 @@ class PoolInstrumentationTests(unittest.TestCase):
         self.assertEqual(admission["outcomes"]["completed"], 2)
         self.assertEqual(admission["queued_now"], 0)
 
-    def test_wrapped_verifier_records_recognition_stage_on_the_inference_lane(self):
+    def test_wrapped_verifier_records_recognition_stage_off_the_synthesis_model_thread(self):
         pool = RenderPool(pool_config(worker("local", local=True)))
         pool._local_runtime = LocalRuntime(metrics_stage="model_thread")
         verifier = pool.wrap_verifier(FakeVerifier())
@@ -381,7 +381,8 @@ class PoolInstrumentationTests(unittest.TestCase):
         snapshot = self.metrics.snapshot()
         self.assertEqual(snapshot["recognition"]["outcomes"]["completed"], 1)
         self.assertEqual(snapshot["recognition"]["active_now"], 0)
-        self.assertEqual(snapshot["model_thread"]["outcomes"]["completed"], 1)
+        # Recognition has its own thread; the synthesis model thread is untouched.
+        self.assertEqual(snapshot["model_thread"]["outcomes"].get("completed", 0), 0)
 
     def test_text_review_lane_records_review_stage_without_the_inference_lane(self):
         # Legacy reviews run on the review thread; pipeline review parents run

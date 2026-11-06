@@ -131,7 +131,7 @@ class LocalRuntimeTests(unittest.TestCase):
                 runtime.run(lambda: None, initialize_mlx=True)
         self.assertEqual(runtime.run(lambda: 7), 7)
 
-    def test_pool_model_initialization_synthesis_verification_and_close_share_owner(self):
+    def test_pool_synthesis_and_recognition_each_keep_one_owner_thread(self):
         pool = RenderPool(pool_config(worker("local", local=True)))
         self.addCleanup(pool.close)
         calls = []
@@ -154,7 +154,7 @@ class LocalRuntimeTests(unittest.TestCase):
             def transcribe(self, path):
                 calls.append(("asr", get_ident()))
                 # Reentrant delegation should not submit to itself and deadlock.
-                return pool._local_runtime.run(lambda: {"text": "words"})
+                return pool._recognition_runtime.run(lambda: {"text": "words"})
             def close(self):
                 calls.append(("verifier_close", get_ident()))
 
@@ -171,8 +171,14 @@ class LocalRuntimeTests(unittest.TestCase):
             pool.close()
         self.assertEqual({name for name, _ in calls},
                          {"load", "speech", "create_voice", "asr", "verifier_close", "engine_close"})
-        self.assertEqual(len({identity for _, identity in calls}), 1)
-        self.assertNotEqual(calls[0][1], get_ident())
+        # Model loading, synthesis and voice creation share the model thread;
+        # recognition and its close share their own, separate thread.
+        model = {identity for name, identity in calls if name in {"load", "speech", "create_voice", "engine_close"}}
+        recognition = {identity for name, identity in calls if name in {"asr", "verifier_close"}}
+        self.assertEqual(len(model), 1)
+        self.assertEqual(len(recognition), 1)
+        self.assertTrue(model.isdisjoint(recognition))
+        self.assertNotIn(get_ident(), model | recognition)
 
 
 if __name__ == "__main__":

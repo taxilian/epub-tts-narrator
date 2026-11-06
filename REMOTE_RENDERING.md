@@ -184,7 +184,8 @@ scheduler, capped at 16) so the next chapter
 can generate
 while the previous chapter finishes CPU recognition or remote JEV verification.
 The pool still enforces its configured GPU concurrency and loads each local
-model once. Local MLX recognition shares the serialized local inference runtime.
+model once. Local MLX recognition runs on its own model thread beside local
+synthesis.
 Plugins without a concurrency contract process one chapter at a time. CPU
 assembly is separate and bounded, so synthesis also continues while an earlier
 chapter is being assembled, compressed, or uploaded.

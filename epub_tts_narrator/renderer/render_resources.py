@@ -2,7 +2,8 @@
 
 ``RenderResources`` instantiates the declared physical lanes for one pooled
 render: a TTS lane with one worker per declared endpoint slot, the
-two-worker audio-preparation lane, the single recognition dispatch lane, the
+two-worker audio-preparation lane, the recognition lane (one worker per
+recognition slot, local or remote), the
 review HTTP lane sized to ``review_concurrency``, and the
 ``2 * review_concurrency`` blind-review coordination lane. Worker counts are
 declared by configuration, never inferred; model-affine callables keep
@@ -42,9 +43,11 @@ class RenderResources:
     """Declared resource lanes for one pooled render; lifetime: its RenderPool."""
 
     def __init__(self, *, tts_slots, synthesis_backlog, review_concurrency,
-                 max_inflight, pending_audio_mb=256):
+                 max_inflight, pending_audio_mb=256, recognition_slots=1):
         if type(tts_slots) is not int or tts_slots < 1:
             raise ValueError("tts_slots must be a positive integer")
+        if type(recognition_slots) is not int or recognition_slots < 1:
+            raise ValueError("recognition_slots must be a positive integer")
         if type(synthesis_backlog) is not int or synthesis_backlog < 1:
             raise ValueError("synthesis_backlog must be a positive integer")
         if type(review_concurrency) is not int or review_concurrency < 1:
@@ -61,7 +64,9 @@ class RenderResources:
         # take still finishes normalization, verification and saving.
         self.preparation = ResourceLane(name="render-preparation", workers=2,
                                         stage="preparation", max_pending=pending, stop_at_dequeue=False)
-        self.recognition = ResourceLane(name="render-recognition", workers=1,
+        # One worker per recognition slot (the controller's own recognizer plus
+        # any remote serve recognizers); pooled calls reserve their slot at dequeue.
+        self.recognition = ResourceLane(name="render-recognition", workers=recognition_slots,
                                         stage="recognition", max_pending=pending, stop_at_dequeue=False)
         self.review = ResourceLane(name="render-review", workers=review_concurrency,
                                    stage="review", max_pending=review_pending, stop_at_dequeue=False)
@@ -89,9 +94,9 @@ class RenderResources:
         """Route one preparation leaf; drains past a lost owner."""
         return self._drained(self.preparation, function, owner, args, kwargs)
 
-    def run_recognition(self, function, *args, owner=(None, None), **kwargs):
+    def run_recognition(self, function, *args, owner=(None, None), reserve=None, **kwargs):
         """Route one recognition leaf; drains past a lost owner."""
-        return self._drained(self.recognition, function, owner, args, kwargs)
+        return self._drained(self.recognition, function, owner, args, kwargs, reserve)
 
     def run_review_parent(self, function, *args, owner=(None, None), **kwargs):
         """Run a parent review routine on coordination capacity, never on HTTP."""
@@ -101,13 +106,13 @@ class RenderResources:
         """Route one actual network review request onto the review lane."""
         return self._drained(self.review, function, owner, args, kwargs)
 
-    def _drained(self, lane, function, owner, args, kwargs):
+    def _drained(self, lane, function, owner, args, kwargs, reserve=None):
         def job(*job_args, **job_kwargs):
             with resource_scope(self, owner):
                 return function(*job_args, **job_kwargs)
 
         def submission():
-            return lane.submit(job, *args, owner=owner, **kwargs).result()
+            return lane.submit(job, *args, owner=owner, reserve=reserve, **kwargs).result()
 
         # A fresh Context strips inherited scoped stop conditions from the
         # copied job context: verification of a started take drains past a
