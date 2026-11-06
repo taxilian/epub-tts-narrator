@@ -18,7 +18,7 @@ import unicodedata
 from .letter_names import make_letter_name_matcher
 
 
-PHONETIC_MATCH_VERSION = 4
+PHONETIC_MATCH_VERSION = 5
 _MAX_ALIGNMENT_STATES = 20_000
 _ALPHABETIC_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*\Z")
 _PROTECTED_NUMERIC = frozenset("""
@@ -87,7 +87,8 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
 
     Match a word to one word or to two/three whitespace-separated words using
     complete Double Metaphone primary/alternate keys, exact letter-name
-    sequences, or an explicit colloquial expansion. Multiword keys concatenate
+    sequences, an indefinite-article allomorph, or an explicit colloquial
+    expansion. Multiword keys concatenate
     each word's own encoding, preserving every boundary sound. General phonetic
     joins exclude short/non-Latin words and punctuation boundaries; exact letter
     sequences have their own spelling-separator rules. Numbers, negations and
@@ -162,6 +163,15 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             yield from letter_matches(i, j)
             return
         yield from letter_matches(i, j)
+        if {expected[i], actual[j]} == {"a", "an"}:
+            # These are context-selected forms of the same indefinite article,
+            # not a fuzzy match between unrelated one-letter words.
+            yield i + 1, j + 1, {
+                "operation": "article_allomorph", "rule": "indefinite_article_allomorph",
+                "expected_start": i, "expected_end": i + 1,
+                "actual_start": j, "actual_end": j + 1,
+                "expected": expected[i:i + 1], "actual": actual[j:j + 1],
+            }
         for reverse in (False, True):
             form = actual[j] if reverse else expected[i]
             expansion = _COLLOQUIAL_EXPANSIONS.get(form)
@@ -229,10 +239,12 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             changes.reverse()
             if not changes:
                 return None
-            # Explicit expansions already preserve the same lexical content;
-            # only uncertain sound matches can disguise moved exact words.
+            # Explicit expansions and grammatical allomorphs already preserve
+            # the same lexical content; only uncertain sound matches can
+            # disguise moved exact words.
             phonetic_changes = [change for change in changes
-                                if change["operation"] not in {"colloquial", "letter_names"}]
+                                if change["operation"] not in {
+                                    "colloquial", "letter_names", "article_allomorph"}]
             changed_expected = {word for change in phonetic_changes for word in change["expected"]}
             changed_actual = {word for change in phonetic_changes for word in change["actual"]}
             if changed_expected & changed_actual:

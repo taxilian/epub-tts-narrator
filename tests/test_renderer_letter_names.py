@@ -52,6 +52,15 @@ class LetterNameTests(unittest.TestCase):
                     self.assertEqual(audit["rule"], "exact_english_letter_names")
                     self.assertGreaterEqual(len(audit["matched_letters"]), 2)
 
+    def test_unambiguous_uppercase_singletons_match_exact_spoken_names(self):
+        for letter, spoken in (("Q", "cue"), ("C", "see")):
+            for expected, actual in ((letter, spoken), (spoken, letter)):
+                with self.subTest(expected=expected, actual=actual):
+                    audit = full_match(expected, actual)
+                    self.assertIsNotNone(audit)
+                    self.assertEqual(audit["operation"], "letter_names")
+                    self.assertEqual(audit["matched_letters"], [letter])
+
     def test_audit_retains_both_repeated_words_and_source_token_positions(self):
         left, right = tokens("Ask See-see? Now."), tokens("Ask CC? Now.")
         edges = list(make_letter_name_matcher(*left, *right, protected=_PROTECTED)(1, 1))
@@ -83,12 +92,12 @@ class LetterNameTests(unittest.TestCase):
         left, right = tokens("see see"), tokens("CC")
         self.assertEqual(list(make_letter_name_matcher(*left, *right, protected={"see"})(0, 0)), [])
 
-    def test_arbitrary_lowercase_words_and_singleton_homophones_are_not_letters(self):
+    def test_arbitrary_lowercase_words_and_wordlike_singletons_are_not_letters(self):
         for expected, actual in (
             ("cat", "see ay tee"), ("arm", "ay are em"), ("in", "eye en"),
             ("why", "double you aitch why"), ("by", "bee why"),
             ("dry", "dee are why"), ("I", "eye"), ("a", "ay"),
-            ("see", "C"), ("see sea", "sea see"),
+            ("q", "cue"), ("see sea", "sea see"),
         ):
             with self.subTest(expected=expected, actual=actual):
                 self.assertIsNone(full_match(expected, actual))

@@ -45,6 +45,34 @@ class PhoneticMatchTests(unittest.TestCase):
         self.assertEqual([item["operation"] for item in report["alignment"]],
                          ["substitute", "split", "substitute", "substitute", "substitute"])
 
+    def test_single_initialism_and_regional_spellings_match_in_complete_passages(self):
+        expected = "The Saviour realised his Q-Card worked."
+        actual = "The Savior realized his cue Card worked."
+        for source, heard in ((expected, actual), (actual, expected)):
+            with self.subTest(expected=source, actual=heard):
+                report = phonetic_equivalence(source, heard)
+                self.assertIsNotNone(report)
+                operations = [item["operation"] for item in report["alignment"]]
+                self.assertIn("letter_names", operations)
+                self.assertEqual(operations.count("substitute"), 2)
+
+    def test_indefinite_article_allomorphs_match_without_losing_word_coverage(self):
+        expected = "An armour set had an vibrant red hue."
+        actual = "A armor set had a vibrant red hue."
+        for source, heard in ((expected, actual), (actual, expected)):
+            with self.subTest(expected=source, actual=heard):
+                report = phonetic_equivalence(source, heard)
+                self.assertIsNotNone(report)
+                operations = [item["operation"] for item in report["alignment"]]
+                self.assertEqual(operations.count("article_allomorph"), 2)
+                self.assertEqual(operations.count("substitute"), 1)
+        for source, heard in (
+                ("An armour set had a vibrant hue.", "A armor set had vibrant hue."),
+                ("An armour set had a vibrant hue.", "A armor set had a a vibrant hue."),
+                ("Ugh, that hurt.", "Oh, that hurt.")):
+            with self.subTest(expected=source, actual=heard):
+                self.assertIsNone(phonetic_equivalence(source, heard))
+
     def test_missing_added_repeated_or_reordered_content_is_not_ignored(self):
         pairs = (
             ("Vandire asked us to wait.", "Van dyer asked us."),

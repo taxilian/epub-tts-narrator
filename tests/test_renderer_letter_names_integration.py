@@ -66,6 +66,32 @@ class LetterNamesVerificationTests(unittest.TestCase):
                         else:
                             self.assertNotIn("reference_text", report)
 
+    def test_single_initialism_and_article_allomorphs_pass_without_remote_verdict(self):
+        cases = (
+            "The Saviour realised his Q-Card worked.",
+            "An armour set had an vibrant red hue.",
+        )
+        for expected in cases:
+            actual = (expected.replace("Saviour", "Savior").replace("realised", "realized")
+                      .replace("Q-Card", "cue Card").replace("An ", "A ")
+                      .replace(" an ", " a ").replace("armour", "armor"))
+            for purpose in ("speech", "reference"):
+                with self.subTest(expected=expected, purpose=purpose):
+                    recognizer = consensus.PrimaryVerifier(actual)
+                    judge = Judge("different")
+                    report = self.check(ReferenceTextJudgingVerifier(recognizer, judge),
+                                        expected=expected, purpose=purpose)
+                    self.assertTrue(report["passed"], report)
+                    self.assertEqual(report["text_confirmation_method"], "double_metaphone")
+                    self.assertEqual(report["verified_transcript"], actual)
+                    self.assertEqual(judge.calls, [])
+                    operations = [row["operation"]
+                                  for row in report["phonetic_comparison"]["alignment"]]
+                    if "Q-Card" in expected:
+                        self.assertIn("letter_names", operations)
+                    else:
+                        self.assertEqual(operations.count("article_allomorph"), 2)
+
     def test_letter_expansion_does_not_interfere_with_soundalike_name_coverage(self):
         expected = "Vandire said see see while Derrins waited."
         actual = "Van Dyer said CC while Darren's waited."

@@ -17,6 +17,9 @@ _UPPER_RUN = re.compile(r"[A-Z]{2,6}\Z")
 _LOWER_RUN = re.compile(r"[bcdfghjklmnpqrstvwxz]{2,6}\Z")
 _CONSONANT_RUN = re.compile(r"[bcdfghjklmnpqrstvwxz]{2,}\Z")
 _SINGLE_LETTER = re.compile(r"[A-Za-z]\Z")
+# Uppercase singletons can be explicit initialisms. A and I remain ordinary
+# English words; arbitrary lowercase singletons remain ambiguous too.
+_SINGLE_INITIALISM = re.compile(r"[B-HJ-Z]\Z")
 _EXPRESSIVE_SOUND = re.compile(r"(?:h?m{2,}|sh+|br+|ps+t|ts+k|s{2,})\Z")
 _NAME_TO_LETTER = {
     name: letter
@@ -59,12 +62,14 @@ def letter_name_rewrite_equivalent(source, replacement):
 
 def make_letter_name_matcher(expected_source, expected_words, expected_spans,
                              actual_source, actual_words, actual_spans, *, protected):
-    """Return exact alignment edges for two through six spoken letters.
+    """Return exact alignment edges for one through six spoken letters.
 
     Sources retain case; spans contain (start, end, casefolded lexeme). At
-    least one side must actually contain letter glyphs. Arbitrary lowercase
-    words are never expanded into their spelling. Every edge consumes both
-    complete spans, including each repeated letter, in its original order.
+    least one side must actually contain letter glyphs. A singleton also needs
+    an unambiguous uppercase initialism on one side; A, I and lowercase
+    singletons stay lexical. Arbitrary lowercase words are never expanded into
+    their spelling. Every edge consumes both complete spans, including each
+    repeated letter, in its original order.
     """
     protected = frozenset(protected)
     sides = ((expected_source, expected_words, expected_spans),
@@ -84,13 +89,13 @@ def make_letter_name_matcher(expected_source, expected_words, expected_spans,
         source, words, spans = sides[side]
         if start < 0 or start >= len(words) or len(spans) != len(words):
             return ()
-        pending = [(start, "", False, False)]
+        pending = [(start, "", False, False, False)]
         seen = set(pending)
         results = set()
         while pending:
-            position, letters, has_glyph, previous_glyph = pending.pop()
-            if len(letters) >= 2:
-                results.add((position, letters, has_glyph))
+            position, letters, has_glyph, previous_glyph, initialism = pending.pop()
+            if letters:
+                results.add((position, letters, has_glyph, initialism))
             if position >= len(words) or len(letters) >= _MAX_LETTERS:
                 continue
             word = words[position]
@@ -121,7 +126,8 @@ def make_letter_name_matcher(expected_source, expected_words, expected_spans,
                         source, spans, position - 1, position,
                         dotted=previous_glyph and glyph):
                     continue
-                state = (following, letters + added, has_glyph or glyph, glyph)
+                state = (following, letters + added, has_glyph or glyph, glyph,
+                         initialism or bool(glyph and _SINGLE_INITIALISM.fullmatch(raw)))
                 if state not in seen:
                     if len(seen) >= _MAX_STATES:
                         return ()
@@ -131,12 +137,14 @@ def make_letter_name_matcher(expected_source, expected_words, expected_spans,
 
     def matches(i, j):
         right = {}
-        for end, letters, glyph in representations(1, j):
-            right.setdefault(letters, []).append((end, glyph))
+        for end, letters, glyph, initialism in representations(1, j):
+            right.setdefault(letters, []).append((end, glyph, initialism))
         emitted = set()
-        for end_i, letters, left_glyph in representations(0, i):
-            for end_j, right_glyph in right.get(letters, ()):
-                if not (left_glyph or right_glyph) or (end_i, end_j, letters) in emitted:
+        for end_i, letters, left_glyph, left_initialism in representations(0, i):
+            for end_j, right_glyph, right_initialism in right.get(letters, ()):
+                if (not (left_glyph or right_glyph)
+                        or (len(letters) == 1 and not (left_initialism or right_initialism))
+                        or (end_i, end_j, letters) in emitted):
                     continue
                 emitted.add((end_i, end_j, letters))
                 yield end_i, end_j, {
@@ -172,8 +180,8 @@ def make_letter_name_matcher(expected_source, expected_words, expected_spans,
             Shouted ordinary names and expressive sounds remain lexical.
             """
             end_i, end_j = i + left_size, j + right_size
-            left = {letters for end, letters, _ in representations(0, i) if end == end_i}
-            right = {letters for end, letters, _ in representations(1, j) if end == end_j}
+            left = {letters for end, letters, _, _ in representations(0, i) if end == end_i}
+            right = {letters for end, letters, _, _ in representations(1, j) if end == end_j}
             if left.intersection(right):
                 return False
             if (expected_words[i:end_i] == actual_words[j:end_j]

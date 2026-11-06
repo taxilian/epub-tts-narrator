@@ -20,7 +20,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 11
+SPEECH_COVERAGE_VERSION = 12
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS: dict[frozenset[str], str] = {
     frozenset(("qi", "chi")): "standard_transliteration",
