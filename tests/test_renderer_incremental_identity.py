@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from pathlib import Path
+import os
 import tempfile
 import unittest
 
@@ -99,6 +100,28 @@ class ExportSequenceIdentityTests(unittest.TestCase):
         restored = reanchor_export_sequences(
             current, [], completed=completed_chunks(self.work, current["chapters"]))
         self.assertEqual(restored, plan([silent]))
+
+    def test_removed_chapter_directory_supplies_no_anchor_but_keeps_accepted_requests(self):
+        request = self.request(self.chunks[0])
+        self.save_request(request)
+        checkpoint = {"format": "audiobook-chapter-checkpoint", "version": 1,
+                      "cache_key": "a" * 64, "context": {"chapter_hash": "prior"}}
+        write_json(self.work / "completed-chapters/chapter-1.json",
+                   dict(checkpoint, record_sha256=digest(checkpoint)))
+        self.assertEqual(completed_chunks(self.work, [{"id": "chapter-1"}]), [])
+        self.assertEqual(accepted_requests(self.work), [request])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink behavior required")
+    def test_broken_chapter_directory_symlink_is_not_treated_as_removed_output(self):
+        checkpoint = {"format": "audiobook-chapter-checkpoint", "version": 1,
+                      "cache_key": "a" * 64, "context": {"chapter_hash": "prior"}}
+        write_json(self.work / "completed-chapters/chapter-1.json",
+                   dict(checkpoint, record_sha256=digest(checkpoint)))
+        folder = self.work / "chapters" / checkpoint["cache_key"]
+        folder.parent.mkdir()
+        folder.symlink_to(self.work / "absent", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            completed_chunks(self.work, [{"id": "chapter-1"}])
 
 
 if __name__ == "__main__":

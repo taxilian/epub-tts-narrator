@@ -49,8 +49,10 @@ def completed_chunks(work, chapters):
                 or not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)):
             raise ValueError(f"Checkpoint integrity check failed: {path}")
         folder = Path(work) / "chapters" / key
-        if folder.is_symlink():
+        if folder.is_symlink() or folder.parent.is_symlink():
             raise ValueError(f"Chapter cache must not use symlinks: {folder}")
+        if not folder.exists():
+            continue
         record = read_json(regular_file(folder / "chapter.json"))
         if not isinstance(record, dict):
             raise ValueError(f"Invalid chapter cache: {folder}")

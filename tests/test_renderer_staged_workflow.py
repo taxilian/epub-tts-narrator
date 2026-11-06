@@ -1,6 +1,7 @@
 """Staged rendering retains verified chapters across independent runs and failures."""
 
 from pathlib import Path
+from copy import deepcopy
 import shutil
 import tempfile
 import unittest
@@ -165,7 +166,43 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertNotEqual(first["chapters"][0]["cache_directory"],
                             second["chapters"][0]["cache_directory"])
         self.assertEqual(before, {str(path): path.read_bytes()
-                                 for path in (self.root / "work" / "clips").rglob("accepted.json")})
+                                  for path in (self.root / "work" / "clips").rglob("accepted.json")})
+
+    def test_deleted_chapter_directory_is_rebuilt_without_new_tts_or_asr(self):
+        first = self.chapters()
+        folder = Path(first["chapters"][0]["cache_directory"])
+        pcm_hash = file_hash(folder / "chapter.wav")
+        untouched_checkpoint = self.checkpoint(2).read_bytes()
+        accepted = {str(path): path.read_bytes()
+                    for path in (self.root / "work" / "clips").rglob("accepted.json")}
+        shutil.rmtree(folder)
+        with (patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")),
+              patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR"))):
+            rebuilt = self.chapters()
+        self.assertEqual(rebuilt["chapters"][0]["audio_file"], first["chapters"][0]["audio_file"])
+        self.assertTrue(Path(rebuilt["chapters"][0]["audio_file"]).is_file())
+        self.assertEqual(file_hash(folder / "chapter.wav"), pcm_hash)
+        self.assertEqual(self.checkpoint(2).read_bytes(), untouched_checkpoint)
+        self.assertEqual(accepted, {str(path): path.read_bytes()
+                                   for path in (self.root / "work" / "clips").rglob("accepted.json")})
+
+    def test_deleted_chapter_output_does_not_hide_invalid_checkpoint_verification(self):
+        first = self.chapters()
+        original = read_json(self.checkpoint())
+        shutil.rmtree(Path(first["chapters"][0]["cache_directory"]))
+        for corruption in ("missing_entry", "failed_report", "wrong_chunk"):
+            with self.subTest(corruption=corruption):
+                record = deepcopy(original)
+                del record["record_sha256"]
+                if corruption == "missing_entry":
+                    record["acceptance"].pop()
+                elif corruption == "failed_report":
+                    record["acceptance"][0]["report"]["passed"] = False
+                else:
+                    record["acceptance"][0]["chunk_id"] = "different-chunk"
+                write_json(self.checkpoint(), dict(record, record_sha256=digest(record)))
+                with self.assertRaisesRegex(RenderBlocked, "verification"):
+                    self.chapters()
 
     def test_assembly_rejects_changed_generation_or_normalization_settings(self):
         self.chapters()

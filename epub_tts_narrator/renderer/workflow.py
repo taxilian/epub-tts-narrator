@@ -39,13 +39,13 @@ class RenderBlocked(ValueError):
 
 
 class ChapterNeedsRendering(RenderBlocked):
-    """An intact checkpoint contains performances with obsolete synthesis inputs."""
+    """An intact checkpoint needs fresh synthesis or derived chapter assembly."""
 
-    def __init__(self, chapter_id, block_count):
+    def __init__(self, chapter_id, block_count, *, reason=None):
         self.block_count = block_count
+        self.reason = reason or f"speech inputs changed for {block_count} block(s)"
         super().__init__(
-            f"Saved {chapter_id} needs rendering: speech inputs changed for "
-            f"{block_count} block(s). Rerun render to rebuild this chapter "
+            f"Saved {chapter_id} needs rendering: {self.reason}. Rerun render to rebuild this chapter "
             "while reusing matching verified clips.")
 
 
@@ -1424,26 +1424,30 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         raise RenderBlocked(f"A saved clip for {chapter['id']} was removed. "
                             "Run render --chapters-only for this chapter to restore it.")
     try:
-        composed = load_chapter(Path(work) / "chapters" / record["cache_key"],
-                                ffprobe=config["render"]["ffprobe"])
-        if composed["context"] != record["context"] or composed["settings"] != context["settings"]:
-            raise ValueError("Chapter cache and checkpoint disagree")
         # A checkpoint binds every spoken chunk to a successful verification,
         # including exact expected words and the voice selected for that chunk.
         expected = [chunk for chunk in chapter["chunks"] if not chunk["silent_control"]]
         acceptance = record["acceptance"]
         if not isinstance(acceptance, list) or len(acceptance) != len(expected):
             raise ValueError("Incomplete chapter verification records")
+        for chunk, accepted in zip(expected, acceptance):
+            if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
+                raise ValueError("Invalid chapter verification record")
+            if accepted.get("chunk_id") != chunk["chunk_id"] or not _has_accepted_verification(accepted):
+                raise ValueError("Chapter verification does not match the current plan")
+        folder = Path(work) / "chapters" / record["cache_key"]
+        if not folder.exists() and not folder.is_symlink() and not folder.parent.is_symlink():
+            raise ChapterNeedsRendering(chapter["id"], 0, reason="assembled chapter output was removed")
+        composed = load_chapter(folder, ffprobe=config["render"]["ffprobe"])
+        if composed["context"] != record["context"] or composed["settings"] != context["settings"]:
+            raise ValueError("Chapter cache and checkpoint disagree")
         cache_record = read_json(Path(composed["cache_directory"]) / "chapter.json")
         cached_clips = {clip["chunk_id"]: clip for clip in cache_record["identity"]["clips"]}
         timings = {item["chunk_id"]: item for item in composed["segments"]}
         stale_chunks = set()
         for chunk, accepted in zip(expected, acceptance):
-            if not isinstance(accepted, dict) or not isinstance(accepted.get("report"), dict):
-                raise ValueError("Invalid chapter verification record")
             cached = cached_clips[chunk["chunk_id"]]
-            if (accepted["chunk_id"] != chunk["chunk_id"] or not _has_accepted_verification(accepted)
-                    or accepted["audio_sha256"] != cached["audio_sha256"]):
+            if accepted["audio_sha256"] != cached["audio_sha256"]:
                 raise ValueError("Chapter verification does not match the current plan")
             speakers = chunk_speakers(chunk)
             if "paragraph_turns" in chunk:
@@ -1489,6 +1493,8 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                     stale_chunks.add(chunk["chunk_id"])
         if [item["chunk_id"] for item in composed["segments"]] != [c["chunk_id"] for c in chapter["chunks"]]:
             raise ValueError("Chapter timing map does not cover the complete plan")
+    except ChapterNeedsRendering:
+        raise
     except (ValueError, KeyError, TypeError, OSError) as exc:
         raise RenderBlocked(f"Invalid saved chapter {chapter['id']}: {exc}") from exc
     if stale_chunks:
@@ -2224,7 +2230,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     composed, chapter_acceptance = _restore_chapter(
                         work, chapter, saved, context, voices, config, speech_cache=speech_cache)
                 except ChapterNeedsRendering as exc:
-                    notify(f"Rebuilding {chapter_label}: speech inputs changed for {exc.block_count} block(s); "
+                    notify(f"Rebuilding {chapter_label}: {exc.reason}; "
                            "reusing matching verified clips.")
                 else:
                     notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
