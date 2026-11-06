@@ -311,7 +311,23 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
                 or record.get("version") != 1 or digest(record["identity"]) != folder.name):
             raise ValueError("Chapter cache metadata failed integrity checks")
         chapter = deepcopy(record["chapter"])
-        wav = regular_file(folder / "chapter.wav")
+        kind = record["identity"]["settings"]["chapter_format"]
+        if kind not in {"m4a", "mp3"}:
+            raise ValueError("Chapter cache encoding format is invalid")
+        if "wav_file" not in record and "encoded_file" not in record and chapter["frames"]:
+            wav, encoded = _legacy_audio_paths(folder, chapter, kind)
+            return dict(chapter, wav_path=str(wav.resolve()),
+                        encoded_path=str(encoded.resolve()), encoded_sha256=record["encoded_sha256"],
+                        pcm_sha256=record["pcm_sha256"], normalization=record["normalization"],
+                        cache_directory=str(folder.resolve()), cache_key=folder.name,
+                        track_number=record["identity"]["ordinal"],
+                        total_chapters=record["identity"]["total_chapters"],
+                        context=deepcopy(record["identity"]["context"]),
+                        settings=deepcopy(record["identity"]["settings"]))
+        filename = record.get("wav_file")
+        if filename is not None and (not isinstance(filename, str) or filename != Path(filename).name):
+            raise ValueError("Chapter PCM filename must be a plain file")
+        wav = regular_file(folder / (filename or "chapter.wav"))
         if (file_hash(wav) != record["pcm_sha256"]
                 or _wave_info(wav, chapter["sample_rate"]) != {
                     "sample_rate": chapter["sample_rate"], "channels": chapter["channels"],
@@ -321,9 +337,10 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
         encoded = None
         if chapter["frames"]:
             kind = record["identity"]["settings"]["chapter_format"]
-            if kind not in {"m4a", "mp3"}:
-                raise ValueError("Chapter cache encoding format is invalid")
-            encoded = regular_file(folder / f"chapter.{kind}")
+            filename = record.get("encoded_file")
+            if filename is not None and (not isinstance(filename, str) or filename != Path(filename).name):
+                raise ValueError("Encoded chapter filename must be a plain file")
+            encoded = regular_file(folder / (filename or f"chapter.{kind}"))
             if file_hash(encoded) != record["encoded_sha256"]:
                 raise ValueError("Encoded chapter failed integrity checks")
             _check_encoded(encoded, chapter["frames"], chapter["sample_rate"], ffprobe=ffprobe)
@@ -340,6 +357,13 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
                     settings=deepcopy(record["identity"]["settings"]))
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Incomplete or invalid chapter cache: {folder}") from exc
+
+
+def _legacy_audio_paths(folder, chapter, kind):
+    """Return legacy generic paths only when they are valid, ordinary files."""
+    wav = regular_file(folder / "chapter.wav")
+    encoded = regular_file(folder / f"chapter.{kind}")
+    return wav, encoded
 
 
 def prepare_chapter(chapter, clips, directory, *, book, render_settings, context, notify=print,
@@ -383,19 +407,19 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         stage.mkdir()
         notify(f"Assembling chapter {chapter_label}: {metadata['title']}")
         composed = compose_chapter(
-            clips, stage / "chapter.wav", sample_rate=settings["sample_rate"],
+            clips, stage / f"chapter-{metadata['number']:04d}.wav", sample_rate=settings["sample_rate"],
             paragraph_pause_ms=settings["paragraph_pause_ms"],
             blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
             normalize_pauses=settings["normalize_pauses"],
             sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"],
             censorship_policy=censorship_policy)
         composed.update(metadata)
-        normalization = _normalize(stage / "chapter.wav", settings)
+        normalization = _normalize(Path(composed["wav_path"]), settings)
         encoded = None
         if composed["frames"]:
             notify(f"Encoding chapter {chapter_label}: {metadata['title']}")
             encoded = encode_chapter(
-                composed, stage / f"chapter.{settings['chapter_format']}", book=book,
+                composed, stage / f"chapter-{metadata['number']:04d}.{settings['chapter_format']}", book=book,
                 ordinal=ordinal, total_chapters=total, chapter_format=settings["chapter_format"],
                 aac_bitrate=settings["aac_bitrate"], mp3_bitrate=settings["mp3_bitrate"],
                 ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
@@ -405,7 +429,9 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                 raise ValueError("Verified clip changed during chapter preparation")
         record = {"format": "audiobook-renderer-chapter", "version": 1, "identity": identity,
                   "chapter": {key: value for key, value in composed.items() if key != "wav_path"},
-                  "normalization": normalization, "pcm_sha256": file_hash(stage / "chapter.wav"),
+                  "wav_file": Path(composed["wav_path"]).name,
+                  "encoded_file": Path(encoded["path"]).name if encoded else None,
+                  "normalization": normalization, "pcm_sha256": file_hash(composed["wav_path"]),
                   "encoded_sha256": encoded["sha256"] if encoded else None}
         write_json(stage / "chapter.json", dict(record, record_sha256=digest(record)))
         try:
@@ -447,20 +473,22 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=directory) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        wav = stage / "chapter.wav"
+        wav = stage / f"chapter-{identity['chapter']['number']:04d}.wav"
         wav.hardlink_to(regular_file(source["wav_path"]))
         encoded = None
         if source["frames"]:
             notify(f"Encoding chapter {source['number']} / {source['total_chapters']}: {source['title']}")
             encoded = encode_chapter(
-                dict(source, wav_path=str(wav)), stage / f"chapter.{settings['chapter_format']}",
+                dict(source, wav_path=str(wav)), stage / f"chapter-{identity['chapter']['number']:04d}.{settings['chapter_format']}",
                 book=book, ordinal=identity["ordinal"], total_chapters=identity["total_chapters"],
                 chapter_format=settings["chapter_format"], aac_bitrate=settings["aac_bitrate"],
                 mp3_bitrate=settings["mp3_bitrate"], ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
         if file_hash(wav) != original["pcm_sha256"]:
             raise ValueError("Chapter PCM changed during re-encoding")
         record = {key: deepcopy(value) for key, value in original.items() if key != "record_sha256"}
-        record.update(identity=identity, encoded_sha256=encoded["sha256"] if encoded else None)
+        record.update(identity=identity, wav_file=wav.name,
+                      encoded_file=Path(encoded["path"]).name if encoded else None,
+                      encoded_sha256=encoded["sha256"] if encoded else None)
         write_json(stage / "chapter.json", dict(record, record_sha256=digest(record)))
         try:
             os.rename(stage, folder)

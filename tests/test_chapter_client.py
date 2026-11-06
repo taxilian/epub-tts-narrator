@@ -789,7 +789,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
     def test_stale_local_checkpoint_does_not_hide_corrupted_chapter_audio(self):
         self._render_local_revision_fixture()
         checkpoint = read_json(self.root / "work" / "completed-chapters" / "chapter-0001.json")
-        audio = self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter.wav"
+        audio = self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter-0001.wav"
         audio.write_bytes(audio.read_bytes()[:-2] + b"xx")
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
             with self.assertRaisesRegex(ChapterClientError, "PCM failed integrity"):

@@ -96,6 +96,8 @@ class ChapterCheckpointTests(unittest.TestCase):
         self.assertEqual(first["frames"], 44100 * 4 + 17640)
         self.assertEqual(first["segments"][0]["chapter_end_frame"], 44100 * 4)
         self.assertEqual(first["number"], 7)
+        self.assertTrue(first["encoded_path"].endswith("/chapter-0007.m4a"))
+        self.assertTrue(first["wav_path"].endswith("/chapter-0007.wav"))
         self.assertEqual(first["normalization"]["status"], "normalized")
         self.assertAlmostEqual(first["normalization"]["output_lufs"], -20, delta=1)
         # Independently measure the published PCM instead of trusting the
@@ -111,6 +113,21 @@ class ChapterCheckpointTests(unittest.TestCase):
              patch.object(chapter_cache, "encode_chapter", side_effect=AssertionError("reencoded")):
             self.assertEqual(self.prepare(), first)
         self.assertEqual(load_chapter(first["cache_directory"]), first)
+
+    def test_legacy_cache_without_filename_fields_loads_with_recorded_generic_names(self):
+        first = self.prepare()
+        metadata = Path(first["cache_directory"]) / "chapter.json"
+        record = read_json(metadata)
+        record.pop("wav_file")
+        record.pop("encoded_file")
+        (metadata.parent / "chapter-0007.wav").rename(metadata.parent / "chapter.wav")
+        (metadata.parent / "chapter-0007.m4a").rename(metadata.parent / "chapter.m4a")
+        signature = record.pop("record_sha256", None)
+        record["record_sha256"] = digest(record)
+        write_json(metadata, record)
+        loaded = load_chapter(first["cache_directory"])
+        self.assertEqual(loaded["wav_path"], str(metadata.parent / "chapter.wav"))
+        self.assertEqual(loaded["encoded_path"], str(metadata.parent / "chapter.m4a"))
 
     def test_changed_pause_voice_policy_or_clip_invalidates_checkpoint(self):
         first = self.prepare()
@@ -155,7 +172,7 @@ class ChapterCheckpointTests(unittest.TestCase):
             self.assertEqual(self.prepare(), first)
 
     def test_audio_and_metadata_corruption_are_rejected(self):
-        for filename in ("chapter.wav", "chapter.m4a", "chapter.json"):
+        for filename in ("chapter-0007.wav", "chapter-0007.m4a", "chapter.json"):
             with self.subTest(filename=filename):
                 self.context["test"] = filename
                 ready = self.prepare()
@@ -265,7 +282,7 @@ class ChapterCheckpointTests(unittest.TestCase):
              patch.object(assembly, "_run", side_effect=record_command):
             manifest = assembly.package_audio([ready], output, book=self.book)
         self.assertEqual(len(calls), 1)
-        self.assertIn("chapter.wav", calls[0])
+        self.assertIn("chapter-0007.wav", calls[0])
         self.assertNotIn("chapter.m4a", calls[0])
         self.assertEqual(file_hash(output / "chapters/chapter-0007.m4a"), ready["encoded_sha256"])
         self.assertEqual(manifest["chapters"][0]["ordinal"], 1)

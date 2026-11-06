@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from copy import deepcopy
+import os
 import shutil
 import tempfile
 import unittest
@@ -70,6 +71,27 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertEqual(len(sync["segments"]), 4)
         self.assertEqual(len(read_json(output / "verification.json")), 4)
         self.assertTrue(all(c["normalization"]["status"] == "normalized" for c in sync["chapters"]))
+
+    def test_local_completed_chapters_have_stable_work_links_before_and_after_assembly(self):
+        self.chapters()
+        checkpoint = read_json(self.checkpoint(1))
+        self.assertTrue(checkpoint["audio_file"].endswith("/chapter-0001.m4a"))
+        self.assertTrue((self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter-0001.wav").is_file())
+        for number in (1, 2):
+            link = self.root / "work" / "chapter-links" / f"chapter-{number:02d}.m4a"
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(os.path.isabs(os.readlink(link)))
+            self.assertTrue(link.resolve().is_file())
+            self.assertEqual(link.resolve(), Path(read_json(self.checkpoint(number))["audio_file"]).resolve())
+            self.assertNotIn("/output/", os.readlink(link))
+        first_target = os.readlink(self.root / "work" / "chapter-links/chapter-01.m4a")
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No ASR/TTS")):
+            self.chapters()
+        self.assertEqual(os.readlink(self.root / "work" / "chapter-links/chapter-01.m4a"), first_target)
+        self.package()
+        self.assertEqual(os.readlink(self.root / "work" / "chapter-links/chapter-01.m4a"), first_target)
+        for number in (1, 2):
+            self.assertTrue((self.root / "output" / "chapter-links" / f"chapter-{number:02d}.m4a").is_symlink())
 
     def test_selected_chapters_from_separate_runs_assemble_with_original_numbers(self):
         self.config["render"]["chapter_numbers"] = [2]
@@ -171,7 +193,7 @@ class StagedWorkflowTests(unittest.TestCase):
     def test_deleted_chapter_directory_is_rebuilt_without_new_tts_or_asr(self):
         first = self.chapters()
         folder = Path(first["chapters"][0]["cache_directory"])
-        pcm_hash = file_hash(folder / "chapter.wav")
+        pcm_hash = file_hash(folder / "chapter-0001.wav")
         untouched_checkpoint = self.checkpoint(2).read_bytes()
         accepted = {str(path): path.read_bytes()
                     for path in (self.root / "work" / "clips").rglob("accepted.json")}
@@ -181,7 +203,7 @@ class StagedWorkflowTests(unittest.TestCase):
             rebuilt = self.chapters()
         self.assertEqual(rebuilt["chapters"][0]["audio_file"], first["chapters"][0]["audio_file"])
         self.assertTrue(Path(rebuilt["chapters"][0]["audio_file"]).is_file())
-        self.assertEqual(file_hash(folder / "chapter.wav"), pcm_hash)
+        self.assertEqual(file_hash(folder / "chapter-0001.wav"), pcm_hash)
         self.assertEqual(self.checkpoint(2).read_bytes(), untouched_checkpoint)
         self.assertEqual(accepted, {str(path): path.read_bytes()
                                    for path in (self.root / "work" / "clips").rglob("accepted.json")})
@@ -203,6 +225,18 @@ class StagedWorkflowTests(unittest.TestCase):
                 write_json(self.checkpoint(), dict(record, record_sha256=digest(record)))
                 with self.assertRaisesRegex(RenderBlocked, "verification"):
                     self.chapters()
+
+    def test_link_collision_does_not_overwrite_ordinary_file_or_abort_chapter(self):
+        first = self.chapters()
+        link = self.root / "work" / "chapter-links/chapter-01.m4a"
+        link.unlink()
+        link.write_text("keep this file")
+        original = link.read_text()
+        resumed = self.chapters()
+        self.assertEqual(link.read_text(), original)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(resumed["chapters"][0]["audio_file"], first["chapters"][0]["audio_file"])
+        self.assertTrue(any("Chapter link not created" in message for message in self.messages))
 
     def test_assembly_rejects_changed_generation_or_normalization_settings(self):
         self.chapters()
@@ -281,7 +315,7 @@ class StagedWorkflowTests(unittest.TestCase):
 
     def test_corrupt_pcm_or_index_cannot_be_assembled_or_silently_regenerated(self):
         result = self.chapters()
-        wav = Path(result["chapters"][0]["cache_directory"]) / "chapter.wav"
+        wav = Path(result["chapters"][0]["cache_directory"]) / "chapter-0001.wav"
         original = wav.read_bytes()
         wav.write_bytes(original[:-2] + b"xx")
         for action in (self.package, self.chapters):

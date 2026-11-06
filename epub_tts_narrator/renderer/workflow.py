@@ -1394,7 +1394,7 @@ def _read_checkpoint(work, chapter):
         raise RenderBlocked(f"Invalid chapter checkpoint; inspect {path}: {exc}") from exc
 
 
-def _restore_chapter(work, chapter, record, context, voices, config, *, speech_cache=None):
+def _restore_chapter(work, chapter, record, context, voices, config, *, speech_cache=None, notify=print):
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
@@ -1501,6 +1501,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         # Finish every integrity check first. A valid but obsolete performance
         # is a cache miss; changed bytes or broken provenance remain fatal.
         raise ChapterNeedsRendering(chapter["id"], len(stale_chunks))
+    _publish_work_chapter_link(config, composed, notify=notify)
     return composed, acceptance
 
 
@@ -2096,12 +2097,62 @@ def _publish_chapter_link(config, composed, *, notify):
         if link.is_symlink() and os.readlink(link) == relative:
             return
         temporary = links / f".chapter-{composed['track_number']:02d}{suffix}.link"
+        if temporary.exists() or temporary.is_symlink():
+            raise OSError(f"temporary chapter link already exists: {temporary}")
         links.mkdir(parents=True, exist_ok=True)
         os.symlink(relative, temporary)
         os.replace(temporary, link)
         notify(f"Chapter link updated: {link.name} -> {relative}")
     except OSError as exc:
         notify(f"Could not create the chapter link: {exc}")
+
+
+def _publish_work_chapter_link(config, composed, *, notify):
+    """Expose a completed local chapter outside publication during a run."""
+    settings = config["render"]
+    _publish_chapter_link({"render": dict(settings, output_dir=settings["work_dir"])}, composed, notify=notify)
+
+
+def _link_completed_chapters(work, records, *, notify):
+    """Backfill meaningful work filenames and chapter links from valid checkpoints."""
+    from .chapter_cache import load_chapter
+    from .chapter_records import signed_record
+    work = Path(work)
+    for checkpoint in records:
+        audio = checkpoint.get("audio_file")
+        if not isinstance(audio, str) or not audio:
+            continue
+        cached = load_chapter(work / "chapters" / checkpoint["cache_key"])
+        number = cached["number"]
+        suffix = cached["settings"]["chapter_format"]
+        base = cached["cache_directory"]
+        wav = f"chapter-{number:04d}.wav"
+        encoded = f"chapter-{number:04d}.{suffix}"
+        record = dict(cached, wav_path=str(Path(base) / wav), encoded_path=str(Path(base) / encoded))
+        legacy_names = set()
+        if Path(audio) != Path(record["encoded_path"]):
+            legacy_names.add(Path(audio).name)
+        legacy_names.update({"chapter.wav", f"chapter.{suffix}"})
+        if Path(base) == Path(audio).parent:
+            legacy_names.add(Path(audio).name)
+        for name in legacy_names:
+            if name != Path(name).name:
+                raise ValueError("Saved chapter filename must be a plain file")
+            path = Path(base) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            digest = file_hash(path)
+            if name.endswith(".wav"):
+                expected = cached["pcm_sha256"]
+            else:
+                expected = cached["encoded_sha256"]
+            if digest != expected:
+                raise ValueError(f"Saved chapter audio failed integrity checks: {path}")
+            target = Path(base) / (wav if name.endswith(".wav") else encoded)
+            if target.exists() or target.is_symlink():
+                raise ValueError(f"Cannot rename chapter audio without replacing an existing file: {target}")
+            path.rename(target)
+        _publish_work_chapter_link(config, record, notify=notify)
 
 
 def _publish_chapter_links(config, rendered, *, notify):
@@ -2187,6 +2238,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         # remote alike, so duplicate work coordinates instead of racing.
         take_locks, take_locks_guard = {}, Lock()
         run_key = digest(plan)[:12]
+        if config.get("_link_checkpoint_records") is not None:
+            _link_completed_chapters(work, config["_link_checkpoint_records"], notify=notify)
 
         def completed(index, composed, chapter_acceptance, chapter_label, chapter_started):
             composed_records[index] = (composed, chapter_acceptance)
@@ -2213,6 +2266,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                    if config.get("censorship", {}).get("enabled", False) else {}))
             with plan_lock:
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+                _publish_work_chapter_link(config, composed, notify=notify)
             return composed
 
         def process(chapter_index):
@@ -2228,7 +2282,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     and _saved_chapter_engines_match(work, saved, context["engine"])):
                 try:
                     composed, chapter_acceptance = _restore_chapter(
-                        work, chapter, saved, context, voices, config, speech_cache=speech_cache)
+                        work, chapter, saved, context, voices, config, speech_cache=speech_cache, notify=notify)
                 except ChapterNeedsRendering as exc:
                     notify(f"Rebuilding {chapter_label}: {exc.reason}; "
                            "reusing matching verified clips.")
@@ -2378,6 +2432,7 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                 restore_context["settings"].pop("censorship", None)
             composed, chapter_acceptance = _restore_chapter(
                 work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
+            _publish_work_chapter_link(config, composed, notify=notify)
             if censorship_changed:
                 from .censorship_runtime import restore_verified_clips, prepare_chapter_censorship
                 clips = restore_verified_clips(chapter, chapter_acceptance, work,
