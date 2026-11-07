@@ -15,6 +15,7 @@ import re
 import sys
 import uuid
 
+from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json, write_json
 from .diagnostics import configured_secrets, safe_error_text
 from .quality import validate_audio, validation_key, text_confirmation_unavailable
@@ -884,9 +885,9 @@ class CastingSession:
                         or record.get("seed") != _seed(previous["base_seed"], previous, attempt)
                         or report.get("expected_text") != previous["text"]):
                     raise ValueError("attempt identity")
-                name = f"attempt-{attempt:03d}.wav"
+                name = validate_audio_filename(record.get("audio_file"), suffix=".wav")
                 wav = directory / name
-                if (record.get("audio_file") != name or wav.is_symlink() or not wav.is_file()
+                if (wav.is_symlink() or not wav.is_file()
                         or not 0 < wav.stat().st_size <= MAX_PENDING_AUDIO_BYTES
                         or not isinstance(record.get("audio_sha256"), str)
                         or not re.fullmatch(r"[0-9a-f]{64}", record["audio_sha256"])
