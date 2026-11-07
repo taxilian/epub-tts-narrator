@@ -25,6 +25,9 @@ def _clean(text):
 class StreamConsole:
     """Two continuously updated status lines over ordinary progress output."""
 
+    _STEPS = ((0.50, "Casting"), (0.90, "Attribution"),
+              (0.99, "Review and completion"), (1.00, "Validation and publication"))
+
     def __init__(self, stream, *, width=120, draw_interval=0.25):
         self.stream = stream
         self.enabled = bool(getattr(stream, "isatty", lambda: False)())
@@ -159,6 +162,15 @@ class StreamConsole:
                 self._draw_locked(monotonic())
             sleep(1.0)
 
+    def _step_status(self):
+        start = 0.0
+        for index, (end, name) in enumerate(self._STEPS, 1):
+            if self._overall <= end or end == self._STEPS[-1][0]:
+                fraction = 0.0 if end == start else (self._overall - start) / (end - start)
+                return index, len(self._STEPS), name, min(1.0, max(0.0, fraction))
+            start = end
+        return len(self._STEPS), len(self._STEPS), self._STEPS[-1][1], 1.0
+
     def _draw_locked(self, now):
         states = list(self._active.values())
         if not states:
@@ -180,8 +192,9 @@ class StreamConsole:
             first = "Waiting for provider response"
         if quiet >= 1:
             first += f" · quiet {_seconds(quiet)}"
-        second = (f"LLM {len(states)} active | overall {self._overall:.0%} "
-                  f"{self._stage} | elapsed {_seconds(now - oldest)} | "
+        step, step_count, step_name, step_fraction = self._step_status()
+        second = (f"LLM {len(states)} active | step {step}/{step_count} {step_name} "
+                  f"{step_fraction:.0%} · {self._stage} | elapsed {_seconds(now - oldest)} | "
                   f"{events} events | thought {reasoning:,} chars | "
                   f"answer {content:,} chars | {_size(received)} received")
         self._clear_locked()

@@ -40,15 +40,15 @@ class StreamConsoleTests(unittest.TestCase):
         self.assertGreaterEqual(text.count("LLM 1 active"), 2)
         console.observe({"request_id": "req-1", "phase": "failed"})
 
-    def test_status_includes_monotonic_overall_analysis_progress(self):
+    def test_status_includes_step_and_step_local_analysis_progress(self):
         output = TTY()
-        console = StreamConsole(output, width=220, draw_interval=0)
+        console = StreamConsole(output, width=240, draw_interval=0)
         console.observe({"request_id": "req-1", "phase": "started"})
-        console.set_progress(0.37, "Attribution 37/100")
+        console.set_progress(0.68, "Attribution 37/100")
         console.set_progress(0.20, "Stale milestone")
         text = output.getvalue()
-        self.assertIn("overall 37% Attribution 37/100", text[-500:])
-        self.assertNotIn("overall 20%", text[-500:])
+        self.assertIn("step 2/4 Attribution 45% · Attribution 37/100", text[-600:])
+        self.assertNotIn("Casting 20%", text[-600:])
         console.observe({"request_id": "req-1", "phase": "failed"})
 
     def test_ordinary_log_writes_scroll_before_redrawn_status(self):
