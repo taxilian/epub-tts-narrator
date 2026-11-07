@@ -100,7 +100,7 @@ def _normalize_clip(input_path: str | Path, output_path: str | Path, *,
         raise ValueError(f"Output already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".normalize-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "audio.wav"
+        staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
               "-protocol_whitelist", "file,pipe", "-i", str(source),
               "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar",
@@ -139,7 +139,7 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
     target.parent.mkdir(parents=True, exist_ok=True)
     peak = 0
     with tempfile.TemporaryDirectory(prefix=".mix-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "mix.wav"
+        staged = Path(temporary) / target.name
         with ExitStack() as handles:
             inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
             destination = handles.enter_context(wave.open(str(staged), "wb"))
@@ -290,7 +290,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     timings, cursor, pending_pause, previous_tail = [], 0, 0, 0
     pending_punctuation = 0
     with tempfile.TemporaryDirectory(prefix=".compose-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "chapter.wav"
+        staged = Path(temporary) / target.name
         with wave.open(str(staged), "wb") as destination:
             destination.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
 

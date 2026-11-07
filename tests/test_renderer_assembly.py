@@ -8,6 +8,7 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import wave
 import zipfile
 import zlib
@@ -53,6 +54,39 @@ class ChapterCompositionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.wav = make_wav(self.root / "clip.wav")
+
+    def test_normalization_scratch_uses_the_destination_basename(self):
+        # Given a real source WAV and a descriptive normalized destination.
+        from epub_tts_narrator.renderer import assembly
+        run = assembly._run
+        outputs = []
+        def record_run(arguments, **kwargs):
+            outputs.append(Path(arguments[-1]).name)
+            return run(arguments, **kwargs)
+
+        # When normalizing through the real FFmpeg writer.
+        with patch("epub_tts_narrator.renderer.assembly._run", side_effect=record_run):
+            normalize_clip(self.wav, self.root / "voice-mara-normalized.wav")
+
+        # Then its private staging file is descriptive too.
+        self.assertEqual(outputs, ["voice-mara-normalized.wav"])
+
+    def test_composition_scratch_uses_the_chapter_destination_basename(self):
+        # Given a real clip and chapter destination.
+        from epub_tts_narrator.renderer import assembly
+        open_wave = assembly.wave.open
+        outputs = []
+        def record_open(path, *args, **kwargs):
+            if args and args[0] == "wb":
+                outputs.append(Path(path).name)
+            return open_wave(path, *args, **kwargs)
+
+        # When composing through the real PCM writer.
+        with patch("epub_tts_narrator.renderer.assembly.wave.open", side_effect=record_open):
+            compose_chapter([clip(self.wav)], self.root / "chapter-0007.wav")
+
+        # Then the temporary compose artifact is no longer generic chapter.wav.
+        self.assertEqual(outputs, ["chapter-0007.wav"])
 
     def test_split_segment_gets_one_paragraph_pause_and_exact_ranges(self):
         result = compose_chapter([
