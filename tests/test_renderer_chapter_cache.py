@@ -114,6 +114,22 @@ class ChapterCheckpointTests(unittest.TestCase):
             self.assertEqual(self.prepare(), first)
         self.assertEqual(load_chapter(first["cache_directory"]), first)
 
+    def test_loudness_normalization_scratch_targets_a_descriptive_name(self):
+        commands = []
+        real_run = chapter_cache.run_subprocess
+
+        def recording(command, **kwargs):
+            commands.append([str(item) for item in command])
+            return real_run(command, **kwargs)
+
+        with patch.object(chapter_cache, "run_subprocess", side_effect=recording):
+            ready = self.prepare()
+        self.assertEqual(ready["normalization"]["status"], "normalized")
+        destinations = [Path(command[-1]) for command in commands if command[-1].endswith(".wav")]
+        self.assertEqual([destination.name for destination in destinations],
+                         ["chapter-0007-loudness-normalized.wav"])
+        self.assertNotIn("normalized.wav", [destination.name for destination in destinations])
+
     def test_legacy_cache_without_filename_fields_loads_with_recorded_generic_names(self):
         first = self.prepare()
         metadata = Path(first["cache_directory"]) / "chapter.json"

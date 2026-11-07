@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_speakers
+from .audio_naming import descriptive_audio_filename
 from .chapter_records import signed_record
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import RENDER_CONTRACT
@@ -103,7 +104,8 @@ def _normalize(source, settings):
                     f":measured_LRA={float(measured['input_lra'])}"
                     f":measured_thresh={float(measured['input_thresh'])}"
                     f":offset={float(measured['target_offset'])}")
-    destination = source.with_name("normalized.wav")
+    destination = source.with_name(
+        descriptive_audio_filename("loudness-normalized", source.stem, suffix=".wav"))
     result = _loudness_pass(source, audio_filter, destination, settings)
     if _wave_info(destination, settings["sample_rate"]) != info:
         raise ValueError("Chapter loudness normalization changed the PCM timeline")
