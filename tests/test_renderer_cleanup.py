@@ -34,27 +34,33 @@ class CleanupTests(unittest.TestCase):
             write_json(directory / "accepted.json", record)
         return directory, record
 
-    def chapter(self, *, name="Chapter one", checkpoint=None, empty=False, context=None):
+    def chapter(self, *, name="Chapter one", checkpoint=None, empty=False, context=None, recorded=False):
         identity = {"context": context or {"book": "a book", "voices": {"v": "asset"}},
                     "settings": {"chapter_format": "m4a"}, "chapter": {"title": name}}
         directory = self.work / "chapters" / digest(identity)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "chapter.wav").write_bytes(b"chapter pcm")
+        wav_name = "chapter-0007.wav" if recorded else "chapter.wav"
+        encoded_name = "chapter-0007.m4a" if recorded else "chapter.m4a"
+        (directory / wav_name).write_bytes(b"chapter pcm")
         if not empty:
-            (directory / "chapter.m4a").write_bytes(b"encoded chapter")
+            (directory / encoded_name).write_bytes(b"encoded chapter")
         record = {"format": "audiobook-renderer-chapter", "version": 1, "identity": identity,
                   "chapter": {"frames": 0 if empty else 100, "sample_rate": 44100},
-                  "pcm_sha256": file_hash(directory / "chapter.wav"),
-                  "encoded_sha256": None if empty else file_hash(directory / "chapter.m4a")}
+                  "pcm_sha256": file_hash(directory / wav_name),
+                  "encoded_sha256": None if empty else file_hash(directory / encoded_name)}
+        if recorded:
+            record.update(wav_file=wav_name, encoded_file=None if empty else encoded_name)
         write_json(directory / "chapter.json", dict(record, record_sha256=digest(record)))
         if checkpoint:
             self.checkpoint(checkpoint, directory, identity["context"], empty=empty)
         return directory
 
     def checkpoint(self, name, directory, context, *, empty=False):
+        chapter = read_json(directory / "chapter.json")
+        encoded_name = chapter.get("encoded_file", "chapter.m4a")
         record = {"format": "audiobook-chapter-checkpoint", "version": 1,
                   "cache_key": directory.name, "context": context, "acceptance": [],
-                  "audio_file": None if empty else str(directory / "chapter.m4a")}
+                  "audio_file": None if empty else str(directory / encoded_name)}
         path = self.work / "completed-chapters" / (name + ".json")
         write_json(path, dict(record, record_sha256=digest(record)))
         return path
@@ -435,6 +441,77 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(current.is_dir())
         self.assertTrue(old.is_dir())
         self.assertEqual(protected, self.snapshot())
+
+    def test_default_cleanup_uses_signed_numbered_chapter_audio_names(self):
+        # Given referenced and obsolete chapter caches with signed numbered audio.
+        current = self.chapter(recorded=True, checkpoint="current")
+        obsolete = self.chapter(name="Obsolete numbered chapter", recorded=True)
+        current_record = read_json(current / "chapter.json")
+        protected = {key: value for key, value in self.snapshot().items() if obsolete.name not in key}
+
+        # When cleaning obsolete chapters through the public default operation.
+        report = cleanup_work(self.work)
+
+        # Then only the obsolete signed WAV, encoding, and record are removed.
+        self.assertEqual(report["files_removed"], 3)
+        self.assertEqual(report["directories_removed"], 1)
+        self.assertEqual(report["categories"]["obsolete_chapters"]["files_removed"], 3)
+        self.assertFalse(obsolete.exists())
+        self.assertEqual(protected, self.snapshot())
+        self.assertTrue((current / current_record["wav_file"]).is_file())
+        self.assertTrue((current / current_record["encoded_file"]).is_file())
+
+    def test_explicit_discard_removes_signed_numbered_chapter_audio(self):
+        # Given a current chapter whose signed record uses numbered audio names.
+        directory = self.chapter(recorded=True, checkpoint="current")
+        record = read_json(directory / "chapter.json")
+
+        # When explicitly discarding the render cache.
+        report = cleanup_work(self.work, discard_render_cache=True)
+
+        # Then exactly the checkpoint and record-owned chapter artifacts are removed.
+        removed = {item["path"] for item in report["files"]}
+        self.assertEqual(removed, {"completed-chapters/current.json",
+                                   f"chapters/{directory.name}/chapter.json",
+                                   f"chapters/{directory.name}/{record['wav_file']}",
+                                   f"chapters/{directory.name}/{record['encoded_file']}"})
+        self.assertFalse(directory.exists())
+
+    def test_numbered_chapter_cleanup_refuses_unknown_audio_without_deletion(self):
+        # Given foreign audio beside an otherwise valid numbered chapter cache.
+        directory = self.chapter(recorded=True, checkpoint="current")
+        foreign = directory / "unrelated-voice.wav"
+        foreign.write_bytes(b"audio that must not be deleted")
+        before = self.snapshot()
+
+        for discard in (False, True):
+            with self.subTest(discard=discard):
+                # When either public cleanup mode sees the unrecognized file.
+                with self.assertRaisesRegex(ValueError, "unrecognized files"):
+                    cleanup_work(self.work, discard_render_cache=discard)
+
+                # Then every audio file and record remains byte-identical.
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(foreign.read_bytes(), b"audio that must not be deleted")
+
+    def test_numbered_chapter_cleanup_refuses_tampered_recorded_audio(self):
+        # Given a signed numbered chapter and one changed audio payload at a time.
+        directory = self.chapter(recorded=True, checkpoint="current")
+        record = read_json(directory / "chapter.json")
+        for field in ("wav_file", "encoded_file"):
+            path = directory / record[field]
+            original = path.read_bytes()
+            path.write_bytes(b"tampered chapter audio")
+            before = self.snapshot()
+            for discard in (False, True):
+                with self.subTest(field=field, discard=discard):
+                    # When the recorded checksum no longer matches the physical file.
+                    with self.assertRaisesRegex(ValueError, "invalid checksum"):
+                        cleanup_work(self.work, discard_render_cache=discard)
+
+                    # Then fail-closed preflight leaves the entire cache untouched.
+                    self.assertEqual(self.snapshot(), before)
+            path.write_bytes(original)
 
     def test_incomplete_chapters_and_staging_are_retained_by_default(self):
         for name in ("a" * 64, ".chapter-abcd1234"):
