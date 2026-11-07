@@ -54,7 +54,7 @@ class RetainedCandidateTests(unittest.TestCase):
 
         wav, accepted = self.resume()
 
-        self.assertEqual(wav.name, "attempt-001.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["transcript"], HEARD)
         self.assertEqual(accepted["report"]["text_confirmation_method"], "recurring_resolution")
@@ -68,7 +68,7 @@ class RetainedCandidateTests(unittest.TestCase):
     def test_saved_transcript_cannot_supply_a_word_missing_from_fresh_recognition(self):
         import hashlib
         from test_renderer_speech_recovery_integration import pcm
-        audio = self.work / "takes" / "attempt-001.wav"
+        audio = self.work / "takes" / read_json(self.work / "takes" / "attempt-001.json")["audio_file"]
         self.registry[hashlib.sha256(pcm(audio)).hexdigest()] = MISSING
         self.client.actions = [{"action": "stop", "edits": [], "reason": "No complete candidate remains."}]
         self.config["verification"]["recurrence_threshold"] = 1
@@ -78,7 +78,7 @@ class RetainedCandidateTests(unittest.TestCase):
         self.assertEqual(self.client.reviews, [])
 
     def test_modified_retained_waveform_is_not_recognized_or_reviewed(self):
-        audio = self.work / "takes" / "attempt-001.wav"
+        audio = self.work / "takes" / read_json(self.work / "takes" / "attempt-001.json")["audio_file"]
         audio.write_bytes(b"changed waveform")
         before = len(self.base.calls)
         with self.assertRaises(RenderBlocked):
