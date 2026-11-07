@@ -733,6 +733,49 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ChapterClientError, "source turns"):
             _validate_metadata(folder, record)
 
+    def test_voice_transfer_uses_descriptive_name_and_reuses_it_without_reencoding(self):
+        # Given a WAV reference owned by a specific remote voice.
+        bindings, assets = _voice_assets({"hero": self.voice}, self.root / "named-assets", FFMPEG)
+        path = assets[bindings["hero"]]["path"]
+        record = read_json(path.parent / (digest({"audio": file_hash(Path(self.voice["reference_audio"])),
+                                                   "encoding": "flac-v1"}) + ".json"))
+
+        # Then the physical cache file names its source role and owner in metadata.
+        self.assertIn("hero", path.name)
+        self.assertIn("reference", path.name)
+        self.assertIn("remote-reference", path.name)
+        self.assertNotRegex(path.name, r"^[0-9a-f]{64}\.flac$")
+        self.assertEqual(record["audio_file"], path.name)
+
+        # When reopening the exact saved conversion, no encoder runs again.
+        with patch("epub_tts_narrator.renderer.chapter_client._run_audio",
+                   side_effect=AssertionError("unexpected reencode")):
+            resumed_ids, resumed = _voice_assets({"hero": self.voice}, self.root / "named-assets", FFMPEG)
+        self.assertEqual(resumed[resumed_ids["hero"]]["path"], path)
+
+    def test_legacy_hash_named_voice_transfer_resumes_without_rename_or_reencode(self):
+        # Given a previously valid hash-named FLAC and its original JSON receipt.
+        bindings, assets = _voice_assets({"hero": self.voice}, self.root / "legacy-transfer", FFMPEG)
+        current = assets[bindings["hero"]]["path"]
+        conversion_key = digest({"audio": file_hash(Path(self.voice["reference_audio"])),
+                                 "encoding": "flac-v1"})
+        legacy = current.parent / (conversion_key + ".flac")
+        current.rename(legacy)
+        receipt = current.parent / (conversion_key + ".json")
+        saved = read_json(receipt)
+        saved.pop("audio_file")
+        write_json(receipt, saved)
+        before = receipt.read_bytes()
+
+        # When reusing the old cache through the public conversion boundary.
+        with patch("epub_tts_narrator.renderer.chapter_client._run_audio",
+                   side_effect=AssertionError("unexpected reencode")):
+            resumed_ids, resumed = _voice_assets({"hero": self.voice}, self.root / "legacy-transfer", FFMPEG)
+
+        # Then the established bytes and receipt stay in place without migration.
+        self.assertEqual(resumed[resumed_ids["hero"]]["path"], legacy)
+        self.assertEqual(receipt.read_bytes(), before)
+
     def test_same_audio_different_transcript_has_distinct_registered_identity(self):
         bindings, assets = _voice_assets({"one": self.voice,
                                          "two": {**self.voice, "reference_text": "Another transcript."}},

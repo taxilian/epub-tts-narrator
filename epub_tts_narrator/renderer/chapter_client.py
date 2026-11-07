@@ -34,6 +34,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .bundle import chunk_speakers
 from .common import USER_AGENT, RejectRedirects, digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .chapter_protocol import (
@@ -285,9 +286,18 @@ def _voice_assets(voices, work, ffmpeg):
             already_flac = stream.read(4) == b"fLaC"
         expected_pcm = None if already_flac else _reference_pcm_hash(source)
         conversion_key = digest({"audio": original_hash, "encoding": "flac-v1"})
-        target, record = directory / f"{conversion_key}.flac", directory / f"{conversion_key}.json"
-        if record.exists() and target.exists():
-            saved = read_json(regular_file(record))
+        legacy_target, record = directory / f"{conversion_key}.flac", directory / f"{conversion_key}.json"
+        fresh_target = directory / descriptive_audio_filename(
+            "remote-reference", voice_id, source.stem, conversion_key[:16], suffix=".flac")
+        saved = read_json(regular_file(record)) if record.exists() or record.is_symlink() else None
+        if saved is not None:
+            filename = validate_audio_filename(saved.get("audio_file", legacy_target.name), suffix=".flac")
+            target = directory / filename
+        elif legacy_target.exists() or legacy_target.is_symlink():
+            target = legacy_target
+        else:
+            target = fresh_target
+        if saved is not None and (target.exists() or target.is_symlink()):
             if file_hash(regular_file(target)) != saved.get("sha256"):
                 raise ChapterClientError("Saved compressed voice transfer copy changed")
             if already_flac and file_hash(target) != original_hash:
@@ -298,8 +308,12 @@ def _voice_assets(voices, work, ffmpeg):
         else:
             if target.exists() or target.is_symlink():
                 raise ChapterClientError("Incomplete compressed voice cache; remove the orphaned transfer copy")
+            target = fresh_target
+            if target.exists() or target.is_symlink():
+                raise ChapterClientError("Incomplete compressed voice cache; remove the orphaned transfer copy")
             with tempfile.TemporaryDirectory(prefix=".voice-flac-", dir=directory) as temporary:
-                converted = Path(temporary) / "reference.flac"
+                converted = Path(temporary) / descriptive_audio_filename(
+                    "remote-reference-conversion", voice_id, source.stem, conversion_key[:16], suffix=".flac")
                 if already_flac:
                     shutil.copyfile(source, converted)
                 else:
@@ -312,7 +326,7 @@ def _voice_assets(voices, work, ffmpeg):
                     raise ChapterClientError("Voice reference changed during compression")
                 target.hardlink_to(converted)
             write_json(record, {"sha256": file_hash(target), "source_sha256": original_hash,
-                                "pcm_sha256": expected_pcm})
+                                "pcm_sha256": expected_pcm, "audio_file": target.name})
         manifest = {"version": 1, "audio_sha256": file_hash(target),
                     "reference_text": voice["reference_text"]}
         asset_id = digest(manifest)
