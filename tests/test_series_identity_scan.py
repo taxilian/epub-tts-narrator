@@ -176,6 +176,21 @@ class SeriesIdentityScanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "visible"):
             _accept_series_scan(valid, source, cast["characters"], prior, units[:1])
 
+    def test_invalid_prior_ids_identify_the_exact_decision_and_candidate(self):
+        source, cast, registry = fixture()
+        prior = series_context(registry, source)
+        units = make_units(source)[0]
+        valid = {"decisions": [decision(row) for row in cast["characters"]]}
+        response = deepcopy(valid)
+        response["decisions"][0]["prior_character_ids"] = ["invented-prior"]
+        with self.assertRaises(ValueError) as caught:
+            _accept_series_scan(response, source, cast["characters"], prior, units)
+        message = str(caught.exception)
+        self.assertIn("decisions[0]", message)
+        self.assertIn(cast["characters"][0]["id"], message)
+        self.assertIn("invented-prior", message)
+        self.assertIn("unknown IDs", message)
+
     def test_missing_decisions_are_repaired_and_all_responses_replay_from_cache(self):
         class Client(ScanRequests):
             identity = {"model": "test", "base_url": "https://example.invalid"}

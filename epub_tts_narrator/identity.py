@@ -7,6 +7,7 @@ place with an unresolved review item. All calls use the caller's cached client.
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from difflib import SequenceMatcher
@@ -210,31 +211,51 @@ def _accept_series_scan(response, source, characters, prior, units):
         raise ValueError("Series identity scan must return exactly a decisions array")
     rows = response["decisions"]
     if len(rows) != len(characters):
-        raise ValueError("Series identity scan must decide EVERY current character exactly once")
+        expected = {row["id"] for row in characters}
+        supplied = {row.get("character_id") for row in rows if isinstance(row, dict)}
+        missing = sorted(expected - supplied)
+        extra = sorted(item for item in supplied - expected if isinstance(item, str))
+        raise ValueError(
+            f"Series identity scan must decide EVERY current character exactly once: expected "
+            f"{len(characters)} decision(s), received {len(rows)}; missing IDs {missing[:8]}; "
+            f"unexpected IDs {extra[:8]}")
     prior_ids = {row["id"] for row in prior["characters"]}
     accepted = []
-    for row, character in zip(rows, characters):
+    for index, (row, character) in enumerate(zip(rows, characters)):
+        location = f"decisions[{index}] (character_id={character['id']})"
         if not isinstance(row, dict) or set(row) != {"character_id", "decision", "prior_character_ids", "reason", "evidence"}:
-            raise ValueError("Each series decision needs only character_id, decision, prior_character_ids, reason, evidence")
+            raise ValueError(f"{location}: each series decision needs only character_id, decision, "
+                             "prior_character_ids, reason, evidence")
         if row["character_id"] != character["id"]:
-            raise ValueError("Series identity scan must decide each supplied current character once, in input order")
+            raise ValueError(f"{location}: expected supplied character ID {character['id']!r}; "
+                             f"received {row['character_id']!r}")
         if not isinstance(row["decision"], str) or row["decision"] not in {"new", "match", "uncertain"}:
-            raise ValueError("Series identity decision must be new, match, or uncertain")
+            raise ValueError(f"{location}: series identity decision must be new, match, or uncertain")
         candidates = row["prior_character_ids"]
-        if (not isinstance(candidates, list) or any(not isinstance(item, str) or item not in prior_ids for item in candidates)
-                or len(candidates) != len(set(candidates))):
-            raise ValueError("Series identity candidates must be distinct existing prior-series character IDs")
+        unknown = ([item for item in candidates if not isinstance(item, str) or item not in prior_ids]
+                   if isinstance(candidates, list) else [])
+        duplicates = ([item for item, count in Counter(candidates).items() if count > 1]
+                      if isinstance(candidates, list) and all(isinstance(item, str) for item in candidates)
+                      else [])
+        if not isinstance(candidates, list) or unknown or duplicates:
+            raise ValueError(
+                f"{location}: prior_character_ids must contain distinct IDs from prior_series; "
+                f"unknown IDs {unknown[:8]}; duplicate IDs {duplicates[:8]}")
         if row["decision"] == "match" and len(candidates) != 1:
-            raise ValueError("A series match must propose exactly one prior identity")
+            raise ValueError(f"{location}: a series match must propose exactly one prior identity")
         if row["decision"] == "new" and candidates:
-            raise ValueError("A new character decision must have no proposed prior identities")
+            raise ValueError(f"{location}: a new character decision must have no proposed prior identities")
         if not isinstance(row["reason"], str) or not row["reason"].strip() or len(row["reason"]) > 2400:
-            raise ValueError("Series identity decisions need concise source-grounded reasons")
-        _evidence(row["evidence"], source, units)
+            raise ValueError(f"{location}: series identity decisions need concise source-grounded reasons")
+        try:
+            _evidence(row["evidence"], source, units)
+        except ValueError as exc:
+            raise ValueError(f"{location}: {exc}") from None
         if row["decision"] == "match" and not _has_context(
                 row["evidence"], {"characters": [character]},
                 {"character_ids": [character["id"]], "prior_character_id": candidates[0]}, prior):
-            raise ValueError("A series match needs current narrative evidence beyond names or aliases alone")
+            raise ValueError(f"{location}: a series match needs current narrative evidence beyond "
+                             "names or aliases alone")
         accepted.append(deepcopy(row))
     return accepted
 
