@@ -175,7 +175,7 @@ class ReplicaWorkerTests(unittest.TestCase):
         cleanup.assert_called_once_with([*natives, chapter])
 
     def test_insufficient_gpu_memory_fails_before_loading_any_copy(self):
-        with self.assertRaisesRegex(ValueError, "2 Drama 3 copies need about 88 GB.*has 79 GB"):
+        with self.assertRaisesRegex(ValueError, "2 Drama 3 copies need about 94 GB.*has 79 GB"):
             worker.check_gpu_memory(2, query=lambda: "81559\n")
         self.assertEqual(worker.check_gpu_memory(2, query=lambda: "97887\n"), 97887)
         with self.assertRaisesRegex(RuntimeError, "unreadable"):

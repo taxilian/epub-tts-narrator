@@ -43,9 +43,10 @@ WHISPER_REPOSITORY = "Systran/faster-whisper-large-v3"
 WHISPER_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 RECEIPT = ".epub-tts-prepared.json"
 FISH_URL = "http://127.0.0.1:8080/v1/tts"
-# GPU memory one Drama 3 copy needs: about 41.5 GB of bf16 weights and codec
-# plus its caches and captured decode graphs. Checked before any copy loads.
-REPLICA_GPU_MEMORY_MIB = 44 * 1024
+# GPU memory one Drama 3 copy needs: 41.5 GB of bf16 weights and codec plus
+# caches and decode graphs, measured at 48,110 MiB per copy while generating on
+# an RTX PRO 6000 (2026-11-07). Checked before any copy loads.
+REPLICA_GPU_MEMORY_MIB = 47 * 1024
 MPS_ROOT = Path("/tmp/epub-tts-mps")
 SMOKE_TEXT = ("The little boat crossed the quiet lake. We reached the far shore before sunset, "
               "then walked home together beneath the stars.")

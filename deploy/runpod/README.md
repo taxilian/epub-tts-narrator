@@ -353,10 +353,11 @@ time; the chapter service sees one single-request worker per copy, so up to that
 many passages from different chapters generate at once. Passages inside one
 chapter stay sequential because each one's history is the previous accepted take.
 
-Each copy needs about 42 GB of GPU memory for weights and codec plus its caches
-and graphs. Before loading anything the worker checks that GPU 0 has at least
-44 GB per copy and stops with the shortfall otherwise; leave room for CUDA
-Whisper too when `verification.device = "cuda"`. An 80 GB H100 holds one copy,
+Each copy needs 41.5 GB for weights and codec and grows to about 48 GB
+(48,110 MiB measured) with its caches and graphs while generating. Before
+loading anything the worker checks that GPU 0 has at least 47 GiB per copy and
+stops with the shortfall otherwise; CUDA Whisper needs another 2.5–4.5 GB when
+`verification.device = "cuda"`. An 80 GB H100 holds one copy,
 so more than one replica requires `prefer_h100 = false` and a large-memory
 `gpu_type_id` such as the 96 GB RTX PRO 6000. All copies load together at
 startup, and the smoke check generates and verifies a sample from every copy.
@@ -367,8 +368,29 @@ must be present in the container) for the inference copies only, so their
 kernels can run concurrently; Whisper and the chapter service do not join it.
 The daemon is stopped whenever the worker stops. Changing either setting takes
 effect at the next `runpod update`, or at an `encode` that finds the
-configuration changed. Measure before relying on any speedup; see the benchmark
-section below.
+configuration changed. Measure before relying on any speedup.
+
+#### Measured on an RTX PRO 6000 (2026-11-07)
+
+Fixed 24-passage corpus (`scripts/benchmark_rendering.py pipeline --worker all`),
+CUDA Whisper verification, one Secure Cloud RTX PRO 6000 (96 GB), same quality
+thresholds as rendering:
+
+| Configuration | Generated audio / s | Verified audio / s | Accepted | GPU memory peak |
+| --- | --- | --- | --- | --- |
+| 1 copy (default) | 2.10× | 2.10× | 24 / 24 | 52.7 GB |
+| 2 copies | 2.09× | 1.47× | 22 / 24 | 97.1 of 97.9 GB |
+| 2 copies + MPS | 2.62× | 1.84× | 22 / 24 | 97.2 of 97.9 GB |
+
+Without MPS a second copy adds nothing: the copies time-slice a GPU that one
+single-request decoder already keeps busy (96% utilization). MPS lets their
+kernels overlap for about 25% more generated audio, but two copies with CUDA
+Whisper fill the card to within 1 GB, and two passages were rejected in both
+two-copy runs (none with one copy); that cause has not been isolated. Keep the
+default single copy. For comparison, the batched SGLang backend measured 8.04×
+verified on the same card and corpus on 2026-10-22, before it was removed for
+lacking chapter history; that gap is the headroom a batched decoder with
+history could recover.
 
 ### Optional CUDA verification
 
