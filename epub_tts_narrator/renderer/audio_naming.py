@@ -149,5 +149,4 @@ def speech_take_filename(request: Mapping[str, JsonValue], attempt: int, *, role
     """Name a take by its stable request context and public attempt role."""
     if type(attempt) is not int or attempt < 1:
         raise ValueError("Speech attempt number must be a positive integer")
-    purpose = f"attempt-{attempt:03d}" + (f"-{role}" if role else "")
-    return descriptive_audio_filename(purpose, *_take_context(request), suffix=".wav")
+    return descriptive_audio_filename(role or "take", f"attempt-{attempt:03d}", *_take_context(request), suffix=".wav")

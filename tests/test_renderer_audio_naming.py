@@ -52,8 +52,8 @@ class AudioFilenameTests(unittest.TestCase):
         raw = speech_take_filename(request, 3, role="raw")
 
         # Then stable content ownership and roles replace the generic basename.
-        self.assertEqual(normalized, "chunk-42-voice-mara-attempt-003.wav")
-        self.assertEqual(raw, "chunk-42-voice-mara-attempt-003-raw.wav")
+        self.assertEqual(normalized, "attempt-003-chunk-42-voice-mara-take.wav")
+        self.assertEqual(raw, "attempt-003-chunk-42-voice-mara-raw.wav")
         self.assertNotIn("Secret", normalized + raw)
 
     def test_voice_and_recovery_requests_use_their_available_owner_ids(self):
@@ -67,8 +67,8 @@ class AudioFilenameTests(unittest.TestCase):
         recovered = speech_take_filename(recovery, 2)
 
         # Then each uses real available identifiers rather than guessed book text.
-        self.assertEqual(created, "voice-hero-Hero-attempt-001.wav")
-        self.assertEqual(recovered, "aaaaaaaaaaaaaaaa-part-012-034-attempt-002.wav")
+        self.assertEqual(created, "attempt-001-voice-hero-Hero-take.wav")
+        self.assertEqual(recovered, "attempt-002-aaaaaaaaaaaaaaaa-part-012-034-take.wav")
 
     def test_explicit_legacy_recorded_name_remains_valid(self):
         # Given an already persisted generic artifact name.
