@@ -95,6 +95,18 @@ class SpeechRetryBudgetTests(unittest.TestCase):
         self.assertEqual(generation_attempts(self.directory), [2, 3, 12, 999, 1000, 1000000000])
         self.assertEqual({path.name for path in self.directory.iterdir()}, set(names))
 
+    def test_inventory_recognizes_contextual_take_and_raw_names(self):
+        # Given newly written contextual normalized, RAW, and recovery artifacts.
+        names = ["attempt-003-chunk-voice-take.wav", "attempt-002-chunk-voice-raw.wav",
+                 "attempt-012-parent-part-recovery-raw.wav",
+                 "attempt-999-chunk-voice-regenerated-0123456789abcdef.wav"]
+        for name in names:
+            (self.directory / name).write_bytes(b"retained candidate")
+
+        # When inventorying attempt IDs, then each contextual file reserves its ID once.
+        self.assertEqual(generation_attempts(self.directory), [2, 3, 12, 999])
+        self.assertEqual({path.name for path in self.directory.iterdir()}, set(names))
+
     def test_inventory_ignores_unknown_noncanonical_and_reference_metadata_names(self):
         names = ["attempt-000.wav", "attempt-0001.wav", "attempt-01.wav", "attempt--01.wav",
                  "attempt-001-generation.json", "attempt-001-regenerated-nothex.wav",
