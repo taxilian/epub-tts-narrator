@@ -35,7 +35,8 @@ service_port = 8082
 # inference_replicas = 2
 # inference_mps = true
 # Batched decoding: one copy advances up to this many passages per step
-# (default 1; not combinable with inference_replicas above 1).
+# (default 1; not combinable with inference_replicas above 1). EXPERIMENTAL:
+# some passages run on; see the deployment README before enabling.
 # inference_batch_rows = 8
 idle_timeout_seconds = 300
 github_url = "https://github.com/taxilian/epub-tts-narrator.git"

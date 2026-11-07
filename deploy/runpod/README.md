@@ -392,7 +392,24 @@ verified on the same card and corpus on 2026-10-22, before it was removed for
 lacking chapter history; that gap is the headroom a batched decoder with
 history could recover.
 
-### Batched decoding
+### Batched decoding (experimental; keep the default of 1)
+
+**Status (2026-11-07, RTX PRO 6000):** the decoder itself runs 303.8 frames per
+second at 8 rows against 41.2 for Fish's own graph-captured decoder (7.4×), and
+generation-only serving of the 24-passage corpus doubled (3.09× realtime at 8
+concurrent requests against 1.52× at 1). But it is **not ready for books**:
+across runs it produced about 43% more audio than Fish's decoder for the same
+passages (366–368 s against 256.7 s), because a few passages fail to stop
+(8.2 s became 27.8 s, 16.1 s became 91.6 s), even with one request at a time.
+Every layer, cache and recurrent state matches Fish exactly for identical
+inputs, captured graphs equal eager decoding, and the sampler's distribution
+matches Fish's; whether the counter-hash noise stream or a numerical difference
+in the masked attention causes the run-ons is not yet isolated. On the GPU,
+multi-step logits comparisons are not reproducible between processes (kernel
+selection varies), so `check_drama3_batching.py --checkpoint` reports drift
+there even when nothing is wrong; its per-step state comparison is the useful
+signal. With batching on, Whisper verification on the same GPU becomes the
+pipeline bottleneck, so the full verified pipeline did not speed up.
 
 `runpod.inference_batch_rows` (default 1, at most 16) makes the single Drama 3
 copy decode that many passages together, one frame per step. The chapter

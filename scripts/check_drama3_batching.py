@@ -177,16 +177,21 @@ def check_equivalence(model, requests, scripts, rows, capacity, tolerance):
     results, harness, scheduler = run_batched(
         model, requests, rows, graphs=False, capacity=capacity,
         harness=lambda backend: ForcedHarness(backend, scripts))
-    worst = 0.0
+    worst, first = 0.0, None
+    draws = 1 + model.config.audio_decoder.num_codebooks
     for index, ((ref_frames, ref_finish, ref_seen), (frames, finish)) in enumerate(zip(reference, results)):
         ours = harness.seen[index]
-        if frames != ref_frames or finish != ref_finish or len(ours) != len(ref_seen):
-            raise AssertionError(f"request {index}: batched frames differ from Fish's decoder")
-        for a, b in zip(ref_seen, ours):
+        for call, (a, b) in enumerate(zip(ref_seen, ours)):
             diff = (a.reshape(-1) - b.reshape(-1)).abs().max().item()
-            worst = max(worst, diff / max(a.abs().max().item(), 1e-6))
-    if worst > tolerance:
-        raise AssertionError(f"batched logits differ from Fish's decoder by {worst:.2e} (limit {tolerance:.0e})")
+            relative = diff / max(a.abs().max().item(), 1e-6)
+            worst = max(worst, relative)
+            if relative > tolerance and first is None:
+                first = {"request": index, "step": call // draws, "draw": call % draws, "relative": relative}
+        if first is None and (frames != ref_frames or finish != ref_finish or len(ours) != len(ref_seen)):
+            first = {"request": index, "frames": "differ"}
+    if first is not None or worst > tolerance:
+        raise AssertionError(f"batched decoding differs from Fish's decoder: first {first}, "
+                             f"worst relative logits difference {worst:.2e} (limit {tolerance:.0e})")
     return {"requests": len(requests), "rows": rows, "steps": scheduler.steps,
             "row_steps": scheduler.row_steps, "worst_relative_logits_difference": worst}
 
@@ -244,6 +249,8 @@ def main():
     parser.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32",
                         help="--tiny only; the real model always loads in bfloat16")
     parser.add_argument("--rows", type=int, default=8)
+    parser.add_argument("--requests", type=int, choices=range(2, 7), default=None,
+                        help="Requests to decode (default: 3 with --tiny, 6 with --checkpoint)")
     args = parser.parse_args()
     import torch
     rng = random.Random(7)
@@ -254,7 +261,7 @@ def main():
     else:
         model, capacity = real_model(args.checkpoint, args.device), None
         tolerance = 5e-2
-    count = 6 if not args.tiny else 3
+    count = args.requests or (3 if args.tiny else 6)
     requests = [frames.to(model.audio_decoder.device) for frames in prompts(model, count, rng)]
     scripts = scripts_for(model, count, rng)
     equivalence_rows = max(1, min(args.rows, count - 1))
