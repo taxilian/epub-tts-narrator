@@ -27,7 +27,7 @@ def signed_record(record):
 def audio_pointers(frames, chapter_number=None, *, audio_file=None, lossless_file=None):
     """Build fresh chapter pointers, honoring exact safe filename overrides."""
     if (type(frames) is not int or frames < 0
-            or chapter_number is not None and (type(chapter_number) is not int or chapter_number < 1)):
+            or (chapter_number is not None and (type(chapter_number) is not int or chapter_number < 1))):
         raise ValueError("Chapter audio pointers require nonnegative frames and a positive chapter number")
     if not frames:
         if audio_file is not None or lossless_file is not None:
@@ -58,8 +58,8 @@ def chapter_record(composed, *, spec, pcm_data_sha256):
     record = {key: deepcopy(composed[key]) for key in
               ("id", "number", "title", "frames", "channels", "sample_rate", "segments",
                "pcm_sha256", "encoded_sha256", "normalization", "track_number", "total_chapters")}
-    pointers = audio_pointers(composed["frames"], audio_file=composed.get("audio_file"),
-                              lossless_file=composed.get("lossless_file"))
+    pointers = audio_pointers(composed["frames"], composed["number"],
+                              audio_file=composed.get("audio_file"), lossless_file=composed.get("lossless_file"))
     record.update(format=CHAPTER_FORMAT, version=1, spec_hash=digest(spec),
                   source_fingerprint=spec["source_fingerprint"],
                   voice_bindings=deepcopy(spec["voice_bindings"]),
