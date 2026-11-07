@@ -30,7 +30,7 @@ def _decoded_chapter(folder, record, scratch, render):
     wav = scratch / f"{chapter['id']}.wav"
     if composed["frames"]:
         _run_audio([render["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-                    "-i", str(folder / "chapter.flac"), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
+                    "-i", str(folder / metadata["lossless_file"]), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
         if pcm_sha256(wav) != metadata.get("pcm_data_sha256"):
             raise ValueError("Decoded chapter master differs from the server's lossless PCM")
     else:
