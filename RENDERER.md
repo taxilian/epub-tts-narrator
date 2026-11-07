@@ -1286,15 +1286,29 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 | File | Purpose |
 | --- | --- |
 | `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio using original manifest numbers, including when a subset is selected; empty entries are marked skipped. |
-| `book.m4b` | AAC audiobook with chapter titles and timing. |
+| `<book-title>.m4b` | AAC audiobook with chapter titles and timing, using a filesystem-safe form of the actual book title. |
 | `chapter-links/chapter-01.m4a` etc. | Convenience symlinks to each finished chapter's audio inside `chapters/`; renderer-owned and ignored during replacement validation. Entries are always symlinks. |
 | `artwork/cover.jpg` | Square 1600×1600 cover embedded in the M4B. |
 | `artwork/original-cover.jpg` or `.png` | Original declared EPUB cover, retained byte-for-byte. |
 | `sync.json` | Exact PCM frame ranges linking audio chunks to source text. |
 | `source.json`, `cast.json` | Portable canonical text and voice assignments. |
 | `verification.json` | Accepted chunk reports, transcripts, and hashes. |
-| `audio-manifest.json` | Audio inventory, durations, chapter ranges, and checksums. |
+| `audio-manifest.json` | Audio inventory, durations, chapter ranges, checksums, and the authoritative `audiobook.path` basename. |
 | `render.json` | Completion marker, provenance, engine/verifier identities, voice hashes, and file checksums. |
+
+Fresh books use a sanitized form of the actual title, for example `The Last Lantern.m4b`, never the generic `book.m4b`. Path separators, controls, reserved device names, and unsafe override values are rejected; Unicode is preserved where possible and long names are bounded. The exact chosen basename is persisted in `audio-manifest.json` as `audiobook.path`, repeated in `sync.json` as `audio_file`, and included in `render.json` `files_sha256`. For example:
+
+```json
+{
+  "audiobook": {
+    "path": "The Last Lantern.m4b",
+    "sha256": "<sha256>",
+    "codec": "aac"
+  }
+}
+```
+
+An existing per-book `audiobook.path` is authoritative across render, assemble, metadata refresh, publication, result paths, and checksums, including a custom name or an explicitly recorded `book.m4b`. Changing the book title does not silently rename that output. An older manifest without `audiobook.path` can use an intact existing `book.m4b`; that compatibility fallback is not a fresh-book default. No existing book is renamed, deleted, re-encoded, or regenerated merely because its name is legacy.
 
 New EPUB analyses retain a local `source-epub.json` location hint, bound to the analyzed book's SHA-256. Rendering uses that original automatically. The hint is separate from analysis fingerprints and voice/audio cache identities. For an older analysis or a moved original, pass `--epub PATH`; the EPUB's byte hash must match the analyzed book. Local and remote chapter rendering use the same final publication path for artwork and tags.
 
@@ -1308,7 +1322,7 @@ To add or refresh artwork and metadata on a completed book without generating sp
 audiobook-render refresh-metadata path/to/book-directory --epub path/to/original.epub
 ```
 
-This command needs only FFmpeg/FFprobe and the existing finished output; it does not need models or render caches. It stream-copies the M4B's encoded audio, preserves chapter files and synchronization ranges, verifies that the encoded audio packets are identical, and updates all affected checksums. The previous book remains intact until the replacement passes verification. The original EPUB location is saved for future commands.
+This command needs only FFmpeg/FFprobe and the existing finished output; it does not need models or render caches. It stream-copies the M4B's encoded audio under the same recorded `audiobook.path` basename, preserves chapter files and synchronization ranges, verifies that the encoded audio packets are identical, and updates all affected checksums. Refreshed EPUB metadata does not rename the file. The previous book remains intact until the replacement passes verification. The original EPUB location is saved for future commands.
 
 Chapters and the final M4B are encoded independently from the same assembled lossless PCM. The final book is never built by re-encoding the lossy chapter files. FFprobe checks the resulting duration, chapter tags, and embedded cover. Completed chapter PCM, encoded chapter copies, accepted chunk PCM, and failed attempts remain in the work cache for recovery; the published audiobook does not duplicate the PCM files.
 
