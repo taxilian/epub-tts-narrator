@@ -856,7 +856,11 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.get_pod.side_effect = RunpodAPIError(
             "Runpod could not find the requested resource (HTTP 404)", status=404)
 
-        with self.assertRaisesRegex(RuntimeError, "runpod bootstrap"):
+        with self.assertRaisesRegex(RuntimeError, "Pod disk was deleted with it; run runpod bootstrap"):
+            deployment.start()
+        # An older worker's network volume outlives its Pod; never claim otherwise.
+        deployment.state["volume_id"] = "volume_kept"
+        with self.assertRaisesRegex(RuntimeError, "network volume volume_kept is not deleted automatically"):
             deployment.start()
 
     def test_status_reports_a_pod_deleted_elsewhere(self):

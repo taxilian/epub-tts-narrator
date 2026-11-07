@@ -14,6 +14,7 @@ import unittest
 import wave
 from unittest.mock import Mock, patch
 
+from shared_fixtures import FFMPEG
 from test_runpod_worker import fake_download
 
 from epub_tts_narrator.renderer.config import DEFAULTS
@@ -231,6 +232,39 @@ class ReplicaWorkerTests(unittest.TestCase):
         worker.stop_mps(binary, variables, run=stop)
         self.assertEqual(stop.call_args.kwargs["input"], b"quit\n")
 
+    def test_smoke_validates_normalized_pcm_not_the_raw_float32_take(self):
+        # Regression: the CUDA engine writes IEEE-float WAV (format 3), which the
+        # PCM WAV reader rejects; smoke must check the normalized clip instead.
+        import numpy as np
+        import soundfile as sf
+        ffmpeg = FFMPEG
+        from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
+        self.assertIsNotNone(ffmpeg, "FFmpeg is required by the renderer test environment")
+        self.config["render_pool"]["workers"] = inference_workers(1)
+        self.config["render"]["ffmpeg"] = ffmpeg
+        engine = Mock()
+        engine._request.side_effect = lambda text, refs, history, destination, seed: sf.write(
+            destination, (0.2 * np.sin(np.linspace(0, 800, 44100))).astype(np.float32), 44100, subtype="FLOAT")
+        checked = []
+
+        def validate(path, text, verifier, quality, purpose):
+            with wave.open(str(path), "rb") as stream:  # raises "unknown format: 3" on the raw take
+                checked.append((Path(path).name, stream.getsampwidth()))
+            return {"passed": True}
+
+        real_run = worker.subprocess.run
+
+        def run(command, **kwargs):
+            if command[0] == ffmpeg and command[-1].endswith(".m4a"):
+                Path(command[-1]).write_bytes(b"fixture m4a")
+                return Mock(returncode=0)
+            return real_run(command, **kwargs)
+        with (patch("epub_tts_narrator.renderer.quality.validate_audio", side_effect=validate),
+              patch.object(worker.subprocess, "run", side_effect=run), patch("sys.stdout", new=io.StringIO())):
+            worker.smoke(self.config, fetch=Mock(return_value={"protocol": PROTOCOL}), engine_factory=lambda *_: engine,
+                         verifier_factory=lambda *_: Mock(), roundtrip=Mock())
+        self.assertEqual(checked, [("sample-1-normalized.wav", 2)])
+
     def test_smoke_checks_every_copy(self):
         from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
         engines = []
@@ -254,7 +288,8 @@ class ReplicaWorkerTests(unittest.TestCase):
               patch.object(worker.subprocess, "run", side_effect=encode), patch("sys.stdout", new=io.StringIO()),
               self.assertRaisesRegex(RuntimeError, "copy 2 did not pass verification")):
             worker.smoke(self.config, fetch=Mock(return_value={"protocol": PROTOCOL}), engine_factory=factory,
-                         verifier_factory=lambda *_: Mock(), roundtrip=Mock())
+                         verifier_factory=lambda *_: Mock(), roundtrip=Mock(),
+                         normalize=lambda source, target, **_: Path(target).write_bytes(Path(source).read_bytes()))
         self.assertEqual([engine.url for engine in engines],
                          ["http://127.0.0.1:8080/v1/tts", "http://127.0.0.1:8090/v1/tts"])
         self.assertTrue(all(engine._request.call_count == 1 and engine.close.call_count == 1 for engine in engines))

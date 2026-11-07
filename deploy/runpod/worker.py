@@ -389,13 +389,13 @@ def storage_smoke(config, path, *, publisher_factory=None, download=_download_ha
 
 
 def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None,
-          roundtrip=storage_smoke):
+          roundtrip=storage_smoke, normalize=None):
     """Exercise synthesis, recognition, encoding and Ceph using invented text."""
     from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
     from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
     from epub_tts_narrator.renderer.quality import validate_audio
     from epub_tts_narrator.renderer.verification import create_verifier
-    from epub_tts_narrator.renderer.assembly import aac_codec_arguments
+    from epub_tts_narrator.renderer.assembly import aac_codec_arguments, normalize_clip
     import soundfile as sf
 
     check(config)
@@ -421,7 +421,12 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
                 # A self-contained smoke check cannot require any book's cast. The
                 # inference service accepts an empty reference list for this probe.
                 engine._request(SMOKE_TEXT, [], [], path, 4101)
-                samples.append(path)
+                # The CUDA engine returns float32 WAV; checks run on the same
+                # normalized PCM that rendering produces, never the raw take.
+                normalized = directory / f"sample-{index + 1}-normalized.wav"
+                (normalize or normalize_clip)(path, normalized, sample_rate=config["render"]["sample_rate"],
+                                              ffmpeg=config["render"]["ffmpeg"])
+                samples.append(normalized)
             audio = samples[0]
             device = config["verification"]["device"].upper()
             print(f"Smoke test: checking generated words with {device} Whisper.", flush=True)

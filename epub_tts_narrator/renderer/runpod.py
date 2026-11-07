@@ -787,9 +787,11 @@ class Deployment:
         except RunpodAPIError as exc:
             if not _resource_missing(exc):
                 raise
+            storage = (f"Its network volume {self.state['volume_id']} is not deleted automatically"
+                       if self.state.get("volume_id") else "Its Pod disk was deleted with it")
             raise RuntimeError(
                 f"The saved worker {self.pod_id} no longer exists in Runpod (deleted outside this tool). "
-                "Its Pod disk was deleted with it; run runpod bootstrap to create and fully set up a new worker."
+                f"{storage}; run runpod bootstrap or encode to create and fully set up a new worker."
             ) from None
 
     def start(self):

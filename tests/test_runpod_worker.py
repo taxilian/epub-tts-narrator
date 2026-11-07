@@ -678,7 +678,8 @@ class RunpodWorkerTests(unittest.TestCase):
               patch.object(worker.subprocess, "run", side_effect=encode),
               patch("sys.stdout", new=io.StringIO())):
             worker.smoke(self.config, fetch=fetch, engine_factory=lambda *_: engine,
-                         verifier_factory=lambda *_: verifier, roundtrip=roundtrip)
+                         verifier_factory=lambda *_: verifier, roundtrip=roundtrip,
+                         normalize=lambda source, target, **_: Path(target).write_bytes(Path(source).read_bytes()))
         self.assertEqual(fetch.call_args.kwargs["headers"], {"Authorization": "Bearer test-service-key"})
         self.assertEqual([call.args[1].suffix for call in roundtrip.call_args_list], [".flac", ".m4a"])
         self.assertEqual(list((self.root / "data/deployment-smoke").iterdir()), [])
