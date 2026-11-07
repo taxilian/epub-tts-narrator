@@ -1,0 +1,96 @@
+"""Resolve fresh and persisted audiobook basenames without changing cache identity."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+import unicodedata
+from typing import Final, TypeAlias
+
+
+JsonValue: TypeAlias = str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
+LEGACY_AUDIOBOOK_FILENAME: Final = "book.m4b"
+_SUFFIX: Final = ".m4b"
+_MAX_STEM_BYTES: Final = 180
+_MAX_FILENAME_BYTES: Final = 240
+_FORBIDDEN: Final = frozenset('<>:"/\\|?*')
+_GENERIC_STEMS: Final = frozenset({"audio", "audiobook", "book", "output"})
+_RESERVED_STEMS: Final = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)),
+     *(f"LPT{number}" for number in range(1, 10))}
+)
+
+
+def _filename_error() -> ValueError:
+    return ValueError("audio.audiobook.path must be one nonempty .m4b basename of at most 240 UTF-8 bytes; path separators, absolute/relative paths, hidden/control characters, reserved device names, and leading/trailing spaces or dots are not allowed.")
+
+
+def _reserved_stem(stem: str) -> bool:
+    return stem.split(".", 1)[0].rstrip(" .").upper() in _RESERVED_STEMS
+
+
+def validate_audiobook_filename(value: JsonValue) -> str:
+    """Return an exact safe recorded basename or reject it without rewriting it."""
+    if not isinstance(value, str) or not value.endswith(_SUFFIX):
+        raise _filename_error()
+    stem = value[:-len(_SUFFIX)]
+    if (not stem or stem != stem.strip(" .") or len(value.encode("utf-8")) > _MAX_FILENAME_BYTES
+            or _reserved_stem(stem)
+            or any(character in _FORBIDDEN or unicodedata.category(character).startswith("C")
+                   for character in value)):
+        raise _filename_error()
+    return value
+
+
+def default_audiobook_filename(book: Mapping[str, JsonValue]) -> str:
+    """Derive a bounded, filesystem-safe fresh basename from the actual book title."""
+    title = book.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("A nonempty book title is required to create a descriptive audiobook filename")
+    normalized = unicodedata.normalize("NFC", title)
+    safe = "".join(
+        " " if character in _FORBIDDEN or unicodedata.category(character).startswith("C") else character
+        for character in normalized
+    )
+    stem = " ".join(safe.split()).strip(" .")
+    if not stem:
+        stem = "audiobook-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    if len(stem.encode("utf-8")) > _MAX_STEM_BYTES:
+        retained: list[str] = []
+        size = 0
+        for character in stem:
+            width = len(character.encode("utf-8"))
+            if size + width > _MAX_STEM_BYTES:
+                break
+            retained.append(character)
+            size += width
+        stem = "".join(retained).rstrip(" .")
+    if stem.casefold() in _GENERIC_STEMS or _reserved_stem(stem):
+        stem += " audiobook"
+    return validate_audiobook_filename(stem + _SUFFIX)
+
+
+def resolve_audiobook_filename(book: Mapping[str, JsonValue] | None = None,
+                               previous_audio: Mapping[str, JsonValue] | None = None,
+                               output_dir: str | Path | None = None) -> str:
+    """Honor a recorded name, recognize an intact legacy book, or derive a fresh name."""
+    if previous_audio is None:
+        if book is None:
+            raise ValueError("Book metadata is required when no previous audio manifest exists")
+        return default_audiobook_filename(book)
+    if not isinstance(previous_audio, dict):
+        raise ValueError("The previous audio manifest must be an object with audio.audiobook.path")
+    audiobook = previous_audio.get("audiobook", {})
+    if not isinstance(audiobook, dict):
+        raise _filename_error()
+    recorded = audiobook.get("path")
+    if recorded is not None:
+        return validate_audiobook_filename(recorded)
+    if output_dir is not None:
+        legacy = Path(output_dir) / LEGACY_AUDIOBOOK_FILENAME
+        if legacy.is_symlink():
+            raise ValueError("Legacy audiobook must be a regular, nonsymlink file: book.m4b")
+        if legacy.is_file():
+            return LEGACY_AUDIOBOOK_FILENAME
+    raise ValueError("audio.audiobook.path is missing and no intact legacy book.m4b exists; restore the recorded output name or the legacy file before updating this book.")
