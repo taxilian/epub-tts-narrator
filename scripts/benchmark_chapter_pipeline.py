@@ -174,8 +174,9 @@ def cmd_run(args):
                 downloaded[group] = (folder, descriptor)
             assembled = assemble_book(corpus, downloaded, config, output / "book", notify=print)
             report["timing"]["assembly_seconds"] = time.perf_counter() - began
+            book_name = assembled["result"]["audio"]["audiobook"]["path"]
             report["book"] = {"path": assembled["path"],
-                              "sha256": assembled["result"]["files_sha256"]["book.m4b"]}
+                              "sha256": assembled["result"]["files_sha256"][book_name]}
             manifest["status"] = "complete"
             save()
             finalize(report, manifest, status="complete")

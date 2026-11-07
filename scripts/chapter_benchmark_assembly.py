@@ -82,5 +82,6 @@ def assemble_book(corpus, downloaded, config, destination, *, notify=lambda mess
         write_json(stage / "render.json", result)
         _publish(stage, destination)
     seconds = time.perf_counter() - began
-    notify(f"Benchmark book assembled: {destination / 'book.m4b'}")
-    return {"seconds": seconds, "path": str(destination / "book.m4b"), "result": result}
+    book_path = destination / audio["audiobook"]["path"]
+    notify(f"Benchmark book assembled: {book_path}")
+    return {"seconds": seconds, "path": str(book_path), "result": result}

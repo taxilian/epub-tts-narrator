@@ -25,7 +25,7 @@ class RunSafetyTests(BenchmarkFixture):
         flac.write_bytes(flac.read_bytes() + b"tampered")
         self.expect_failure("run", str(self.frozen), "--config", str(self.config_path),
                             "--scheduler", "legacy", "--output", str(self.root / "run"), "--fake-engine")
-        self.assertFalse((self.root / "run" / "book" / "book.m4b").exists())
+        self.assertFalse(list((self.root / "run" / "book").glob("*.m4b")))
 
     def test_frozen_passage_tampering_fails_the_corpus_checksum(self):
         path = self.frozen
