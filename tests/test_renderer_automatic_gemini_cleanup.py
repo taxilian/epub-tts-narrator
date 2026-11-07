@@ -257,7 +257,8 @@ class AutomaticGeminiCleanupTests(unittest.TestCase):
 
     def test_pending_verification_rechecks_local_audio_after_remote_deletion(self):
         directory = self.make_pending()
-        original = (directory / "attempt-001.wav").read_bytes()
+        pending = read_json(directory / "attempt-001.json")
+        original = (directory / pending["audio_file"]).read_bytes()
         events = list(self.remote.events)
         selected = self.ensure()
         self.assertEqual(Path(selected["reference_audio"]).read_bytes(), original)
