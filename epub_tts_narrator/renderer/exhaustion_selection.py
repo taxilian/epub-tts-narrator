@@ -133,9 +133,18 @@ def selected_generation_identity(request, voices, metadata):
 
 
 def select_retained(directory, request, client):
+    from .history_echo import archive, candidate_echo
     directory = Path(directory)
-    candidates = retained_candidates(directory, request)
+    retained = retained_candidates(directory, request)
+    # A take that replayed another line of chapter history is not a rendition
+    # of this passage at all, so it is never a best-effort candidate.
+    echoes = {item['summary']['candidate_id']: echo for item in retained
+              if (echo := candidate_echo(item['record'], logical_text(request))) is not None}
+    candidates = [item for item in retained if item['summary']['candidate_id'] not in echoes]
     if not candidates:
+        if echoes:
+            raise ValueError('Every retained take repeats an earlier line of chapter history (history echo); '
+                             'none is a rendition of this passage, so none is published')
         raise ValueError('No physically usable bound full-span candidate remains')
     payload = {'mode': 'exhaustion_selection', 'request_sha256': digest(request),
                'requested_text': logical_text(request), 'request': deepcopy(request),
@@ -143,6 +152,14 @@ def select_retained(directory, request, client):
     path = directory / 'exhaustion-selection.json'
     identity = policy(client.identity)
     state = {'audit': {'identity': identity, 'payload': payload, 'response': None}, 'response_received': False}
+    if path.exists() or path.is_symlink():
+        saved = read_json(regular_file(path))
+        offered = {item.get('candidate_id') for item in
+                   saved.get('audit', {}).get('payload', {}).get('candidates', [])}
+        if offered & set(echoes):
+            # A pending choice that offered echoes is retired, not trusted.
+            archive(directory, ['exhaustion-selection.json'],
+                    {'retired_candidates': sorted(offered & set(echoes))})
     if path.exists() or path.is_symlink():
         saved = read_json(regular_file(path))
         state = {key: value for key, value in saved.items() if key != 'record_sha256'}

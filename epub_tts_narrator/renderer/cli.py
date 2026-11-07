@@ -22,7 +22,7 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -64,6 +64,11 @@ def parser():
                                  help="List removable files and space savings without deleting anything")
             command.add_argument("--discard-render-cache", action="store_true",
                                  help="Also delete accepted speech and chapter caches; future rendering regenerates speech. Never deletes voice samples or finished audiobooks")
+        if name == "history-echoes":
+            command.add_argument("--retire", action="store_true",
+                                 help="Rename each published history-echo take's files out of the way (never deletes) "
+                                      "so the next render regenerates those lines")
+            command.add_argument("--json", action="store_true", help="Print the full report as JSON")
         if name == "voice-aliases":
             command.add_argument("--set", dest="alias_assignments", nargs=2, action="append", default=[],
                                  metavar=("SOURCE", "TARGET"), help="Share TARGET's voice for SOURCE in this book and descendants")
@@ -263,7 +268,7 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations"}:
+        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "history-echoes"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -391,6 +396,30 @@ def main(argv=None):
                 print("Discarding the render cache removes speech resumability; future rendering will generate speech again.")
             else:
                 print("Accepted speech and current chapter checkpoints are retained for resume.")
+            return 0
+        if args.command == "history-echoes":
+            from .history_echo_report import history_echo_report
+            report = history_echo_report(bundle, config, retire_choices=args.retire)
+            if args.json:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return 0
+            echoes = report["echo_choices"]
+            print(f"Best-effort choices checked: {report['best_effort_choices']}; "
+                  f"history echoes: {len(echoes)}.")
+            for item in echoes:
+                print(f"- Chapter {item['chapter_number'] or '?'} ({', '.join(item['segment_ids'])}): "
+                      f"{item['text'].strip()!r}")
+                print(f"    heard as: {item['transcript']!r}")
+                print(f"    repeats:  {item['echoed_line']!r}")
+            if report["history_unavailable"]:
+                print(f"{report['history_unavailable']} choice(s) could not be checked: their history codes are missing.")
+            chapters = sorted({item["chapter_number"] for item in echoes if item["chapter_number"]})
+            if echoes and report["retired"]:
+                print("Retired these takes (files renamed with a history-echo suffix; nothing deleted).")
+            if chapters:
+                listed = ",".join(map(str, chapters))
+                verb = "Re-render" if report["retired"] else "To fix, retire them with --retire, then re-render"
+                print(f"{verb} chapters {listed}: audiobook-render render {args.bundle} --chapters {listed}")
             return 0
         if getattr(args, "chapters", None) is not None:
             config["render"]["chapter_numbers"] = chapter_numbers(args.chapters, len(bundle["chapters"]))

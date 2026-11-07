@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from .common import digest
-from .clip_repair_contract import approved, synthesis_request
+from .clip_repair_contract import approved, logical_text, synthesis_request
+from .continuity import history_recovery
+from .history_echo import candidate_echo
 from .clip_repair_execute import execute_plan
 from .clip_repair_state import ClipRepairState, ClipRecoveryUnavailable
 from .exhaustion_candidates import retained_candidates
@@ -61,8 +63,13 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
             if plan is not None or session.state['phase'] == 'evaluated':
                 notify('  Restoring the completed clip repair.' if session.state['phase'] == 'evaluated'
                        else '  Executing a clip-local repair approved by two independent reviewers.')
-                result = execute_plan(session, generate_plan_part, verifier, config,
-                                      budget=budget, episode=episode, reserve=reserve)
+                # Repair parts that heard the history this line echoed would
+                # repeat it again; they keep only the reference voice.
+                expected = logical_text(request)
+                echoed = any(candidate_echo(item['record'], expected) for item in candidates)
+                with history_recovery('none' if echoed else None):
+                    result = execute_plan(session, generate_plan_part, verifier, config,
+                                          budget=budget, episode=episode, reserve=reserve)
                 if result is not None:
                     return result
         notify('  Selecting the best physically usable full-clip take under the best-effort exhaustion policy.')

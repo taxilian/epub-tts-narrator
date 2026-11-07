@@ -253,7 +253,14 @@ class HistorySynthesis:
     chapter's history turns and their voices; subclasses implement only
     ``_generate_wire``, which local runtimes run directly and HTTP clients
     send to a worker's ``synthesize_fish``.
+
+    ``history_layouts`` names the prompt layouts ``_generate_wire`` builds:
+    ``directing`` (Fish's history conversation, always) and optionally
+    ``streaming`` (Drama 3's streaming continuation, used only by a
+    history-echo retry; see ``history_echo``).
     """
+
+    history_layouts = frozenset({"directing"})
 
     def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
         # Validate the full request before encoding a voice/loading a model.
@@ -277,24 +284,38 @@ class HistorySynthesis:
         return {**self._compose_and_generate(engine_text, voices, output_path, seed=seed), **metadata}
 
     def _compose_and_generate(self, text, voices, output_path, *, seed):
-        from .continuity import compose, current, generated_codes
+        from .continuity import compose, current, generated_codes, recovery_mode
+        from .history_echo import VERSION, apply_recovery
         references, history = compose(text, voices)
-        metadata, codes, codebook_size = self._generate_wire(text, references, history, output_path, seed=seed)
-        if current() is None:
+        scope = current()
+        requested = recovery_mode() if scope is not None else None
+        applied, text, history, layout = apply_recovery(
+            requested, text, history, self.history_layouts, kind=scope.get("kind") if scope else None)
+        options = {"layout": layout} if layout != "directing" else {}
+        metadata, codes, codebook_size = self._generate_wire(text, references, history, output_path,
+                                                             seed=seed, **options)
+        if requested is not None:
+            metadata = {**metadata, "history_recovery": {"version": VERSION, "requested": requested,
+                                                         "applied": applied}}
+        if scope is None:
             # Casting and preview takes are never chapter history.
             return metadata
         return {**metadata, **generated_codes(codes, codebook_size, text, voices)}
 
-    def synthesize_fish(self, text, voices, output_path, *, seed, history=()):
+    def synthesize_fish(self, text, voices, output_path, *, seed, history=(), layout="directing"):
         """Serve one composed wire request; the client owns chapter history."""
         from .fish_http import trim_wire_text
         _seed(seed)
+        if layout not in self.history_layouts:
+            raise EngineError(f"This engine does not build the {layout!r} history layout")
         text = trim_wire_text(text, {voice.get("speaker") for voice in voices})
         if len(voices) == 1 and voices[0].get("speaker") is None:
             voices = [dict(voices[0], speaker=0)]
             if not text.lstrip().startswith("<|speaker:"):
                 text = f"<|speaker:0|> {text}"
-        metadata, codes, codebook_size = self._generate_wire(text, voices, list(history), output_path, seed=seed)
+        options = {"layout": layout} if layout != "directing" else {}
+        metadata, codes, codebook_size = self._generate_wire(text, voices, list(history), output_path,
+                                                             seed=seed, **options)
         return {**metadata, "codes": codes, "codebook_size": codebook_size}
 
 
@@ -490,18 +511,41 @@ class Drama3MLXEngine(HistorySynthesis):
                 raise EngineError(f"Could not encode reference audio: {exc}") from exc
         return self._reference_cache[key]
 
+    history_layouts = frozenset({"directing", "streaming"})
+
+    def _streaming_segment(self, model: Any, text: str, voice: dict[str, Any], kept: list, seed: int) -> Any:
+        """One take in the streaming-continuation layout (see ``drama3_layouts``)."""
+        import mlx.core as mx
+        from drama3_mlx.generate import generate_frames
+        from drama3_mlx.model import Segment
+        from .drama3_layouts import streaming_rows
+        rows = streaming_rows(text, self._reference(voice), kept, model.tokenizer, model.model.config)
+        mx.random.seed(seed)
+        frames, finish_reason = generate_frames(
+            model.model, rows, max_new_tokens=self.max_new_tokens or 2048,
+            temperature=self.temperature, top_k=self.top_k, top_p=self.top_p)
+        if not len(frames):
+            raise EngineError("Drama 3 returned no audio frames")
+        codes = frames[:, 1:].T.copy()
+        return Segment(text=text, codes=codes, audio=model.codec.decode(codes), finish_reason=finish_reason,
+                       prompt_rows=len(rows), seconds=0.0)
+
     def _generate_wire(
         self, text: str, references: list[dict[str, Any]], history: list, output_path: Path,
-        *, seed: int,
+        *, seed: int, layout: str = "directing",
     ) -> tuple[dict[str, Any], list[list[int]], int]:
         """Generate tagged ``text`` after ``history`` turns with tagged references.
 
         Prompt overflow follows Fish's fallback order (drop the latest turn,
         then the pinned one). The metadata records how many turns were used.
+        ``layout="streaming"`` (a history-echo retry of one voice) sends the
+        same turns in Drama 3's streaming-continuation layout instead.
         """
         output_path = Path(output_path)
         if output_path.exists():
             raise EngineError(f"Audio output already exists: {output_path}")
+        if layout not in self.history_layouts:
+            raise EngineError(f"Unknown Drama 3 history layout: {layout!r}")
         model = self._load()
         from .continuity import candidates
         from .continuity_codes import history_digest
@@ -510,30 +554,41 @@ class Drama3MLXEngine(HistorySynthesis):
         try:
             import numpy as np
             for selected, kept in candidates(text, references, history):
-                prompt_references = []
-                for voice in selected:
-                    key = voice["speaker"]
-                    if key not in encoded:
-                        reference = self._reference(voice)
-                        encoded[key] = replace(reference, text=f"<|speaker:{key}|> {reference.text}")
-                    prompt_references.append(encoded[key])
-                previous = [(turn_text, np.array(codes, dtype=np.int64)) for turn_text, codes in kept]
-                iterator = iter(model.generate(
-                    text, references=prompt_references, previous_takes=previous,
-                    temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
-                    max_new_tokens=self.max_new_tokens, single_chunk=True,
-                    seed=seed, attempts=1,
-                ))
-                try:
-                    segment = next(iterator, None)
-                except Exception as exc:
-                    # The pinned runtime validates the full prompt before sampling.
-                    if type(exc).__name__ != "PromptTooLongError":
-                        raise
-                    overflow = exc
-                    continue
-                if segment is None or next(iterator, None) is not None:
-                    raise EngineError("Drama 3 must return exactly one audio segment")
+                if layout == "streaming":
+                    if len(selected) != 1:
+                        raise EngineError("The streaming history layout serves exactly one voice")
+                    try:
+                        segment = self._streaming_segment(model, text, selected[0], kept, seed)
+                    except Exception as exc:
+                        if type(exc).__name__ != "PromptTooLongError":
+                            raise
+                        overflow = exc
+                        continue
+                else:
+                    prompt_references = []
+                    for voice in selected:
+                        key = voice["speaker"]
+                        if key not in encoded:
+                            reference = self._reference(voice)
+                            encoded[key] = replace(reference, text=f"<|speaker:{key}|> {reference.text}")
+                        prompt_references.append(encoded[key])
+                    previous = [(turn_text, np.array(codes, dtype=np.int64)) for turn_text, codes in kept]
+                    iterator = iter(model.generate(
+                        text, references=prompt_references, previous_takes=previous,
+                        temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
+                        max_new_tokens=self.max_new_tokens, single_chunk=True,
+                        seed=seed, attempts=1,
+                    ))
+                    try:
+                        segment = next(iterator, None)
+                    except Exception as exc:
+                        # The pinned runtime validates the full prompt before sampling.
+                        if type(exc).__name__ != "PromptTooLongError":
+                            raise
+                        overflow = exc
+                        continue
+                    if segment is None or next(iterator, None) is not None:
+                        raise EngineError("Drama 3 must return exactly one audio segment")
                 codes = segment.codes
                 if (getattr(codes, "ndim", None) != 2 or getattr(codes.dtype, "kind", None) not in ("i", "u")
                         or codes.shape[0] != model.model.config.audio_decoder.num_codebooks):
@@ -541,6 +596,8 @@ class Drama3MLXEngine(HistorySynthesis):
                 metadata = self._save_segment(segment, model, text, output_path)
                 metadata.update(seed=seed, synthesis_text=text, history_turns=len(kept),
                                 history_available=len(history), history_sha256=history_digest(kept))
+                if layout != "directing":
+                    metadata["history_layout"] = layout
                 return metadata, codes.tolist(), model.model.config.audio_decoder.vocab_size
         except EngineError:
             raise

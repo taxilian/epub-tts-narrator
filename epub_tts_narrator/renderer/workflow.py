@@ -315,7 +315,17 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 raise RenderBlocked("Cached accepted audio is not a readable regular file") from exc
             if checksum != accepted.get("audio_sha256"):
                 raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
-            if isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
+            from .history_echo import ECHO_CHOICE_FILES, archive, rejected_pick
+            echo = rejected_pick(accepted) if purpose == "speech" else None
+            if echo is not None:
+                # A best-effort choice of a take that replayed another line
+                # was never a rendition of this passage. Retire it (renamed,
+                # never deleted) so the history-echo ladder renders the line.
+                archive(directory, ECHO_CHOICE_FILES, echo)
+                notify("  The saved best-effort take repeats an earlier line of this chapter's history; "
+                       "retired it and rendering the line again.")
+                accepted = None
+            elif isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
                 return finish(wav, accepted)
     from .performance_runtime import verification_options
     performance_options = verification_options(request)
@@ -482,18 +492,27 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 return result
     secrets = configured_secrets(config)
     last_report = None
+    # A history echo moves to the next ladder rung with at most one extra
+    # attempt per rung, so every rung gets a real test within this request.
+    from .history_echo import LADDER as ECHO_LADDER
+    echo_cap = attempts + len(ECHO_LADDER)
     first_attempt = missing_accepted_attempt or resume_attempt or 1
     if fresh_speech:
         saved_attempts = generation_attempts(directory)
         if missing_accepted_attempt is not None and missing_accepted_attempt not in saved_attempts:
             saved_attempts = sorted([*saved_attempts, missing_accepted_attempt])
         next_attempt = max(saved_attempts, default=0) + 1
+        # The run budget's claim bounds real generations; numbering leaves room
+        # for the history-echo ladder's extra attempts.
         attempt_numbers = ([number for number in saved_attempts if number >= first_attempt]
-                           + list(range(next_attempt, next_attempt + (episode_maximum or attempts))))
+                           + list(range(next_attempt,
+                                        next_attempt + (episode_maximum or attempts) + len(ECHO_LADDER))))
     else:
         saved_attempts = []
-        attempt_numbers = range(first_attempt, max(attempts, first_attempt) + 1)
+        attempt_numbers = range(first_attempt, max(echo_cap, first_attempt) + 1)
     for attempt in attempt_numbers:
+        if not fresh_speech and attempt > max(attempts, first_attempt):
+            break
         if direction_session is not None and direction_session.abandoned(attempt):
             continue
         prefix = f"attempt-{attempt:03d}"
@@ -611,7 +630,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     set_phase(notify, f"generating {kind}, attempt {current_attempt}/{attempts}", generated=True)
                     if purpose == "speech":
                         notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
-                    with generation_activity(notify):
+                    from .continuity import history_recovery
+                    from .history_echo import ladder_mode
+                    echo_mode = ladder_mode(directory, request_hash, text) if purpose == "speech" else None
+                    with generation_activity(notify), history_recovery(echo_mode):
                         if direction_marker is not None:
                             direction_session.begin(attempt)
                             metadata = generate_direction(
@@ -710,6 +732,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             # recursive child work, even when the wave file stays on disk.
             if attempt_ticket is not None:
                 attempt_ticket.release()
+        if purpose == "speech" and report.get("passed") is not True and "history_echo" not in report:
+            from .history_echo import attempt_evidence
+            echo = attempt_evidence(report, metadata, text)
+            if echo is not None:
+                report = {**report, "history_echo": echo}
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -742,6 +769,18 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             label = f"Attempt {attempt}/{attempts}"
         notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
         stop_if_requested()
+        if purpose == "speech" and isinstance(report.get("history_echo"), dict):
+            from .history_echo import RUNG_DESCRIPTIONS, applied_mode, ladder_mode
+            following = ladder_mode(directory, request_hash, text)
+            if following is not None and following != applied_mode(record):
+                # The prompt caused the echo; another seed of it would too.
+                # The next rung gets a real attempt before any other recovery.
+                notify("  History echo: the take repeated an earlier line of this chapter's history; "
+                       f"the next attempt uses {RUNG_DESCRIPTIONS[following]}.")
+                used = generation_ordinal if generation_ordinal is not None else attempt
+                if used >= attempts and attempts < echo_cap:
+                    attempts += 1
+                continue
         resolved = resolve_failure(record)
         if resolved is not None:
             return resolved
@@ -1413,6 +1452,10 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                 return False
             directory = Path(work) / "clips" / accepted["request_hash"]
             full = read_json(regular_file(directory / "accepted.json"))
+            from .history_echo import rejected_pick
+            if rejected_pick(full) is not None:
+                # A best-effort choice that replayed another line is re-rendered.
+                return False
             continuity.accept(directory / full["audio_file"], full)
             return True
 
@@ -1729,6 +1772,12 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         with lock:
             try:
                 cached = speech_cache.find(identity, request=request)
+                if cached is not None:
+                    from .history_echo import rejected_pick
+                    if rejected_pick(cached[1]) is not None:
+                        # Never reuse an echo choice; this request's own take
+                        # directory retires its copy in verified_take.
+                        cached = None
                 if cached is not None:
                     report_worker_activity(notify, "source",
                                            cached[1].get("engine_metadata", {}).get("render_worker"))

@@ -158,6 +158,15 @@ overlaps chapters with its own coordinators, as local rendering does. A
 remote take's history and codes are persisted on the service with its take
 records; resuming a chapter rebuilds history from them.
 
+History-echo retries (RENDERER.md, "History echo") can ask a `serve` worker for
+Drama 3's streaming-continuation layout. A worker's `/health` lists the layouts
+its engine builds as `history_layouts`. The request then carries
+`layout = "streaming"` and the response must echo `history_layout`. A worker
+that lists none (an older server, MLX-Audio or `fish_speech_cuda`) never
+receives that layout; its echo retries go from the role tag straight to no
+history, which every worker serves. Restart workers after updating so their
+`/health` advertises the layout.
+
 For Linux recognition, `verification.type = "faster_whisper"` uses a local
 CTranslate2 Whisper model directory containing `config.json`, `model.bin`, and
 `tokenizer.json`. It never downloads a model implicitly. CPU recognition is the

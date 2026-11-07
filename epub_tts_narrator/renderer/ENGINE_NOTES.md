@@ -158,3 +158,24 @@ output, seed)` and returns `(metadata, codes, codebook_size)`:
   Fish's stock server.
 
 Plugins that do not advertise `chapter_continuity` cannot render.
+
+### History-echo layouts
+
+`HistorySynthesis.history_layouts` names the prompt layouts an engine's
+`_generate_wire` builds. `directing` is Fish's history conversation, always
+present and used for every ordinary take. `streaming` is Drama 3's
+streaming-continuation layout. A history-echo retry asks for it with
+`_generate_wire(..., layout="streaming")` (RENDERER.md, "History echo"), and
+`history_echo.apply_recovery` never requests a layout the engine lacks: that
+rung falls through to no history. The engines differ:
+
+- **Sogni (`drama3_mlx`)**: builds `streaming` beside the pinned runtime in
+  `drama3_layouts.py`. It encodes rows the way the runtime does, then calls the
+  runtime's `generate_frames`. The vendored files are unchanged.
+- **`fish_http`**: advertises what the worker's `/health` lists as
+  `history_layouts` and sends `layout` only then. The worker must echo
+  `history_layout`.
+- **MLX-Audio and `fish_speech_cuda`**: `directing` only.
+
+Role-tag and no-history rungs need no engine support: `HistorySynthesis`
+changes the wire text or drops the turns before `_generate_wire`.

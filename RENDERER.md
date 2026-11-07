@@ -383,6 +383,59 @@ requests; there is no setting to turn it off.
   (`history_turns`).
 - **Chapters start fresh.** Silent controls do not reset history.
 
+#### History echo
+
+Fish's history layout is a take-revision conversation: Drama 3 was trained to
+treat earlier takes as previous attempts and the next user turn as a note on
+how to redo them. A short line, a speech tag ("Sal asked carefully.") or a
+heading can read like such a note, and the model then speaks the previous
+history turn again instead of the requested text. Another seed of the same
+prompt rarely helps. In a replay of 16 recorded cases, the unchanged prompt
+echoed 42 of 48 times and temperature 1.0 made no difference.
+
+The renderer detects this from recognition evidence. A failed take whose
+transcript lines up with a heard history turn far better than with its own
+text is recorded as a `history_echo`, naming the turn and both match shares.
+Its next attempt changes the prompt instead of re-rolling it, one rung at a
+time:
+
+1. **Role tag**: the same history, with `[narration]` or `[dialogue]` leading
+   the new line (merged into an existing direction, for example
+   `[dialogue; quietly]`). This keeps the usual layout and the most continuity.
+2. **Streaming layout**: the same history audio in Drama 3's
+   streaming-continuation layout (technical report, figure 10), with the
+   reference recording as its first turn. This needs a single voice, no
+   bracketed controls, and an engine that builds it: the local MLX adapter, or
+   a `serve` worker whose `/health` lists it. Otherwise this rung is skipped.
+3. **No history**: the reference recording alone. This cannot replay history.
+
+Each rung gets a real attempt, up to one extra per rung beyond
+`max_attempts`. The speech-recovery planner, clip repair and the exhaustion
+chooser run only after the ladder. A take records the rung it used in
+`engine_metadata.history_recovery` (`requested` and `applied`). Role-tagged
+and streaming takes are ordinary generations of their text, so later lines
+hear them as history. Every other take, and its cache identity, is unchanged.
+Takes recorded before this check existed are reassessed from their saved
+transcripts, so a rerun continues the ladder.
+
+To find echoes already published in a book, run:
+
+```bash
+audiobook-render history-echoes BOOK
+```
+
+It reads only the saved takes and history codes: no models, no network, and
+nothing changes. It lists each best-effort choice that speaks a heard history
+line instead of its passage (only best-effort choices can be echoes, because
+ordinary acceptance requires the passage's words), with its chapter, what was
+heard and the line it repeats, and prints the chapters to re-render. `--json`
+prints the full report. Add `--retire` to retire those choices under the
+render lock. Their files are renamed with a `history-echo-…` suffix (never
+deleted), and the next `render` regenerates just those lines through the
+ladder and rebuilds their chapters from the other cached takes. Render also
+rejects echo choices by itself, so `--retire` mainly makes the affected
+chapters explicit before you render.
+
 Each chapter is strictly sequential: its next take starts only after its
 predecessor is accepted. Throughput comes from overlapping chapters. Drama 3
 always renders through a pool (a one-slot local pool when no workers are
@@ -1025,6 +1078,8 @@ When analysis-model recovery is enabled, repeated failures can trigger a whole-c
 The repaired performance first receives ordinary verification. When ordinary strategies are exhausted, the runtime nominates retained, hash-bound, physically usable takes covering the complete logical clip. It does not exclude them using strict word equality, protected-word/phonetic rules, or an earlier failed verification result. Approximate syllables, word-count differences, omission/addition clusters, numbers and negation, ASR uncertainty, and acoustic advisories are supplied to an LLM chooser as evidence. Short and expressive utterances are not rejected by a rigid syllable heuristic.
 
 The chooser must select a supplied candidate, and that selection is decisive: the same lexical or acoustic-advisory checks do not veto it afterward. This is explicitly best-effort acceptance and can retain imperfect or different content; it does not certify that every original word was spoken. `verification.json` marks it with `text_confirmation_method: "llm_exhaustion_selection"`, records the accepting policy and `ordinary_verification_passed`, and preserves `original_failed_report`. Original failed attempts remain unchanged. Corrupt, empty, nonfinite, effectively silent, unrelated-span, and unrelated-reference audio cannot qualify; no audio is fabricated when none is usable.
+
+A history echo is different: a take that speaks an earlier line of the chapter's history (see "History echo") is not a rendition of this passage at all. Echo takes are never offered to the chooser, and a clip repair for a line that echoed generates its parts without chapter history. If only echoes remain, nothing is published and the line fails with a message naming the echo. A saved best-effort choice that was an echo is not reused. Its `accepted.json`, `exhaustion-selection.json`, `clip-repair.json` and `clip-repair-parts` are renamed with a `history-echo-…` suffix (never deleted), and a `history-echo-….json` record names the evidence. The line, and a completed chapter containing it, then render again. A pending choice that offered an echo is retired the same way and asked again without it.
 
 `clip-repair.json` checkpoints the proposal, both reviews, and each generated part. `exhaustion-selection.json` checkpoints chooser evidence and its response. Rerunning resumes completed work without new synthesis or semantic reranking. Structural chooser-format corrections are bounded and retain all previous responses; a valid choice is not reconsidered. Provider outages leave pending work available for retry. Selected audio and audits remain hash-bound through cache reuse, child/join provenance, and model-free assembly. Existing verified recordings and historical recovery policies retain their original authority.
 

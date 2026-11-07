@@ -64,7 +64,8 @@ def _parse_request(data, content_type, references_cache=None):
         raise RequestError(f"Invalid request body: {exc}") from exc
     if not isinstance(body, dict):
         raise RequestError("Request body must be an object")
-    allowed = {"text", "references", "history", "format", "normalize", "temperature", "top_p", "max_new_tokens"}
+    allowed = {"text", "references", "history", "format", "normalize", "temperature", "top_p", "max_new_tokens",
+               "layout"}
     unsupported = set(body) - allowed
     if unsupported:
         raise RequestError("Unsupported Fish request option(s): " + ", ".join(sorted(map(str, unsupported))))
@@ -72,6 +73,8 @@ def _parse_request(data, content_type, references_cache=None):
         raise RequestError("This server supports format='wav' only")
     if body.get("normalize", False) is not False:
         raise RequestError("This server requires normalize=false to preserve audiobook wording")
+    if body.get("layout", "directing") not in {"directing", "streaming"}:
+        raise RequestError("layout must be directing or streaming")
     references = body.get("references")
     # Zero references is the deployment smoke probe's unconditioned voice.
     if not isinstance(references, list) or not 0 <= len(references) <= 16:
@@ -244,21 +247,24 @@ class _RenderServer(ThreadingHTTPServer):
                 # request handler from releasing its admission slot.
                 pass
 
-    def _infer(self, text, voices, history, output, seed, sampling, request_id=None, queued_at=None):
+    def _infer(self, text, voices, history, output, seed, sampling, request_id=None, queued_at=None,
+               layout="directing"):
         if request_id:
             self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
         previous = {key: getattr(self.engine, key) for key in sampling}
         try:
             for key, value in sampling.items():
                 setattr(self.engine, key, value)
-            return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history)
+            options = {"layout": layout} if layout != "directing" else {}
+            return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history, **options)
         finally:
             for key, value in previous.items():
                 setattr(self.engine, key, value)
 
-    def synthesize(self, text, voices, output, seed, sampling, *, history=(), request_id=None, queued_at=None):
+    def synthesize(self, text, voices, output, seed, sampling, *, history=(), layout="directing",
+                   request_id=None, queued_at=None):
         return self.inference_runtime.run(
-            self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at,
+            self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at, layout,
             initialize_mlx=requires_mlx(self.engine),
         )
 
@@ -383,6 +389,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
         health = {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True,
+                  "history_layouts": sorted(getattr(self.server.engine, "history_layouts", {"directing"})),
                   "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else [])}
         if self.server.recognizers is not None:
             health.update(recognition_protocol=RECOGNITION_PROTOCOL, recognition=self.server.recognition)
@@ -424,6 +431,9 @@ class _Handler(BaseHTTPRequestHandler):
             body, references, history = _parse_request(data, self.headers.get_content_type(),
                                                        self.server.references)
             seed, sampling = _sampling(body, self.headers)
+            layout = body.get("layout", "directing")
+            if layout not in getattr(self.server.engine, "history_layouts", {"directing"}):
+                raise RequestError(f"This server's engine does not build the {layout!r} history layout")
         except (RequestError, EngineError) as exc:
             self._json(400, {"error": {"message": str(exc)}})
             return
@@ -452,7 +462,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, "
                                                      f"{len(voices)} reference(s), {len(history)} history turn(s){suffix}")
                 generated = self.server.synthesize(body["text"], voices, output, seed, sampling, history=history,
-                                                   request_id=self.request_id, queued_at=queued_at)
+                                                   layout=layout, request_id=self.request_id, queued_at=queued_at)
                 audio = inspect_wav(output)
                 if output.stat().st_size > MAX_AUDIO_BYTES:
                     raise EngineError("Generated WAV exceeds the 100 MiB response limit")
@@ -462,6 +472,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "codebook_size": generated["codebook_size"],
                     "history_turns": generated["history_turns"],
                     "history_sha256": generated["history_sha256"],
+                    "history_layout": generated.get("history_layout", "directing"),
                     "sampling": sampling, "seed": seed}, use_bin_type=True)
                 size = len(payload)
                 self.send_response(200)

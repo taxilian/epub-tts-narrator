@@ -196,6 +196,12 @@ class FishHTTPEngine(HistorySynthesis):
         self._reuse_supported = False
         self._registered_references: set[str] = set()
         self._history_checked = False
+        # Layouts the worker's /health advertises; older servers build only Fish's.
+        self._history_layouts = frozenset({"directing"})
+
+    @property
+    def history_layouts(self) -> frozenset[str]:
+        return getattr(self, "_history_layouts", frozenset({"directing"}))
 
     @property
     def identity(self) -> dict[str, Any]:
@@ -221,6 +227,9 @@ class FishHTTPEngine(HistorySynthesis):
         if health.get("protocol") != PROTOCOL:
             raise EngineError(f"Render worker {self.name} does not support chapter history; update and "
                               "restart audiobook-render serve on that machine")
+        layouts = health.get("history_layouts")
+        if isinstance(layouts, list) and all(isinstance(layout, str) for layout in layouts):
+            self._history_layouts = frozenset({"directing"} | ({"streaming"} & set(layouts)))
         self._history_checked = True
 
     def close(self) -> None:
@@ -234,17 +243,19 @@ class FishHTTPEngine(HistorySynthesis):
             raise EngineError("This Fish HTTP endpoint is configured without multi-speaker support")
         return super().synthesize_dialogue(turns, output_path, seed=seed)
 
-    def _generate_wire(self, text, references, history, output_path, *, seed):
+    def _generate_wire(self, text, references, history, output_path, *, seed, layout="directing"):
         _seed(seed)
         output = Path(output_path)
         if output.exists():
             raise EngineError(f"Audio output already exists: {output}")
+        if layout not in self.history_layouts:
+            raise EngineError(f"Render worker {self.name} does not build the {layout!r} history layout")
         wire = []
         for voice in references:
             blob, transcript = read_reference(voice)
             wire.append({"audio": blob, "text": transcript, "speaker": voice["speaker"]})
         turns = [{"text": turn_text, "codes": codes} for turn_text, codes in history]
-        metadata, codes, codebook_size = self._request(text, wire, turns, output, seed)
+        metadata, codes, codebook_size = self._request(text, wire, turns, output, seed, layout)
         return {**metadata, "synthesis_text": text}, codes, codebook_size
 
     def _references_for_wire(self, references):
@@ -276,10 +287,10 @@ class FishHTTPEngine(HistorySynthesis):
         with self._reuse_lock:
             self._registered_references.difference_update(content_ids)
 
-    def _request(self, text, references, history, output, seed):
+    def _request(self, text, references, history, output, seed, layout="directing"):
         wire, seeded, reused = self._references_for_wire(references)
         try:
-            return self._transmit(text, wire, history, output, seed, seeded + reused)
+            return self._transmit(text, wire, history, output, seed, seeded + reused, layout)
         except FishHTTPError as exc:
             if not reused or exc.status != 400 or UNKNOWN_REFERENCE_MARKER not in str(exc):
                 raise
@@ -287,7 +298,7 @@ class FishHTTPEngine(HistorySynthesis):
             # is stale. The rejected attempt never reached synthesis because
             # unknown ids fail at parse time; resend the audio inline once.
             self._forget_registered(seeded + reused)
-        return self._transmit(text, references, history, output, seed, seeded + reused)
+        return self._transmit(text, references, history, output, seed, seeded + reused, layout)
 
     def _headers(self, content_type=None):
         headers = {"Accept": "application/msgpack", "model": self.model}
@@ -313,10 +324,13 @@ class FishHTTPEngine(HistorySynthesis):
             raise FishHTTPError(f"Fish HTTP health check returned invalid JSON ({self.name})")
         return body
 
-    def _transmit(self, text, references, history, output, seed, seeded_ids):
+    def _transmit(self, text, references, history, output, seed, seeded_ids, layout="directing"):
         body = {"text": text, "references": references, "history": history, "format": "wav",
                 "normalize": False, "temperature": float(self.sampling["temperature"]),
                 "top_p": float(self.sampling["top_p"]), "max_new_tokens": self.sampling["max_new_tokens"]}
+        if layout != "directing":
+            # Only sent to workers whose /health advertises the layout.
+            body["layout"] = layout
         try:
             import msgpack
         except ImportError as exc:
@@ -362,6 +376,9 @@ class FishHTTPEngine(HistorySynthesis):
                 turns = result.get("history_turns")
                 if type(turns) is not int or not 0 <= turns <= len(history):
                     raise FishHTTPError("Fish HTTP response must report the history turns it used")
+                if result.get("history_layout", "directing") != layout:
+                    raise FishHTTPError(f"Render worker {self.name} did not apply the requested "
+                                        f"{layout!r} history layout", retryable=False)
                 with tempfile.NamedTemporaryFile(prefix=".fish-", suffix=".wav", dir=output.parent, delete=False) as stream:
                     staged = Path(stream.name)
                     stream.write(result["audio"])
@@ -381,6 +398,8 @@ class FishHTTPEngine(HistorySynthesis):
                                 seed_applied=True,
                                 history_turns=turns, history_available=len(history),
                                 history_sha256=result.get("history_sha256"))
+                if layout != "directing":
+                    metadata["history_layout"] = layout
                 return metadata, result["codes"], result["codebook_size"]
         except HTTPError as exc:
             try:

@@ -30,6 +30,8 @@ from .common import digest, file_hash, regular_file
 
 
 _CURRENT = ContextVar("accepted_chapter_continuity", default=None)
+# A history-echo retry's ladder rung (see history_echo); None is ordinary history.
+_RECOVERY = ContextVar("history_echo_recovery", default=None)
 POLICY = "fish-first-latest-same-voice"
 MAX_SPEAKERS = 16
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
@@ -41,6 +43,21 @@ _NOT_HISTORY = {"recovery", "clip_repair", "speech_resolution", "fragment_recove
 
 def current():
     return _CURRENT.get()
+
+
+def recovery_mode():
+    """The requested history-echo ladder rung for generation in this context."""
+    return _RECOVERY.get()
+
+
+@contextmanager
+def history_recovery(mode):
+    """Generate inside ``mode``'s rung; engines record what they actually applied."""
+    token = _RECOVERY.set(mode)
+    try:
+        yield
+    finally:
+        _RECOVERY.reset(token)
 
 
 def require_support(engine):
@@ -97,8 +114,11 @@ class ChapterContinuity:
         takes = deepcopy(self.takes(voices))
         identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
+        segments = _segments(request["chunk"]) if isinstance(request.get("chunk"), dict) else []
         scope = {"chapter": self, "identity": identity, "takes": takes, "voices": sorted(voices),
                  "request_binding": digest(bound), "pinnable": pinnable,
+                 # The line's role, for a history-echo retry's role tag.
+                 "kind": segments[0].get("kind") if segments else None,
                  # Simultaneous lanes overlap in time; none of them is the
                  # next turn of the chapter.
                  "history": "performer" not in request}
