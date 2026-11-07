@@ -108,8 +108,11 @@ The CLI prints the exact path for each completed M4A. Downloaded files live in
 `WORK/remote-chapters/<selection-hash>/chapter.m4a`, where `WORK` is `--work-dir`
 or its default `BOOK/render-work`. With `--chapters-only`, `-o` does not receive
 chapter copies. When packaging an M4B, `-o` (default `BOOK/audiobook`) receives
-`book.m4b`, `chapters/chapter-NNNN.m4a`, and book-wide sync JSON. Supply `--epub`
-with the analyzed EPUB to include its cover when no EPUB path is configured.
+a descriptive `<book-title>.m4b`, `chapters/chapter-NNNN.m4a`, and book-wide sync
+JSON. The exact audiobook basename is recorded in `audio-manifest.json` as
+`audiobook.path` and in `sync.json` as `audio_file`; existing recorded names,
+including legacy `book.m4b`, remain authoritative on subsequent remote assembly.
+Supply `--epub` with the analyzed EPUB to include its cover when no EPUB path is configured.
 Original voice samples and inherited book/series selections are untouched.
 
 Each verified remote download also gets a readable relative symlink at
