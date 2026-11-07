@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .audio_naming import validate_audio_filename
 from .common import digest
 
 
@@ -23,18 +24,42 @@ def signed_record(record):
     return digest({key: value for key, value in record.items() if key != "record_sha256"})
 
 
-def audio_pointers(frames):
-    """Status and filenames implied by whether the chapter contains audio."""
-    return {"status": "complete" if frames else "empty",
-            "audio_file": "chapter.m4a" if frames else None,
-            "lossless_file": "chapter.flac" if frames else None}
+def audio_pointers(frames, chapter_number=None, *, audio_file=None, lossless_file=None):
+    """Build fresh chapter pointers, honoring exact safe filename overrides."""
+    if (type(frames) is not int or frames < 0
+            or chapter_number is not None and (type(chapter_number) is not int or chapter_number < 1)):
+        raise ValueError("Chapter audio pointers require nonnegative frames and a positive chapter number")
+    if not frames:
+        if audio_file is not None or lossless_file is not None:
+            raise ValueError("An empty chapter cannot declare audio filenames")
+        return {"status": "empty", "audio_file": None, "lossless_file": None}
+    default_audio = f"chapter-{chapter_number:04d}.m4a" if chapter_number is not None else "chapter.m4a"
+    default_lossless = f"chapter-{chapter_number:04d}.flac" if chapter_number is not None else "chapter.flac"
+    return {"status": "complete",
+            "audio_file": validate_audio_filename(
+                audio_file if audio_file is not None else default_audio, suffix=".m4a"),
+            "lossless_file": validate_audio_filename(
+                lossless_file if lossless_file is not None else default_lossless, suffix=".flac")}
+
+
+def recorded_audio_pointers(metadata):
+    """Read persisted pointers, defaulting only absent legacy fields to generic names."""
+    if not isinstance(metadata, dict):
+        raise ValueError("Chapter metadata must be an object")
+    frames = metadata.get("frames")
+    audio_file = metadata.get("audio_file", "chapter.m4a" if frames else None)
+    lossless_file = metadata.get("lossless_file", "chapter.flac" if frames else None)
+    if frames and (audio_file is None or lossless_file is None):
+        raise ValueError("A completed chapter must declare its audio filenames")
+    return audio_pointers(frames, metadata.get("number"), audio_file=audio_file, lossless_file=lossless_file)
 
 
 def chapter_record(composed, *, spec, pcm_data_sha256):
     record = {key: deepcopy(composed[key]) for key in
               ("id", "number", "title", "frames", "channels", "sample_rate", "segments",
                "pcm_sha256", "encoded_sha256", "normalization", "track_number", "total_chapters")}
-    pointers = audio_pointers(composed["frames"])
+    pointers = audio_pointers(composed["frames"], audio_file=composed.get("audio_file"),
+                              lossless_file=composed.get("lossless_file"))
     record.update(format=CHAPTER_FORMAT, version=1, spec_hash=digest(spec),
                   source_fingerprint=spec["source_fingerprint"],
                   voice_bindings=deepcopy(spec["voice_bindings"]),
@@ -70,5 +95,7 @@ def manifest_record(*, identity, spec, status, artifacts):
             "status": status, "artifacts": artifacts}
 
 
-def expected_artifact_names(frames):
-    return {"chapter.json", "sync.json", "verification.json"} | ({"chapter.m4a", "chapter.flac"} if frames else set())
+def expected_artifact_names(metadata):
+    pointers = recorded_audio_pointers(metadata)
+    audio = {pointers["audio_file"], pointers["lossless_file"]} if metadata["frames"] else set()
+    return {"chapter.json", "sync.json", "verification.json"} | audio
