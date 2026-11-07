@@ -43,6 +43,20 @@ def legacy_request_cache_key(provider_identity, system, payload):
                         "system": system, "payload": payload})
 
 
+def legacy_request_cache_keys(provider_identity, system, payload):
+    """Yield legacy keys for known reasoning-effort variants of this provider."""
+    base = {key: value for key, value in provider_identity.items() if key != "reasoning_effort"}
+    identities = [provider_identity]
+    for effort in (None, "none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        identities.append(base if effort is None else {**base, "reasoning_effort": effort})
+    seen = set()
+    for identity in identities:
+        key = legacy_request_cache_key(identity, system, payload)
+        if key not in seen:
+            seen.add(key)
+            yield key
+
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -935,9 +949,9 @@ class CachedRequests:
         return False, None
 
     def _cache_keys(self, system, payload):
-        shared = request_cache_key(system, payload)
-        legacy = legacy_request_cache_key(self.client.identity, system, payload)
-        return shared, legacy
+        keys = [request_cache_key(system, payload)]
+        keys.extend(legacy_request_cache_keys(self.client.identity, system, payload))
+        return tuple(dict.fromkeys(keys))
 
     def cached(self, system, payload, validate, *, cancelled=None):
         """Read and validate an exact prior request without initiating a model call."""
@@ -952,13 +966,18 @@ class CachedRequests:
     def run(self, system, payload, validate, *, cancelled=None, repair_protocol=None):
         if cancelled is not None and cancelled.is_set():
             raise CancelledError("Analysis was cancelled")
-        key, legacy_key = self._cache_keys(system, payload)
+        keys = self._cache_keys(system, payload)
+        key = keys[0]
         path = self.cache_dir / f"{key}.json"
         found, accepted = self.cached(system, payload, validate, cancelled=cancelled)
         if found:
             return accepted
         current = payload
-        failed = self._latest_failed_response(key) or self._latest_failed_response(legacy_key)
+        failed = None
+        for candidate in keys:
+            failed = self._latest_failed_response(candidate)
+            if failed is not None:
+                break
         if failed is not None:
             try:
                 try:

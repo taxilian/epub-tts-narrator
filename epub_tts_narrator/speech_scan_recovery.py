@@ -5,9 +5,8 @@ import json
 from pathlib import Path
 
 from .pipeline import (
-    fingerprint, legacy_request_cache_key, request_cache_key, write_json,
+    fingerprint, legacy_request_cache_keys, request_cache_key, write_json,
 )
-from .prompts import PROMPT_VERSION
 from .provider import OutputTruncatedError
 from .speech_prompts import SCAN as compact_scan, pack_payload
 
@@ -23,7 +22,7 @@ def _split_hint(requests, system, payload):
     entries = []
     for prompt, data in ((compact_scan, pack_payload(payload)), (system, payload)):
         keys = dict.fromkeys((request_cache_key(prompt, data),
-                              legacy_request_cache_key(client.identity, prompt, data)))
+                              *legacy_request_cache_keys(client.identity, prompt, data)))
         for key in keys:
             marker = {"version": 1, "reason": "model_output_truncated", "request_cache_fingerprint": key}
             entries.append((Path(cache) / "speech-spelling-subdivisions" / f"{key}.json",

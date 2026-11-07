@@ -19,9 +19,8 @@ from .inline_performance import project_segments
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
 from .pipeline import (
     DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint,
-    legacy_request_cache_key, request_cache_key, write_json,
+    legacy_request_cache_keys, request_cache_key, write_json,
 )
-from .prompts import PROMPT_VERSION
 from .provider import ProviderError
 
 
@@ -182,9 +181,9 @@ def _scan_split_marker(requests, payload):
     if cache_dir is None or client is None:
         return None, None, False
     shared = request_cache_key(SCAN, payload)
-    legacy = legacy_request_cache_key(client.identity, SCAN, payload)
+    legacy = legacy_request_cache_keys(client.identity, SCAN, payload)
     paths = []
-    for key in dict.fromkeys((shared, legacy)):
+    for key in dict.fromkeys((shared, *legacy)):
         marker = {"version": 1, "reason": "model_output_truncated",
                   "request_fingerprint": fingerprint(payload), "request_cache_fingerprint": key,
                   "observation_origin": "provider_response", "prior_observation_fingerprint": None}

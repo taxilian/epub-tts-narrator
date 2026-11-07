@@ -61,12 +61,12 @@ def _fingerprint(value: P) -> str:
 
 def _split_marker(requests: _RequestCache[P, R], system: str,
                   payload: P) -> tuple[Path, JsonObject, bool]:
-    from .pipeline import legacy_request_cache_key, request_cache_key
+    from .pipeline import legacy_request_cache_keys, request_cache_key
     shared_key = request_cache_key(system, payload)
-    legacy_key = legacy_request_cache_key(requests.client.identity, system, payload)
+    legacy_keys = legacy_request_cache_keys(requests.client.identity, system, payload)
     directory = Path(requests.cache_dir) / "adaptive-subdivisions"
     markers = []
-    for key in dict.fromkeys((shared_key, legacy_key)):
+    for key in dict.fromkeys((shared_key, *legacy_keys)):
         markers.append((directory / f"{key}.json", {
             "version": 1, "reason": "provider_capacity",
             "request_fingerprint": _fingerprint(payload),

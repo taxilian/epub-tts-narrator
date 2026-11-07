@@ -6,7 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
+from epub_tts_narrator.pipeline import (
+    CachedRequests, fingerprint, legacy_request_cache_key, write_json,
+)
 from epub_tts_narrator.prompts import PROMPT_VERSION
 
 
@@ -64,6 +66,18 @@ class CacheProgressTests(unittest.TestCase):
         resumed = CachedRequests(other, self.root, progress=lambda message: None)
         self.assertEqual(resumed.run("shared system", payload, self.validate), expected)
         self.assertEqual(other.calls, [])
+
+    def test_reasoning_effort_change_reuses_existing_legacy_cache(self):
+        payload = {"index": "reasoning-change"}
+        high = dict(Client.identity, reasoning_effort="high")
+        key = legacy_request_cache_key(high, "original system", payload)
+        write_json(self.root / f"{key}.json", {"valid": True})
+        client = Client()
+        client.identity = dict(Client.identity, reasoning_effort="low")
+        requests = CachedRequests(client, self.root, progress=lambda message: None)
+        self.assertEqual(requests.run("original system", payload, self.validate),
+                         {"valid": True})
+        self.assertEqual(client.calls, [])
 
     def test_concurrent_cache_hits_count_only_this_run(self):
         for number in range(75):
