@@ -48,7 +48,14 @@ def _evidence(evidence, source, units, *, nonempty=True):
         elif not isinstance(block_id, str) or block_id not in blocks:
             problem = "unknown source block; choose a block_id present in source_units"
         elif quote not in blocks[block_id]:
-            problem = "quote is not an exact substring of the referenced source block"
+            matches = [visible_id for visible_id, texts in visible.items()
+                       if any(quote in text for text in texts)]
+            if matches:
+                shown_ids = ", ".join(repr(item[:64]) for item in matches[:3])
+                problem = (f"quote is not in the referenced block; it appears verbatim in visible "
+                           f"block_id {shown_ids}; use the correct block_id")
+            else:
+                problem = "quote is not an exact substring of the referenced source block"
         elif not any(quote in text for text in excerpts):
             problem = "quote is outside the source text visible in this request"
         else:

@@ -31,6 +31,14 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.assertIn("Correct every listed citation", message)
         self.assertLessEqual(len(message), 1800)
 
+    def test_quote_cited_under_the_wrong_visible_block_names_the_correct_block(self):
+        message = self.error([
+            {"block_id": "b1", "quote": "She was still the captain."},
+        ])
+        self.assertIn("appears verbatim in visible block_id 'b2'", message)
+        self.assertIn("use the correct block_id", message)
+        self.assertNotIn("The baker stayed home.", message)
+
     def test_hidden_block_and_hidden_portion_are_never_exposed_in_feedback(self):
         self.source["blocks"][1]["text"] = "PRIVATE UNSEEN CONTEXT"
         message = self.error([{"block_id": "b2", "quote": "PRIVATE UNSEEN CONTEXT"}], self.units[:1])
