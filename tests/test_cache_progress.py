@@ -54,6 +54,17 @@ class CacheProgressTests(unittest.TestCase):
             self.assertIn("no API calls for these responses", message)
             self.assertNotIn("PRIVATE", message)
 
+    def test_validated_response_is_reused_across_provider_and_reasoning_changes(self):
+        first = Client()
+        requests = CachedRequests(first, self.root, progress=lambda message: None)
+        payload = {"index": "shared"}
+        expected = requests.run("shared system", payload, self.validate)
+        other = Client()
+        other.identity = {"model": "fallback-model", "reasoning_effort": "low"}
+        resumed = CachedRequests(other, self.root, progress=lambda message: None)
+        self.assertEqual(resumed.run("shared system", payload, self.validate), expected)
+        self.assertEqual(other.calls, [])
+
     def test_concurrent_cache_hits_count_only_this_run(self):
         for number in range(75):
             self.cache({"index": number}, {"valid": True})

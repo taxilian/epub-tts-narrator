@@ -6,7 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from epub_tts_narrator.pipeline import CachedRequests, align_units, fingerprint, make_units, seed_cast, write_json
+from epub_tts_narrator.pipeline import (
+    CachedRequests, align_units, fingerprint, make_units, request_cache_key, seed_cast, write_json,
+)
 from epub_tts_narrator.prompts import ATTRIBUTE, PROMPT_VERSION
 from test_contracts import valid_document
 
@@ -47,8 +49,7 @@ class RepairContractTests(unittest.TestCase):
         return align_units(self.source, self.cast, self.units, response)
 
     def key(self):
-        return fingerprint({"provider": Client.identity, "prompt_version": PROMPT_VERSION,
-                            "system": ATTRIBUTE, "payload": self.payload})
+        return request_cache_key(ATTRIBUTE, self.payload)
 
     @staticmethod
     def size(system, payload):

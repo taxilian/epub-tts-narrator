@@ -9,7 +9,9 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
-from .pipeline import align_attribution_response, align_units, fingerprint, write_json
+from .pipeline import (
+    align_attribution_response, align_units, fingerprint, request_cache_key, write_json,
+)
 from .prompts import PROMPT_VERSION
 from .provider import ProviderError
 
@@ -23,10 +25,7 @@ _PAYLOAD_KEYS = {"final_cast", "performance_policy", "target_units", "context_un
 def _request_metadata(requests, system, payload):
     return {
         "request_fingerprint": fingerprint(payload),
-        "request_cache_fingerprint": fingerprint({
-            "provider": requests.client.identity, "prompt_version": PROMPT_VERSION,
-            "system": system, "payload": payload,
-        }),
+        "request_cache_fingerprint": request_cache_key(system, payload),
     }
 
 

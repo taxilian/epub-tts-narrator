@@ -20,7 +20,7 @@ from collections import Counter
 from threading import Lock
 
 from .performance_plan import text_sha256, validate_performance
-from .pipeline import fingerprint
+from .pipeline import fingerprint, request_cache_key
 from .prompts import PROMPT_VERSION
 from .speech_normalization import _preserve_protected, _word_forms_accounted_for
 from .speech_word_review import word_alignment
@@ -456,9 +456,7 @@ def review_inline_performance(document, requests, *, workers=1, progress=lambda 
         for record in batch:
             record["outcome"] = _VERDICT_OUTCOMES[verdicts[record["id"]]]
         batch_records.append({
-            "request_cache_fingerprint": fingerprint({"provider": requests.client.identity,
-                                                      "prompt_version": PROMPT_VERSION,
-                                                      "system": INLINE_REVIEW, "payload": payload}),
+            "request_cache_fingerprint": request_cache_key(INLINE_REVIEW, payload),
             "proposal_ids": proposal_ids,
         })
     _check_complete_rows(records, names)

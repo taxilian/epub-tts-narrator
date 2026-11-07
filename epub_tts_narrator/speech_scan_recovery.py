@@ -4,7 +4,9 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
-from .pipeline import fingerprint, write_json
+from .pipeline import (
+    fingerprint, legacy_request_cache_key, request_cache_key, write_json,
+)
 from .prompts import PROMPT_VERSION
 from .provider import OutputTruncatedError
 from .speech_prompts import SCAN as compact_scan, pack_payload
@@ -20,23 +22,26 @@ def _split_hint(requests, system, payload):
         return None, None, False
     entries = []
     for prompt, data in ((compact_scan, pack_payload(payload)), (system, payload)):
-        key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                           "system": prompt, "payload": data})
-        marker = {"version": 1, "reason": "model_output_truncated", "request_cache_fingerprint": key}
-        entries.append((Path(cache) / "speech-spelling-subdivisions" / f"{key}.json", marker, key))
-    path, marker, _ = entries[0]
-    if any((Path(cache) / f"{key}.json").exists() for _, _, key in entries):
-        return path, marker, False
-    for candidate, expected, _ in entries:
+        keys = dict.fromkeys((request_cache_key(prompt, data),
+                              legacy_request_cache_key(client.identity, prompt, data)))
+        for key in keys:
+            marker = {"version": 1, "reason": "model_output_truncated", "request_cache_fingerprint": key}
+            entries.append((Path(cache) / "speech-spelling-subdivisions" / f"{key}.json",
+                            Path(cache) / f"{key}.json", marker))
+    primary = entries[0][0]
+    fallback = entries[0][2]
+    if any(response.exists() for _, response, _ in entries):
+        return primary, fallback, False
+    for candidate, _, expected in entries:
         if candidate.is_file() and not candidate.is_symlink():
             try:
                 with candidate.open(encoding="utf-8") as stream:
                     raw = stream.read(2049)
                 if len(raw) <= 2048 and json.loads(raw) == expected:
-                    return path, marker, True
+                    return candidate, expected, True
             except (OSError, ValueError, RecursionError):
                 continue
-    return path, marker, False
+    return primary, fallback, False
 
 
 def scan_with_recovery(requests, system, payload, rows, run, progress):

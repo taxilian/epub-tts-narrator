@@ -32,6 +32,17 @@ DEFAULT_POLICY = {
 _UNSET_RECONCILIATION_NOTES = object()
 
 
+def request_cache_key(system, payload):
+    """Provider-independent key for one validated analysis request."""
+    return fingerprint({"prompt_version": PROMPT_VERSION, "system": system, "payload": payload})
+
+
+def legacy_request_cache_key(provider_identity, system, payload):
+    """Read compatibility key used before provider identity left the namespace."""
+    return fingerprint({"provider": provider_identity, "prompt_version": PROMPT_VERSION,
+                        "system": system, "payload": payload})
+
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -923,25 +934,31 @@ class CachedRequests:
                 return True, accepted
         return False, None
 
+    def _cache_keys(self, system, payload):
+        shared = request_cache_key(system, payload)
+        legacy = legacy_request_cache_key(self.client.identity, system, payload)
+        return shared, legacy
+
     def cached(self, system, payload, validate, *, cancelled=None):
         """Read and validate an exact prior request without initiating a model call."""
         if cancelled is not None and cancelled.is_set():
             raise CancelledError("Analysis was cancelled")
-        key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
-                           "system": system, "payload": payload})
-        return self._cached_response(self.cache_dir / f"{key}.json", validate)
+        for key in self._cache_keys(system, payload):
+            found, accepted = self._cached_response(self.cache_dir / f"{key}.json", validate)
+            if found:
+                return True, accepted
+        return False, None
 
     def run(self, system, payload, validate, *, cancelled=None, repair_protocol=None):
         if cancelled is not None and cancelled.is_set():
             raise CancelledError("Analysis was cancelled")
-        key = fingerprint({"provider": self.client.identity, "prompt_version": PROMPT_VERSION,
-                           "system": system, "payload": payload})
+        key, legacy_key = self._cache_keys(system, payload)
         path = self.cache_dir / f"{key}.json"
-        found, accepted = self._cached_response(path, validate)
+        found, accepted = self.cached(system, payload, validate, cancelled=cancelled)
         if found:
             return accepted
         current = payload
-        failed = self._latest_failed_response(key)
+        failed = self._latest_failed_response(key) or self._latest_failed_response(legacy_key)
         if failed is not None:
             try:
                 try:

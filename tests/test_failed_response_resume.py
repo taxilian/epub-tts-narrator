@@ -8,8 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.pipeline import CachedRequests, fingerprint, write_json
-from epub_tts_narrator.prompts import PROMPT_VERSION
+from epub_tts_narrator.pipeline import CachedRequests, request_cache_key, write_json
 
 
 class Client:
@@ -33,9 +32,8 @@ class FailedResponseResumeTests(unittest.TestCase):
         self.client = Client()
 
     def key(self, client=None, system=None, payload=None):
-        return fingerprint({"provider": (client or self.client).identity, "prompt_version": PROMPT_VERSION,
-                            "system": self.system if system is None else system,
-                            "payload": self.payload if payload is None else payload})
+        return request_cache_key(self.system if system is None else system,
+                                 self.payload if payload is None else payload)
 
     def failure(self, value, attempt=1):
         path = self.cache / "failed" / f"{self.key()}-attempt{attempt}.json"
@@ -79,19 +77,27 @@ class FailedResponseResumeTests(unittest.TestCase):
         self.assertEqual(self.run_request(repeat, repair_attempts=0), result)
         self.assertEqual(repeat.calls, [])
 
-    def test_failures_from_other_prompt_payload_or_provider_are_never_borrowed(self):
+    def test_failures_from_other_prompt_or_payload_are_never_borrowed(self):
         self.failure({"valid": False, "private": "OTHER REQUEST"})
         cases = [
             (Client(), self.system + " Changed.", self.payload),
             (Client(), self.system, {"source": "Different source."}),
-            (Client(), self.system, self.payload),
         ]
-        cases[2][0].identity = dict(Client.identity, model="different-model")
         for client, system, payload in cases:
-            with self.subTest(system=system, payload=payload, provider=client.identity):
+            with self.subTest(system=system, payload=payload):
                 requests = CachedRequests(client, self.cache, repair_attempts=0)
                 self.assertEqual(requests.run(system, payload, self.validate), {"valid": True})
                 self.assertEqual(client.calls, [(system, payload)])
+
+    def test_failed_repair_hint_survives_provider_change(self):
+        latest = self.failure({"valid": False})
+        client = Client()
+        client.identity = dict(Client.identity, model="fallback-model", reasoning_effort="low")
+        result = self.run_request(client, repair_attempts=0)
+        self.assertEqual(result, {"valid": True})
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0][1]["correction"]["previous_response"],
+                         json.loads(latest.read_text()))
 
     def test_corrupt_nonobject_nonfinite_oversized_and_misnamed_failures_are_ignored(self):
         path = self.failure({"valid": False})

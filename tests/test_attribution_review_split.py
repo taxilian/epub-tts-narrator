@@ -10,7 +10,7 @@ import unittest
 from epub_tts_narrator.attribution_review import MAX_SCAN_SPLIT_DEPTH, _batches, audit_attribution, record_scan_truncation
 from epub_tts_narrator.attribution_review_prompts import SCAN
 from epub_tts_narrator.contracts import validate_document
-from epub_tts_narrator.pipeline import CachedRequests, fingerprint
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, request_cache_key
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from epub_tts_narrator.provider import ProviderError
 from test_attribution_review import Requests, correction, fixture
@@ -100,11 +100,9 @@ class ScanSubdivisionTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 4)
             parent_payload = client.calls[1]
             normal_payload = client.calls[0]
-            normal_key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                                      "system": SCAN, "payload": normal_payload})
+            normal_key = request_cache_key(SCAN, normal_payload)
             self.assertTrue((cache / f"{normal_key}.json").exists())
-            parent_key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                                      "system": SCAN, "payload": parent_payload})
+            parent_key = request_cache_key(SCAN, parent_payload)
             self.assertFalse((cache / f"{parent_key}.json").exists())
             marker_path = cache / "attribution-review-subdivisions" / f"{parent_key}.json"
             self.assertEqual(json.loads(marker_path.read_text())["reason"], "model_output_truncated")

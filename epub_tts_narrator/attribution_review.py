@@ -17,7 +17,10 @@ from .attribution_review_prompts import LENSES, REVIEW_VERSION, SCAN, VOTE
 from .contracts import has_assigned_speakers, readiness, validate_document
 from .inline_performance import project_segments
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
-from .pipeline import DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint, write_json
+from .pipeline import (
+    DEFAULT_POLICY, align_units, complete_empty_delivery, fingerprint,
+    legacy_request_cache_key, request_cache_key, write_json,
+)
 from .prompts import PROMPT_VERSION
 from .provider import ProviderError
 
@@ -178,27 +181,33 @@ def _scan_split_marker(requests, payload):
     client = getattr(requests, "client", None)
     if cache_dir is None or client is None:
         return None, None, False
-    key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                       "system": SCAN, "payload": payload})
-    marker = {"version": 1, "reason": "model_output_truncated",
-              "request_fingerprint": fingerprint(payload), "request_cache_fingerprint": key,
-              "observation_origin": "provider_response", "prior_observation_fingerprint": None}
-    path = Path(cache_dir) / "attribution-review-subdivisions" / f"{key}.json"
-    # A successful original response takes precedence, if one was later cached.
-    if not (Path(cache_dir) / f"{key}.json").exists():
+    shared = request_cache_key(SCAN, payload)
+    legacy = legacy_request_cache_key(client.identity, SCAN, payload)
+    paths = []
+    for key in dict.fromkeys((shared, legacy)):
+        marker = {"version": 1, "reason": "model_output_truncated",
+                  "request_fingerprint": fingerprint(payload), "request_cache_fingerprint": key,
+                  "observation_origin": "provider_response", "prior_observation_fingerprint": None}
+        paths.append((Path(cache_dir) / "attribution-review-subdivisions" / f"{key}.json",
+                      Path(cache_dir) / f"{key}.json", marker))
+    for path, response_path, marker in paths:
+        # A successful original response takes precedence, if one was later cached.
+        if response_path.exists():
+            continue
         try:
             with path.open(encoding="utf-8") as stream:
-                text = stream.read(2049)
-            saved = json.loads(text) if len(text) <= 2048 else None
+                raw = stream.read(2049)
+            saved = json.loads(raw) if len(raw) <= 2048 else None
             if isinstance(saved, dict) and set(saved) == set(marker):
                 observation = saved["prior_observation_fingerprint"]
-                valid_observation = ((saved["observation_origin"] == "provider_response" and observation is None)
-                                     or (saved["observation_origin"] == "prior_run" and _sha256(observation)))
-                if valid_observation and all(saved[key] == value for key, value in marker.items()
-                                             if key not in {"observation_origin", "prior_observation_fingerprint"}):
+                valid_origin = ((saved["observation_origin"] == "provider_response" and observation is None)
+                                or (saved["observation_origin"] == "prior_run" and _sha256(observation)))
+                if valid_origin and all(saved[key] == value for key, value in marker.items()
+                                        if key not in {"observation_origin", "prior_observation_fingerprint"}):
                     return path, saved, True
         except (OSError, ValueError, RecursionError):
             pass
+    path, _, marker = paths[0]
     return path, marker, False
 
 

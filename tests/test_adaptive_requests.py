@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from epub_tts_narrator.adaptive_requests import capacity_error, request_size, run_partitioned
-from epub_tts_narrator.pipeline import CachedRequests, fingerprint
+from epub_tts_narrator.pipeline import CachedRequests, fingerprint, request_cache_key
 from epub_tts_narrator.prompts import PROMPT_VERSION
 from epub_tts_narrator.provider import OutputTruncatedError, ProviderError, ResponseCapacityError
 
@@ -203,8 +203,7 @@ class AdaptiveRequestTests(unittest.TestCase):
 
             original = run_partitioned([0, 1, 2], build, execute, requests=requests)
             parent_payload = client.calls[0]
-            parent_key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                                      "system": "Adaptive test", "payload": parent_payload})
+            parent_key = request_cache_key("Adaptive test", parent_payload)
             marker = Path(directory) / "adaptive-subdivisions" / f"{parent_key}.json"
             self.assertEqual(json.loads(marker.read_text())["request_cache_fingerprint"], parent_key)
             marker_text = marker.read_text()
@@ -244,8 +243,7 @@ class AdaptiveRequestTests(unittest.TestCase):
 
             original = run_partitioned([0, 1, 2], build, execute, requests=requests)
             system, payload = build([0, 1, 2])
-            key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                               "system": system, "payload": payload})
+            key = request_cache_key(system, payload)
             (Path(directory) / f"{key}.json").write_text('{"invalid": true}')
             client.calls.clear()
 
@@ -266,8 +264,7 @@ class AdaptiveRequestTests(unittest.TestCase):
 
                 run_partitioned([0, 1], build, execute, requests=requests)
                 parent_payload = client.calls[0]
-                key = fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                                   "system": "Adaptive test", "payload": parent_payload})
+                key = request_cache_key("Adaptive test", parent_payload)
                 marker = Path(directory) / "adaptive-subdivisions" / f"{key}.json"
                 if corruption == "garbage":
                     marker.write_text("{")

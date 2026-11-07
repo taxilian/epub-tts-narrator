@@ -14,6 +14,7 @@ from epub_tts_narrator.attribution_fallback import (
 )
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import (
+    request_cache_key,
     CachedRequests, DEFAULT_POLICY, align_attribution_response, analyze, base_document,
     fingerprint, make_units, seed_cast,
 )
@@ -49,8 +50,7 @@ def response(payload):
 
 
 def cache_key(client, payload, system=ATTRIBUTE):
-    return fingerprint({"provider": client.identity, "prompt_version": PROMPT_VERSION,
-                        "system": system, "payload": payload})
+    return request_cache_key(system, payload)
 
 
 class Client:

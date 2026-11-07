@@ -61,24 +61,30 @@ def _fingerprint(value: P) -> str:
 
 def _split_marker(requests: _RequestCache[P, R], system: str,
                   payload: P) -> tuple[Path, JsonObject, bool]:
-    key = _fingerprint({"provider": requests.client.identity, "prompt_version": PROMPT_VERSION,
-                        "system": system, "payload": payload})
-    marker: JsonObject = {"version": 1, "reason": "provider_capacity",
-                          "request_fingerprint": _fingerprint(payload),
-                          "request_cache_fingerprint": key}
+    from .pipeline import legacy_request_cache_key, request_cache_key
+    shared_key = request_cache_key(system, payload)
+    legacy_key = legacy_request_cache_key(requests.client.identity, system, payload)
     directory = Path(requests.cache_dir) / "adaptive-subdivisions"
-    path = directory / f"{key}.json"
-    try:
-        if directory.is_symlink() or path.is_symlink() or not path.is_file():
-            return path, marker, False
-        with path.open("rb") as stream:
-            raw = stream.read(_MARKER_BYTES + 1)
-        saved = json.loads(raw.decode("utf-8")) if len(raw) <= _MARKER_BYTES else None
-        valid = (isinstance(saved, dict) and set(saved) == set(marker)
-                 and type(saved["version"]) is int and saved == marker)
-        return path, marker, valid
-    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
-        return path, marker, False
+    markers = []
+    for key in dict.fromkeys((shared_key, legacy_key)):
+        markers.append((directory / f"{key}.json", {
+            "version": 1, "reason": "provider_capacity",
+            "request_fingerprint": _fingerprint(payload),
+            "request_cache_fingerprint": key,
+        }))
+    for path, marker in markers:
+        try:
+            if directory.is_symlink() or path.is_symlink() or not path.is_file():
+                continue
+            with path.open("rb") as stream:
+                raw = stream.read(_MARKER_BYTES + 1)
+            saved = json.loads(raw.decode("utf-8")) if len(raw) <= _MARKER_BYTES else None
+            if (isinstance(saved, dict) and set(saved) == set(marker)
+                    and type(saved["version"]) is int and saved == marker):
+                return path, marker, True
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            continue
+    return markers[0][0], markers[0][1], False
 
 
 def _write_marker(path: Path, marker: JsonObject) -> None:
