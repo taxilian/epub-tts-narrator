@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_speakers
-from .audio_naming import descriptive_audio_filename
+from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .chapter_records import signed_record
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import RENDER_CONTRACT
@@ -227,6 +227,12 @@ def mixture_validation_key(lanes):
                              for lane in lanes]})
 
 
+def mixture_audio_filename(lanes, key):
+    """Describe a mixture by its stable cache key and verified performers."""
+    return descriptive_audio_filename("simultaneous-mix", f"key-{key[:16]}",
+                                      *(lane["voice_id"] for lane in lanes), suffix=".wav")
+
+
 def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preserve_lanes=False):
     """Cache a mix only after every lane has passed independent verification."""
     if not isinstance(lanes, list) or len(lanes) < 2:
@@ -259,7 +265,8 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
         if not isinstance(record, dict):
             raise ValueError("Simultaneous mixture metadata must be an object")
         checksum = record.pop("record_sha256", None)
-        wav = regular_file(folder / "mix.wav")
+        filename = validate_audio_filename(record.get("audio_file", "mix.wav"), suffix=".wav")
+        wav = regular_file(folder / filename)
         if (checksum != signed_record(record) or record.get("identity") != identity
                 or record.get("format") != "audiobook-renderer-mix" or record.get("version") != 1
                 or record.get("audio_sha256") != file_hash(wav)
@@ -286,10 +293,11 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
         stage = Path(temporary) / "ready"
         stage.mkdir()
         notify(f"Mixing {len(prepared)} independently verified simultaneous speakers")
-        mixed = mix_speakers(prepared, stage / "mix.wav", sample_rate=sample_rate)
+        filename = mixture_audio_filename(prepared, key)
+        mixed = mix_speakers(prepared, stage / filename, sample_rate=sample_rate)
         record = {"format": "audiobook-renderer-mix", "version": 1, "identity": identity,
                   "frames": frames, "audio_sha256": mixed["audio_sha256"],
-                  "peak_amplitude": mixed["peak_amplitude"]}
+                  "peak_amplitude": mixed["peak_amplitude"], "audio_file": filename}
         write_json(stage / "mix.json", dict(record, record_sha256=digest(record)))
         try:
             os.rename(stage, folder)

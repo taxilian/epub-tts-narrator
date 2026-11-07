@@ -59,6 +59,19 @@ class CleanupTests(unittest.TestCase):
         write_json(path, dict(record, record_sha256=digest(record)))
         return path
 
+    def mixture(self, *, recorded=True):
+        key = "b" * 64
+        directory = self.work / "mixes" / key
+        directory.mkdir(parents=True)
+        name = (f"key-{key[:16]}-voice0-voice1-simultaneous-mix.wav" if recorded else "mix.wav")
+        (directory / name).write_bytes(b"simultaneous mix")
+        record = {"format": "audiobook-renderer-mix", "version": 1, "identity": {"sample_rate": 44100},
+                  "frames": 4, "audio_sha256": file_hash(directory / name), "peak_amplitude": 30000}
+        if recorded:
+            record["audio_file"] = name
+        write_json(directory / "mix.json", dict(record, record_sha256=digest(record)))
+        return directory, record
+
     def speech_index(self, directory, record):
         identity = {"version": 1, "kind": "speech", "text": record["request"]["text"],
                     "voice": {"kind": "reference", "reference_sha256": "a" * 64,
@@ -629,6 +642,50 @@ class CleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unrecognized"):
             cleanup_work(self.work, discard_render_cache=True)
         self.assertEqual(before, self.snapshot())
+
+    def test_explicit_discard_removes_recorded_mixture_audio_by_its_validated_record(self):
+        # Given a signed mixture record naming its descriptive audio file.
+        directory, record = self.mixture()
+
+        # When discarding the render cache.
+        report = cleanup_work(self.work, discard_render_cache=True)
+
+        # Then exactly the recorded audio and its record are removed.
+        removed = {item["path"] for item in report["files"]}
+        self.assertEqual(removed, {f"mixes/{directory.name}/mix.json",
+                                   f"mixes/{directory.name}/{record['audio_file']}"})
+        self.assertFalse(directory.exists())
+
+    def test_explicit_discard_refuses_unknown_audio_beside_a_recorded_mixture(self):
+        directory, record = self.mixture()
+        foreign = directory / "unrelated-voice.wav"
+        foreign.write_bytes(b"audio that must not be deleted")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "unrecognized mixes cache file"):
+            cleanup_work(self.work, discard_render_cache=True)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(foreign.read_bytes(), b"audio that must not be deleted")
+
+    def test_explicit_discard_refuses_recorded_mixture_audio_that_changed(self):
+        directory, record = self.mixture()
+        (directory / record["audio_file"]).write_bytes(b"changed mix bytes")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "invalid checksum"):
+            cleanup_work(self.work, discard_render_cache=True)
+        self.assertEqual(before, self.snapshot())
+
+    def test_explicit_discard_still_removes_a_signed_mixture_without_recorded_name(self):
+        # Given an older signed mixture record whose legacy mix.wav is intact.
+        directory, record = self.mixture(recorded=False)
+
+        # When discarding the render cache.
+        report = cleanup_work(self.work, discard_render_cache=True)
+
+        # Then the legacy audio is checksum-verified against its record and removed.
+        removed = {item["path"] for item in report["files"]}
+        self.assertEqual(removed, {f"mixes/{directory.name}/mix.json",
+                                   f"mixes/{directory.name}/mix.wav"})
+        self.assertFalse(directory.exists())
 
     def test_explicit_discard_refuses_symlinks_in_every_store(self):
         target = self.work / "voices" / "reference.wav"

@@ -385,10 +385,33 @@ def _purge_clip(directory, plan):
     plan.remove_directory(directory)
 
 
+def _mixes_names(directory, plan):
+    """Trust a mixture's recorded audio name only from its own signed record.
+
+    A missing or unreadable record leaves only the legacy generic names
+    deletable, so an unknown recorded mixture can never be silently discarded;
+    anything else fails closed before any file is removed.
+    """
+    record_path = directory / "mix.json"
+    if not _exists(record_path):
+        return {"mix.json", "mix.wav"}
+    try:
+        record = _signed(record_path, "audiobook-renderer-mix", plan)
+    except ValueError:
+        return {"mix.json", "mix.wav"}
+    name = validate_audio_filename(record.get("audio_file", "mix.wav"), suffix=".wav")
+    if not _hash(record.get("audio_sha256")):
+        raise ValueError(f"Cleanup needs a mixture audio checksum: {directory}")
+    plan.check_file(directory / name, record["audio_sha256"])
+    return {"mix.json", name}
+
+
 def _purge_cache(directory, plan, store, *, staging=False):
     _directory(directory)
     names = ({"chapter.json", "chapter.wav", "chapter.m4a", "chapter.mp3", "normalized.wav"}
              if store == "chapters" else {"mix.json", "mix.wav"}) | {".DS_Store"}
+    if store == "mixes":
+        names = _mixes_names(directory, plan) | {".DS_Store"}
     for path in sorted(directory.iterdir()):
         if staging and path.name == "ready":
             _purge_cache(path, plan, store)

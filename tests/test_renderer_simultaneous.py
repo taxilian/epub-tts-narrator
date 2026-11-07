@@ -79,6 +79,47 @@ class SimultaneousMixerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "integrity"):
             prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
 
+    def test_new_mixture_cache_records_a_descriptive_audio_name_and_reuses_it(self):
+        lanes = self.lanes()
+        mixed = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        name = record["audio_file"]
+        self.assertIn("simultaneous-mix", name)
+        self.assertIn(f"key-{folder.name[:16]}", name)
+        self.assertTrue(all(f"voice{index}" in name for index in range(2)))
+        self.assertEqual(Path(mixed["wav_path"]).name, name)
+        self.assertEqual(file_hash(folder / name), record["audio_sha256"])
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", name})
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+            self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
+
+    def test_legacy_mixture_cache_without_recorded_name_still_loads_without_remixing(self):
+        lanes = self.lanes()
+        prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        (folder / record.pop("audio_file")).rename(folder / "mix.wav")
+        record.pop("record_sha256")
+        write_json(folder / "mix.json", dict(record, record_sha256=digest(record)))
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+            reused = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        self.assertEqual(Path(reused["wav_path"]).name, "mix.wav")
+
+    def test_mixture_cache_refuses_an_invalid_recorded_audio_filename(self):
+        lanes = self.lanes()
+        prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        original = record.pop("audio_file")
+        record.pop("record_sha256")
+        for bad in ("../escape.wav", "nested/mix.wav", "mix.mp3"):
+            tampered = dict(record, audio_file=bad)
+            write_json(folder / "mix.json", dict(tampered, record_sha256=digest(tampered)))
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "Recorded audio filename"):
+                prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", original})
+
     def test_truncated_lane_and_cancelling_audio_never_publish(self):
         lanes = self.lanes()
         short = Path(lanes[1]["wav_path"])
