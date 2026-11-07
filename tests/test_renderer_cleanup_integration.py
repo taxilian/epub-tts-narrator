@@ -40,6 +40,10 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
             self.verifier, self.config, purpose=purpose, notify=self.messages.append,
         )
 
+    def attempt_path(self, number=1, field="audio_file"):
+        record = read_json(self.directory / f"attempt-{number:03d}.json")
+        return self.directory / record[field]
+
     def test_accepted_speech_removes_raw_but_resumes_without_models(self):
         for kind in ("speech", "paragraph_speech"):
             with self.subTest(kind=kind):
@@ -57,7 +61,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
     def test_existing_acceptance_is_cleaned_when_resumed_without_invalidation(self):
         self.config["render"]["keep_intermediate_audio"] = True
         audio, accepted = self.take()
-        raw = self.directory / "attempt-001-raw.wav"
+        raw = self.attempt_path(field="raw_file")
         self.assertTrue(raw.is_file())
         self.config["render"]["keep_intermediate_audio"] = False
         with (patch.object(self.engine, "_write", side_effect=AssertionError("regenerated speech")),
@@ -70,7 +74,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         # Purpose alone must protect a sample even if a caller supplies a speech
         # request; protecting only the request kind would not be sufficient.
         audio, accepted = self.take(purpose="reference")
-        raw = self.directory / "attempt-001-raw.wav"
+        raw = self.attempt_path(field="raw_file")
         self.assertTrue(raw.is_file())
         checksum = file_hash(raw)
         self.assertEqual((audio, accepted), self.take(purpose="reference"))
@@ -79,7 +83,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
     def test_explicit_keep_setting_preserves_generated_and_cached_intermediates(self):
         self.config["render"]["keep_intermediate_audio"] = True
         first = self.take()
-        raw = self.directory / "attempt-001-raw.wav"
+        raw = self.attempt_path(field="raw_file")
         self.assertTrue(raw.is_file())
         checksum = file_hash(raw)
         self.assertEqual(first, self.take())
@@ -92,8 +96,8 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.assertFalse((self.directory / "accepted.json").exists())
         for number in (1, 2):
             prefix = f"attempt-{number:03d}"
-            self.assertTrue((self.directory / f"{prefix}.wav").is_file())
-            self.assertTrue((self.directory / f"{prefix}-raw.wav").is_file())
+            self.assertTrue(self.attempt_path(number).is_file())
+            self.assertTrue(self.attempt_path(number, "raw_file").is_file())
             self.assertFalse(read_json(self.directory / f"{prefix}.json")["report"]["passed"])
 
     def test_accepted_later_attempt_keeps_earlier_failed_normalized_audio(self):
@@ -101,9 +105,9 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         good = {"passed": True, "reasons": []}
         with patch.object(workflow, "validate_audio", side_effect=[wrong, good]):
             audio, accepted = self.take()
-        self.assertEqual(audio.name, "attempt-002.wav")
+        self.assertEqual(audio, self.attempt_path(2))
         self.assertEqual(accepted["attempt"], 2)
-        self.assertTrue((self.directory / "attempt-001.wav").is_file())
+        self.assertTrue(self.attempt_path(1).is_file())
         self.assertFalse(read_json(self.directory / "attempt-001.json")["report"]["passed"])
         self.assertTrue((self.directory / "attempt-002.json").is_file())
         self.assertFalse(list(self.directory.glob("*-raw.wav")))
@@ -115,8 +119,8 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
             with self.assertRaises(workflow.VerificationUnavailable):
                 self.take()
         self.assertFalse((self.directory / "accepted.json").exists())
-        self.assertTrue((self.directory / "attempt-001.wav").is_file())
-        self.assertTrue((self.directory / "attempt-001-raw.wav").is_file())
+        self.assertTrue(self.attempt_path().is_file())
+        self.assertTrue(self.attempt_path(field="raw_file").is_file())
         self.assertEqual(read_json(self.directory / "attempt-001.json")["report"], pending)
 
     def test_failed_legacy_acceptance_is_replaced_with_fresh_verified_audio(self):
@@ -127,11 +131,12 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.config["render"]["keep_intermediate_audio"] = False
         resumed, revalidated = self.take()
         self.assertNotEqual(resumed, audio)
-        self.assertEqual(resumed.name, "attempt-002.wav")
+        self.assertEqual(resumed, self.attempt_path(2))
+        self.assertEqual(revalidated["attempt"], 2)
         self.assertTrue(revalidated["report"]["passed"])
         self.assertEqual(len(self.verifier.calls), 2)
         self.assertFalse(read_json(self.directory / "attempt-001.json")["report"]["passed"])
-        self.assertFalse((self.directory / "attempt-001-raw.wav").exists())
+        self.assertFalse(self.attempt_path(field="raw_file").exists())
 
     def test_cleanup_error_warns_but_preserves_successful_acceptance(self):
         with patch("epub_tts_narrator.renderer.cleanup.clean_take_intermediates",
@@ -142,7 +147,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(read_json(self.directory / "accepted.json"), accepted)
         self.assertEqual(file_hash(audio), accepted["audio_sha256"])
-        self.assertTrue((self.directory / "attempt-001-raw.wav").is_file())
+        self.assertTrue(self.attempt_path(field="raw_file").is_file())
         self.assertTrue(any("test disk permission failure" in message for message in self.messages))
 
 
