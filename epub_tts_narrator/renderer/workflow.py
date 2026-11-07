@@ -1603,6 +1603,7 @@ def _save_checkpoint(work, chapter, composed, context, acceptance):
 
 def _package(bundle, config, plan, store, voices, rendered, acceptance,
              engine_identity, verifier_identity, *, notify):
+    from .book_output import resolve_audiobook_filename
     from .publication import published_book, publication_key
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1624,7 +1625,8 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
             unchanged = previous.get("publication_key") == publication_key(
                 bundle, config, plan, voices, rendered, acceptance, previous["engine"], verifier_identity)
     if unchanged:
-        notify(f"Audiobook unchanged; reusing {output / 'book.m4b'}")
+        filename = resolve_audiobook_filename(previous_audio=previous["audio"], output_dir=output)
+        notify(f"Audiobook unchanged; reusing {output / filename}")
         _publish_chapter_links(config, rendered, notify=notify)
         return previous
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
@@ -1632,8 +1634,10 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
         stage.mkdir()
         from .book_metadata import publication_assets
         book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
+        filename = resolve_audiobook_filename(
+            book, previous["audio"] if previous is not None else None, output)
         audio = package_audio(
-            rendered, stage, book=book, cover_path=cover,
+            rendered, stage, book=book, cover_path=cover, audiobook_name=filename,
             chapter_format=config["render"]["chapter_format"],
             aac_bitrate=config["render"].get("aac_bitrate", "128k"),
             mp3_bitrate=config["render"].get("mp3_bitrate", "128k"),
@@ -1665,7 +1669,7 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
         }
         write_json(stage / "render.json", result)
         _publish(stage, output, expected=expected)
-    notify(f"Audiobook ready: {output / 'book.m4b'}")
+    notify(f"Audiobook ready: {output / audio['audiobook']['path']}")
     _publish_chapter_links(config, rendered, notify=notify)
     return result
 

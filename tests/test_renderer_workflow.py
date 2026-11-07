@@ -249,14 +249,17 @@ class RendererWorkflowTests(unittest.TestCase):
             self.assertEqual(file_hash(output / name), checksum)
         self.assertFalse((output / "pcm").exists())
         self.assertTrue((output / "chapters" / "chapter-0001.m4a").is_file())
-        inspection = probe_audio(output / "book.m4b", ffprobe=FFPROBE)
+        book_path = output / first["audio"]["audiobook"]["path"]
+        self.assertEqual(book_path.name, "The Last Lantern.m4b")
+        self.assertFalse((output / "book.m4b").exists())
+        inspection = probe_audio(book_path, ffprobe=FFPROBE)
         self.assertEqual(len(inspection["chapters"]), 1)
         self.assertEqual(inspection["chapters"][0]["tags"]["title"],
                          self.bundle["chapters"][0]["entry"]["title"])
         sync = read_json(output / "sync.json")
         self.assertEqual(sync["source_fingerprint"], self.bundle["manifest"]["source_fingerprint"])
         self.assertEqual(sync["book_id"], self.bundle["source"]["book"]["id"])
-        self.assertEqual(sync["audio_sha256"], file_hash(output / "book.m4b"))
+        self.assertEqual(sync["audio_sha256"], file_hash(book_path))
         rows = {row["id"]: row for chapter in self.bundle["chapters"] for row in chapter["rows"]}
         self.assertEqual(len(sync["segments"]), len(rows))
         previous_end = 0

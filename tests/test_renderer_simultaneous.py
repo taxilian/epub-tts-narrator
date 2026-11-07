@@ -224,8 +224,8 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
         self.assertEqual(lanes[0]["audio_sha256"], lanes[1]["audio_sha256"])
         self.assertTrue(all(lane["report"]["passed"] for lane in lanes))
-        assemble(self.bundle, self.config, notify=lambda _: None)
-        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+        result = assemble(self.bundle, self.config, notify=lambda _: None)
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_analysis_update_lock_blocks_render_and_assemble_before_audio(self):
         lock = self.root / "bundle" / ".analysis-update.lock"
@@ -275,7 +275,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertFalse((self.root / "work" / ".render.lock").exists())
 
     def test_each_performer_is_verified_and_source_sync_is_shared_once(self):
-        self.run_render()
+        result = self.run_render()
         first, second = self.engine.speech_calls[:2]
         self.assertEqual(first["text"], self.group_spoken)
         self.assertEqual(second["text"], self.group_spoken)
@@ -294,7 +294,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertEqual([lane["voice_id"] for lane in group["speaker_lanes"]], ["voice_mara", "voice_lena"])
         self.assertEqual(sum(item["chunk_id"] == group["chunk_id"] for item in sync["segments"]), 1)
         self.assertFalse(any("mixes" in path for path in self.verifier.calls))
-        self.assertTrue((output / "book.m4b").is_file())
+        self.assertTrue((output / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_failed_second_lane_cannot_publish_a_mix_chapter_or_book(self):
         self.verifier.failed_voice = "voice_lena"
@@ -321,8 +321,8 @@ class SimultaneousWorkflowTests(unittest.TestCase):
                              for row in self.engine.speech_calls), 1)
         with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("ASR or TTS called")):
             self.run_render(chapters_only=True)
-            assemble(self.bundle, self.config, notify=lambda _: None)
-        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+            result = assemble(self.bundle, self.config, notify=lambda _: None)
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_changed_lane_verification_cannot_pass_restoration(self):
         self.run_render(chapters_only=True)
