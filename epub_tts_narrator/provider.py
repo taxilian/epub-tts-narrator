@@ -45,6 +45,7 @@ _RATE_LIMIT_HEADERS = {
     "X-Concurrent-Limit-Max": "concurrent_max",
 }
 _LOGGER = logging.getLogger(__name__)
+_DEFAULT_STREAM_OBSERVER = None
 _JSON_INSTRUCTION = (
     "Return a single JSON object only, without Markdown code fences or "
     "surrounding commentary."
@@ -64,6 +65,16 @@ class ProviderError(Exception):
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
         self.rate_limits = dict(rate_limits or {})
+
+
+def set_default_stream_observer(observer):
+    """Set the process-wide stream observer used by newly created clients."""
+    global _DEFAULT_STREAM_OBSERVER
+    if observer is not None and not callable(observer):
+        raise ProviderError("The stream observer must be callable or None.")
+    previous = _DEFAULT_STREAM_OBSERVER
+    _DEFAULT_STREAM_OBSERVER = observer
+    return previous
 
 
 class OutputTruncatedError(ProviderError):
@@ -257,7 +268,8 @@ class OpenAICompatibleClient:
         self.retry_max_delay = float(retry_max_delay)
         self.stall_timeout = float(stall_timeout)
         self.progress_callback = progress_callback
-        self.stream_observer = stream_observer
+        self.stream_observer = (
+            _DEFAULT_STREAM_OBSERVER if stream_observer is None else stream_observer)
         # Reasoning models may pause minutes before the first stream byte, so
         # initial silence gets a longer allowance than inter-chunk gaps, and
         # never beyond the overall request timeout.

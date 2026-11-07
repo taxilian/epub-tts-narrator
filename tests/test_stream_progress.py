@@ -40,6 +40,16 @@ class StreamConsoleTests(unittest.TestCase):
         self.assertGreaterEqual(text.count("LLM 1 active"), 2)
         console.observe({"request_id": "req-1", "phase": "failed"})
 
+    def test_ordinary_log_writes_scroll_before_redrawn_status(self):
+        output = TTY()
+        console = StreamConsole(output, width=200, draw_interval=0)
+        console.observe({"request_id": "req-1", "phase": "started"})
+        console.write("ordinary log line\n")
+        text = output.getvalue()
+        self.assertIn("ordinary log line\n", text)
+        self.assertGreater(text.rfind("LLM 1 active"), text.index("ordinary log line"))
+        console.observe({"request_id": "req-1", "phase": "failed"})
+
     def test_non_tty_output_stays_plain(self):
         output = io.StringIO()
         console = StreamConsole(output)

@@ -22,6 +22,7 @@ from epub_tts_narrator.provider import (
     ProviderError,
     _NoRedirect,
     provider_failure_summary,
+    set_default_stream_observer,
 )
 
 
@@ -578,6 +579,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertEqual(body["messages"][0]["role"], "system")
         self.assertEqual(body["messages"][1], {"role": "user", "content": '{"text":"Café"}'})
+
+    def test_default_stream_observer_applies_to_every_new_client(self):
+        seen = []
+        previous = set_default_stream_observer(seen.append)
+        self.addCleanup(set_default_stream_observer, previous)
+        self.respond(sse(delta('{"characters": []}'), delta_end("stop"), "[DONE]"))
+        self.assertEqual(OpenAICompatibleClient("model").complete("Analyze", {}),
+                         {"characters": []})
+        self.assertTrue(seen)
+        self.assertEqual(seen[0]["phase"], "started")
+        self.assertEqual(seen[-1]["phase"], "completed")
 
     def test_stream_observer_reports_reasoning_and_content_progress(self):
         seen = []

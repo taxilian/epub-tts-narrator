@@ -23,7 +23,7 @@ from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerp
 from .attribution_review import audit_attribution
 from .speaker_decisions import prompt_speaker_decisions
 from .jev import JevClient
-from .provider import OpenAICompatibleClient, ProviderError
+from .provider import OpenAICompatibleClient, ProviderError, set_default_stream_observer
 from .stream_progress import StreamConsole
 from .series import link_analysis, load_registry, save_registry
 from .analysis_directory import (
@@ -312,7 +312,11 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     model_cache = None
-    stream_console = StreamConsole(sys.stderr)
+    original_stderr = sys.stderr
+    stream_console = StreamConsole(original_stderr)
+    previous_observer = set_default_stream_observer(stream_console.observe)
+    if stream_console.enabled:
+        sys.stderr = stream_console
 
     def progress(message):
         stream_console.progress(message)
@@ -768,4 +772,7 @@ def main(argv=None):
         resume_guidance()
         return 130
     finally:
+        if sys.stderr is stream_console:
+            sys.stderr = original_stderr
+        set_default_stream_observer(previous_observer)
         stream_console.close()

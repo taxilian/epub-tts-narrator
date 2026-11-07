@@ -37,24 +37,49 @@ class StreamConsole:
         self._drawn = False
         self._last_draw = 0.0
         self._thread = None
+        self._pending = ""
 
     def close(self):
         if not self.enabled:
             return
         with self._lock:
             self._active.clear()
+            self._preview = ""
+            self._notice = ""
             self._clear_locked()
+
+    def write(self, text):
+        if not self.enabled:
+            return self.stream.write(text)
+        with self._lock:
+            self._pending += text
+            while "\n" in self._pending:
+                line, self._pending = self._pending.split("\n", 1)
+                self._message_locked(line)
+        return len(text)
+
+    def flush(self):
+        if not self.enabled:
+            return self.stream.flush()
+        with self._lock:
+            if self._pending:
+                self._message_locked(self._pending)
+                self._pending = ""
+            self.stream.flush()
 
     def progress(self, message):
         if not self.enabled:
             print(message, file=self.stream, flush=True)
             return
         with self._lock:
-            self._clear_locked()
-            self.stream.write(str(message) + "\n")
-            self.stream.flush()
-            if self._active:
-                self._draw_locked(monotonic())
+            self._message_locked(str(message))
+
+    def _message_locked(self, message):
+        self._clear_locked()
+        self.stream.write(message + "\n")
+        self.stream.flush()
+        if self._active:
+            self._draw_locked(monotonic())
 
     def observe(self, event):
         if not self.enabled or not isinstance(event, dict):
@@ -99,6 +124,7 @@ class StreamConsole:
                 self._active.pop(request_id, None)
                 self._notice = ""
                 if not self._active:
+                    self._preview = ""
                     self._clear_locked()
                     return
             if now - self._last_draw >= self.draw_interval:
