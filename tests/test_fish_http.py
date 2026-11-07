@@ -22,7 +22,7 @@ import wave
 from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import EngineError
 from epub_tts_narrator.renderer.fish_http import PROTOCOL, FishHTTPEngine, FishHTTPError
-from epub_tts_narrator.renderer.fish_http import trim_wire_text
+from epub_tts_narrator.renderer.fish_http import trim_wire_text, validate_wire_text
 from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.server import make_server, serve
 from shared_fixtures import PARENTHESIS_TRIM_CASES
@@ -138,6 +138,20 @@ class SpeechTargetTests(unittest.TestCase):
                 self.assertEqual(trim_speech_text(source), interior)
                 self.assertEqual(trim_speech_text(trim_speech_text(source)), interior)
         self.assertEqual(trim_speech_text(' ” \t\n\u2003« '), "")
+
+    def test_invisible_format_characters_are_not_sent_to_the_engine(self):
+        # Book UI lists put a zero-width space after each bullet; a soft
+        # hyphen, joiner or byte-order mark is likewise never spoken.
+        for source, expected in ((" ●​ Pinnacle Abilities: ", "● Pinnacle Abilities:"),
+                                 ("Paired Devices ●​ ", "Paired Devices ●"),
+                                 ("﻿“A won­der⁠ful day.”​", "A wonderful day."),
+                                 ("(​quietly​)", "quietly")):
+            with self.subTest(source=source):
+                prepared = trim_speech_text(source)
+                self.assertEqual(prepared, expected)
+                validate_wire_text("<|speaker:0|> " + prepared, {0})
+        self.assertEqual(trim_speech_text(" ●​ "), "●")
+        self.assertEqual(trim_speech_text("​ ​"), "")
 
     def test_each_wire_target_is_trimmed_inside_tags_and_prefix_controls(self):
         source = ('<|speaker:0|> [nervous] “ Hello. ”\n'

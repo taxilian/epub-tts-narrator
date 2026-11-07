@@ -1,9 +1,17 @@
 """Target-only text preparation; source and saved voice transcripts stay exact."""
 
+import unicodedata
+
 
 _EDGE_QUOTES = frozenset("\"'‘’‚‛“”„‟«»‹›")
 _PAREN_EDGES = _EDGE_QUOTES | frozenset("()")
 _SENTENCE_ENDS = frozenset(".,;:!?…")
+
+
+def _invisible(character: str) -> bool:
+    # Zero-width spaces, soft hyphens, joiners, byte-order and direction marks
+    # are typesetting, never speech; Drama 3 requests must not contain them.
+    return unicodedata.category(character) == "Cf"
 
 
 def speech_text_indices(value: str) -> list[int]:
@@ -12,14 +20,16 @@ def speech_text_indices(value: str) -> list[int]:
     Source segmentation can leave an opening parenthesis on one speaker's
     fragment and its closing mark on another. Strip those edge marks, including
     a closing mark before sentence punctuation, and pairs enclosing the whole
-    target. Balanced interior parentheticals remain intact. Original indices
-    identify the edge boundaries even when the prepared text is not contiguous.
+    target. Balanced interior parentheticals remain intact. Invisible format
+    characters (Unicode category Cf) are removed wherever they occur. Original
+    indices identify the edge boundaries even when the prepared text is not
+    contiguous.
     """
     leading_end, trailing_start = 0, len(value)
-    while leading_end < len(value) and (value[leading_end].isspace()
+    while leading_end < len(value) and (value[leading_end].isspace() or _invisible(value[leading_end])
                                         or value[leading_end] in _PAREN_EDGES):
         leading_end += 1
-    while trailing_start > 0 and (value[trailing_start - 1].isspace()
+    while trailing_start > 0 and (value[trailing_start - 1].isspace() or _invisible(value[trailing_start - 1])
                                   or value[trailing_start - 1] in _PAREN_EDGES | _SENTENCE_ENDS):
         trailing_start -= 1
     stack, pairs, unmatched = [], [], []
@@ -33,6 +43,7 @@ def speech_text_indices(value: str) -> list[int]:
                 unmatched.append(index)
     removed = {index for index in unmatched + stack
                if index < leading_end or index >= trailing_start}
+    removed.update(index for index, character in enumerate(value) if _invisible(character))
     for opening, closing in pairs:
         if opening < leading_end and closing >= trailing_start:
             removed.update((opening, closing))
