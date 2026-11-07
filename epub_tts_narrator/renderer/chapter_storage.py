@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .chapter_protocol import ARTIFACT_NAMES, require_hash
+from .chapter_protocol import is_artifact_name, require_hash
 from .common import file_hash
 from .diagnostics import exception_detail
 
@@ -55,7 +55,7 @@ class S3ArtifactPublisher:
     def publish(self, job_id, name, path, sha256):
         require_hash(job_id, "Job ID")
         require_hash(sha256, "Artifact hash")
-        if name not in ARTIFACT_NAMES:
+        if not is_artifact_name(name):
             raise ValueError("Only compressed chapter audio and JSON may be published")
         key = key_for(self.settings, job_id, sha256, name)
         record = {"key": key, "bucket": self.bucket, "endpoint_url": self.settings.get("endpoint_url", ""),

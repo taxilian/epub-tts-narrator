@@ -29,7 +29,7 @@ import time
 from .audio_naming import descriptive_audio_filename
 from .chapter_executor import MAX_PARALLEL_CHAPTERS
 from .chapter_protocol import (
-    ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix,
+    FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix, is_artifact_name,
     require_hash, validate_spec, validate_voice_manifest,
 )
 from .chapter_sessions import ClientSessions, require_session_id
@@ -511,7 +511,7 @@ class ChapterJobs:
         return {"acknowledged": True}
 
     def artifact(self, job_id, name):
-        if name not in ARTIFACT_NAMES:
+        if not is_artifact_name(name):
             raise KeyError("Unknown artifact")
         with self._condition, self._connect() as db:
             row = self._row(db, job_id)
@@ -748,7 +748,7 @@ class ChapterJobs:
                 raise RenderPaused("The chapter's rendering client disconnected before assembly")
             paths = self.executor.assemble(spec, prepared, self.root / "render-work",
                                            lambda message: self._log(job_id, message))
-            if not isinstance(paths, dict) or not paths or set(paths) - ARTIFACT_NAMES:
+            if not isinstance(paths, dict) or not paths or any(not is_artifact_name(name) for name in paths):
                 raise ValueError("Executor returned an unsupported artifact; WAV transfers are forbidden")
             artifacts = []
             for name, supplied in sorted(paths.items()):
