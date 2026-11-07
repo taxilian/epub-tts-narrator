@@ -14,7 +14,7 @@ from time import monotonic
 import unicodedata
 
 from .assembly import normalize_clip, package_audio
-from .audio_naming import descriptive_audio_filename
+from .audio_naming import descriptive_audio_filename, speech_take_filename, validate_audio_filename
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .chapter_records import signed_record
@@ -159,10 +159,7 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
                 or payload.get("request_hash") != digest(request)
                 or payload.get("attempt") != attempt or payload.get("seed") != seed):
             raise ValueError("generation identity")
-        raw_name = payload["raw_file"]
-        if (not isinstance(raw_name, str) or not re.fullmatch(
-                rf"attempt-{attempt:03d}-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav", raw_name)):
-            raise ValueError("generation audio path")
+        raw_name = validate_audio_filename(payload["raw_file"], suffix=".wav")
         raw = path.parent / raw_name
         if file_hash(regular_file(raw)) != payload["raw_sha256"]:
             raise ValueError("generation audio checksum")
@@ -258,13 +255,15 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         if accepted_path.exists() or accepted_path.is_symlink():
             raise RenderBlocked("A pending reference cannot resume an accepted candidate")
         pending_path = directory / f"attempt-{resume_attempt:03d}.json"
-        pending_wav = directory / f"attempt-{resume_attempt:03d}.wav"
-        if any(path.is_symlink() or not path.is_file() for path in (pending_path, pending_wav)):
+        if pending_path.is_symlink() or not pending_path.is_file():
             raise RenderBlocked("Pending reference verification requires the saved attempt and audio")
         pending = read_json(pending_path)
         if (not isinstance(pending, dict) or pending.get("request_hash") != digest(request)
                 or not pending_confirmation(pending.get("report", {}))):
             raise RenderBlocked("Saved reference is not awaiting text confirmation")
+        pending_wav = directory / validate_audio_filename(pending.get("audio_file"), suffix=".wav")
+        if pending_wav.is_symlink() or not pending_wav.is_file():
+            raise RenderBlocked("Pending reference verification requires the saved attempt and audio")
 
     accepted = None
     missing_accepted_attempt = None
@@ -276,9 +275,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             raise RenderBlocked("Invalid cached acceptance record") from exc
         if not isinstance(accepted, dict):
             raise RenderBlocked("Invalid cached acceptance record")
-        name = accepted.get("audio_file", "")
-        if not isinstance(name, str) or name != Path(name).name or not name.endswith(".wav"):
-            raise RenderBlocked("Invalid cached audio path")
+        try:
+            name = validate_audio_filename(accepted.get("audio_file", ""), suffix=".wav")
+        except ValueError as exc:
+            raise RenderBlocked("Invalid cached audio path") from exc
         wav = directory / name
         if accepted.get("request_hash") != digest(request):
             raise RenderBlocked("Cached audio changed; refusing to trust or silently overwrite it")
@@ -289,8 +289,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             # even if verification is interrupted again before recovery finishes.
             demoted_attempt = accepted.get("attempt")
             if (type(demoted_attempt) is not int or demoted_attempt < 1
-                    or (purpose != "speech" and demoted_attempt > 10)
-                    or name != f"attempt-{demoted_attempt:03d}.wav"):
+                    or (purpose != "speech" and demoted_attempt > 10)):
                 raise RenderBlocked("Invalid failed acceptance attempt")
             diagnostic_path = directory / f"attempt-{demoted_attempt:03d}.json"
             if diagnostic_path.exists() or diagnostic_path.is_symlink():
@@ -303,8 +302,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         elif not wav.exists() and not wav.is_symlink():
             missing_accepted_attempt = accepted.get("attempt")
             if (type(missing_accepted_attempt) is not int or missing_accepted_attempt < 1
-                    or (purpose != "speech" and missing_accepted_attempt > 10)
-                    or name != f"attempt-{missing_accepted_attempt:03d}.wav"):
+                    or (purpose != "speech" and missing_accepted_attempt > 10)):
                 raise RenderBlocked("Invalid cached attempt for missing accepted audio")
             notify("  Saved accepted audio was removed; generating a replacement.")
             accepted_path.unlink()
@@ -470,7 +468,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     if direction_session is None or not direction_session.abandoned(number)]
         latest = resolution_session.records[max(eligible)]
         name = latest.get("audio_file")
-        if name == f"attempt-{latest['attempt']:03d}.wav" and (directory / name).exists():
+        if isinstance(name, str) and (directory / name).exists():
+            name = validate_audio_filename(name, suffix=".wav")
             if file_hash(regular_file(directory / name)) != latest.get("audio_sha256"):
                 raise RenderBlocked("Speech recovery candidate changed on disk")
             # Pending decisions and recurring failures are reconsidered; no saved
@@ -517,7 +516,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         if direction_session is not None and direction_session.abandoned(attempt):
             continue
         prefix = f"attempt-{attempt:03d}"
-        raw, wav = directory / (prefix + "-raw.wav"), directory / (prefix + ".wav")
+        raw = directory / speech_take_filename(request, attempt, role="raw")
+        wav = directory / speech_take_filename(request, attempt)
         result_path = directory / (prefix + ".json")
         seed = _seed(config["render"]["seed"],
                      request if seed_identity is None else seed_identity, attempt)
@@ -534,6 +534,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             previous = read_json(result_path)
             if previous.get("request_hash") != digest(request):
                 raise RenderBlocked("Attempt belongs to a different synthesis request")
+            if previous.get("audio_file") is not None:
+                wav = directory / validate_audio_filename(previous["audio_file"], suffix=".wav")
+            if previous.get("raw_file") is not None:
+                raw = directory / validate_audio_filename(previous["raw_file"], suffix=".wav")
+            elif (directory / (prefix + "-raw.wav")).exists():
+                raw = directory / (prefix + "-raw.wav")
             if (fresh_speech and not wav.exists() and attempt != missing_accepted_attempt
                     and not previous.get("report", {}).get("passed")):
                 # No waveform exists to recheck, even if verification settings
@@ -570,7 +576,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         # its checksum. Recreate privately and compare, retaining
                         # the original rather than trusting an unbound WAV.
                         with tempfile.TemporaryDirectory(prefix=".verify-normalized-", dir=directory) as stage:
-                            expected = Path(stage) / "audio.wav"
+                            expected = Path(stage) / wav.name
                             normalize_clip(raw, expected, sample_rate=config["render"]["sample_rate"],
                                            ffmpeg=config["render"]["ffmpeg"])
                             if checksum != file_hash(expected):
@@ -582,9 +588,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             else:
                 # Orphans from interruption are retained; choose another raw name.
                 if attempt == missing_accepted_attempt:
-                    raw = directory / (prefix + "-regenerated-" + os.urandom(8).hex() + ".wav")
+                    raw = directory / speech_take_filename(
+                        request, attempt, role="regenerated-" + os.urandom(8).hex())
                 elif raw.exists() and generation is None:
-                    raw = directory / (prefix + "-recovery-raw.wav")
+                    raw = directory / speech_take_filename(request, attempt, role="recovery-raw")
                     if raw.exists():
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
@@ -688,7 +695,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         "attempt": attempt, "seed": seed, "validation_key": validation_key,
                         "report": {"passed": False, "reasons": ["generation_incomplete"],
                                    "retry_on_resume": True},
-                        "engine_metadata": metadata, "audio_file": wav.name,
+                        "engine_metadata": metadata, "audio_file": wav.name, "raw_file": raw.name,
                         "audio_sha256": file_hash(regular_file(wav)),
                     })
                 if attempt_ticket is not None:
@@ -742,6 +749,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
             "audio_file": wav.name if wav.exists() else None,
+            "raw_file": raw.name if raw.exists() else None,
             "audio_sha256": file_hash(wav) if wav.exists() else None,
         }
         write_json(result_path, record)
@@ -1755,8 +1763,10 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
         filename = record.get("audio_file")
         if filename is None:
             continue  # Interrupted synthesis has no normalized candidate to check.
-        if filename != f"attempt-{attempt:03d}.wav":
-            raise RenderBlocked("Invalid saved whole speech candidate path")
+        try:
+            filename = validate_audio_filename(filename, suffix=".wav")
+        except ValueError as exc:
+            raise RenderBlocked("Invalid saved whole speech candidate path") from exc
         wav = directory / filename
         if not wav.exists() and not wav.is_symlink():
             continue

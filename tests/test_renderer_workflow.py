@@ -14,7 +14,7 @@ import wave
 
 from epub_tts_narrator.renderer.assembly import probe_audio
 from epub_tts_narrator.renderer.bundle import load_bundle
-from epub_tts_narrator.renderer.common import digest, file_hash, read_json
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_take
 from epub_tts_narrator.cli import export_bundle
@@ -113,6 +113,37 @@ class RendererWorkflowTests(unittest.TestCase):
         return render(bundle or self.bundle, config or self.config, self.engine,
                       self.verifier, notify=lambda _: None)
 
+    def test_take_audio_uses_request_context_and_legacy_recorded_path_resumes(self):
+        # Given a request with stable content and voice identifiers.
+        request = {"kind": "fixture", "text": "Hello there.", "engine": self.engine.identity,
+                   "chunk": {"chunk_id": "chunk-42", "segment": {"voice_id": "voice-mara"}}}
+
+        # When generating a real take through the public verification boundary.
+        wav, record = self.take(request=request)
+
+        # Then new normalized and raw names carry context while JSON keeps its attempt ID.
+        self.assertEqual(wav.name, "attempt-001-chunk-42-voice-mara-take.wav")
+        self.assertEqual(record["audio_file"], wav.name)
+        self.assertEqual(record["raw_file"], "attempt-001-chunk-42-voice-mara-raw.wav")
+        self.assertTrue((self.root / "takes" / "attempt-001.json").is_file())
+
+        # Given the same accepted record in its old explicit attempt-001.wav form.
+        legacy = wav.with_name("attempt-001.wav")
+        wav.rename(legacy)
+        for path in (self.root / "takes" / "accepted.json", self.root / "takes" / "attempt-001.json"):
+            saved = read_json(path)
+            saved["audio_file"] = legacy.name
+            write_json(path, saved)
+        accepted_before = (self.root / "takes" / "accepted.json").read_bytes()
+        audio_before = legacy.read_bytes()
+
+        # When reopening it, no synthesis or path migration is needed.
+        with patch.object(self.engine, "_write", side_effect=AssertionError("unexpected synthesis")):
+            resumed, _ = self.take(request=request)
+        self.assertEqual(resumed, legacy)
+        self.assertEqual(legacy.read_bytes(), audio_before)
+        self.assertEqual((self.root / "takes" / "accepted.json").read_bytes(), accepted_before)
+
     def test_chapters_only_does_not_require_an_available_original_epub(self):
         from epub_tts_narrator.renderer.workflow import _preflight
         self.config["render"].update(require_cover=True, epub=str(self.root / "moved-original.epub"))
@@ -166,7 +197,7 @@ class RendererWorkflowTests(unittest.TestCase):
             self.assertEqual(generate.call_count, 1)
             self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.verifier.calls), 3)
-        self.assertEqual(len(list((self.root / "takes").glob("attempt-001-regenerated-*.wav"))), 2)
+        self.assertEqual(len(list((self.root / "takes").glob("attempt-001-*regenerated-*.wav"))), 2)
 
     def test_changed_policy_does_not_reuse_unsuccessful_audio_from_an_exhausted_budget(self):
         self.verifier.wrong_texts.add("Hello there.")
