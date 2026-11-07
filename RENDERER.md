@@ -1310,6 +1310,27 @@ Fresh books use a sanitized form of the actual title, for example `The Last Lant
 
 An existing per-book `audiobook.path` is authoritative across render, assemble, metadata refresh, publication, result paths, and checksums, including a custom name or an explicitly recorded `book.m4b`. Changing the book title does not silently rename that output. An older manifest without `audiobook.path` can use an intact existing `book.m4b`; that compatibility fallback is not a fresh-book default. No existing book is renamed, deleted, re-encoded, or regenerated merely because its name is legacy.
 
+### Audio filenames and existing output compatibility
+
+New output uses descriptive names, such as `BookTitle.m4b`, `chapter-0042.m4a`, `voice-id-Hero-reference.wav`, contextual attempt raw audio, and purpose-specific context or temporary stages. Filenames are not part of speech, ASR, or reference cache identity. They identify files for people and let saved records locate them reliably.
+
+For existing output, the recorded JSON filename remains authoritative, even when it is a legacy generic name. The renderer reads and resumes using these fields:
+
+| Record | Filename field(s) |
+| --- | --- |
+| `audio-manifest.json` | `audiobook.path` (also inventoried by `render.json`; mirrored as `sync.json.audio_file`) |
+| `voice.json` | `reference_file` |
+| `normalization.json` | `audio_file` |
+| `pronunciationpreview.json` | `audio_file`, `raw_file`, `normalized_file` |
+| `attempt-NNN.json` | `audio_file`, `raw_file`; `accepted.json` uses `audio_file` |
+| Local `chapter.json` | `localwav_file`, `encoded_file` |
+| Remote `chapter.json` | `audio_file`, `lossless_file` (remote chapter body fields) |
+| `mix.json` | `audio_file` |
+
+Local and remote chapter records use different fields. New local and remote chapters use numbered names; remote exports require a coordinated controller and worker update. A new controller can still read legacy worker and cache metadata. The audited writers also cover final books, imported and generated voice references, loudness and pronunciation previews, speech and recovery attempts, selections, mixes, server scratch audio, provider atomic stages, downloads, comparison copies, and worker smoke artifacts. This describes current renderer-owned defaults, not unmerged branches or opaque vendor internals.
+
+Older records without a filename field use only their existing legacy-reader fallback. Existing audio, checksums, and selected voices are not mass-renamed or regenerated. These filenames are linked to integrity records: don't edit one manifest or rename one file by hand, since the other checksums and linked state would no longer agree. Compatibility means the application honors the name already recorded; it is not a freeform filename setting or a new command. New defaults apply to new output only, and changing a title does not rename an existing recorded book.
+
 New EPUB analyses retain a local `source-epub.json` location hint, bound to the analyzed book's SHA-256. Rendering uses that original automatically. The hint is separate from analysis fingerprints and voice/audio cache identities. For an older analysis or a moved original, pass `--epub PATH`; the EPUB's byte hash must match the analyzed book. Local and remote chapter rendering use the same final publication path for artwork and tags.
 
 The full declared JPEG/PNG cover is scaled proportionally into a 1600×1600 square, over a blurred, darkened background derived from the same image. The sharp foreground is never cropped or stretched. The original image is retained, and the square JPEG is embedded as attached cover art. Required artwork is checked before synthesis. Missing or unsupported artwork stops full-book publication by default; `--chapters-only` can still generate speech. Set `render.require_cover = false` only when deliberately publishing without artwork. Unsafe, corrupt, or mismatched EPUB inputs still stop the run.
