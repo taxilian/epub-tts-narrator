@@ -689,7 +689,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # recognition can be interrupted. In particular, a pronunciation
                 # rewrite must retain its reviewed spelling and audit when this
                 # already-generated waveform is verified on the next run.
-                if adaptive:
+                if adaptive or fresh_speech:
                     write_json(result_path, {
                         "request_hash": request_hash, "request": request,
                         "attempt": attempt, "seed": seed, "validation_key": validation_key,
