@@ -17,6 +17,7 @@ import unittest
 
 from epub_tts_narrator import casting_discovery
 from epub_tts_narrator.casting_discovery import discover_candidates, flatten_atoms
+from epub_tts_narrator.casting_workflow import _metered_identity_progress
 from epub_tts_narrator.pipeline import DEFAULT_POLICY, CachedRequests, make_units, seed_cast
 
 
@@ -246,6 +247,20 @@ class DiscoveryCandidatesTests(unittest.TestCase):
     def _requests(self, client, *, budget=None):
         return CachedRequests(client, self.cache, repair_attempts=0,
                               max_request_chars=budget if budget is not None else 200000)
+
+    def test_identity_votes_and_collision_waves_advance_the_overall_meter(self):
+        messages, values = [], []
+        report = _metered_identity_progress(
+            messages.append, lambda value, stage: values.append((value, stage)), 0.25, 0.07)
+        report("Identity jury: 51/102 reviewer responses complete")
+        report("Collision wave 1: 160 merge hypothesis case(s) over 400 live lineages")
+        report("Collision jury: 2/3 reviewer response set(s) complete")
+        self.assertEqual(values, [
+            (0.25 + 0.07 * 0.75 * 0.5, "Identity jury 51/102"),
+            (0.25 + 0.07 * 0.75, "Collision review 160 cases"),
+            (0.25 + 0.07 * (0.75 + 0.25 * 2 / 3), "Collision jury 2/3 reviewer sets"),
+        ])
+        self.assertEqual(len(messages), 3)
 
     def test_source_character_budget_sets_initial_discovery_regions(self):
         client = DiscoveryFake()
