@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from threading import Lock, Thread
 from time import monotonic, sleep
 import unicodedata
@@ -171,6 +172,12 @@ class StreamConsole:
             start = end
         return len(self._STEPS), len(self._STEPS), self._STEPS[-1][1], 1.0
 
+    def _terminal_width(self):
+        try:
+            return os.get_terminal_size(self.stream.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            return self.width
+
     def _draw_locked(self, now):
         states = list(self._active.values())
         if not states:
@@ -197,9 +204,10 @@ class StreamConsole:
                   f"{step_fraction:.0%} · {self._stage} | elapsed {_seconds(now - oldest)} | "
                   f"{events} events | thought {reasoning:,} chars | "
                   f"answer {content:,} chars | {_size(received)} received")
+        width = max(40, self._terminal_width())
         self._clear_locked()
-        self.stream.write(first[:max(1, self.width - 1)] + "\n")
-        self.stream.write(second[:max(1, self.width - 1)] + "\n")
+        self.stream.write(first[:max(1, width - 1)] + "\n")
+        self.stream.write(second[:max(1, width - 1)] + "\n")
         self.stream.flush()
         self._drawn = True
         self._last_draw = now

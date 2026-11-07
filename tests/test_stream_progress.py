@@ -1,7 +1,9 @@
 """Live model-stream status is TTY-only, bounded, and non-persistent."""
 
 import io
+import os
 import unittest
+from unittest.mock import patch
 
 from epub_tts_narrator.stream_progress import StreamConsole
 
@@ -12,6 +14,26 @@ class TTY(io.StringIO):
 
 
 class StreamConsoleTests(unittest.TestCase):
+    def test_status_uses_the_attached_terminal_width(self):
+        class SizedTTY(TTY):
+            def fileno(self):
+                return 1
+
+        output = SizedTTY()
+        console = StreamConsole(output, width=200, draw_interval=0)
+        with patch("epub_tts_narrator.stream_progress.os.get_terminal_size",
+                   return_value=os.terminal_size((48, 24))):
+            console.set_progress(0.75, "Attribution 80/100 complete")
+            console.observe({"request_id": "req-1", "phase": "started"})
+            console.observe({
+                "request_id": "req-1", "phase": "streaming", "kind": "reasoning",
+                "text": "x" * 300, "received": 1, "events": 1,
+                "reasoning_chars": 300, "content_chars": 0,
+            })
+        for line in output.getvalue().splitlines():
+            self.assertLessEqual(len(line.replace("\x1b[2A\x1b[J", "")), 47)
+        console.observe({"request_id": "req-1", "phase": "failed"})
+
     def test_two_line_status_shows_reasoning_and_aggregate_stats(self):
         output = TTY()
         console = StreamConsole(output, width=200, draw_interval=0)
