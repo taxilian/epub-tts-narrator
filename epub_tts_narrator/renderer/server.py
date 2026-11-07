@@ -261,8 +261,21 @@ class _RenderServer(ThreadingHTTPServer):
             for key, value in previous.items():
                 setattr(self.engine, key, value)
 
+    def _infer_concurrent(self, text, voices, history, output, seed, sampling, request_id=None,
+                          queued_at=None, layout="directing"):
+        """A batching engine decodes many requests at once; sampling travels per request."""
+        from .request_sampling import request_sampling
+        if request_id:
+            self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
+        options = {"layout": layout} if layout != "directing" else {}
+        with request_sampling(sampling):
+            return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history, **options)
+
     def synthesize(self, text, voices, output, seed, sampling, *, history=(), layout="directing",
                    request_id=None, queued_at=None):
+        if getattr(self.engine, "concurrent_requests", 1) > 1:
+            return self._infer_concurrent(text, voices, list(history), output, seed, sampling,
+                                          request_id, queued_at, layout)
         return self.inference_runtime.run(
             self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at, layout,
             initialize_mlx=requires_mlx(self.engine),
@@ -581,6 +594,13 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
         if config["engine"].get("type", "drama3_mlx") not in {"drama3_mlx", "fish_speech_cuda"}:
             raise EngineError("The renderer server requires engine.type='drama3_mlx' or 'fish_speech_cuda'")
         engine = create_engine(config["engine"])
+    rows = settings.get("batch_rows", 1)
+    if rows > 1:
+        if not callable(getattr(engine, "set_batch_rows", None)):
+            raise EngineError("server.batch_rows above 1 requires an engine that decodes batches (fish_speech_cuda)")
+        if settings.get("max_pending_requests", 4) < rows:
+            raise EngineError("server.max_pending_requests must be at least server.batch_rows")
+        engine.set_batch_rows(rows)
     if recognizers is None:
         # A configured [verification] model makes this a recognition worker too.
         # An unusable one leaves it TTS-only; controllers that ask this worker

@@ -33,7 +33,8 @@ from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
 from epub_tts_narrator.renderer.drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
-from epub_tts_narrator.renderer.runpod_config import MAX_INFERENCE_REPLICAS, inference_ports
+from epub_tts_narrator.renderer.runpod_config import (
+    MAX_INFERENCE_BATCH_ROWS, MAX_INFERENCE_REPLICAS, inference_ports)
 
 
 APPLICATION_ROOT = Path(__file__).resolve().parents[2]
@@ -64,13 +65,18 @@ def validate_worker(config):
     if not 1 <= len(workers) <= MAX_INFERENCE_REPLICAS:
         raise ValueError(f"Use 1 through {MAX_INFERENCE_REPLICAS} private CUDA workers")
     expected = [f"http://127.0.0.1:{port}/v1/tts" for port in inference_ports(len(workers))]
+    # One batched copy may take several concurrent requests; several copies
+    # each take one.
+    limit = MAX_INFERENCE_BATCH_ROWS if len(workers) == 1 else 1
     for worker, url in zip(workers, expected):
         if (worker["type"] != "fish_http" or worker.get("api_key")
                 or worker.get("protocol", "fish_inline") != "fish_inline"
-                or worker["url"] != url or worker["concurrency"] != 1):
-            raise ValueError("Use loopback history workers (protocol fish_inline, concurrency 1) on ports "
+                or worker["url"] != url or type(worker["concurrency"]) is not int
+                or not 1 <= worker["concurrency"] <= limit):
+            raise ValueError("Use loopback history workers (protocol fish_inline) on ports "
                              + ", ".join(str(port) for port in inference_ports(len(workers)))
-                             + " with no internal API key")
+                             + f" with concurrency 1 (1 through {MAX_INFERENCE_BATCH_ROWS} for one batched copy)"
+                             + " and no internal API key")
     if not config["engine"].get("checkpoint"):
         raise ValueError("engine.checkpoint must name the native Drama 3 model directory")
     if not re.fullmatch(r"[0-9a-f]{40}", config["render_pool"]["model_revision"]):
@@ -545,7 +551,11 @@ def inference_config(config, port=8080):
         lines.append(f"{key} = {float(engine[key])!r}")
     for key in ("top_k", "max_new_tokens"):
         lines.append(f"{key} = {int(engine[key])}")
-    lines += ["", "[server]", 'host = "127.0.0.1"', f"port = {int(port)}", ""]
+    # A single copy with several concurrent requests decodes them in batches.
+    workers = config["render_pool"]["workers"]
+    rows = workers[0]["concurrency"] if len(workers) == 1 else 1
+    lines += ["", "[server]", 'host = "127.0.0.1"', f"port = {int(port)}",
+              f"batch_rows = {int(rows)}", f"max_pending_requests = {min(32, max(4, 2 * int(rows)))}", ""]
     staged = path.with_suffix(".tmp")
     staged.write_text("\n".join(lines))
     os.replace(staged, path)

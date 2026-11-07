@@ -241,8 +241,9 @@ class RunpodWorkerTests(unittest.TestCase):
 
     def test_deployment_profile_rejects_remote_backend_duplicate_gpu_and_mlx(self):
         variants = []
-        for key, value in (("url", "https://external.example/v1/tts"), ("concurrency", 2),
-                           ("protocol", "fish_compatible"), ("protocol", "fish_native_drama3"),
+        # One copy may take up to 16 concurrent (batched) requests, never more.
+        for key, value in (("url", "https://external.example/v1/tts"), ("concurrency", 17),
+                           ("concurrency", 0), ("protocol", "fish_compatible"), ("protocol", "fish_native_drama3"),
                            ("protocol", "fish_sglang_drama3"), ("url", "http://127.0.0.1:8080/v1/audio/speech"),
                            ("api_key", "unexpected")):
             item = deepcopy(self.config)
@@ -252,6 +253,9 @@ class RunpodWorkerTests(unittest.TestCase):
             with self.subTest(item=item):
                 with self.assertRaises(ValueError):
                     worker.validate_worker(item)
+        batched = deepcopy(self.config)
+        batched["render_pool"]["workers"][0]["concurrency"] = 8
+        worker.validate_worker(batched)
         mlx = deepcopy(self.config)
         mlx["verification"]["type"] = "mlx_whisper"
         with self.assertRaises(ValueError):
@@ -330,7 +334,7 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(settings, {
             "engine": {"type": "fish_speech_cuda", "checkpoint": str(self.root / "drama"),
                        "temperature": 0.8, "top_p": 0.75, "top_k": 40, "max_new_tokens": 1024},
-            "server": {"host": "127.0.0.1", "port": 8080}})
+            "server": {"host": "127.0.0.1", "port": 8080, "batch_rows": 1, "max_pending_requests": 4}})
         # Loopback only: the service has no key and never listens beyond localhost.
         self.assertNotIn("api_key", inference.read_text())
         (image["fish_source"] / ".venv/bin/python").unlink()

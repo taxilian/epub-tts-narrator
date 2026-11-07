@@ -392,6 +392,45 @@ verified on the same card and corpus on 2026-10-22, before it was removed for
 lacking chapter history; that gap is the headroom a batched decoder with
 history could recover.
 
+### Batched decoding
+
+`runpod.inference_batch_rows` (default 1, at most 16) makes the single Drama 3
+copy decode that many passages together, one frame per step. The chapter
+service sees one worker with that many concurrent slots, and passages from
+different chapters share each step; passages inside one chapter stay
+sequential because each one's history is the previous accepted take. It cannot
+be combined with `inference_replicas` above 1.
+
+Each request is still its own: its prompt (reference voices, up to two
+history turns with codes, and text) is built with Fish's
+`build_drama3_prompt` and prefilled with Fish's own forward pass into that
+request's row of each cache, and it returns its own WAV and generated codes in
+the same `audiobook-history-wav-v2` response. History echo recovery works per
+request. Only the decode step is shared
+(`epub_tts_narrator/renderer/drama3_batch.py`, scheduled by
+`drama3_batch_scheduler.py`): it reuses Fish's Gated DeltaNet, MoE (the fused
+FP8 kernel, which reads each expert once for all the rows routed to it), norm,
+embedding and head modules unchanged, recomputes only full attention and the
+tower's time attention so every row attends at its own position through its
+own mask, and captures one CUDA graph per attended cache length.
+
+Sampling follows Fish's `sample_top_k_top_p` and repetition-aware retry with
+per-request temperature, top-k and top-p, but its noise comes from a counter
+hash of the request's seed, step and draw, so a request's randomness never
+depends on which other requests share its step. Batched takes carry their own
+engine identity (`decoder = "batched"`, `batch_rows`, `sampler`), so they are
+verified and cached separately from single-request takes. Each row adds about
+0.55 GB of caches (10 full-attention layers, 30 linear-attention states and 13
+tower attentions at 10,240 positions) beside the 48 GB model.
+
+`scripts/check_drama3_batching.py` checks the decoder against Fish's own
+`generate_drama3`, in Fish's environment: `--tiny` on a small random-weight
+Drama 3 on the CPU, or `--checkpoint /workspace/models/drama-3` on the worker.
+Both paths receive identical forced sampler results, and every logits tensor
+and frame must agree while requests join and leave mid-flight. It also checks
+that each request's frames are identical alone and batched, and on CUDA that
+captured graphs equal eager decoding, then reports decode steps per second.
+
 ### Optional CUDA verification
 
 CPU recognition remains the default. To move Whisper onto the same GPU, add
@@ -518,8 +557,9 @@ instead. Do not mount `/workspace` over `/opt`.
   compilation, codec on the tower device) and generates one chunk per request
   with `build_drama3_prompt(history=...)` and `generate_drama3`, Fish's default
   sampling (`temperature`/`top_p` 0.7, `top_k` 30) and `set_seed`. Each copy
-  serves **one** request at a time; `runpod.inference_replicas` (default 1)
-  loads independent copies, never a shared or batched model.
+  serves **one** request at a time unless `runpod.inference_batch_rows` (default
+  1) enables batched decoding of up to that many requests per step on the same
+  weights; `runpod.inference_replicas` (default 1) loads independent copies.
 - Requests and responses use protocol `audiobook-history-wav-v2`: speaker-tagged
   references, up to two history turns with codes, and a MessagePack response
   with the WAV and the generated codes.

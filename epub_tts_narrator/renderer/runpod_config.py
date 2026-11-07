@@ -58,9 +58,12 @@ DEPLOYMENT_DEFAULTS = {
     # Run the copies through NVIDIA's Multi-Process Service so their kernels
     # can share the GPU concurrently instead of time-slicing.
     "inference_mps": False,
+    # Passages one Drama 3 copy decodes together per step (batched decoding).
+    "inference_batch_rows": 1,
 }
 
 MAX_INFERENCE_REPLICAS = 4
+MAX_INFERENCE_BATCH_ROWS = 16
 _FIRST_EXTRA_INFERENCE_PORT = 8090
 
 
@@ -69,11 +72,12 @@ def inference_ports(replicas):
     return [8080] + [_FIRST_EXTRA_INFERENCE_PORT + index for index in range(replicas - 1)]
 
 
-def inference_workers(replicas):
-    """One single-request history worker per Drama 3 copy, in port order."""
+def inference_workers(replicas, batch_rows=1):
+    """One history worker per Drama 3 copy, in port order; a batched copy
+    accepts batch_rows concurrent requests."""
     return [{"name": "drama3-cuda" if index == 0 else f"drama3-cuda-{index + 1}",
              "type": "fish_http", "protocol": "fish_inline", "model": "drama-3",
-             "url": f"http://127.0.0.1:{port}/v1/tts", "api_key": "", "concurrency": 1,
+             "url": f"http://127.0.0.1:{port}/v1/tts", "api_key": "", "concurrency": batch_rows,
              "multi_speaker": True, "timeout_seconds": 600.0}
             for index, port in enumerate(inference_ports(replicas))]
 
@@ -215,6 +219,11 @@ def _deployment_settings(values, directory):
         raise ValueError(f"runpod.inference_replicas must be an integer from 1 through {MAX_INFERENCE_REPLICAS}")
     if type(settings["inference_mps"]) is not bool:
         raise ValueError("runpod.inference_mps must be true or false")
+    batch_rows = settings["inference_batch_rows"]
+    if type(batch_rows) is not int or not 1 <= batch_rows <= MAX_INFERENCE_BATCH_ROWS:
+        raise ValueError(f"runpod.inference_batch_rows must be an integer from 1 through {MAX_INFERENCE_BATCH_ROWS}")
+    if batch_rows > 1 and replicas > 1:
+        raise ValueError("Use either runpod.inference_batch_rows or runpod.inference_replicas above 1, not both")
     reserved = {22, *inference_ports(MAX_INFERENCE_REPLICAS)}
     if settings["service_port"] in reserved:
         raise ValueError("runpod.service_port must differ from SSH port 22 and the private speech ports "
@@ -314,7 +323,7 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
         "model_revision": native.revision,
         # Our inference service (Fish's library on CUDA) on private loopback,
         # one single-request worker per Drama 3 copy on the GPU.
-        "workers": inference_workers(settings["inference_replicas"]),
+        "workers": inference_workers(settings["inference_replicas"], settings["inference_batch_rows"]),
     }
     if scheduler == "pipeline":
         # Project the validated scheduler controls and honor automatic

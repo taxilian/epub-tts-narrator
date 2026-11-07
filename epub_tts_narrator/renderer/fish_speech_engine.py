@@ -8,6 +8,12 @@ library functions the stock server uses for Drama 3: ``init_model``,
 completed user/assistant turns), ``generate_drama3`` and ``set_seed``.
 Reference encoding mirrors Fish's ``VQManager.encode_reference``. Every import
 is lazy; the coordinator never loads torch.
+
+With ``batch_rows`` above 1 (``serve``'s ``server.batch_rows``), prompts are
+still built per request with Fish's ``build_drama3_prompt`` and each request
+still returns its own WAV and generated codes, but decoding runs in
+``drama3_batch``: up to ``batch_rows`` requests advance one frame per step on
+the one loaded model.
 """
 
 from __future__ import annotations
@@ -21,11 +27,15 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import threading
 from typing import Any
 
 from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
 from .engines import EngineError, HistorySynthesis, _checkpoint_fingerprints
 from .fish_http import read_reference
+from .request_sampling import current_sampling
+
+MAX_BATCH_ROWS = 32
 
 
 FISH_SPEECH_REVISION = "541566932abbaebcb0a40e562a1f846738383f38"
@@ -63,6 +73,25 @@ class FishSpeechCudaEngine(HistorySynthesis):
         self._codec: Any = None
         self._references: dict[tuple[str, str], Any] = {}
         self._identity: dict[str, Any] | None = None
+        self.batch_rows = 1
+        self._scheduler: Any = None
+        # Concurrent requests share the model load, the reference cache and
+        # the codec; decoding itself runs on the scheduler's one thread.
+        self._load_lock = threading.Lock()
+        self._codec_lock = threading.Lock()
+
+    def set_batch_rows(self, rows: int) -> None:
+        """Decode up to ``rows`` concurrent requests per step; set before loading."""
+        if type(rows) is not int or not 1 <= rows <= MAX_BATCH_ROWS:
+            raise EngineError(f"batch_rows must be an integer from 1 through {MAX_BATCH_ROWS}")
+        if self._model is not None:
+            raise EngineError("Set batch_rows before the model loads")
+        self.batch_rows = rows
+        self._identity = None
+
+    @property
+    def concurrent_requests(self) -> int:
+        return self.batch_rows
 
     @property
     def capabilities(self) -> dict[str, bool]:
@@ -94,12 +123,20 @@ class FishSpeechCudaEngine(HistorySynthesis):
                 "max_new_tokens": self.max_new_tokens, "min_audio_seconds": self.min_audio_seconds,
                 "single_chunk": True, "output_encoding": "wav-float32-mono",
             }
+            if self.batch_rows > 1:
+                # Batched takes are not bit-identical to single-request takes.
+                from .drama3_batch import DECODER_VERSION, SAMPLER
+                self._identity.update(decoder="batched", decoder_version=DECODER_VERSION,
+                                      batch_rows=self.batch_rows, sampler=SAMPLER)
         return deepcopy(self._identity)
 
     def warmup(self) -> None:
         self._load()
 
     def close(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.close()
+            self._scheduler = None
         loaded = self._model is not None
         self._model = self._codec = None
         self._references.clear()
@@ -115,6 +152,10 @@ class FishSpeechCudaEngine(HistorySynthesis):
         raise EngineError("fish_speech_cuda renders saved reference voices; create voices with the cast tool")
 
     def _load(self):
+        with self._load_lock:
+            return self._load_locked()
+
+    def _load_locked(self):
         if self._model is None:
             try:
                 import torch
@@ -127,7 +168,14 @@ class FishSpeechCudaEngine(HistorySynthesis):
                 model, _ = init_model(str(self.checkpoint), self.device, torch.bfloat16)
                 devices, tower = resolve_drama3_devices(self.device)
                 precision = resolve_drama3_dtype(torch.bfloat16, [*devices, tower])
-                self._codec = load_codec_model(resolve_codec_path(self.checkpoint), tower, precision)
+                codec = load_codec_model(resolve_codec_path(self.checkpoint), tower, precision)
+                if self.batch_rows > 1:
+                    from .drama3_batch import BatchedDrama3Backend
+                    from .drama3_batch_scheduler import Drama3BatchScheduler
+                    with torch.inference_mode():
+                        backend = BatchedDrama3Backend(model, rows=self.batch_rows)
+                    self._scheduler = Drama3BatchScheduler(backend)
+                self._codec = codec
                 self._model = model
             except EngineError:
                 raise
@@ -136,6 +184,10 @@ class FishSpeechCudaEngine(HistorySynthesis):
         return self._model, self._codec
 
     def _reference_codes(self, voice, codec):
+        with self._codec_lock:
+            return self._reference_codes_locked(voice, codec)
+
+    def _reference_codes_locked(self, voice, codec):
         blob, transcript = read_reference(voice)
         key = (hashlib.sha256(blob).hexdigest(), transcript)
         if key not in self._references:
@@ -183,14 +235,28 @@ class FishSpeechCudaEngine(HistorySynthesis):
                     continue
                 if capacity - len(prompt) < 1:
                     continue
-                # Fish's set_seed clamps above 2**31; fold uint32 attempt seeds.
-                set_seed(seed % (1 << 31))
-                with torch.inference_mode():
-                    frames, finish_reason = generate_drama3(
-                        model, prompt, max_new_tokens=min(self.max_new_tokens, capacity - len(prompt)),
-                        temperature=self.temperature, top_k=self.top_k, top_p=self.top_p)
-                    if finish_reason != "eos" or not len(frames):
-                        raise EngineError(f"Drama 3 did not finish the text: {finish_reason!r}")
+                max_new_tokens = min(self.max_new_tokens, capacity - len(prompt))
+                sampling = current_sampling() or {}
+                temperature = sampling.get("temperature", self.temperature)
+                top_k = sampling.get("top_k", self.top_k)
+                top_p = sampling.get("top_p", self.top_p)
+                if self._scheduler is not None:
+                    # Shared decode loop; this request's own prompt, seed and
+                    # sampling, and its own frames back.
+                    rows, finish_reason = self._scheduler.submit(
+                        prompt, max_new_tokens, temperature=temperature, top_k=top_k,
+                        top_p=top_p, seed=seed).result()
+                    frames = torch.tensor(rows, dtype=torch.long).reshape(len(rows), -1)
+                else:
+                    # Fish's set_seed clamps above 2**31; fold uint32 attempt seeds.
+                    set_seed(seed % (1 << 31))
+                    with torch.inference_mode():
+                        frames, finish_reason = generate_drama3(
+                            model, prompt, max_new_tokens=max_new_tokens,
+                            temperature=temperature, top_k=top_k, top_p=top_p)
+                if finish_reason != "eos" or not len(frames):
+                    raise EngineError(f"Drama 3 did not finish the text: {finish_reason!r}")
+                with self._codec_lock, torch.inference_mode():
                     generated = frames[:, 1:].T.contiguous()
                     audio = codec.from_indices(generated.to(codec.device)[None])[0].squeeze()
                 audio = audio.float().cpu().numpy().astype(np.float32)

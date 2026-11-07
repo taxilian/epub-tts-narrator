@@ -116,6 +116,8 @@ DEFAULTS = {
         "host": "127.0.0.1", "port": 8080, "api_key": "",
         "max_request_bytes": 100 * 1024 * 1024,
         "max_pending_requests": 4, "request_timeout_seconds": 300.0,
+        # Requests decoded together per step by a batching engine (serve only).
+        "batch_rows": 1,
     },
     "remote_chapters": {
         "url": "", "api_key": "", "timeout_seconds": 60.0,
@@ -355,7 +357,7 @@ def validate_distributed_settings(config):
         raise ValueError("server.host must be a hostname or IP address")
     _credential(server["api_key"], "server.api_key")
     for key, low, high in (("port", 1, 65535), ("max_request_bytes", 1024, 512 * 1024 * 1024),
-                           ("max_pending_requests", 1, 32)):
+                           ("max_pending_requests", 1, 32), ("batch_rows", 1, 32)):
         if type(server[key]) is not int or not low <= server[key] <= high:
             raise ValueError(f"server.{key} must be an integer from {low} through {high}")
     timeout = server["request_timeout_seconds"]
