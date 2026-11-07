@@ -30,9 +30,10 @@ class SpeechResolutionEvaluationTests(unittest.TestCase):
         self.request = speech_request(reference(), self.expected)
         self.request["chunk"]["segment"]["delivery"]["direction"] = "pained, breaking into a cry"
 
-    def save_record(self, number=1, *, reasons=None, heard="Oh! The pain has returned.", request=None):
+    def save_record(self, number=1, *, reasons=None, heard="Oh! The pain has returned.", request=None,
+                    audio_name=None):
         request = deepcopy(request or self.request)
-        audio = self.directory / f"attempt-{number:03d}.wav"
+        audio = self.directory / (audio_name or f"attempt-{number:03d}.wav")
         audio.write_bytes(f"saved waveform {number}".encode())
         text, delivery = _directed_text(self.expected, request["chunk"]["segment"]["delivery"]["direction"])
         record = {"attempt": number, "request": request, "request_hash": digest(request),
@@ -60,6 +61,35 @@ class SpeechResolutionEvaluationTests(unittest.TestCase):
         self.assertIn("[pained, breaking into a cry]", case["failures"][0]["generation"]["synthesis_text"])
         self.assertTrue(case["can_plain_delivery"])
         self.assertIsNone(case["expected_actions"], "Unlabelled saved audio is not required to be accepted")
+
+    def test_saved_context_reads_the_exact_contextual_audio_record(self):
+        # Given a current take whose stable attempt JSON names contextual audio.
+        name = "attempt-001-chunk-42-voice-mara-take.wav"
+        saved = self.save_record(audio_name=name)
+        self.assertNotEqual(saved["audio_file"], "attempt-001.wav")
+
+        # When loading the saved failure through its attempt ID and record.
+        case = EVALUATION.saved_case(self.directory)
+
+        # Then the recorded file and its original hash supply the failure evidence.
+        self.assertEqual(case["failures"], [failed_take_context(self.expected, saved)])
+        self.assertEqual(saved["audio_file"], name)
+        self.assertEqual(file_hash(self.directory / name), saved["audio_sha256"])
+
+    def test_saved_context_rejects_a_record_pointing_at_different_audio(self):
+        # Given two different waveforms and a record bound to the first one's bytes.
+        saved = self.save_record(audio_name="attempt-001-chunk-42-voice-mara-take.wav")
+        other = self.directory / "attempt-001-chunk-42-voice-other-take.wav"
+        other.write_bytes(b"different waveform")
+        saved["audio_file"] = other.name
+        write_json(self.directory / "attempt-001.json", saved)
+
+        # When the record's filename and checksum do not bind the same file.
+        with self.assertRaisesRegex(ValueError, "audio hash mismatch"):
+            EVALUATION.saved_case(self.directory)
+
+        # Then a similarly prefixed foreign take cannot be substituted.
+        self.assertEqual(other.read_bytes(), b"different waveform")
 
     def test_supported_capability_requires_a_bound_request_and_exact_source_text(self):
         first = self.save_record()

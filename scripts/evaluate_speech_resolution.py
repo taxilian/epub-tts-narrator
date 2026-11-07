@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from epub_tts_narrator.config import load_config
+from epub_tts_narrator.renderer.audio_naming import validate_audio_filename
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, regular_file, write_json
 from epub_tts_narrator.renderer.delivery_recovery import plain_delivery_request
 from epub_tts_narrator.renderer.quality import compare_words
@@ -82,9 +83,7 @@ def saved_case(directory):
             raise ValueError(f"Missing saved transcript in {path.name}")
         if record.get("attempt") != number:
             raise ValueError(f"Attempt number mismatch in {path.name}")
-        name = record.get("audio_file")
-        if not isinstance(name, str) or name != f"attempt-{number:03d}.wav":
-            raise ValueError(f"Invalid audio reference in {path.name}")
+        name = validate_audio_filename(record.get("audio_file"), suffix=".wav")
         audio = regular_file(directory / name)
         if file_hash(audio) != record.get("audio_sha256"):
             raise ValueError(f"Saved audio hash mismatch in {path.name}")
