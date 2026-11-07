@@ -72,6 +72,14 @@ class BroadRepairTests(unittest.TestCase):
         self.assertTrue(all('reviews' not in row for row in self.client.review_calls))
         self.assertTrue(acceptance['report']['passed'])
         self.assertEqual(acceptance['report']['text_confirmation_method'], 'llm_exhaustion_selection')
+        state = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+        for part in state['parts']:
+            self.assertIn(self.chunk['chunk_id'], part['raw_file'])
+            self.assertIn(self.chunk['chunk_id'], part['audio_file'])
+        candidate = next(read_json(path) for path in (self.work / 'clips').glob('*/attempt-*.json')
+                         if 'clip_repair' in read_json(path).get('engine_metadata', {}))
+        self.assertIn(self.chunk['chunk_id'], candidate['audio_file'])
+        self.assertTrue(candidate['audio_file'].endswith('-take.wav'))
         self.assertEqual(self.render_chunk(), (result, acceptance))
         self.assertEqual(len(self.engine.calls), 5)
 
@@ -138,7 +146,8 @@ class BroadRepairTests(unittest.TestCase):
         self.client.outage = True
         with self.assertRaises(VerificationUnavailable):
             self.render_chunk()
-        wav = next((self.work / 'clips').glob('*/attempt-001.wav'))
+        metadata = next((self.work / 'clips').glob('*/attempt-001.json'))
+        wav = metadata.parent / read_json(metadata)['audio_file']
         wav.write_bytes(wav.read_bytes() + b'changed')
         calls = len(self.engine.calls)
         self.client.outage = False
