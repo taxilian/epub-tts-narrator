@@ -1321,9 +1321,9 @@ For existing output, the recorded JSON filename remains authoritative, even when
 | `audio-manifest.json` | `audiobook.path` (also inventoried by `render.json`; mirrored as `sync.json.audio_file`) |
 | `voice.json` | `reference_file` |
 | `normalization.json` | `audio_file` |
-| `pronunciationpreview.json` | `audio_file`, `raw_file`, `normalized_file` |
+| `preview.json` | `audio_file`, `raw_file`, `normalized_file` |
 | `attempt-NNN.json` | `audio_file`, `raw_file`; `accepted.json` uses `audio_file` |
-| Local `chapter.json` | `localwav_file`, `encoded_file` |
+| Local `chapter.json` | `wav_file`, `encoded_file` |
 | Remote `chapter.json` | `audio_file`, `lossless_file` (remote chapter body fields) |
 | `mix.json` | `audio_file` |
 
