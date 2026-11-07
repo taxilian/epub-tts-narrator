@@ -104,14 +104,18 @@ packages an M4B. The client needs FFmpeg/ffprobe but does not load a local TTS o
 ASR model for remote rendering. Create and audition missing voices with `cast`
 before submitting remote jobs.
 
-The CLI prints the exact path for each completed M4A. Downloaded files live in
-`WORK/remote-chapters/<selection-hash>/chapter.m4a`, where `WORK` is `--work-dir`
-or its default `BOOK/render-work`. With `--chapters-only`, `-o` does not receive
-chapter copies. When packaging an M4B, `-o` (default `BOOK/audiobook`) receives
-a descriptive `<book-title>.m4b`, `chapters/chapter-NNNN.m4a`, and book-wide sync
-JSON. The exact audiobook basename is recorded in `audio-manifest.json` as
-`audiobook.path` and in `sync.json` as `audio_file`; existing recorded names,
-including legacy `book.m4b`, remain authoritative on subsequent remote assembly.
+The CLI prints the exact path for each completed M4A. Fresh downloads live in
+`WORK/remote-chapters/<selection-hash>/chapter-NNNN.m4a`, where `WORK` is
+`--work-dir` or its default `BOOK/render-work`. The downloaded `chapter.json`
+records the authoritative `audio_file` and `lossless_file` basenames. Existing
+recorded names, including legacy `chapter.m4a` / `chapter.flac`, remain valid;
+records without those fields fall back only to the intact legacy files. With
+`--chapters-only`, `-o` does not receive chapter copies. When packaging an M4B,
+`-o` (default `BOOK/audiobook`) receives a descriptive `<book-title>.m4b`,
+`chapters/chapter-NNNN.m4a`, and book-wide sync JSON. The exact audiobook basename
+is recorded in `audio-manifest.json` as `audiobook.path` and in `sync.json` as
+`audio_file`; existing recorded names, including legacy `book.m4b`, remain
+authoritative on subsequent remote assembly.
 Supply `--epub` with the analyzed EPUB to include its cover when no EPUB path is configured.
 Original voice samples and inherited book/series selections are untouched.
 
@@ -120,10 +124,13 @@ Each verified remote download also gets a readable relative symlink at
 book finishes, including with `--chapters-only`; rerunning backfills missing
 links from verified downloads without contacting the service. Empty chapters
 have no audio link. Links stay in the work directory so they cannot interfere
-with atomic publication into `BOOK/audiobook`. The remote wire artifact remains
-`chapter.m4a`; independently generated local chapter caches use numbered
-`chapter-NNNN.wav` / `.m4a` filenames, with their work-level links in the same
-`WORK/chapter-links/` directory.
+with atomic publication into `BOOK/audiobook`. Fresh remote wire artifacts use
+numbered `chapter-NNNN.m4a` / `chapter-NNNN.flac` filenames. New controllers also
+accept older workers' generic artifacts, but old controllers do not understand
+numbered worker inventories, so update old controllers and new workers together.
+Independently generated local chapter caches use numbered `chapter-NNNN.wav` /
+`.m4a` filenames, with their work-level links in the same `WORK/chapter-links/`
+directory.
 
 `--chapters-only` skips final book packaging, but downloads M4A, JSON and FLAC
 masters before acknowledging delivery. M4B packaging decodes those lossless masters
@@ -368,9 +375,9 @@ Each completed nonempty chapter provides:
 
 | Artifact | Contents |
 | --- | --- |
-| `chapter.m4a` | Assembled, normalized AAC chapter audio |
-| `chapter.flac` | Lossless master for final book packaging |
-| `chapter.json` | Source/voice identity, audio hashes, sample frames, composition metadata |
+| `chapter-NNNN.m4a` | Assembled, normalized AAC chapter audio (`chapter.json.audio_file`) |
+| `chapter-NNNN.flac` | Lossless master for final book packaging (`chapter.json.lossless_file`) |
+| `chapter.json` | Authoritative audio filenames, source/voice identity, audio hashes, sample frames, composition metadata |
 | `sync.json` | Source ranges and chapter timing after trimming and inserted pauses |
 | `verification.json` | Successful acceptance reports and their original provenance |
 | `manifest.json` | Versioned artifact inventory and integrity hashes |
