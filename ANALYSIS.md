@@ -167,7 +167,7 @@ On an interactive terminal, model streaming reserves two transient lines: the la
 
 Validated responses are cached under `.epub-audiobook-cache` beside the output, or under `analysis.cache_dir`. Cache keys include exact prompts, inputs, model, endpoint, and relevant options. Changing request inputs invalidates affected work. Cache entries contain book text and derived annotations, never API keys. Keep the cache and rerun the same command after interruption. A failed analysis does not publish a completed directory. Failed responses remain in `failed/` for bounded repair and are never accepted as successful results.
 
-Resuming the same book needs no flag. `--continue-from` selects prior series context and must remain the same when resuming. Changing timeout, key, or retry settings does not invalidate completed response caches; changing model, prompts, cast, policy, or other request inputs can. Advisory notes do not make a bundle a draft, but missing speakers prevent rendering.
+Resuming the same book needs no flag. `--continue-from` selects prior series context and must remain the same when resuming. Changing timeout, key, retry, model, or reasoning settings does not invalidate completed stage snapshots; new requests use cache keys bound to the provider that serves them, so switching models or falling back can mix completed and new work deliberately. Changing prompts, cast, policy, or other request inputs can invalidate affected work. Advisory notes do not make a bundle a draft, but missing speakers prevent rendering.
 
 ## Optional pronunciation work and targeted attribution edits
 

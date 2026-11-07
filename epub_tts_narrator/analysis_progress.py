@@ -385,12 +385,19 @@ def resume_document(output, identity):
     if record is None:
         return None
     wanted = _validate_identity(identity)
-    differing = [field for field in _IDENTITY_FIELDS if record["identity"].get(field) != wanted[field]]
+    # Provider selection is execution policy, not analysis semantics. Completed
+    # stages remain reusable across model/fallback changes; each new request is
+    # still cache-keyed by the provider that actually serves it.
+    differing = [field for field in _IDENTITY_FIELDS if field != "provider"
+                 and record["identity"].get(field) != wanted[field]]
     if differing:
         raise ValueError("Pending analysis progress belongs to a different run configuration "
                          f"({', '.join('identity.' + field for field in differing)}): "
                          f"{Path(output) / PENDING_DIRNAME / 'state.json'}; "
                          "remove the directory or choose another output")
+    if record["identity"]["provider"] != wanted["provider"]:
+        record["identity"]["provider"] = deepcopy(wanted["provider"])
+        _save_state(Path(output) / PENDING_DIRNAME, record)
     completed = record["completed_stages"]
     if not completed:
         return None, STAGES[0]

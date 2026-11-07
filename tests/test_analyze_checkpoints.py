@@ -318,9 +318,12 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         self.write_config()
         self.epub = make_epub(self.root / "story.epub", "Test Story", "test-story", EPUB_BODY)
 
-    def write_config(self, *, chunk_chars=2400, model="fixture-model"):
+    def write_config(self, *, chunk_chars=2400, model="fixture-model", reasoning_effort=None):
+        provider = f'[provider]\nmodel = "{model}"\nbase_url = "http://offline.invalid/v1"\n'
+        if reasoning_effort is not None:
+            provider += f'reasoning_effort = "{reasoning_effort}"\n'
         self.config.write_text(
-            f'[provider]\nmodel = "{model}"\nbase_url = "http://offline.invalid/v1"\n'
+            provider +
             f'[analysis]\nchunk_chars = {chunk_chars}\nidentity_consensus = false\n'
             'attribution_review = false\nrepair_attempts = 0\nattribution_workers = 5\n',
             encoding="utf-8")
@@ -399,8 +402,8 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         _completed_directory(output)
         self.assertFalse((output / PENDING_DIRNAME).exists())
 
-    def test_rerun_with_changed_options_provider_or_prompt_version_is_refused_by_name(self):
-        for field in ("identity.options_fingerprint", "identity.provider", "identity.prompt_version"):
+    def test_rerun_with_changed_options_or_prompt_version_is_refused_by_name(self):
+        for field in ("identity.options_fingerprint", "identity.prompt_version"):
             with self.subTest(field=field):
                 output = self.root / f"book-{field.split('.')[-1]}"
                 self.write_config()
@@ -409,8 +412,6 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
                 mutation = contextlib.nullcontext()
                 if field == "identity.options_fingerprint":
                     self.write_config(chunk_chars=1200)
-                elif field == "identity.provider":
-                    self.write_config(model="other-model")
                 else:
                     mutation = patch("epub_tts_narrator.analysis_progress.PROMPT_VERSION", "0-foreign")
                 factory, made = self.clients()
@@ -423,6 +424,18 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
                 self.assertEqual(self.model_calls(made), [], "A refused rerun must not issue model requests")
                 self.assertEqual(self.state_bytes(output), before)
                 self.assertEqual(inspect_pending(output)["completed_stages"], ["analyzed"])
+
+    def test_model_or_reasoning_change_resumes_completed_stages(self):
+        output = self.root / "book-provider-change"
+        self.write_config()
+        self.interrupt_after_analyzed(output)
+        self.write_config(model="other-model", reasoning_effort="low")
+        factory, _ = self.clients()
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
+            status, _, stderr = self.run_cli(*self.analyze_command(output))
+        self.assertEqual(status, 0, stderr)
+        _completed_directory(output)
+        self.assertFalse((output / PENDING_DIRNAME).exists())
 
     def test_rerun_with_a_tampered_state_record_fails_closed_naming_state_json(self):
         for mutate in ("version", "record_sha256"):
