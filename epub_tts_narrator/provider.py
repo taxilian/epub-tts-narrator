@@ -11,6 +11,7 @@ import random
 import socket
 import ssl
 import time
+import uuid
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException, IncompleteRead, RemoteDisconnected
 from urllib.error import HTTPError, URLError
@@ -195,6 +196,7 @@ class OpenAICompatibleClient:
         retry_max_delay: float = 60.0,
         stall_timeout: float = 120.0,
         progress_callback=None,
+        stream_observer=None,
     ):
         if not isinstance(model, str) or not model.strip():
             raise ProviderError("A nonempty model name is required.")
@@ -235,6 +237,8 @@ class OpenAICompatibleClient:
             raise ProviderError("The API stall timeout must be a positive, finite number.")
         if progress_callback is not None and not callable(progress_callback):
             raise ProviderError("The stream progress callback must be callable or None.")
+        if stream_observer is not None and not callable(stream_observer):
+            raise ProviderError("The stream observer must be callable or None.")
         if api_key is not None:
             if not isinstance(api_key, str) or any(
                 ord(char) < 32 or ord(char) > 126 for char in api_key
@@ -253,6 +257,7 @@ class OpenAICompatibleClient:
         self.retry_max_delay = float(retry_max_delay)
         self.stall_timeout = float(stall_timeout)
         self.progress_callback = progress_callback
+        self.stream_observer = stream_observer
         # Reasoning models may pause minutes before the first stream byte, so
         # initial silence gets a longer allowance than inter-chunk gaps, and
         # never beyond the overall request timeout.
@@ -343,57 +348,66 @@ class OpenAICompatibleClient:
     def _request(self, encoded: bytes, headers: dict) -> bytes:
         # Retry synchronously inside the caller's worker. Never create additional
         # workers or change the serialized request/cache identity between attempts.
-        for attempt in range(self.max_retries + 1):
-            failure = None
-            try:
-                request = Request(
-                    f"{self.base_url}/chat/completions", data=encoded, headers=headers, method="POST"
-                )
-                with self._opener.open(request, timeout=self.timeout) as response:
-                    if not 200 <= response.status < 300:
-                        failure = self._http_failure(response.status, getattr(response, "headers", {}), response)
-                    else:
-                        return self._read_response(response)
-            except HTTPError as error:
+        request_id = uuid.uuid4().hex
+        self._stream_event(request_id, phase="started")
+        try:
+            for attempt in range(self.max_retries + 1):
+                failure = None
                 try:
-                    failure = self._http_failure(error.code, error.headers, error)
-                finally:
-                    error.close()
-            except ProviderError as error:
-                # Streamed reads classify their own failures (stall and early
-                # end are retryable; malformed bodies are not), so they share
-                # the same bounded retry budget as transport failures.
-                failure = error
-            except (TimeoutError, URLError, OSError, HTTPException, ValueError) as error:
-                # Only typed transient failures may retry. Never surface raw
-                # reasons, URLs, partial response bodies, or TLS diagnostics.
-                failure = ProviderError(
-                    "The API request failed or timed out. Check the connection and API configuration.",
-                    retryable=_transient_transport(error),
-                )
-            if not failure.retryable or attempt == self.max_retries:
-                raise failure from None
-            delay = min(self.retry_max_delay, self.retry_initial_delay * 2 ** attempt)
-            delay = min(self.retry_max_delay, delay + random.uniform(0, delay / 4))
-            if failure.retry_after_seconds is not None:
-                # Never ignore a longer server cooldown by clipping it to our
-                # bound. Stop and leave cached work available for a later resume.
-                if failure.retry_after_seconds > self.retry_max_delay:
+                    request = Request(
+                        f"{self.base_url}/chat/completions", data=encoded, headers=headers, method="POST"
+                    )
+                    with self._opener.open(request, timeout=self.timeout) as response:
+                        if not 200 <= response.status < 300:
+                            failure = self._http_failure(response.status, getattr(response, "headers", {}), response)
+                        else:
+                            raw = self._read_response(response, request_id)
+                            self._stream_event(request_id, phase="completed")
+                            return raw
+                except HTTPError as error:
+                    try:
+                        failure = self._http_failure(error.code, error.headers, error)
+                    finally:
+                        error.close()
+                except ProviderError as error:
+                    # Streamed reads classify their own failures (stall and early
+                    # end are retryable; malformed bodies are not), so they share
+                    # the same bounded retry budget as transport failures.
+                    failure = error
+                except (TimeoutError, URLError, OSError, HTTPException, ValueError) as error:
+                    # Only typed transient failures may retry. Never surface raw
+                    # reasons, URLs, partial response bodies, or TLS diagnostics.
+                    failure = ProviderError(
+                        "The API request failed or timed out. Check the connection and API configuration.",
+                        retryable=_transient_transport(error),
+                    )
+                if not failure.retryable or attempt == self.max_retries:
                     raise failure from None
-                delay = max(delay, failure.retry_after_seconds)
-            if failure.status_code is None:
-                _LOGGER.warning("API transient transport failure; retry %d/%d in %.1f seconds.",
-                                attempt + 1, self.max_retries, delay)
-            else:
-                limit_summary = ", ".join(f"{key}={value}" for key, value in failure.rate_limits.items())
-                _LOGGER.warning("API HTTP %s%s%s; retry %d/%d in %.1f seconds.",
-                                failure.status_code, f" ({failure.code})" if failure.code else "",
-                                f" [{limit_summary}]" if limit_summary else "",
-                                attempt + 1, self.max_retries, delay)
-            time.sleep(delay)
-        raise AssertionError("Unreachable retry state")
+                delay = min(self.retry_max_delay, self.retry_initial_delay * 2 ** attempt)
+                delay = min(self.retry_max_delay, delay + random.uniform(0, delay / 4))
+                if failure.retry_after_seconds is not None:
+                    # Never ignore a longer server cooldown by clipping it to our
+                    # bound. Stop and leave cached work available for a later resume.
+                    if failure.retry_after_seconds > self.retry_max_delay:
+                        raise failure from None
+                    delay = max(delay, failure.retry_after_seconds)
+                if failure.status_code is None:
+                    _LOGGER.warning("API transient transport failure; retry %d/%d in %.1f seconds.",
+                                    attempt + 1, self.max_retries, delay)
+                else:
+                    limit_summary = ", ".join(f"{key}={value}" for key, value in failure.rate_limits.items())
+                    _LOGGER.warning("API HTTP %s%s%s; retry %d/%d in %.1f seconds.",
+                                    failure.status_code, f" ({failure.code})" if failure.code else "",
+                                    f" [{limit_summary}]" if limit_summary else "",
+                                    attempt + 1, self.max_retries, delay)
+                self._stream_event(request_id, phase="retry", attempt=attempt + 1, delay=delay)
+                time.sleep(delay)
+            raise AssertionError("Unreachable retry state")
+        except BaseException:
+            self._stream_event(request_id, phase="failed")
+            raise
 
-    def _read_response(self, response) -> bytes:
+    def _read_response(self, response, request_id=None) -> bytes:
         """Return one 200 response body as raw completion-envelope bytes.
 
         Bodies are either a server-sent event stream or a legacy JSON object
@@ -405,12 +419,15 @@ class OpenAICompatibleClient:
             sock.settimeout(self.first_byte_timeout)
         first = self._guarded_readline(response)
         if first.lstrip().startswith((b"data:", b"event:", b"id:", b"retry:", b":")):
-            return self._read_stream(response, first, sock)
+            return self._read_stream(response, first, sock, request_id)
         body = first + response.read(MAX_RESPONSE_BYTES + 1)
         self._progress(len(body))
+        self._stream_event(request_id, phase="streaming", kind="content",
+                           received=len(body), events=1, content_chars=len(body),
+                           reasoning_chars=0)
         return body
 
-    def _read_stream(self, response, first: bytes, sock) -> bytes:
+    def _read_stream(self, response, first: bytes, sock, request_id=None) -> bytes:
         """Assemble a completion SSE stream into the raw completion-envelope bytes."""
         content_parts: list[str] = []
         role = None
@@ -418,6 +435,7 @@ class OpenAICompatibleClient:
         finish_reason = None
         data_lines: list[str] = []
         received = 0
+        event_count = reasoning_chars = content_chars = 0
         saw_done = False
         raw = first
         while raw:
@@ -425,6 +443,10 @@ class OpenAICompatibleClient:
             if received > MAX_RESPONSE_BYTES:
                 raise ResponseCapacityError("The API response exceeds the 16 MiB limit.")
             self._progress(received)
+            self._stream_event(request_id, phase="streaming", kind="bytes",
+                               received=received, events=event_count,
+                               reasoning_chars=reasoning_chars,
+                               content_chars=content_chars)
             if sock is not None:
                 # Bytes are flowing; silence from here on is an inter-chunk
                 # stall, bounded by the overall request timeout.
@@ -458,22 +480,34 @@ class OpenAICompatibleClient:
                     raise self._stream_error(chunk["error"])
                 choices = chunk.get("choices")
                 if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    event_count += 1
                     choice = choices[0]
                     if choice.get("finish_reason") is not None:
                         finish_reason = choice["finish_reason"]
                     stream_delta = choice.get("delta")
                     if isinstance(stream_delta, dict):
+                        reasoning_piece = "".join(
+                            value for key in ("reasoning_content", "reasoning")
+                            if isinstance((value := stream_delta.get(key)), str))
+                        if reasoning_piece:
+                            reasoning_chars += len(reasoning_piece)
                         piece = stream_delta.get("content")
                         if isinstance(piece, str) and piece:
                             content_parts.append(piece)
+                            content_chars += len(piece)
                         piece = stream_delta.get("role")
                         if isinstance(piece, str) and piece:
                             role = piece
                         piece = stream_delta.get("refusal")
                         if isinstance(piece, str) and piece:
                             refusal = piece
-                        # delta.reasoning_content / delta.reasoning carry thinking
-                        # tokens, not content, and are deliberately not accumulated.
+                        self._stream_event(
+                            request_id, phase="streaming",
+                            kind="reasoning" if reasoning_piece else "content",
+                            text=reasoning_piece or None, received=received,
+                            events=event_count, reasoning_chars=reasoning_chars,
+                            content_chars=content_chars,
+                        )
             raw = self._guarded_readline(response)
         if not saw_done:
             raise ProviderError("The API response stream ended before the model finished.", retryable=True)
@@ -522,6 +556,15 @@ class OpenAICompatibleClient:
     def _progress(self, received: int) -> None:
         if self.progress_callback is not None:
             self.progress_callback(received)
+
+    def _stream_event(self, request_id, **event) -> None:
+        if self.stream_observer is None or not isinstance(request_id, str):
+            return
+        try:
+            self.stream_observer({"request_id": request_id, **event})
+        except Exception:
+            # Terminal rendering must never change request success or caching.
+            return
 
     def _http_failure(self, status: int, headers, response) -> ProviderError:
         retryable = status in _TRANSIENT_HTTP_STATUSES

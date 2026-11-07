@@ -24,6 +24,7 @@ from .attribution_review import audit_attribution
 from .speaker_decisions import prompt_speaker_decisions
 from .jev import JevClient
 from .provider import OpenAICompatibleClient, ProviderError
+from .stream_progress import StreamConsole
 from .series import link_analysis, load_registry, save_registry
 from .analysis_directory import (
     default_output, validate_output, continuation_registry, fresh_registry,
@@ -311,6 +312,15 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     model_cache = None
+    stream_console = StreamConsole(sys.stderr)
+
+    def progress(message):
+        stream_console.progress(message)
+
+    def provider_client(settings=None, **kwargs):
+        options = dict(settings or {})
+        options.update(kwargs)
+        return OpenAICompatibleClient(**options, stream_observer=stream_console.observe)
 
     def announce_cache(path):
         resolved = Path(path).resolve()
@@ -358,8 +368,8 @@ def main(argv=None):
                                      "update the book first")
                 updated = update_book(
                     directory, source, config=config, input_path=args.input,
-                    client_factory=OpenAICompatibleClient, speaker_judge=_speaker_judge(config),
-                    announce_cache=announce_cache, progress=lambda message: print(message, file=sys.stderr))
+                    client_factory=provider_client, speaker_judge=_speaker_judge(config),
+                    announce_cache=announce_cache, progress=progress)
                 return _speaker_completion_status(updated if updated is not None else original)
             if args.input.suffix.lower() == ".epub":
                 accepted = accepted_epub_digests(original)
@@ -403,15 +413,15 @@ def main(argv=None):
             if not config["provider"]["model"]:
                 raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             model_cache = announce_cache(cache)
-            client = OpenAICompatibleClient(**config["provider"])
+            client = provider_client(config["provider"])
             print(f"Updating analysis with {client.model} at {client.base_url}; book passages will be sent to this endpoint.", file=sys.stderr)
             requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                       max_request_chars=settings["max_request_chars"],
-                                      progress=lambda message: print(message, file=sys.stderr))
+                                      progress=progress)
         if targets:
             revised = complete_speakers(revised, requests, workers=min(5, settings["attribution_workers"]),
                                         target_block_ids=targets, retry_unresolved=True,
-                                        progress=lambda message: print(message, file=sys.stderr))
+                                        progress=progress)
             revised = repair_narration_boundaries(revised, progress=print)
         speaker_input = deepcopy(revised)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config),
@@ -421,7 +431,7 @@ def main(argv=None):
             # casting text must not prevent publishing finished book analysis.
             revised = prepare_document_samples(revised, requests,
                 workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                progress=lambda message: print(message, file=sys.stderr))
+                progress=progress)
         if revised != original:
             result = revise_directories({directory: revised}, directories=directories,
                                         expected_manifest_hashes=hashes, scope="speaker-decisions",
@@ -457,17 +467,17 @@ def main(argv=None):
                     if not config["provider"]["model"]:
                         raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
                     model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
-                    client = OpenAICompatibleClient(**config["provider"])
+                    client = provider_client(config["provider"])
                     print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
                     requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                               max_request_chars=settings["max_request_chars"],
-                                              progress=lambda message: print(message, file=sys.stderr))
+                                              progress=progress)
                 print(f"Checking remaining speakers in {len(targets)} source block(s): {directory}; "
                       "saved assignments will be retained.", file=sys.stderr, flush=True)
                 revised[directory] = complete_speakers(
                     revised[directory], requests, workers=min(5, settings["attribution_workers"]),
                     target_block_ids=targets, retry_unresolved=True,
-                    progress=lambda message: print(message, file=sys.stderr))
+                    progress=progress)
                 revised[directory] = repair_narration_boundaries(revised[directory], progress=print)
             judge = _speaker_judge(config)
             decisions_cache = Path(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache").resolve()
@@ -481,7 +491,7 @@ def main(argv=None):
                     from .audition_scripts import prepare_document_samples
                     revised[directory] = prepare_document_samples(revised[directory], requests,
                         workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                        progress=lambda message: print(message, file=sys.stderr))
+                        progress=progress)
             changed = {path: document for path, document in revised.items() if document != documents[path]}
             if changed:
                 result = revise_directories(changed, directories=directories, expected_manifest_hashes=hashes,
@@ -592,7 +602,7 @@ def main(argv=None):
                 return 0
             if not config["provider"]["model"]:
                 raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
-            client = OpenAICompatibleClient(**config["provider"])
+            client = provider_client(config["provider"])
             print(f"Analyzing with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
             settings = config["analysis"]
             cache = settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache"
@@ -633,14 +643,14 @@ def main(argv=None):
                         cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
                         cast_reconciliation_notes=settings["cast_reconciliation_notes"],
                         series_registry=registry,
-                        policy=config["performance_policy"], progress=lambda message: print(message, file=sys.stderr))
+                        policy=config["performance_policy"], progress=progress)
                     if edits is not None:
                         document = apply_edits(document, edits)
                     complete("analyzed")
                 from .audition_scripts import prepare_document_samples
                 sample_requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                                  max_request_chars=settings["max_request_chars"],
-                                                 progress=lambda message: print(message, file=sys.stderr))
+                                                 progress=progress)
                 if resume_index <= 1:
                     # Keep persisted checkpoint names resumable; spelling cleanup is retired.
                     begin("speech-normalized-1")
@@ -649,7 +659,7 @@ def main(argv=None):
                     begin("samples-prepared-1")
                     document = prepare_document_samples(document, sample_requests,
                         workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                        progress=lambda message: print(message, file=sys.stderr))
+                        progress=progress)
                     complete("samples-prepared-1")
                 if resume_index <= 3:
                     begin("speakers-decided")
@@ -665,7 +675,7 @@ def main(argv=None):
                     begin("samples-prepared-2")
                     document = prepare_document_samples(document, None,
                         workers=min(5, settings["attribution_workers"]), allow_incomplete=True,
-                        progress=lambda message: print(message, file=sys.stderr))
+                        progress=progress)
                     complete("samples-prepared-2")
                 if directory_mode:
                     state = publish_directory(document, registry, args.output, export_bundle,
@@ -704,17 +714,17 @@ def main(argv=None):
                 protected.append(Path(settings["series_registry"]))
             if any(args.output.resolve() == path.resolve() for path in protected):
                 raise ValueError("The reviewed analysis must use a separate path from configuration and series registry")
-            client = OpenAICompatibleClient(**config["provider"])
+            client = provider_client(config["provider"])
             print(f"Reviewing attribution with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
             model_cache = announce_cache(settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache")
             requests = CachedRequests(client, model_cache,
                                       repair_attempts=settings["repair_attempts"],
                                       max_request_chars=settings["max_request_chars"],
-                                      progress=lambda message: print(message, file=sys.stderr))
+                                      progress=progress)
             result = audit_attribution(document, requests, workers=min(5, settings["attribution_workers"]),
                                        review_chunk_chars=settings["attribution_review_chunk_chars"],
                                        review_notes=settings["attribution_review_notes"] or settings["cast_review_notes"],
-                                       progress=lambda message: print(message, file=sys.stderr))
+                                       progress=progress)
             from .narration_boundaries import repair_narration_boundaries
             result = repair_narration_boundaries(result, progress=print)
             write_json(args.output, result, overwrite=args.force)
@@ -757,3 +767,5 @@ def main(argv=None):
               "is kept in the output directory; rerun the same command to resume.", file=sys.stderr)
         resume_guidance()
         return 130
+    finally:
+        stream_console.close()

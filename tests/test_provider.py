@@ -565,6 +565,7 @@ class ProviderTests(unittest.TestCase):
             OpenAICompatibleClient("model"),
             OpenAICompatibleClient("model", stall_timeout=30),
             OpenAICompatibleClient("model", progress_callback=lambda count: None),
+            OpenAICompatibleClient("model", stream_observer=lambda event: None),
             OpenAICompatibleClient("model", api_key="secret-key"),
         ):
             self.assertEqual(client.identity, OpenAICompatibleClient("model").identity)
@@ -577,6 +578,24 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertEqual(body["messages"][0]["role"], "system")
         self.assertEqual(body["messages"][1], {"role": "user", "content": '{"text":"Café"}'})
+
+    def test_stream_observer_reports_reasoning_and_content_progress(self):
+        seen = []
+        self.respond(sse(
+            delta("", reasoning_content="checking the scene"),
+            delta('{"characters": []}'), delta_end("stop"), "[DONE]",
+        ))
+        client = OpenAICompatibleClient("model", stream_observer=seen.append)
+        self.assertEqual(client.complete("Analyze", {}), {"characters": []})
+        self.assertEqual(seen[0]["phase"], "started")
+        self.assertEqual(seen[-1]["phase"], "completed")
+        self.assertTrue(all(event["phase"] == "streaming" for event in seen[1:-1]))
+        reasoning = [event for event in seen if event.get("kind") == "reasoning"]
+        self.assertEqual(reasoning[0]["text"], "checking the scene")
+        self.assertEqual(reasoning[0]["reasoning_chars"], 18)
+        final_content = [event for event in seen if event.get("kind") == "content"]
+        self.assertEqual(final_content[-1]["content_chars"], 18)
+        self.assertTrue(all("request_id" in event for event in seen))
 
     def test_streamed_multi_chunk_response_accumulates_the_exact_content(self):
         self.respond(sse(
