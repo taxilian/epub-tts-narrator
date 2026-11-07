@@ -78,6 +78,12 @@ class TimeoutClient(JuryClient):
                 raise AssertionError("The completed peer responses were not saved before timeout")
             self.failed_key = key
             raise ProviderError("API request timed out.", retryable=True)
+        if stage == "identity_collision_votes":
+            return {"votes": [
+                {"case_id": case["case_id"], "verdict": "reject",
+                 "reason": "The fixture keeps independently discovered speakers separate.",
+                 "evidence": []}
+                for case in payload["cases"]]}
         if stage == "attribution_review_scan":
             # Initial narration is deliberately wrong; this independent scan
             # proposes the same exact source spans the ordinary fixture uses.

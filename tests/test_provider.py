@@ -21,6 +21,7 @@ from epub_tts_narrator.provider import (
     OutputTruncatedError,
     ProviderError,
     _NoRedirect,
+    provider_failure_summary,
 )
 
 
@@ -312,6 +313,19 @@ class ProviderTests(unittest.TestCase):
             sleep.assert_not_called()
             self.assertFalse(caught.exception.retryable)
             self.assertNotIn("private", str(caught.exception))
+
+    def test_failure_summary_reports_rate_limits_without_private_messages(self):
+        error = ProviderError(
+            "private provider detail", status_code=429, code="rate_limit_exceeded",
+            retryable=True, retry_after_seconds=20,
+            rate_limits={"concurrent_active": 4, "concurrent_max": 4},
+        )
+        summary = provider_failure_summary(error)
+        self.assertIn("HTTP 429", summary)
+        self.assertIn("code rate_limit_exceeded", summary)
+        self.assertIn("concurrent_active=4", summary)
+        self.assertIn("retry after 20s", summary)
+        self.assertNotIn("private", summary)
 
     def test_retry_after_numeric_and_http_date_are_respected(self):
         for header in ("25", "Thu, 01 Jan 1970 00:17:05 GMT"):

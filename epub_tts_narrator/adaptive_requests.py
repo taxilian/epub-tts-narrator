@@ -11,7 +11,9 @@ import tempfile
 from typing import Protocol, TypeAlias, TypeVar
 
 from .prompts import PROMPT_VERSION
-from .provider import OutputTruncatedError, ProviderError, ResponseCapacityError
+from .provider import (
+    OutputTruncatedError, ProviderError, ResponseCapacityError, provider_failure_summary,
+)
 
 
 JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
@@ -169,6 +171,7 @@ def run_partitioned(
                 ) from error
             if requests is not None and path is not None and marker is not None:
                 _write_marker(path, marker)
-            return subdivide("provider_capacity", "after a provider capacity failure")
+            return subdivide("provider_capacity",
+                             f"after provider failure ({provider_failure_summary(error)})")
 
     return run_part(list(items))

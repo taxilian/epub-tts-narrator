@@ -73,6 +73,30 @@ class ResponseCapacityError(ProviderError):
     """The provider response exceeded a fixed transport capacity bound."""
 
 
+def provider_failure_summary(error: BaseException) -> str:
+    """Safe actionable classification without provider messages or source data."""
+    labels = []
+    if isinstance(error, OutputTruncatedError):
+        labels.append("output token limit")
+    elif isinstance(error, ResponseCapacityError):
+        labels.append("response size limit")
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        labels.append(f"HTTP {status}")
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        labels.append(f"code {code}")
+    limits = getattr(error, "rate_limits", None)
+    if isinstance(limits, dict) and limits:
+        labels.append("rate limits " + ", ".join(f"{key}={value}" for key, value in sorted(limits.items())))
+    retry_after = getattr(error, "retry_after_seconds", None)
+    if isinstance(retry_after, (int, float)):
+        labels.append(f"retry after {retry_after:g}s")
+    if getattr(error, "retryable", False):
+        labels.append("retryable")
+    return "; ".join(labels) or "unspecified provider failure"
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward credentials (or book text) to a redirect destination.

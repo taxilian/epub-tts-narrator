@@ -18,7 +18,7 @@ from .attribution_compact_prompts import ATTRIBUTE_COMPACT, ATTRIBUTE_COMPACT_V1
 from .contracts import readiness, validate_document
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
 from .prompts import ATTRIBUTE, PROMPT_VERSION, TYPOGRAPHY_GUIDANCE
-from .provider import MAX_RESPONSE_BYTES, ProviderError
+from .provider import MAX_RESPONSE_BYTES, ProviderError, provider_failure_summary
 from .series import add_series_issues, reconcile_series_cast
 
 
@@ -983,6 +983,9 @@ class CachedRequests:
                     if not completion_retry_available or str(error) != (
                         "The model output was truncated. Increase the output token limit or reduce the input."
                     ):
+                        with self.progress_lock:
+                            self.progress("Provider request failed immediately: "
+                                          + provider_failure_summary(error))
                         raise
                     completion_retry_available = False
                     with self.progress_lock:

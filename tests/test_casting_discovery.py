@@ -194,7 +194,7 @@ class DiscoveryCandidatesTests(unittest.TestCase):
 
         client = CorrectReportedFields(self.source, character_count=2)
         requests = CachedRequests(client, self.cache, repair_attempts=1)
-        result = discover_candidates(self.source, requests, make_units(self.source, 256), policy=DEFAULT_POLICY)
+        result = discover_candidates(self.source, requests, [self.atoms], policy=DEFAULT_POLICY)
         self.assertEqual(len(result["cast"]["characters"]), 2)
         self.assertEqual(len(client.calls), 2)
         feedback = client.calls[1][1]["correction"]["validator_error"]
@@ -246,6 +246,72 @@ class DiscoveryCandidatesTests(unittest.TestCase):
     def _requests(self, client, *, budget=None):
         return CachedRequests(client, self.cache, repair_attempts=0,
                               max_request_chars=budget if budget is not None else 200000)
+
+    def test_source_character_budget_sets_initial_discovery_regions(self):
+        client = DiscoveryFake()
+        result = discover_candidates(self.source, self._requests(client),
+                                     make_units(self.source, 256), policy=DEFAULT_POLICY,
+                                     region_chars=300)
+        self.assertGreater(len(result["regions"]), 1)
+        self.assertEqual(len(client.calls), len(result["regions"]))
+        self.assertEqual([unit["unit_id"] for region in result["regions"] for unit in region],
+                         [unit["unit_id"] for unit in self.atoms])
+
+    def test_source_batch_regions_run_concurrently_without_reordering_results(self):
+        class BlockingDiscovery(DiscoveryFake):
+            def __init__(self, source):
+                super().__init__(source)
+                import threading
+                self.condition = threading.Condition()
+                self.release = threading.Event()
+                self.active = 0
+                self.peak = 0
+
+            def complete(self, system, payload):
+                with self.condition:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                    self.condition.notify_all()
+                try:
+                    if not self.release.wait(10):
+                        raise AssertionError("discovery concurrency was never released")
+                    return super().complete(system, payload)
+                finally:
+                    with self.condition:
+                        self.active -= 1
+                        self.condition.notify_all()
+
+        source = make_source(TWO_SCENES[0], TWO_SCENES[1],
+                             "Mara crossed the dark bridge before the ferry bell rang.",
+                             "Mara counted the silver coins again beside the river.")
+        client = BlockingDiscovery(source)
+        batches = make_units(source, 256)
+        self.assertGreater(len(batches), 1)
+        import threading
+        outcome = {}
+
+        def run():
+            try:
+                outcome["result"] = discover_candidates(
+                    source, self._requests(client), batches,
+                    policy=DEFAULT_POLICY, workers=2, region_chars=300)
+            except BaseException as error:
+                outcome["error"] = error
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        try:
+            deadline = 10
+            with client.condition:
+                self.assertTrue(client.condition.wait_for(lambda: client.peak == 2, deadline))
+        finally:
+            client.release.set()
+            worker.join(20)
+        self.assertFalse(worker.is_alive())
+        if "error" in outcome:
+            raise outcome["error"]
+        self.assertEqual([unit["unit_id"] for region in outcome["result"]["regions"] for unit in region],
+                         [unit["unit_id"] for batch in batches for unit in batch])
 
     def test_independent_regions_keep_equal_names_separate_without_merging(self):
         client = DiscoveryFake()
@@ -354,7 +420,7 @@ class DiscoveryCandidatesTests(unittest.TestCase):
     def test_unbounded_response_local_ids_exceed_legacy_allocation_caps(self):
         client = DiscoveryFake(distinct_names=True, character_count=70)
         result = discover_candidates(self.source, self._requests(client),
-                                     make_units(self.source, 256), policy=DEFAULT_POLICY)
+                                     [self.atoms], policy=DEFAULT_POLICY)
         self.assertEqual(len(result["cast"]["characters"]), 70)
         allocated = {character["id"] for character in result["cast"]["characters"]}
         self.assertEqual(len(allocated), 70)

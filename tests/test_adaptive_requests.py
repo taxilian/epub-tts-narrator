@@ -154,16 +154,44 @@ class AdaptiveRequestTests(unittest.TestCase):
             return ProviderError(message, code="context_length_exceeded", status_code=413)
 
         client = Client(maximum=2, failure=failure)
+        progress = []
         with tempfile.TemporaryDirectory() as directory:
-            requests = CachedRequests(client, directory, repair_attempts=0)
+            requests = CachedRequests(client, directory, repair_attempts=0,
+                                      progress=progress.append)
 
             def execute(system, payload):
                 return requests.run(system, payload, validate)
 
-            leaves = run_partitioned(list(range(5)), build, execute, requests=requests)
+            leaves = run_partitioned(list(range(5)), build, execute, requests=requests,
+                                     progress=progress.append)
 
         self.assertEqual([item for selected, _ in leaves for item in selected], list(range(5)))
         self.assertEqual([len(call["items"]) for call in client.calls], [5, 2, 3, 1, 2])
+        messages = "\n".join(progress)
+        self.assertIn("Provider request failed immediately: HTTP 413; code context_length_exceeded", messages)
+        self.assertIn("after provider failure (HTTP 413; code context_length_exceeded)", messages)
+
+    def test_rate_limit_failure_is_reported_before_propagation(self):
+        class RateLimited:
+            identity = {"model": "offline", "base_url": "https://example.invalid"}
+
+            def complete(self, system, payload):
+                raise ProviderError(
+                    "private provider detail", status_code=429,
+                    code="rate_limit_exceeded", retryable=True,
+                    rate_limits={"concurrent_active": 4, "concurrent_max": 4},
+                )
+
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            requests = CachedRequests(RateLimited(), directory, repair_attempts=0,
+                                      progress=progress.append)
+            with self.assertRaises(ProviderError):
+                requests.run("system", {"items": [1]}, validate)
+        self.assertTrue(any(
+            "HTTP 429" in message and "code rate_limit_exceeded" in message
+            and "concurrent_active=4" in message for message in progress), progress)
+        self.assertNotIn("private", "\n".join(progress))
 
     def test_resume_skips_a_known_truncated_parent_and_reuses_validated_children(self):
         client = Client(maximum=1)

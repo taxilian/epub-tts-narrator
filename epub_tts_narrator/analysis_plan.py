@@ -1,6 +1,7 @@
 """Read-only work bounds for automatic, source-sized book analysis."""
 
 from .attribution_review import count_review_batches
+from .casting_discovery import discovery_regions
 from .pipeline import make_units
 from .series import series_context
 
@@ -14,13 +15,16 @@ def plan_analysis(source, settings, policy, registry=None):
     review = settings["attribution_review"]
     review_scans = count_review_batches(source, settings["attribution_review_chunk_chars"]) if review else 0
     identity_scans = int(consensus)
-    baseline = len(batches) + 3 + identity_scans + series_scans + review_scans
+    discovery = discovery_regions(atoms)
+    baseline = (len(batches) + len(discovery) + 2 + identity_scans
+                + series_scans + review_scans)
     planned = {
         "book": source["book"], "chapters": len(source["chapters"]), "blocks": len(source["blocks"]),
         "text_characters": sum(len(block["text"]) for block in source["blocks"]),
         "source_units": len(atoms), "analysis_batches": len(batches),
         "casting_strategy": "adaptive_evidence_first", "work_limits": "derived_from_source",
-        "discovery_requests_minimum": 1, "coverage_scan_requests_minimum": 1,
+        "discovery_regions_minimum": len(discovery),
+        "discovery_requests_minimum": len(discovery), "coverage_scan_requests_minimum": 1,
         "adaptive_source_tree_node_bound": max(0, 2 * len(atoms) - 1),
         "identity_consensus": consensus, "identity_scan_requests_minimum": identity_scans,
         "identity_verdicts_per_case": 3 if consensus else 0,
@@ -34,8 +38,8 @@ def plan_analysis(source, settings, policy, registry=None):
         "note": (
             "The baseline is a planning estimate, not a guaranteed lower or upper bound, before cache reuse, repairs and retries. "
             "Discovery, identity scans and source-backed coverage checks use automatic source-sized partitions, "
-            "not attribution-sized discovery batches or a configured number of reconciliation rounds. "
-            "Each initial source partition tree has at most 2N-1 nodes for N original source units; "
+            "not a configured number of reconciliation rounds. Each independent 60,000-character discovery "
+            "region has its own at most 2N-1 adaptive tree for N original source units; "
             "local preflight splits make no model call. Provider capacity and output truncation can add splits. "
             "Coverage repairs follow distinct source-anchored findings and stop on repeated findings or no progress. "
             "Identity cases need three blind verdicts and split cases may add one preparation request. "

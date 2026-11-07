@@ -13,9 +13,11 @@ carries exact visible source evidence validated before cache acceptance. Voice
 entries stay brief placeholders; the whole-cast ensemble pass owns profiles.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 import re
+from threading import Lock
 
 from .casting_prompts import DISCOVERY_PROMPT_VERSION, DISCOVERY_SYSTEM, ID_ALLOCATION_GUIDANCE, sample_available_ids
 from .pipeline import _bounded_validation_errors, check_cast, check_evidence, fingerprint, merge_patch, seed_cast
@@ -24,6 +26,7 @@ from .series import series_context, validate_series_proposals
 
 
 VERSION = 1
+DISCOVERY_REGION_CHARS = 60000
 DISCOVERY_PASS_LABEL = "d"
 COLLECTIONS = ("characters", "roles", "voices")
 _ID_PREFIX = {"characters": "char", "roles": "role", "voices": "voice"}
@@ -40,6 +43,21 @@ _LOCAL_PATTERN = {collection: re.compile(rf"^{prefix}[0-9A-Za-z_-]{{1,48}}$")
 def flatten_atoms(batches):
     """Flatten make_units batches into source atoms with stable original IDs."""
     return [unit for batch in batches for unit in batch]
+
+
+def discovery_regions(atoms, region_chars=DISCOVERY_REGION_CHARS):
+    """Partition source atoms into contiguous bounded discovery regions."""
+    regions, current, current_chars = [], [], 0
+    for atom in atoms:
+        size = len(atom["text"])
+        if current and current_chars + size > region_chars:
+            regions.append(current)
+            current, current_chars = [], 0
+        current.append(atom)
+        current_chars += size
+    if current:
+        regions.append(current)
+    return regions
 
 
 def cast_ids(cast):
@@ -452,6 +470,7 @@ def _preflight_budget(build, atoms, limit, label):
 
 
 def discover_candidates(source, requests, batches, *, policy, series_registry=None,
+                        workers=1, region_chars=DISCOVERY_REGION_CHARS,
                         progress=lambda message: None):
     """Discover cast candidates with independent, source-bounded region requests.
 
@@ -469,6 +488,11 @@ def discover_candidates(source, requests, batches, *, policy, series_registry=No
     atoms = flatten_atoms(batches)
     if not atoms:
         raise ValueError("Cast discovery needs at least one source unit")
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError("Casting discovery workers must be an integer from 1 to 8")
+    if type(region_chars) is not int or region_chars < 256:
+        raise ValueError("Casting discovery region_chars must be an integer of at least 256")
+    initial_regions = discovery_regions(atoms, region_chars)
     seed = seed_cast()
     series_value = series_context(series_registry, source) if series_registry is not None else None
     system = DISCOVERY_SYSTEM + (TYPOGRAPHY_GUIDANCE if _has_typography(atoms) else "")
@@ -498,9 +522,32 @@ def discover_candidates(source, requests, batches, *, policy, series_registry=No
 
     fits = lambda system_value, payload: _region_size(system_value, payload) <= limit
     _preflight_budget(build, atoms, limit, "cast discovery")
-    progress(f"Discovering cast candidates across {len(atoms)} source unit(s)")
-    results = run_partitioned(atoms, build, execute, fits=fits, progress=progress,
-                              label="Casting discovery", requests=requests)
+    progress(f"Discovering cast candidates across {len(atoms)} source unit(s) "
+             f"in {len(initial_regions)} source region(s) with {workers} worker(s)")
+    progress_lock = Lock()
+
+    def safe_progress(message):
+        with progress_lock:
+            progress(message)
+
+    def discover_region(region):
+        return run_partitioned(region, build, execute, fits=fits, progress=safe_progress,
+                               label="Casting discovery", requests=requests)
+
+    if workers == 1 or len(initial_regions) == 1:
+        grouped = [discover_region(region) for region in initial_regions]
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(initial_regions))) as executor:
+            futures = [executor.submit(discover_region, region) for region in initial_regions]
+            grouped = []
+            try:
+                for future in futures:
+                    grouped.append(future.result())
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+    results = [result for group in grouped for result in group]
     state = new_combine_state()
     ledger, combine_issues = combine_region_results(source, seed, results, state)
     if series_registry is not None:

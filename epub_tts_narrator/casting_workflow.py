@@ -38,7 +38,8 @@ def gather_cast(source, requests, batches, *, policy, series_registry=None,
     from .identity import audit_identities
 
     discovered = discover_candidates(source, requests, batches, policy=policy,
-                                     series_registry=series_registry, progress=progress)
+                                     series_registry=series_registry,
+                                     workers=workers, progress=progress)
     cast = discovered["cast"]
     issues = []
     _add_issues(issues, discovered["provenance"]["issues"])
