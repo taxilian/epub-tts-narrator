@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 
+from .audio_naming import descriptive_audio_filename
 from .chapter_executor import MAX_PARALLEL_CHAPTERS
 from .chapter_protocol import (
     ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix,
@@ -249,7 +250,10 @@ class ChapterJobs:
         if folder.is_symlink():
             raise ValueError("Voice references must not use symlinks")
         manifest = validate_voice_manifest(read_json(regular_file(folder / "manifest.json")))
-        audio = regular_file(folder / "reference.flac")
+        legacy = folder / "reference.flac"
+        filename = legacy.name if legacy.exists() or legacy.is_symlink() else descriptive_audio_filename(
+            "reference", asset_id, suffix=".flac")
+        audio = regular_file(folder / filename)
         if digest(manifest) != asset_id or file_hash(audio) != manifest["audio_sha256"]:
             raise ValueError("Registered voice failed its integrity check")
         return {"asset_hash": asset_id, "reference_audio": str(audio),
@@ -299,7 +303,7 @@ class ChapterJobs:
         try:
             with tempfile.TemporaryDirectory(prefix=".voice-", dir=self.root / "voices") as temporary:
                 folder = Path(temporary)
-                target = folder / "reference.flac"
+                target = folder / descriptive_audio_filename("reference", asset_id, suffix=".flac")
                 with target.open("wb") as stream:
                     stream.write(audio)
                     stream.flush()

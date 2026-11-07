@@ -688,7 +688,27 @@ class RealChapterCoreHTTPTests(unittest.TestCase):
             self.assertEqual(client.post("/v1/voices/ensure", headers=AUTH, json={"voices": [asset]}).json(), {"missing": []})
             bad = payload | {"audio_base64": base64.b64encode(encoded + b"changed").decode()}
             self.assertEqual(client.put(f"/v1/voices/{asset}", headers=AUTH, json=bad).status_code, 400)
-            self.assertEqual((self.root / "voices" / asset / "reference.flac").read_bytes(), encoded)
+            stored = Path(self.jobs._voice(asset)["reference_audio"])
+            self.assertIn(asset, stored.name)
+            self.assertTrue(stored.name.endswith("-reference.flac"))
+            self.assertNotEqual(stored.name, "reference.flac")
+            self.assertEqual(stored.read_bytes(), encoded)
+
+    def test_voice_reader_keeps_legacy_reference_filename(self):
+        # Given an old immutable voice folder containing only reference.flac.
+        from epub_tts_narrator.renderer.common import digest, write_json
+        encoded = b"fLaClegacy"
+        manifest = {"version": 1, "audio_sha256": hashlib.sha256(encoded).hexdigest(),
+                    "reference_text": "Legacy voice."}
+        asset = digest(manifest)
+        folder = self.root / "voices" / asset
+        folder.mkdir(parents=True)
+        write_json(folder / "manifest.json", manifest)
+        legacy = folder / "reference.flac"
+        legacy.write_bytes(encoded)
+
+        # When resolving the registered voice, then its established path is reused.
+        self.assertEqual(Path(self.jobs._voice(asset)["reference_audio"]).resolve(), legacy.resolve())
 
 
 if __name__ == "__main__":
