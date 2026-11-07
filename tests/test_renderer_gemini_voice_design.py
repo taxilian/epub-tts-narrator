@@ -93,7 +93,7 @@ class GeminiVoiceDesignTests(unittest.TestCase):
         self.assertEqual(metadata["sample_count"], 2400)
         self.assertEqual(metadata["duration_seconds"], 0.1)
         self.assertEqual(metadata["creation_method"], "prompt_conditioned_voice_design")
-        self.assertEqual(list(self.output.parent.glob(".gemini-*")), [])
+        self.assertEqual([path.name for path in self.output.parent.iterdir() if path.name.startswith(".")], [])
 
     def test_retry_and_process_restart_reuse_voice_id_before_synthesizing(self):
         self.mock_posts({"id": "voice_persistent"}, audio_response(status="incomplete"))

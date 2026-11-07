@@ -338,7 +338,7 @@ class EngineReferenceReuseTests(unittest.TestCase):
         self.assertEqual(self.engine.calls[1]["text"], "<|speaker:0|> Hello again.")
         self.assertLess(len(self.bodies[1]), len(wav_bytes()))
         self.assertNotIn(wav_bytes(), self.bodies[1])
-        self.assertFalse(list(self.root.glob(".fish-*")))
+        self.assertFalse([path for path in self.root.iterdir() if path.name.startswith(".")])
 
     def test_restart_miss_retries_inline_once_without_repeated_synthesis(self):
         self.client.synthesize("First.", self.voice, self.root / "first.wav", seed=1)

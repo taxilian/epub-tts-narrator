@@ -105,7 +105,7 @@ class RendererVoiceDesignTests(unittest.TestCase):
         self.assertEqual(result["designer"]["engine"], "qwen3_mlx_voice_design")
         self.assertEqual(result["sample_rate"], 24000)
         self.assertEqual(self.sf.write.call_args.kwargs["subtype"], "FLOAT")
-        self.assertEqual(list(self.root.glob(".design-*")), [])
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
 
     def test_token_cap_is_rejected_before_publishing(self):
         self.generate(self.segment(tokens=128))
@@ -212,7 +212,7 @@ class RendererVoiceDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(EngineError, "disk full"):
             self.designer.create_voice("A clear voice.", "Hello.", self.output, seed=1)
         self.assertFalse(self.output.exists())
-        self.assertEqual(list(self.root.glob(".design-*")), [])
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
 
     def test_factory_rejects_unknown_settings_and_has_no_random_fallback(self):
         designer = create_designer({

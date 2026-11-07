@@ -1,11 +1,13 @@
 """Descriptive audio names retain ownership without becoming paths."""
 
 from pathlib import Path
+import tempfile
 import unittest
 
 from epub_tts_narrator.renderer.audio_naming import (
     descriptive_audio_filename,
     speech_take_filename,
+    temporary_audio_prefix,
     validate_audio_filename,
 )
 
@@ -87,6 +89,68 @@ class AudioFilenameTests(unittest.TestCase):
                 # When resolving the recorded name, then validation fails closed.
                 with self.assertRaisesRegex(ValueError, "Recorded audio filename"):
                     validate_audio_filename(value, suffix=".wav")
+
+
+class TemporaryStagingPrefixTests(unittest.TestCase):
+    def test_prefix_names_its_destination_and_stage_and_fits_the_filesystem(self):
+        # Given a real chapter destination and the download stage that stages it.
+        # When deriving the hidden staging prefix and creating an actual temp file.
+        prefix = temporary_audio_prefix("chapter-0042.flac", "download", suffix=".flac")
+        with tempfile.TemporaryDirectory() as temporary:
+            with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".flac", dir=temporary,
+                                             delete=False) as handle:
+                staged = Path(handle.name)
+
+            # Then the staged name is hidden, keeps destination and stage, and
+            # reserves room for the random suffix without exceeding the limit.
+            name = staged.name
+            self.assertTrue(name.startswith("."))
+            self.assertIn("chapter-0042", name)
+            self.assertIn("download", name)
+            self.assertNotIn(".flac-", name)
+            self.assertLessEqual(len(name.encode("utf-8")), 255)
+        self.assertFalse(staged.exists())
+
+    def test_long_unicode_destination_still_creates_within_the_filesystem_limit(self):
+        # Given a destination whose own name is longer than any safe prefix budget.
+        # When staging through an actual NamedTemporaryFile with the derived prefix.
+        prefix = temporary_audio_prefix("界" * 200 + "-take.wav", "drama3-cuda", suffix=".wav")
+        with tempfile.TemporaryDirectory() as temporary:
+            with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".wav", dir=temporary,
+                                             delete=False) as handle:
+                staged = Path(handle.name)
+                handle.write(b"audio")
+
+            # Then truncation never splits Unicode or drops the stage identity.
+            self.assertLessEqual(len(staged.name.encode("utf-8")), 255)
+            self.assertIn("drama3-cuda", staged.name)
+            self.assertEqual(staged.read_bytes(), b"audio")
+        self.assertFalse(staged.exists())
+
+    def test_destination_path_and_control_syntax_never_reach_the_staged_name(self):
+        # Given destination metadata containing separators and a control character.
+        # When deriving the prefix, then only the sanitized final component remains.
+        prefix = temporary_audio_prefix(Path("voices") / "../Mara\x07.wav", "qwen3-design",
+                                        suffix=".wav")
+        self.assertNotIn("/", prefix)
+        self.assertNotIn("\x07", prefix)
+        self.assertIn("Mara", prefix)
+        self.assertTrue(prefix.startswith(".Mara"))
+
+    def test_unusable_destinations_still_receive_their_stage_name(self):
+        # Given an opaque destination that sanitizes away to nothing.
+        # When deriving the prefix, then a stable bounded stem carries the stage.
+        first = temporary_audio_prefix("///", "copy")
+        second = temporary_audio_prefix("///", "copy")
+        self.assertEqual(first, second)
+        self.assertIn("copy", first)
+        self.assertTrue(first.startswith("."))
+
+    def test_stage_must_describe_itself(self):
+        # Given a stage label with no visible characters.
+        # When deriving the prefix, then it is refused instead of staging anonymously.
+        with self.assertRaisesRegex(ValueError, "stage"):
+            temporary_audio_prefix("chapter.wav", "//")
 
 
 if __name__ == "__main__":

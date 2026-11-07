@@ -34,7 +34,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .audio_naming import descriptive_audio_filename, validate_audio_filename
+from .audio_naming import descriptive_audio_filename, temporary_audio_prefix, validate_audio_filename
 from .bundle import chunk_speakers
 from .common import USER_AGENT, RejectRedirects, digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .chapter_protocol import (
@@ -204,7 +204,8 @@ class ChapterClient:
             raise ChapterClientError("Chapter artifact URL must use HTTPS or the configured service origin")
         headers = self.headers if same_origin else {}
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".download-", dir=target.parent)
+        fd, temporary = tempfile.mkstemp(prefix=temporary_audio_prefix(target, "download"),
+                                         dir=target.parent)
         received, checksum = 0, hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as stream:

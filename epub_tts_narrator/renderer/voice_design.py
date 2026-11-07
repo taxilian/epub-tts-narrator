@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 
+from .audio_naming import temporary_audio_prefix
 from .engines import EngineError, _checkpoint_fingerprints, _seed
 
 
@@ -133,7 +134,8 @@ class Qwen3VoiceDesigner:
             temp_name = None
             try:
                 with tempfile.NamedTemporaryFile(
-                    prefix=".design-", suffix=".wav", dir=output_path.parent, delete=False,
+                    prefix=temporary_audio_prefix(output_path, "qwen3-design", suffix=".wav"),
+                    suffix=".wav", dir=output_path.parent, delete=False,
                 ) as stage:
                     temp_name = stage.name
                 sf.write(temp_name, audio, rate, subtype="FLOAT")

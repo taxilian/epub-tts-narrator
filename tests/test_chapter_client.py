@@ -157,6 +157,25 @@ class DownloadTests(unittest.TestCase):
             self.client.websocket("job", 0)
         self.assertIsNone(connect.call_args.kwargs["proxy"])
 
+    def test_staged_download_names_destination_and_stage_without_leftovers(self):
+        # Given an HTTP boundary serving a numbered chapter artifact.
+        target = self.root / "chapter-0042.flac"
+        artifact = {**self.artifact, "name": "chapter-0042.flac",
+                    "url": "/v1/jobs/job/artifacts/chapter-0042.flac"}
+        original = tempfile.mkstemp
+        with patch("tempfile.mkstemp", side_effect=lambda *a, **k: original(*a, **k)) as mkstemp:
+            self.client.download(artifact, target)
+
+        # Then the staged file names its destination and download stage,
+        # publishes the exact bytes, and leaves no hidden temporary behind.
+        prefix = mkstemp.call_args.kwargs["prefix"]
+        self.assertTrue(prefix.startswith("."))
+        self.assertIn("chapter-0042.flac", prefix)
+        self.assertIn("download", prefix)
+        self.assertLessEqual(len(prefix.encode("utf-8")) + 8, 255)
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual([path.name for path in self.root.iterdir()], ["chapter-0042.flac"])
+
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
 class ChapterOrchestrationTests(unittest.TestCase):

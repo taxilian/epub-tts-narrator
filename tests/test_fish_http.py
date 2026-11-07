@@ -421,7 +421,7 @@ class HistoryWireTransportTests(unittest.TestCase):
                     with self.assertRaisesRegex(FishHTTPError, message):
                         self.client().synthesize("Hello.", self.voice, output, seed=1)
                 self.assertFalse(output.exists())
-                self.assertFalse(list(self.root.glob(".fish-*")))
+                self.assertFalse([path for path in self.root.iterdir() if path.name.startswith(".")])
 
     def test_oversized_declared_or_received_response_is_refused(self):
         with patch("epub_tts_narrator.renderer.fish_http.MAX_AUDIO_BYTES", 64 * 1024):

@@ -23,6 +23,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from .audio_naming import temporary_audio_prefix
 from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
 from .engines import EngineError, HistorySynthesis, _checkpoint_fingerprints
 from .fish_http import read_reference
@@ -204,8 +205,9 @@ class FishSpeechCudaEngine(HistorySynthesis):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             staged = None
             try:
-                with tempfile.NamedTemporaryFile(prefix=".take-", suffix=".wav", dir=output_path.parent,
-                                                 delete=False) as handle:
+                with tempfile.NamedTemporaryFile(
+                        prefix=temporary_audio_prefix(output_path, "drama3-cuda", suffix=".wav"),
+                        suffix=".wav", dir=output_path.parent, delete=False) as handle:
                     staged = handle.name
                 sf.write(staged, audio, rate, subtype="FLOAT")
                 os.link(staged, output_path)

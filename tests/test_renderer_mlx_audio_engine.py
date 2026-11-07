@@ -141,7 +141,7 @@ class MLXAudioEngineTests(unittest.TestCase):
         self.assertTrue(result["direction_applied"])
         self.assertEqual((result["sample_rate"], result["sample_count"], result["token_counts"]), (100, 20, [5]))
         self.assertEqual(self.written[0]["subtype"], "FLOAT")
-        self.assertEqual(list(self.root.glob(".take-*")), [])
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
         self.assertNotIn("generated_codes", result)
 
     def test_freeform_style_is_delivered_with_the_same_reference_voice(self):
@@ -238,7 +238,7 @@ class MLXAudioEngineTests(unittest.TestCase):
                 with self.assertRaisesRegex(EngineError, message):
                     self.engine.synthesize("Hello.", self.voice, output, seed=1)
                 self.assertFalse(output.exists())
-        self.assertEqual(list(self.root.glob(".take-*")), [])
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
 
     def test_missing_runtime_internals_fail_clearly(self):
         del FakeModel._frames
@@ -309,7 +309,7 @@ class MLXAudioEngineTests(unittest.TestCase):
             with self.assertRaises(EngineError):
                 self.engine.synthesize("Hello.", self.voice, self.output, seed=1)
         self.assertEqual(self.output.read_bytes(), b"concurrent accepted recording")
-        self.assertEqual(list(self.root.glob(".take-*")), [])
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
 
     def test_stable_supported_patch_releases_can_load_and_generate_audio(self):
         for version in ("0.6.1", "0.6.2", "0.6.1.post1"):

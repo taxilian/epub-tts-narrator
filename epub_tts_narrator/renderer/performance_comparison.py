@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from time import monotonic
 
+from .audio_naming import temporary_audio_prefix
 from .book_context import resolve_book_config, voice_store
 from .bundle import load_bundle, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
@@ -46,7 +47,8 @@ def _copy(source, destination, expected=None):
         if file_hash(regular_file(destination)) != expected:
             raise ValueError("Saved comparison input or artifact changed; use a new comparison directory")
         return expected
-    fd, temporary = tempfile.mkstemp(prefix=".copy-", dir=destination.parent)
+    fd, temporary = tempfile.mkstemp(prefix=temporary_audio_prefix(destination, "copy"),
+                                     dir=destination.parent)
     try:
         with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
             shutil.copyfileobj(input_file, output)

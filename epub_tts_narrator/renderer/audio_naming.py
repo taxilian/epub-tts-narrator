@@ -150,3 +150,29 @@ def speech_take_filename(request: Mapping[str, JsonValue], attempt: int, *, role
     if type(attempt) is not int or attempt < 1:
         raise ValueError("Speech attempt number must be a positive integer")
     return descriptive_audio_filename(role or "take", f"attempt-{attempt:03d}", *_take_context(request), suffix=".wav")
+
+
+_TEMP_RANDOM_CHARACTERS: Final = 8  # NamedTemporaryFile/mkstemp random suffix
+_FILESYSTEM_NAME_BYTES: Final = 255
+
+
+def temporary_audio_prefix(target: str | Path, stage: str, *, suffix: str = "") -> str:
+    """Return one hidden staging prefix naming its real destination and stage.
+
+    NamedTemporaryFile/mkstemp append eight random characters plus the
+    caller's suffix, so the destination name is truncated to keep the whole
+    staged basename within the filesystem name limit.
+    """
+    stage_name = _safe_part(stage)
+    if not stage_name:
+        raise ValueError("Staging stage name must contain safe visible characters")
+    name = Path(target).name
+    stem = _safe_part(name)
+    if suffix and stem.endswith(suffix):
+        stem = stem[:-len(suffix)]
+    if not stem:
+        stem = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    budget = max(_FILESYSTEM_NAME_BYTES - 11 - len(stage_name.encode("utf-8"))
+                 - len(suffix.encode("utf-8")), 16)
+    stem = _truncate(stem, budget) or hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f".{stem}-{stage_name}-"
