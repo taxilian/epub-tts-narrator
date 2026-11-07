@@ -5,6 +5,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .quality import compare_words
 from .retry_budget import generation_attempts
@@ -312,9 +313,9 @@ class RecurringResolution:
         self._save()
 
     def _check_candidate_audio(self, record):
-        wav = self.directory / str(record.get('audio_file'))
-        if (record.get('audio_file') != f"attempt-{record['attempt']:03d}.wav"
-                or file_hash(regular_file(wav)) != record.get('audio_sha256')):
+        filename = validate_audio_filename(record.get('audio_file'), suffix='.wav')
+        wav = self.directory / filename
+        if file_hash(regular_file(wav)) != record.get('audio_sha256'):
             raise ValueError('Speech resolution candidate audio changed')
 
     def _failed_takes(self):
