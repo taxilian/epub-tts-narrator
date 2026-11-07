@@ -49,6 +49,9 @@ REPLICA_GPU_MEMORY_MIB = 44 * 1024
 MPS_ROOT = Path("/tmp/epub-tts-mps")
 SMOKE_TEXT = ("The little boat crossed the quiet lake. We reached the far shore before sunset, "
               "then walked home together beneath the stars.")
+# Spoken by each copy in the voice of its own first sample, sent the way a
+# chapter service sends registered voices: a lossless mono FLAC reference.
+SMOKE_REFERENCE_TEXT = "Morning light filled the kitchen, and the kettle began to sing."
 
 
 def validate_worker(config):
@@ -426,17 +429,32 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
                 normalized = directory / f"sample-{index + 1}-normalized.wav"
                 (normalize or normalize_clip)(path, normalized, sample_rate=config["render"]["sample_rate"],
                                               ffmpeg=config["render"]["ffmpeg"])
-                samples.append(normalized)
-            audio = samples[0]
+                samples.append((normalized, SMOKE_TEXT))
+                # Exercise reference encoding too: real passages always carry a
+                # registered voice, which the chapter service stores as FLAC.
+                pcm, rate = sf.read(normalized, dtype="int16", always_2d=True)
+                reference = directory / f"reference-{index + 1}.flac"
+                sf.write(reference, pcm[:, :1], rate, format="FLAC", subtype="PCM_16")
+                voice = {"kind": "reference", "reference_audio": str(reference), "reference_text": SMOKE_TEXT,
+                         "voice_id": "smoke", "reference_sha256": file_hash(reference)}
+                cloned = directory / f"referenced-{index + 1}.wav"
+                engine.synthesize(SMOKE_REFERENCE_TEXT, voice, cloned, seed=4102)
+                cloned_normalized = directory / f"referenced-{index + 1}-normalized.wav"
+                (normalize or normalize_clip)(cloned, cloned_normalized, sample_rate=config["render"]["sample_rate"],
+                                              ffmpeg=config["render"]["ffmpeg"])
+                samples.append((cloned_normalized, SMOKE_REFERENCE_TEXT))
+            audio = samples[0][0]
             device = config["verification"]["device"].upper()
             print(f"Smoke test: checking generated words with {device} Whisper.", flush=True)
             verifier = (verifier_factory or create_verifier)(
                 config["verification"], config.get("jev"), config.get("provider"))
-            for index, sample in enumerate(samples):
-                report = validate_audio(sample, SMOKE_TEXT, verifier, config["quality"], purpose="reference")
+            for index, (sample, text) in enumerate(samples):
+                report = validate_audio(sample, text, verifier, config["quality"], purpose="reference")
                 if not report["passed"]:
-                    copy = f" from copy {index + 1}" if len(samples) > 1 else ""
-                    raise RuntimeError(f"GPU smoke speech{copy} did not pass verification: " + ", ".join(report["reasons"]))
+                    copy = f" from copy {index // 2 + 1}" if len(engines) > 1 else ""
+                    kind = " with a reference voice" if index % 2 else ""
+                    raise RuntimeError(f"GPU smoke speech{copy}{kind} did not pass verification: "
+                                       + ", ".join(report["reasons"]))
             samples, rate = sf.read(audio, dtype="int16", always_2d=True)
             compressed = directory / "chapter.flac"
             sf.write(compressed, samples, rate, subtype="PCM_16", format="FLAC")

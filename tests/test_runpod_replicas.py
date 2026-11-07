@@ -243,8 +243,10 @@ class ReplicaWorkerTests(unittest.TestCase):
         self.config["render_pool"]["workers"] = inference_workers(1)
         self.config["render"]["ffmpeg"] = ffmpeg
         engine = Mock()
-        engine._request.side_effect = lambda text, refs, history, destination, seed: sf.write(
+        write = lambda destination: sf.write(
             destination, (0.2 * np.sin(np.linspace(0, 800, 44100))).astype(np.float32), 44100, subtype="FLOAT")
+        engine._request.side_effect = lambda text, refs, history, destination, seed: write(destination)
+        engine.synthesize.side_effect = lambda text, voice, destination, seed: write(destination)
         checked = []
 
         def validate(path, text, verifier, quality, purpose):
@@ -263,7 +265,7 @@ class ReplicaWorkerTests(unittest.TestCase):
               patch.object(worker.subprocess, "run", side_effect=run), patch("sys.stdout", new=io.StringIO())):
             worker.smoke(self.config, fetch=Mock(return_value={"protocol": PROTOCOL}), engine_factory=lambda *_: engine,
                          verifier_factory=lambda *_: Mock(), roundtrip=Mock())
-        self.assertEqual(checked, [("sample-1-normalized.wav", 2)])
+        self.assertEqual(checked, [("sample-1-normalized.wav", 2), ("referenced-1-normalized.wav", 2)])
 
     def test_smoke_checks_every_copy(self):
         from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
@@ -277,13 +279,15 @@ class ReplicaWorkerTests(unittest.TestCase):
                     stream.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
                     stream.writeframes(b"\x10\x10" * 24000)
             engine._request.side_effect = generate
+            engine.synthesize.side_effect = lambda text, voice, destination, seed: generate(text, [], [], destination, seed)
             engines.append(engine)
             return engine
 
         def encode(command, **kwargs):
             Path(command[-1]).write_bytes(b"fixture m4a")
             return Mock(returncode=0)
-        verify = Mock(side_effect=[{"passed": True}, {"passed": False, "reasons": ["missing words"]}])
+        # Per copy: its plain sample, then its sample with a reference voice.
+        verify = Mock(side_effect=[{"passed": True}, {"passed": True}, {"passed": False, "reasons": ["missing words"]}])
         with (patch("epub_tts_narrator.renderer.quality.validate_audio", verify),
               patch.object(worker.subprocess, "run", side_effect=encode), patch("sys.stdout", new=io.StringIO()),
               self.assertRaisesRegex(RuntimeError, "copy 2 did not pass verification")):
@@ -292,7 +296,8 @@ class ReplicaWorkerTests(unittest.TestCase):
                          normalize=lambda source, target, **_: Path(target).write_bytes(Path(source).read_bytes()))
         self.assertEqual([engine.url for engine in engines],
                          ["http://127.0.0.1:8080/v1/tts", "http://127.0.0.1:8090/v1/tts"])
-        self.assertTrue(all(engine._request.call_count == 1 and engine.close.call_count == 1 for engine in engines))
+        self.assertTrue(all(engine._request.call_count == 1 and engine.synthesize.call_count == 1
+                            and engine.close.call_count == 1 for engine in engines))
 
 
 if __name__ == "__main__":

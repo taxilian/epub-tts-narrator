@@ -259,9 +259,12 @@ immediately, because an idle supervisor is not yet reliable. Persistent storage
 continues to be billed while compute is stopped.
 
 The first live deployment should use one short chapter. The CLI's smoke check
-runs a separate short passage through CUDA synthesis and the configured Whisper device, encodes
-FLAC and M4A, and verifies Ceph upload/download checksums and deletion of its
-temporary objects. It does not change any book or saved character voice. A
+runs a separate short passage through CUDA synthesis on every Drama 3 copy, then
+speaks a second passage on each copy in the voice of its first sample, sent as
+a lossless FLAC reference exactly as the chapter service sends registered
+voices. It checks both with the configured Whisper device after the same
+normalization rendering uses, encodes FLAC and M4A, and verifies Ceph
+upload/download checksums and deletion of its temporary objects. It does not change any book or saved character voice. A
 successful smoke check does not establish throughput for a full book.
 
 ## What persists when compute stops

@@ -670,6 +670,13 @@ class RunpodWorkerTests(unittest.TestCase):
                 stream.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
                 stream.writeframes(b"\x10\x10" * 24000)
         engine._request.side_effect = generate
+        def referenced(text, voice, destination, seed):
+            # The second sample speaks in the first one's voice, sent as FLAC.
+            self.assertEqual(text, worker.SMOKE_REFERENCE_TEXT)
+            self.assertTrue(Path(voice["reference_audio"]).read_bytes().startswith(b"fLaC"))
+            self.assertEqual(voice["reference_text"], worker.SMOKE_TEXT)
+            generate(worker.SMOKE_TEXT, [], [], destination, seed)
+        engine.synthesize.side_effect = referenced
         verifier, roundtrip = Mock(), Mock()
         def encode(command, **kwargs):
             Path(command[-1]).write_bytes(b"fixture m4a")
@@ -684,6 +691,7 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual([call.args[1].suffix for call in roundtrip.call_args_list], [".flac", ".m4a"])
         self.assertEqual(list((self.root / "data/deployment-smoke").iterdir()), [])
         engine.close.assert_called_once()
+        engine.synthesize.assert_called_once()
         verifier.close.assert_called_once()
 
     def test_smoke_rejects_incorrect_service_before_synthesis(self):

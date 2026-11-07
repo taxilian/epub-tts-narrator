@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -136,6 +137,37 @@ def read_reference(voice: Mapping[str, Any]) -> tuple[bytes, str]:
     return blob, transcript
 
 
+def wire_reference_audio(blob: bytes) -> bytes:
+    """The ``serve`` protocol carries WAV references only.
+
+    A chapter service stores every registered voice as lossless FLAC, so a
+    FLAC reference is decoded exactly to mono 16-bit PCM WAV before it is
+    sent. Anything other than lossless mono 16-bit FLAC is refused rather
+    than resampled or downmixed. Voice and speech identities stay bound to
+    the stored asset; only the transfer encoding changes.
+    """
+    if not blob.startswith(b"fLaC"):
+        return blob
+    import soundfile as sf
+    try:
+        info = sf.info(io.BytesIO(blob))
+        if info.format != "FLAC" or info.channels != 1 or info.subtype != "PCM_16":
+            raise EngineError("FLAC voice references must be lossless mono 16-bit audio")
+        samples, rate = sf.read(io.BytesIO(blob), dtype="int16", always_2d=True)
+    except EngineError:
+        raise
+    except (RuntimeError, ValueError, TypeError) as exc:
+        raise EngineError("Saved FLAC reference audio could not be decoded") from exc
+    if not len(samples):
+        raise EngineError("Saved FLAC reference audio is empty")
+    output = io.BytesIO()
+    sf.write(output, samples, rate, format="WAV", subtype="PCM_16")
+    data = output.getvalue()
+    if len(data) > MAX_AUDIO_BYTES:
+        raise EngineError("Decoded reference audio exceeds the 100 MiB request limit")
+    return data
+
+
 def inspect_wav(path: Path) -> dict[str, Any]:
     """Check the entire received WAV before it can become a rendering asset."""
     try:
@@ -253,7 +285,7 @@ class FishHTTPEngine(HistorySynthesis):
         wire = []
         for voice in references:
             blob, transcript = read_reference(voice)
-            wire.append({"audio": blob, "text": transcript, "speaker": voice["speaker"]})
+            wire.append({"audio": wire_reference_audio(blob), "text": transcript, "speaker": voice["speaker"]})
         turns = [{"text": turn_text, "codes": codes} for turn_text, codes in history]
         metadata, codes, codebook_size = self._request(text, wire, turns, output, seed, layout)
         return {**metadata, "synthesis_text": text}, codes, codebook_size
