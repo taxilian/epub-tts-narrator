@@ -8,6 +8,8 @@ from pathlib import Path
 import unicodedata
 from typing import Final, TypeAlias
 
+from .common import digest
+
 
 JsonValue: TypeAlias = str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 _MAX_FILENAME_BYTES: Final = 240
@@ -84,3 +86,68 @@ def descriptive_audio_filename(purpose: str, *context: str, suffix: str) -> str:
         owner = hashlib.sha256("\0".join(owners).encode("utf-8")).hexdigest()[:16]
         owner = _truncate(owner, stem_budget - len(tail.encode("utf-8")))
     return validate_audio_filename(owner + tail + suffix, suffix=suffix)
+
+
+def _take_context(request: Mapping[str, JsonValue]) -> list[str]:
+    kind = request.get("kind")
+    if kind == "create_voice":
+        context = [str(request.get("voice_id", "voice"))]
+        profile = request.get("profile")
+        if isinstance(profile, Mapping):
+            name = profile.get("name") or profile.get("display_name")
+            if isinstance(name, str):
+                context.append(name)
+        return context
+    context: list[str] = []
+    chunk = request.get("chunk")
+    if isinstance(chunk, Mapping):
+        chunk_id = chunk.get("chunk_id")
+        if isinstance(chunk_id, str):
+            context.append(chunk_id)
+        segment = chunk.get("segment")
+        if isinstance(segment, Mapping):
+            voice_id = segment.get("voice_id")
+            if isinstance(voice_id, str):
+                context.append(voice_id)
+            simultaneous = segment.get("simultaneous_speakers")
+            if isinstance(simultaneous, Sequence) and not isinstance(simultaneous, (str, bytes)):
+                simultaneous_ids = []
+                for speaker in simultaneous:
+                    if isinstance(speaker, Mapping):
+                        simultaneous_voice = speaker.get("voice_id")
+                        if isinstance(simultaneous_voice, str):
+                            simultaneous_ids.append(simultaneous_voice)
+                context.extend(sorted(simultaneous_ids))
+    voices = request.get("voice_assets")
+    if isinstance(voices, Mapping):
+        voice_ids = [key for key in voices if isinstance(key, str)]
+        context.extend(sorted(voice_ids))
+    performer = request.get("performer")
+    if isinstance(performer, Mapping):
+        performer_voice = performer.get("voice_id")
+        if isinstance(performer_voice, str):
+            context.append(performer_voice)
+    nested = request.get("synthesis_request")
+    if isinstance(nested, Mapping):
+        context.extend(_take_context(nested))
+    identified = bool(context)
+    part = request.get("part")
+    if isinstance(part, Mapping) and type(part.get("start")) is int and type(part.get("end")) is int:
+        context.append(f"part-{part['start']:03d}-{part['end']:03d}")
+    if not identified:
+        for key in ("recovery_request_hash", "parent_request_hash"):
+            identifier = request.get(key)
+            if isinstance(identifier, str):
+                context.insert(0, identifier[:16])
+                break
+    if not context:
+        context = [str(kind or "speech"), digest(request)[:16]]
+    return list(dict.fromkeys(context))
+
+
+def speech_take_filename(request: Mapping[str, JsonValue], attempt: int, *, role: str = "") -> str:
+    """Name a take by its stable request context and public attempt role."""
+    if type(attempt) is not int or attempt < 1:
+        raise ValueError("Speech attempt number must be a positive integer")
+    purpose = f"attempt-{attempt:03d}" + (f"-{role}" if role else "")
+    return descriptive_audio_filename(purpose, *_take_context(request), suffix=".wav")

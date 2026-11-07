@@ -5,6 +5,7 @@ import unittest
 
 from epub_tts_narrator.renderer.audio_naming import (
     descriptive_audio_filename,
+    speech_take_filename,
     validate_audio_filename,
 )
 
@@ -40,6 +41,34 @@ class AudioFilenameTests(unittest.TestCase):
         # Then the result is stable and descriptive rather than generic or hash-only.
         self.assertEqual(first, second)
         self.assertRegex(first, r"^[0-9a-f]{16}-reference\.flac$")
+
+    def test_take_name_uses_chunk_voice_and_attempt_role_without_book_text(self):
+        # Given a bound speech request and a sentence that must stay out of paths.
+        request = {"kind": "speech", "chunk": {"chunk_id": "chunk-42", "spoken_text": "Secret passage",
+                                               "segment": {"voice_id": "voice-mara"}}}
+
+        # When deriving normalized and raw names for one attempt.
+        normalized = speech_take_filename(request, 3)
+        raw = speech_take_filename(request, 3, role="raw")
+
+        # Then stable content ownership and roles replace the generic basename.
+        self.assertEqual(normalized, "chunk-42-voice-mara-attempt-003.wav")
+        self.assertEqual(raw, "chunk-42-voice-mara-attempt-003-raw.wav")
+        self.assertNotIn("Secret", normalized + raw)
+
+    def test_voice_and_recovery_requests_use_their_available_owner_ids(self):
+        # Given voice creation and recovery-only requests with different metadata.
+        creation = {"kind": "create_voice", "voice_id": "voice-hero", "profile": {"name": "Hero"}}
+        recovery = {"kind": "speech_recovery_part", "parent_request_hash": "a" * 64,
+                    "part": {"start": 12, "end": 34}}
+
+        # When deriving their new attempt names.
+        created = speech_take_filename(creation, 1)
+        recovered = speech_take_filename(recovery, 2)
+
+        # Then each uses real available identifiers rather than guessed book text.
+        self.assertEqual(created, "voice-hero-Hero-attempt-001.wav")
+        self.assertEqual(recovered, "aaaaaaaaaaaaaaaa-part-012-034-attempt-002.wav")
 
     def test_explicit_legacy_recorded_name_remains_valid(self):
         # Given an already persisted generic artifact name.
