@@ -1,8 +1,9 @@
 """Small, file-credential-only Runpod management client.
 
-Pod creation, configuration, lifecycle actions, and the GPU/data-center catalog
-use v2, including detailed placement reads for replacement checks. Routine Pod
-reads and volume management retain v1. Hosts are fixed, redirects
+Pod creation, configuration, lifecycle actions, and the GPU catalog use v2,
+including detailed placement reads for replacement checks. Routine Pod reads
+retain v1. Workers use host-local Pod disks, so there is deliberately no
+network-volume client. Hosts are fixed, redirects
 and ambient HTTP proxies are disabled. Server failures include bounded JSON
 diagnoses with credentials removed. A failed mutation is never retried here: callers must reconcile
 uncertain outcomes before creating another paid resource.
@@ -124,6 +125,14 @@ class RunpodAPI:
         return self._request("PATCH", f"/pods/{_resource_id(pod_id)}", spec=spec,
                              v2=True, expected=dict, require_id=True)
 
+    def delete_pod(self, pod_id):
+        """Delete (terminate) a Pod and its Pod disk; never retried.
+
+        v2 documents no response body. Callers confirm the deletion by
+        reading the Pod back, since an ambiguous outcome may have succeeded.
+        """
+        return self._request("DELETE", f"/pods/{_resource_id(pod_id)}", v2=True, allow_empty=True)
+
     def start_pod(self, pod_id):
         return self._pod_action(pod_id, "start")
 
@@ -140,22 +149,9 @@ class RunpodAPI:
             raise self._invalid_response(True, f"POST /pods/{pod_id}/action")
         return result
 
-    def list_volumes(self):
-        return self._request("GET", "/networkvolumes", expected=list)
-
-    def get_volume(self, volume_id):
-        return self._request("GET", f"/networkvolumes/{_resource_id(volume_id)}", expected=dict)
-
-    def create_volume(self, spec):
-        return self._request("POST", "/networkvolumes", spec=spec, expected=dict, require_id=True)
-
     def catalog_gpus(self, **query):
-        """Read v2 GPU pricing; include='AVAILABILITY', product='POD' adds stock."""
+        """Read v2 GPU pricing; include='AVAILABILITY', product='POD', cloud='SECURE'|'COMMUNITY' adds stock."""
         return self._request("GET", "/catalog/gpus", query=query, v2=True, expected=dict)
-
-    def datacenters(self, **query):
-        """Read v2 data centers, optionally include='GPU_AVAILABILITY'."""
-        return self._request("GET", "/catalog/datacenters", query=query, v2=True, expected=dict)
 
     def _request(self, method, path, *, spec=None, query=None, v2=False,
                  expected=None, allow_empty=False, require_id=False):

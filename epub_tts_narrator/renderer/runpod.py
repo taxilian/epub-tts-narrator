@@ -10,10 +10,12 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,7 +23,10 @@ import uuid
 
 from .runpod_api import RunpodAPI, RunpodAmbiguousOutcome, RunpodAPIError
 from .diagnostics import configured_secrets, safe_error_text
-from .runpod_gpu import H100_CANDIDATE_IDS, PREFERRED_H100_HOURLY_LIMIT, select_placement
+from .runpod_gpu import CLOUD_LABELS, H100_CANDIDATE_IDS, PREFERRED_H100_HOURLY_LIMIT, select_placement
+
+
+WORKSPACE = "/workspace"
 
 
 def _local_head():
@@ -32,8 +37,11 @@ def _local_head():
 def add_parser(commands):
     group = commands.add_parser("runpod", help="Bootstrap, update, and encode with an idle-shutdown Runpod worker")
     actions = group.add_subparsers(dest="runpod_action", required=True)
-    for action in ("bootstrap", "update", "encode", "status", "stop", "progress"):
+    for action in ("bootstrap", "update", "encode", "status", "stop", "progress", "cleanup"):
         command = actions.add_parser(action)
+        if action == "cleanup":
+            command.add_argument("--yes", action="store_true",
+                                 help="Delete without the interactive confirmation")
         command.add_argument("--config", type=Path, help="Normal local TOML configuration")
         command.add_argument("--override-config", type=Path, help="Remote overrides (default: runpod.local.toml beside local config)")
         if action in {"bootstrap", "update"}:
@@ -109,6 +117,21 @@ def ssh_endpoint(pod):
     return host, port
 
 
+def _mounts_network_volume(spec):
+    """True for an older request or Pod that mounts a network volume."""
+    mounts = spec.get("mounts") if isinstance(spec, dict) else None
+    return isinstance(mounts, dict) and isinstance(mounts.get("network"), list) and bool(mounts["network"])
+
+
+def _mounts_match(actual, expected):
+    """Compare a Pod's storage with its request: one network volume or one Pod disk."""
+    if expected.get("network"):
+        return actual.get("network") == expected["network"] and not actual.get("persistent")
+    disk, wanted = actual.get("persistent"), expected.get("persistent")
+    return (isinstance(disk, dict) and isinstance(wanted, dict) and not actual.get("network")
+            and disk.get("path") == wanted["path"] and disk.get("size") == wanted["size"])
+
+
 def _resource_missing(exc):
     """A confirmed 404 answer: the Runpod resource no longer exists."""
     return isinstance(exc, RunpodAPIError) and exc.status == 404
@@ -122,15 +145,19 @@ class Deployment:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_path = self.directory / "state.json"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-        # The saved identity is the GPU and region of the current worker;
-        # cfg holds only the selection fallback and an optional location hint.
-        # A chosen preference never rewrites the configured fallback or hint.
+        # The saved identity is the cloud, GPU, and region of the current
+        # worker; cfg holds only the selection fallback, the cloud preference
+        # order, and an optional location hint. A chosen placement never
+        # rewrites them. Workers saved before cloud selection are Secure.
         self.gpu_type_id = self.state.get("gpu_type_id") or self.cfg["gpu_type_id"]
         self.data_center_id = self.state.get("data_center_id")
+        self.cloud_types = tuple(cloud.upper() for cloud in self.cfg["cloud_types"])
+        self.cloud = self.state.get("cloud") or "SECURE"
         self.api = api or RunpodAPI(settings["runpod_api_key"])
         self.notify = notify
         self.endpoint = None
         self._replacement_attempted = False
+        self._cloud_fallback_attempted = False
         self.secrets = configured_secrets(settings["renderer_config"]) | {settings["runpod_api_key"]}
         self.secrets.update(configured_secrets(settings["override_raw"]))
         for source in (settings["renderer_config"], settings["override_raw"]):
@@ -140,8 +167,6 @@ class Deployment:
             if self.state.get("pod_id") and self.state["pod_id"] != self.cfg["pod_id"]:
                 raise ValueError("Configured pod_id differs from saved deployment; use a separate state_dir")
             self.state["pod_id"] = self.cfg["pod_id"]
-        if self.cfg.get("volume_id") and self.state.get("volume_id") and self.state["volume_id"] != self.cfg["volume_id"]:
-            raise ValueError("Configured volume_id differs from saved deployment; use a separate state_dir")
         if not self.state.get("deployment_id"):
             self.state["deployment_id"] = uuid.uuid4().hex[:12]
         if not self.state.get("api_key"):
@@ -229,45 +254,80 @@ class Deployment:
             self._run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "epub-tts-narrator-worker", "-f", str(key)])
         return key.with_suffix(".pub").read_text().strip()
 
-    def quote(self, *, volume_data_centers=(), pinned_data_center=None):
-        """Read live price/stock and fix the concrete GPU and US datacenter.
+    def quote(self, *, clouds=None):
+        """Read live price/stock and fix the concrete cloud, GPU, and US datacenter.
 
-        The configured data_center_id is only a tie-break hint: every managed
-        allocation searches all eligible US standard-volume locations under
-        the same GPU and price policy, preferring known storage regions and
-        then the hint on ties. Empty, stale, or non-US hints are ignored,
-        never errors. An explicit volume pin restricts the search to its
-        confirmed US datacenter.
+        Clouds are tried in runpod.cloud_types order (or the given subset);
+        the first with an eligible placement wins. Within a cloud the
+        configured data_center_id is only a tie-break hint: empty, stale, or
+        non-US hints are ignored, never errors.
         """
         if not self.cfg["image"]:
             raise ValueError("Set runpod.image to a verified Runpod SSH image in the override file")
-        centers = self.api.datacenters().get("dataCenters", [])
-        rows = self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud="SECURE", count=1,
-                                     minCudaVersion="12.9").get("gpus", [])
-        placement = select_placement(rows, centers, fallback_id=self.cfg["gpu_type_id"],
-                                     prefer_h100=self.cfg["prefer_h100"],
-                                     max_hourly_price=self.cfg["max_hourly_price"],
-                                     preferred_data_center=self.cfg["data_center_id"],
-                                     volume_data_centers=tuple(volume_data_centers),
-                                     pinned_data_center=pinned_data_center)
-        self.gpu_type_id = placement.gpu_type_id
-        self.data_center_id = placement.data_center_id
-        hint = self.cfg["data_center_id"]
-        if hint and hint != placement.data_center_id:
-            self.notify(f"runpod.data_center_id {hint} is only a hint; selected {placement.data_center_id} "
-                        "by GPU availability, price, and stock.")
-        gpu = next((row for row in rows if isinstance(row, dict) and row.get("id") == placement.gpu_type_id), {})
-        preferred = "preferred H100 " if placement.gpu_type_id in H100_CANDIDATE_IDS else ""
-        self.notify(f"Runpod: {gpu.get('name', placement.gpu_type_id)} in {placement.data_center_id}, "
-                    f"catalog {preferred}rate ${placement.hourly_price:.2f}/hour; "
-                    "persistent storage is billed separately.")
-        return placement.hourly_price
+        failures = []
+        for cloud in clouds or self.cloud_types:
+            rows = self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud=cloud, count=1,
+                                         minCudaVersion="12.9").get("gpus", [])
+            try:
+                placement = select_placement(rows, cloud=cloud, fallback_id=self.cfg["gpu_type_id"],
+                                             prefer_h100=self.cfg["prefer_h100"],
+                                             max_hourly_price=self.cfg["max_hourly_price"],
+                                             preferred_data_center=self.cfg["data_center_id"])
+            except ValueError as exc:
+                failures.append(exc)
+                continue
+            self.cloud = placement.cloud
+            self.gpu_type_id = placement.gpu_type_id
+            self.data_center_id = placement.data_center_id
+            hint = self.cfg["data_center_id"]
+            if hint and hint != placement.data_center_id:
+                self.notify(f"runpod.data_center_id {hint} is only a hint; selected {placement.data_center_id} "
+                            "by GPU availability, price, and stock.")
+            gpu = next((row for row in rows if isinstance(row, dict) and row.get("id") == placement.gpu_type_id), {})
+            preferred = "preferred H100 " if placement.gpu_type_id in H100_CANDIDATE_IDS else ""
+            self.notify(f"Runpod {CLOUD_LABELS[self.cloud]}: {gpu.get('name', placement.gpu_type_id)} in "
+                        f"{placement.data_center_id}, catalog {preferred}rate ${placement.hourly_price:.2f}/hour; "
+                        "the Pod disk is billed separately.")
+            return placement.hourly_price
+        if len(failures) == 1:
+            raise failures[0]
+        raise ValueError("No cloud in runpod.cloud_types has an eligible placement; no resources were created. "
+                         + " ".join(str(failure) for failure in failures))
+
+    def _later_clouds(self):
+        """Clouds after the current one in the configured preference order."""
+        order = self.cloud_types
+        return order[order.index(self.cloud) + 1:] if self.cloud in order else ()
+
+    def _fallback_clouds(self, exc):
+        """One fallback per operation, only after a confirmed placement refusal.
+
+        Runpod reports no capacity (400) and an inaccessible pool (403)
+        without a machine-readable code; both confirm that nothing was
+        created, so one request on the next preferred cloud cannot duplicate
+        a worker. Ambiguous outcomes and other errors never fall back.
+        """
+        if exc.ambiguous or exc.status not in {400, 403} or self._cloud_fallback_attempted:
+            return ()
+        remaining = self._later_clouds()
+        if remaining:
+            self._cloud_fallback_attempted = True
+        return remaining
+
+    def _retire_network_volume(self):
+        """Move a legacy network volume to the retained list; never delete it."""
+        volume_id = self.state.pop("volume_id", None)
+        if volume_id:
+            retained = self.state.setdefault("retained_network_volumes", [])
+            if volume_id not in retained:
+                retained.append(volume_id)
+            self.notify(f"Network volume {volume_id} is no longer used; it stays in Runpod and keeps billing "
+                        "for storage until you delete it in the Runpod console.")
 
     def provision(self):
         if self.state.get("pod_replacement"):
             self._adopt_replacement()
             return
-        pod_confirmed_missing = False
         if self.pod_id and not self.state.get("pod_creation_pending"):
             try:
                 self.api.get_pod(self.pod_id)
@@ -281,13 +341,15 @@ class Deployment:
                         f"The configured worker {self.pod_id} does not exist in Runpod; "
                         "correct or remove runpod.pod_id in the configuration.") from None
                 # The saved worker was deleted (for example in the Runpod
-                # console). Persistent storage survives, so provision a new
-                # worker from the saved volume instead of failing on it.
+                # console) together with its Pod disk; create a new one.
                 self.notify(f"Saved worker {self.pod_id} no longer exists in Runpod; creating a new one.")
                 self.state.pop("pod_id", None)
                 self.state.pop("last_status", None)
                 self.save()
-                pod_confirmed_missing = True
+            else:
+                # A healthy saved worker is never replaced merely to change
+                # its cloud, GPU, region, or storage type.
+                return
         allocation = self.state.get("allocation")
         saved_spec = self.state.get("pod_creation_spec")
         name = (saved_spec["name"] if isinstance(saved_spec, dict) else
@@ -307,7 +369,9 @@ class Deployment:
                 self._validate_recovered_creation(matches[0])
                 if isinstance(saved_spec, dict):
                     self.data_center_id = saved_spec["dataCenterIds"][0]
+                    self.cloud = saved_spec.get("cloud", "SECURE")
                     self.state["data_center_id"] = self.data_center_id
+                self._adopt_new_worker(saved_spec)
                 self.state.pop("pod_creation_pending", None)
                 self.state.pop("pod_creation_spec", None)
                 self.state.pop("allocation", None)
@@ -320,146 +384,67 @@ class Deployment:
                         "Runpod console or try a different runpod.data_center_id.")
             self.state.pop("pod_creation_pending", None)
             self.save()
-        # A healthy worker is still only usable with its persistent volume;
-        # verify both resources before deciding that nothing needs creating.
-        volume_id = self.state.get("volume_id") or self.cfg.get("volume_id")
-        volume_dc = None
-        if volume_id:
-            try:
-                volume = self.api.get_volume(volume_id)
-            except RunpodAPIError as exc:
-                if not _resource_missing(exc):
-                    raise
-                if self.cfg.get("volume_id"):
-                    raise ValueError(
-                        f"The configured persistent volume {volume_id} does not exist in Runpod; "
-                        "correct or remove runpod.volume_id in the configuration.") from None
-                if self.cfg.get("pod_id"):
-                    raise ValueError("The configured runpod.pod_id mounts a deleted volume; remove that pin "
-                                     "to allow a new managed worker and volume to be bootstrapped.") from None
-                # The saved volume was deleted together with its pod; its data
-                # cannot be recovered, so provision a new empty volume.
-                self.notify(f"Saved persistent volume {volume_id} no longer exists in Runpod; creating a new one.")
-                self.state.pop("volume_id", None)
-                # A confirmed 404 is the only answer that may discard the
-                # mapping; 403, 5xx, and uncertain answers never prove absence.
-                self._forget_volume(volume_id)
-                self.save()
-                volume_id = None
-                if self.pod_id and not pod_confirmed_missing:
-                    # The surviving worker still mounts the deleted volume and
-                    # cannot run on it. Stop it for good before any paid
-                    # replacement is created; never start a Pod on dead storage.
-                    self._stop_pod(self.pod_id)
-                    self.state.pop("pod_id", None)
-                    self.state.pop("last_status", None)
-                    self.save()
-            else:
-                # Seed the regional storage map from the provider's actual
-                # placement; a changed hint never invalidates healthy storage.
-                volume_dc = self._record_volume(volume, volume_id)
-                if self.cfg.get("volume_id") and not volume_dc.startswith("US-"):
-                    raise ValueError("The explicit volume pin is in a non-US datacenter; use US storage")
-                self.state["volume_id"] = volume_id
-                self.state["data_center_id"] = volume_dc
-                self.save()
-                if self.pod_id:
-                    if not volume_dc.startswith("US-"):
-                        raise ValueError("The saved worker's network volume is outside the US; inspect its placement")
-                    self.data_center_id = volume_dc
-                    # Healthy worker on verified storage: return without
-                    # quoting, migrating, or replacing anything.
-                    return
-        # Resume an interrupted volume creation before today's catalog or
-        # hint; the saved exact request is reconciled by name, never reselected.
-        resumed_volume = False
-        if not volume_id and self.state.get("volume_creation_pending"):
-            resumed_volume = True
-            volume = self._ensure_volume(None)
-            volume_id = volume["id"]
-            volume_dc = self._record_volume(volume, volume_id)
-            self.state["volume_id"] = volume_id
-            self.state["data_center_id"] = volume_dc
-            self.require_bootstrap(save=False)
-            self.save()
-        # Read the live price and fix the concrete GPU and US datacenter
-        # before creating either paid resource; an unavailable or over-budget
-        # catalog must create nothing.
-        known_centers = tuple(self.state.get("volumes_by_center", {}))
-        if volume_dc and volume_dc not in known_centers:
-            known_centers += (volume_dc,)
-        pinned = volume_dc if self.cfg.get("volume_id") else None
-        if pinned and not pinned.startswith("US-"):
-            raise ValueError(f"runpod.volume_id {volume_id} is in non-US datacenter {pinned}; explicit "
-                             "volume pins must use a US datacenter with standard network volumes")
-        allocation = self.state.get("allocation")
-        if isinstance(allocation, dict):
-            price = self._restore_allocation(allocation)
-        elif isinstance(saved_spec, dict):
-            self.gpu_type_id = saved_spec["gpu"]["id"]
-            self.data_center_id = saved_spec["dataCenterIds"][0]
-            price = self.state.get("catalog_hourly_price", self.cfg["max_hourly_price"])
-            self._save_allocation(name, price)
-        else:
-            # A legacy pending volume has no saved GPU choice. Finish in its
-            # confirmed location rather than redirecting the paid request.
-            resumed_dc = volume_dc if resumed_volume else None
-            price = self.quote(volume_data_centers=known_centers, pinned_data_center=pinned or resumed_dc)
-            self._save_allocation(name, price)
-        if volume_id and volume_dc != self.data_center_id:
-            # Policy selected another region than the retained storage. Never
-            # move, copy, or delete the old volume; keep it (and its cache)
-            # and record that its storage keeps billing until removed by hand.
-            self.notify(f"Selected {self.data_center_id} compute; the retained volume {volume_id} in "
-                        f"{volume_dc} stays put and remains billed for storage. A new empty volume is "
-                        f"created in {self.data_center_id}; no cache or data is migrated.")
-            volume_id = None
-            volume_dc = None
-        if not volume_id:
-            mapped = self._mapped_volume_in(self.data_center_id)
-            if mapped is not None:
-                volume_id = mapped
-            else:
-                volume = self._ensure_volume({"name": self._regional_volume_name(self.data_center_id),
-                                              "size": self.cfg["volume_size_gb"],
-                                              "data_center_id": self.data_center_id})
-                volume_id = volume["id"]
-                self._record_volume(volume, volume_id)
-            self.state["volume_id"] = volume_id
-            self.state["data_center_id"] = self.data_center_id
-            self.require_bootstrap(save=False)
-            self.save()
-        # v1 validates datacenter IDs against a stale enum. v2 accepts the
-        # current catalog's IDs and retains explicit placement beside the
-        # existing network volume. Secure on-demand Pods expose a public IP.
-        spec = saved_spec if isinstance(saved_spec, dict) else self._pod_spec(name, volume_id)
-        if spec["dataCenterIds"] != [self.data_center_id] or spec["mounts"]["network"][0]["volumeId"] != volume_id:
-            raise RuntimeError("The saved worker request disagrees with its confirmed storage placement")
-        # The chosen GPU identity is durable before the only POST, so an
-        # ambiguous create or restart can never re-resolve a different GPU.
-        self.state["gpu_type_id"] = self.gpu_type_id
-        self.state["data_center_id"] = self.data_center_id
-        self.state["pod_creation_spec"] = spec
-        self.state["catalog_hourly_price"] = price
-        self.state["pod_creation_pending"] = True
-        self.save()
-        try:
-            pod = self.api.create_pod(spec)
-        except RunpodAmbiguousOutcome:
-            matches = [p for p in self.api.list_pods() if p.get("name") == name]
-            if len(matches) != 1:
-                raise
-            pod = matches[0]
-            self.state["pod_id"] = pod["id"]
-            self.save()
-            self._validate_recovered_creation(pod)
-        except RunpodAPIError:
-            self.state.pop("pod_creation_pending", None)
+        if isinstance(saved_spec, dict) and _mounts_network_volume(saved_spec):
+            # An older request would mount a network volume. Nothing was
+            # created for it, so select a new Pod-disk request instead.
+            self.notify("Discarding an earlier unsent worker request that used a network volume; "
+                        "workers now use a host-local Pod disk.")
+            saved_spec = allocation = None
             self.state.pop("pod_creation_spec", None)
             self.state.pop("allocation", None)
             self.save()
-            raise
+        clouds = None
+        while True:
+            # Read the live price and fix the concrete cloud, GPU, and US
+            # datacenter before creating the paid resource; an unavailable or
+            # over-budget catalog must create nothing.
+            if isinstance(allocation, dict):
+                price = self._restore_allocation(allocation)
+            elif isinstance(saved_spec, dict):
+                self.gpu_type_id = saved_spec["gpu"]["id"]
+                self.data_center_id = saved_spec["dataCenterIds"][0]
+                self.cloud = saved_spec.get("cloud", "SECURE")
+                price = self.state.get("catalog_hourly_price", self.cfg["max_hourly_price"])
+                self._save_allocation(name, price)
+            else:
+                price = self.quote(clouds=clouds)
+                self._save_allocation(name, price)
+            spec = saved_spec if isinstance(saved_spec, dict) else self._pod_spec(name)
+            if spec["dataCenterIds"] != [self.data_center_id] or spec.get("cloud", "SECURE") != self.cloud:
+                raise RuntimeError("The saved worker request disagrees with its saved allocation")
+            # The chosen identity is durable before the only POST, so an
+            # ambiguous create or restart can never re-resolve it.
+            self.state["gpu_type_id"] = self.gpu_type_id
+            self.state["data_center_id"] = self.data_center_id
+            self.state["pod_creation_spec"] = spec
+            self.state["catalog_hourly_price"] = price
+            self.state["pod_creation_pending"] = True
+            self.save()
+            try:
+                pod = self.api.create_pod(spec)
+            except RunpodAmbiguousOutcome:
+                matches = [p for p in self.api.list_pods() if p.get("name") == name]
+                if len(matches) != 1:
+                    raise
+                pod = matches[0]
+                self.state["pod_id"] = pod["id"]
+                self.save()
+                self._validate_recovered_creation(pod)
+            except RunpodAPIError as exc:
+                self.state.pop("pod_creation_pending", None)
+                self.state.pop("pod_creation_spec", None)
+                self.state.pop("allocation", None)
+                self.save()
+                fallback = self._fallback_clouds(exc)
+                if not fallback:
+                    raise
+                self.notify(f"Runpod {CLOUD_LABELS[self.cloud]} refused the worker request "
+                            f"(HTTP {exc.status}); trying {CLOUD_LABELS[fallback[0]]} once.")
+                clouds, allocation, saved_spec = fallback, None, None
+                continue
+            break
         self.state["pod_id"] = pod["id"]
+        self._adopt_new_worker(spec)
         self.state.pop("pod_creation_pending", None)
         self.state.pop("pod_creation_spec", None)
         self.state["catalog_hourly_price"] = price
@@ -471,26 +456,38 @@ class Deployment:
         if self._actual_rate_over_limit(pod.get("cost", pod.get("costPerHr")),
                                         cap=cap, gpu_id=self.gpu_type_id):
             raise RuntimeError("Created worker's rate exceeds configured cap; stopping immediately")
-        self.notify(f"Created worker {self.pod_id}; persistent volume {volume_id}.")
+        self.notify(f"Created worker {self.pod_id} on Runpod {CLOUD_LABELS[self.cloud]} with an empty "
+                    f"{self.cfg['volume_size_gb']} GB Pod disk; it needs a full setup before encoding.")
+
+    def _adopt_new_worker(self, spec):
+        """Record a newly created worker; its empty disk needs a full setup."""
+        self.state["cloud"] = self.cloud
+        if not (isinstance(spec, dict) and _mounts_network_volume(spec)):
+            self._retire_network_volume()
+        # A new Pod disk has none of the saved revision, models, or smoke
+        # result; the marker clears only after a successful smoke check.
+        self.require_bootstrap(save=False)
 
     def _save_allocation(self, name, price):
         if not isinstance(self.data_center_id, str) or not self.data_center_id.startswith("US-"):
             raise RuntimeError("A saved allocation outside the US cannot authorize a new worker request")
         self.state["allocation"] = {"pod_name": name, "gpu_type_id": self.gpu_type_id,
-                                    "data_center_id": self.data_center_id, "catalog_hourly_price": price,
+                                    "data_center_id": self.data_center_id, "cloud": self.cloud,
+                                    "catalog_hourly_price": price,
                                     "max_hourly_price": self.cfg["max_hourly_price"], "image": self.cfg["image"],
-                                    "fallback_gpu_id": self.cfg["gpu_type_id"], "prefer_h100": self.cfg["prefer_h100"],
-                                    "volume_pin": self.cfg.get("volume_id", "")}
+                                    "fallback_gpu_id": self.cfg["gpu_type_id"], "prefer_h100": self.cfg["prefer_h100"]}
         self.save()
 
     def _restore_allocation(self, allocation):
+        cloud = allocation.get("cloud", "SECURE")
         if (allocation.get("image") != self.cfg["image"]
                 or allocation.get("fallback_gpu_id") != self.cfg["gpu_type_id"]
                 or allocation.get("prefer_h100") != self.cfg["prefer_h100"]
-                or allocation.get("volume_pin", "") != self.cfg.get("volume_id", "")):
+                or cloud not in self.cloud_types):
             raise RuntimeError("Saved allocation policy differs from the configured deployment; inspect saved state")
         self.data_center_id = allocation["data_center_id"]
         self.gpu_type_id = allocation["gpu_type_id"]
+        self.cloud = cloud
         if not isinstance(self.data_center_id, str) or not self.data_center_id.startswith("US-"):
             raise RuntimeError("Saved allocation is not in a US datacenter")
         price = allocation["catalog_hourly_price"]
@@ -505,137 +502,8 @@ class Deployment:
             raise RuntimeError("Saved allocation has an invalid hourly cap")
         return min(saved, self.cfg["max_hourly_price"])
 
-    def _regional_volume_name(self, data_center_id):
-        # Region-suffixed so one deployment can hold one volume per US region
-        # and reconciliation by name can never adopt the wrong region's volume.
-        return f"{self.cfg['name']}-{self.state['deployment_id']}-{data_center_id.lower()}"
-
-    def _legacy_volume_name(self):
-        return self.cfg["name"] + "-" + self.state["deployment_id"]
-
-    def _record_volume(self, volume, volume_id):
-        """Return the provider's actual datacenter and seed the regional map."""
-        if volume.get("id") != volume_id:
-            raise RuntimeError("Runpod returned a different network-volume identity; no placement was adopted")
-        dc = volume.get("dataCenterId")
-        if not isinstance(dc, str) or not dc:
-            raise RuntimeError("Runpod returned no datacenter for persistent volume " + str(volume_id))
-        self.state.setdefault("volumes_by_center", {})[dc] = volume_id
-        return dc
-
-    def _forget_volume(self, volume_id):
-        mapping = self.state.get("volumes_by_center")
-        if isinstance(mapping, dict):
-            self.state["volumes_by_center"] = {dc: mapped for dc, mapped in mapping.items()
-                                               if mapped != volume_id}
-
-    def _mapped_volume_in(self, data_center_id):
-        """Return the confirmed volume id mapped to this region, else None.
-
-        Only a provider-confirmed 404 discards a mapping; 403, 5xx, and
-        uncertain answers never prove absence and never release storage.
-        """
-        mapped = self.state.get("volumes_by_center", {}).get(data_center_id)
-        if not mapped:
-            return None
-        try:
-            volume = self.api.get_volume(mapped)
-        except RunpodAPIError as exc:
-            if not _resource_missing(exc):
-                raise
-            self._forget_volume(mapped)
-            self.save()
-            return None
-        if self._record_volume(volume, mapped) != data_center_id:
-            raise RuntimeError("The saved volume map disagrees with Runpod's actual placement; "
-                               "inspect Runpod before retrying")
-        return mapped
-
-    def _validate_volume_target(self, volume_id, request_dc, row):
-        """A provider answer may be adopted only when it names this volume in
-        the requested datacenter; listings without placement are re-read."""
-        if not isinstance(volume_id, str) or not volume_id:
-            raise RuntimeError("Runpod returned a persistent volume without a usable ID; nothing was adopted")
-        if "dataCenterId" not in row:
-            row = self.api.get_volume(volume_id)
-        if row.get("id") != volume_id or (request_dc and row.get("dataCenterId") != request_dc):
-            raise RuntimeError("Runpod's persistent volume answer does not match the saved creation "
-                               "request; inspect Runpod before retrying. No further resources were created.")
-        return row
-
-    def _ensure_volume(self, request):
-        """Reconcile-or-create one exact durable volume request.
-
-        ``request=None`` resumes the saved pending request. The exact request
-        is persisted before the only POST; a lost response is reconciled by
-        the unique saved name, and the empty-inventory retry re-creates the
-        same request rather than selecting another region or name. At most one
-        creation POST happens per run, so retries can never loop unbounded.
-        """
-        pending_key, request_key = "volume_creation_pending", "volume_creation"
-        legacy_request = False
-        if self.state.get(pending_key):
-            saved = self.state.get(request_key)
-            if isinstance(saved, dict) and isinstance(saved.get("name"), str) and saved["name"]:
-                request = {key: saved[key] for key in ("name", "size", "data_center_id") if key in saved}
-            else:
-                legacy_request = True
-                # Legacy boolean pending state carries no saved request; its
-                # name was deterministic and the configured hint supplied the
-                # datacenter when it was created.
-                request = {"name": self._legacy_volume_name(), "size": self.cfg["volume_size_gb"],
-                           "data_center_id": self.cfg["data_center_id"]}
-            matches = [v for v in self.api.list_volumes() if v.get("name") == request["name"]]
-            if len(matches) > 1:
-                raise RuntimeError("Previous volume creation is unconfirmed; multiple volumes share its name. "
-                                   "Inspect Runpod and delete the duplicates before retrying. No duplicate created.")
-            if matches:
-                row = self._validate_volume_target(matches[0].get("id"),
-                                                   None if legacy_request else request.get("data_center_id"),
-                                                   matches[0])
-                if not row["dataCenterId"].startswith("US-"):
-                    raise RuntimeError("The interrupted volume request is not in a US datacenter; "
-                                       "no non-US storage will be adopted")
-                self._record_volume(row, row["id"])
-                self.state.pop(pending_key, None)
-                self.state.pop(request_key, None)
-                self.save()
-                return row
-            # The inventory shows the unconfirmed creation made nothing, so a
-            # retry cannot duplicate it.
-            self.notify("The unconfirmed volume creation made nothing; creating a new volume.")
-            self.notify("Repeated unconfirmed creations mean Runpod's service is failing; check the "
-                        "Runpod console or try a different runpod.data_center_id.")
-            self.state.pop(pending_key, None)
-            self.state.pop(request_key, None)
-        elif request is None:
-            raise RuntimeError("No pending volume creation to resume")
-        if not isinstance(request.get("data_center_id"), str) or not request["data_center_id"].startswith("US-"):
-            raise RuntimeError("The interrupted volume request is not in a US datacenter; inspect the saved "
-                               "request before retrying. No non-US storage will be allocated")
-        self.state[pending_key] = True
-        self.state[request_key] = dict(request)
-        self.save()
-        try:
-            row = self.api.create_volume({"name": request["name"], "size": request["size"],
-                                          "dataCenterId": request["data_center_id"]})
-        except RunpodAPIError as exc:
-            if not exc.ambiguous:
-                self.state.pop(pending_key, None)
-                self.state.pop(request_key, None)
-                self.save()
-            raise
-        row = self._validate_volume_target(row.get("id"), request["data_center_id"], row)
-        # Recording the mapping durably in the same save as the pending pop
-        # keeps an interrupted adoption from ever creating a second volume.
-        self.state.setdefault("volumes_by_center", {})[request["data_center_id"]] = row["id"]
-        self.state.pop(pending_key, None)
-        self.state.pop(request_key, None)
-        self.save()
-        return row
-
     def require_bootstrap(self, *, save=True):
-        """Durably mark replaced storage: full setup and smoke before any reuse."""
+        """Durably mark new storage: full setup and smoke before any reuse."""
         self.state["bootstrap_required"] = True
         self.state.pop("revision", None)
         self.state.pop("bootstrapped", None)
@@ -654,12 +522,15 @@ class Deployment:
                                         required=spec is not None):
             raise RuntimeError("Created worker's rate exceeds configured cap or is unavailable; stopping immediately")
 
-    def _pod_spec(self, name, volume_id):
-        return {"name": name, "image": self.cfg["image"], "cloud": "SECURE",
+    def _pod_spec(self, name):
+        # Secure and Community workers both keep /workspace on a host-local
+        # Pod disk: it survives stop/start on the same host and is discarded
+        # with the Pod. Network volumes are Secure-only and are not used.
+        return {"name": name, "image": self.cfg["image"], "cloud": self.cloud,
                 "gpu": {"id": self.gpu_type_id, "count": 1,
                         "minCudaVersion": "12.9"},
                 "dataCenterIds": [self.data_center_id],
-                "mounts": {"network": [{"volumeId": volume_id, "path": "/workspace"}]},
+                "mounts": {"persistent": {"size": self.cfg["volume_size_gb"], "path": WORKSPACE}},
                 "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
                 "env": {"PUBLIC_KEY": self._public_key()}, "cmd": self.startup_command()}
 
@@ -692,59 +563,51 @@ class Deployment:
         gpu, mounts = pod.get("gpu"), pod.get("mounts")
         if (not isinstance(gpu, dict) or not isinstance(mounts, dict)
                 or gpu.get("id") != expected_gpu or type(gpu.get("count")) is not int
-                or gpu["count"] != 1 or pod.get("cloud") != "SECURE"
+                or gpu["count"] != 1 or pod.get("cloud") != spec.get("cloud", "SECURE")
                 or pod.get("dataCenterId") != spec["dataCenterIds"][0]
-                or mounts.get("network") != spec["mounts"]["network"]
-                or mounts.get("persistent") or mounts.get("global")
+                or not _mounts_match(mounts, spec["mounts"]) or mounts.get("global")
                 or pod.get("image") != spec["image"]
                 or (candidate and pod.get("name") != spec["name"])):
-            raise RuntimeError("Pod replacement placement does not match its saved GPU, datacenter, image, or existing volume; no worker adopted")
+            raise RuntimeError("Pod replacement placement does not match its saved cloud, GPU, datacenter, image, or storage; no worker adopted")
 
     @staticmethod
     def _source_spec(previous, source_gpu_id):
         """Immutable placement snapshot of the old Pod, independent of the target."""
         gpu, mounts = previous.get("gpu"), previous.get("mounts")
-        dc, image = previous.get("dataCenterId"), previous.get("image")
+        dc, image, cloud = previous.get("dataCenterId"), previous.get("image"), previous.get("cloud")
         if (not isinstance(gpu, dict) or gpu.get("id") != source_gpu_id or gpu.get("count") != 1
-                or not isinstance(mounts, dict) or not isinstance(mounts.get("network"), list)
-                or not mounts["network"] or not isinstance(dc, str) or not dc
+                or not isinstance(mounts, dict)
+                or not (_mounts_network_volume({"mounts": mounts}) or isinstance(mounts.get("persistent"), dict))
+                or not isinstance(dc, str) or not dc or cloud not in CLOUD_LABELS
                 or not isinstance(image, str) or not image):
             raise RuntimeError("Runpod returned incomplete placement for the stopped worker; "
                                "no replacement will be created")
-        return {"gpu": {"id": source_gpu_id, "count": 1}, "dataCenterIds": [dc],
+        return {"gpu": {"id": source_gpu_id, "count": 1}, "dataCenterIds": [dc], "cloud": cloud,
                 "mounts": deepcopy(mounts), "image": image}
 
     def _check_replacement_source(self, intent, previous=None):
-        """Validate the old worker and its storage against the immutable source
-        snapshot; a changed location hint is never a mismatch."""
+        """Validate the old worker against its immutable source snapshot; a
+        changed location hint or cloud preference is never a mismatch."""
         source = intent.get("source_spec")
         spec = intent["spec"] if isinstance(intent.get("spec"), dict) else source
-        source_volume = (source or spec)["mounts"]["network"][0]["volumeId"]
-        source_dc = (source or spec)["dataCenterIds"][0]
         if (self.cfg.get("pod_id") or self.pod_id != intent["previous_pod_id"]
-                or self.state.get("volume_id") != source_volume
-                or (self.cfg.get("volume_id") and self.cfg["volume_id"] != source_volume)
                 or self.cfg["gpu_type_id"] != intent.get("fallback_gpu_id", spec["gpu"]["id"])
                 or ("prefer_h100" in intent and self.cfg["prefer_h100"] != intent["prefer_h100"])
                 or self.cfg["image"] != spec["image"]):
             raise RuntimeError("Saved Pod replacement differs from the configured deployment; inspect saved state before continuing")
-        volume = self.api.get_volume(source_volume)
-        if volume.get("id") != source_volume or volume.get("dataCenterId") != source_dc:
-            raise RuntimeError("Pod replacement requires its existing network volume in the source datacenter")
         if previous is None:
             try:
                 previous = self.api.get_pod_details(intent["previous_pod_id"])
             except RunpodAPIError as exc:
                 if not _resource_missing(exc):
                     raise
-                return volume
+                return
         if previous.get("status") not in {"EXITED", "STOPPED"}:
             raise RuntimeError("Previous Pod is not confirmed stopped; no replacement will be created or adopted")
         # The old Pod is validated against its immutable source placement even
-        # when the replacement target selects a different region or GPU.
+        # when the replacement target selects a different cloud, region, or GPU.
         self._check_replacement_placement(previous, source or spec, candidate=False,
                                           gpu_id=intent.get("source_gpu_id", spec["gpu"]["id"]))
-        return volume
 
     def _replacement_candidate(self):
         """Reconcile a unique saved creation intent, never issue another POST."""
@@ -765,35 +628,27 @@ class Deployment:
         return intent["candidate_id"]
 
     def _prepare_replacement(self, intent):
-        if isinstance(intent.get("spec"), dict):
-            return
+        spec = intent.get("spec")
+        if isinstance(spec, dict):
+            if intent.get("creation_attempted") is not False or not _mounts_network_volume(spec):
+                return
+            # An older unsent request would mount a network volume; rebuild
+            # it as a Pod-disk request for the same recorded target.
+            intent.pop("spec")
         intent.setdefault("creation_attempted", False)
         intent.setdefault("pod_name", self.cfg["name"] + "-" + self.state["deployment_id"] + "-r" + uuid.uuid4().hex[:12])
         self.gpu_type_id = intent["target_gpu_type_id"]
         self.data_center_id = intent["target_data_center_id"]
+        self.cloud = intent.get("target_cloud", "SECURE")
+        if self.cloud not in self.cloud_types:
+            raise RuntimeError("Saved Pod replacement targets a cloud that runpod.cloud_types no longer allows; "
+                               "inspect saved state before continuing")
         cap = min(intent["max_hourly_price"], self.cfg["max_hourly_price"])
         if self._actual_rate_over_limit(intent["catalog_hourly_price"], cap=cap,
                                         gpu_id=self.gpu_type_id, required=True,
                                         prefer_h100=intent.get("prefer_h100", False)):
             raise ValueError("Saved replacement price exceeds the current spending policy")
-        source = intent["source_spec"]
-        if self.cfg.get("volume_id") and self.data_center_id != source["dataCenterIds"][0]:
-            raise RuntimeError("The replacement cannot move an explicitly pinned network volume")
-        if intent.get("target_volume_id"):
-            target_volume_id = intent["target_volume_id"]
-            row = self.api.get_volume(target_volume_id)
-            self._validate_volume_target(target_volume_id, self.data_center_id, row)
-            self._record_volume(row, target_volume_id)
-        elif self.data_center_id == source["dataCenterIds"][0]:
-            target_volume_id = intent["source_volume_id"]
-        else:
-            target_volume_id = self._mapped_volume_in(self.data_center_id)
-            if target_volume_id is None:
-                target_volume_id = self._ensure_volume(
-                    {"name": self._regional_volume_name(self.data_center_id),
-                     "size": self.cfg["volume_size_gb"], "data_center_id": self.data_center_id})["id"]
-        intent["target_volume_id"] = target_volume_id
-        intent["spec"] = self._pod_spec(intent["pod_name"], target_volume_id)
+        intent["spec"] = self._pod_spec(intent["pod_name"])
         self.save()
 
     def _post_replacement(self, intent):
@@ -829,41 +684,40 @@ class Deployment:
         if previous not in retired:
             retired.append(previous)
         spec = intent["spec"]
-        source_volume = intent.get("source_volume_id") or intent.get("source_spec", spec)["mounts"]["network"][0]["volumeId"]
-        target_volume = spec["mounts"]["network"][0]["volumeId"]
-        # Atomic switch of worker, GPU, region, and storage in one save; the
-        # previous IDs and regional volume map are retained for accounting.
+        # Atomic switch of worker, cloud, GPU, and region in one save; the
+        # previous Pod ID is retained for accounting.
         self.state["pod_id"] = candidate_id
         self.gpu_type_id = spec["gpu"]["id"]
         self.state["gpu_type_id"] = self.gpu_type_id
         self.data_center_id = spec["dataCenterIds"][0]
         self.state["data_center_id"] = self.data_center_id
+        self.cloud = spec.get("cloud", "SECURE")
         self.state["catalog_hourly_price"] = intent["catalog_hourly_price"]
-        if target_volume != source_volume:
-            self.state["volume_id"] = target_volume
-            # New empty storage: the saved revision and smoke flag describe the
-            # old volume, so a full local deploy and smoke check are required
-            # even with --no-update. The retained volume keeps billing.
-            self.require_bootstrap(save=False)
-            self.notify(f"Replacement storage {target_volume} in {self.data_center_id} is new and empty; "
-                        f"the retained volume {source_volume} remains billed separately. No cache or data "
-                        "was migrated, so the worker needs a full setup before encoding.")
+        self._adopt_new_worker(spec)
         self.state.pop("pod_replacement")
         self.endpoint = None
         self.save()
-        self.notify(f"Using replacement worker {candidate_id}; previous worker {previous} remains stopped.")
+        self.notify(f"Using replacement worker {candidate_id} on Runpod {CLOUD_LABELS[self.cloud]}; its empty "
+                    "Pod disk needs a full setup before encoding. Previous worker "
+                    f"{previous} remains stopped, and its disk keeps billing until it is deleted (runpod cleanup deletes "
+                    "every Pod this deployment created).")
 
-    def _replace_capacity_blocked_pod(self):
+    _REPLACEMENT_REASONS = {
+        "host_capacity": ("The configured runpod.pod_id has no free GPU on its host. It is fixed and will not be replaced automatically.",
+                          "Replacement worker also has no free GPU on its host; only one replacement is attempted per operation.",
+                          "The stopped worker's host has no free GPU. Creating one replacement worker…"),
+        "no_direct_ssh": ("The configured runpod.pod_id never published a direct SSH port. It is fixed and will not be replaced automatically.",
+                          "Replacement worker also never published a direct SSH port; only one replacement is attempted per operation.",
+                          "The Community Cloud worker never published a direct SSH port. Creating one replacement worker…"),
+    }
+
+    def _replace_capacity_blocked_pod(self, *, reason="host_capacity", clouds=None):
+        pinned, repeated, starting = self._REPLACEMENT_REASONS[reason]
         if self.cfg.get("pod_id"):
-            raise RunpodAPIError("The configured runpod.pod_id has no free GPU on its host. It is fixed and will not be replaced automatically.",
-                                 status=400, reason="host_capacity")
+            raise RunpodAPIError(pinned, status=400, reason=reason)
         if self._replacement_attempted:
-            raise RunpodAPIError("Replacement worker also has no free GPU on its host; only one replacement is attempted per operation.",
-                                 status=400, reason="host_capacity")
+            raise RunpodAPIError(repeated, status=400, reason=reason)
         self._replacement_attempted = True
-        volume_id = self.state.get("volume_id")
-        if not volume_id:
-            raise RuntimeError("Capacity replacement requires a saved existing network volume; no new volume will be created")
         previous = self.api.get_pod_details(self.pod_id)
         source_gpu_id = self.state.get("gpu_type_id") or previous.get("gpu", {}).get("id")
         allowed = H100_CANDIDATE_IDS | {self.cfg["gpu_type_id"]} if self.cfg["prefer_h100"] else {self.cfg["gpu_type_id"]}
@@ -875,19 +729,15 @@ class Deployment:
                   "fallback_gpu_id": self.cfg["gpu_type_id"],
                   "prefer_h100": bool(self.cfg["prefer_h100"]),
                   "source_spec": source,
-                  "source_volume_id": volume_id,
                   "max_hourly_price": self.cfg["max_hourly_price"]}
-        source_volume = self._check_replacement_source(intent, previous)
-        self._record_volume(source_volume, volume_id)
-        self.state["data_center_id"] = source["dataCenterIds"][0]
-        price = self.quote(volume_data_centers=tuple(self.state.get("volumes_by_center", {})),
-                           pinned_data_center=source["dataCenterIds"][0] if self.cfg.get("volume_id") else None)
+        self._check_replacement_source(intent, previous)
+        price = self.quote(clouds=clouds)
         intent.update(target_data_center_id=self.data_center_id, target_gpu_type_id=self.gpu_type_id,
-                      catalog_hourly_price=price, creation_attempted=False,
+                      target_cloud=self.cloud, catalog_hourly_price=price, creation_attempted=False,
                       pod_name=self.cfg["name"] + "-" + self.state["deployment_id"] + "-r" + uuid.uuid4().hex[:12])
         self.state["pod_replacement"] = intent
         self.save()
-        self.notify("The stopped worker's host has no free GPU. Creating one replacement with colocated storage…")
+        self.notify(starting)
         self._adopt_replacement()
 
     def service_ports(self):
@@ -895,7 +745,7 @@ class Deployment:
 
     @staticmethod
     def startup_command():
-        # Network storage may restore permissive modes even when the original
+        # Persistent storage may restore permissive modes even when the original
         # keys were private. Fix the local copies before sshd reads them.
         startup = ("set -eu; keys=/workspace/.epub-tts-runtime/ssh-host-keys; "
                    "mkdir -p \"$keys\"; chmod 700 \"$keys\"; "
@@ -939,7 +789,7 @@ class Deployment:
                 raise
             raise RuntimeError(
                 f"The saved worker {self.pod_id} no longer exists in Runpod (deleted outside this tool). "
-                "Run runpod bootstrap to create a new worker; persistent storage is retained."
+                "Its Pod disk was deleted with it; run runpod bootstrap to create and fully set up a new worker."
             ) from None
 
     def start(self):
@@ -972,10 +822,12 @@ class Deployment:
             break
         self.notify("Waiting for the worker's SSH connection…")
         deadline = time.monotonic() + self.cfg["startup_timeout_seconds"]
+        endpoint_seen = False
         while time.monotonic() < deadline:
             pod = self._require_pod()
             endpoint = ssh_endpoint(pod)
             if endpoint:
+                endpoint_seen = True
                 self.endpoint = endpoint
                 try:
                     self.ssh("true", timeout=15)
@@ -992,6 +844,16 @@ class Deployment:
                 self.ssh("python3 -c " + shlex.quote(check), timeout=30)
                 return
             time.sleep(5)
+        if self.cloud == "COMMUNITY" and not endpoint_seen:
+            # Community hosts may lack a public IP; Runpod's proxy SSH carries
+            # only an interactive shell, which cannot run this deployment.
+            # Stop the worker (confirmed) before one replacement, preferring
+            # the next configured cloud.
+            self.notify(f"Community Cloud worker {self.pod_id} never published a direct SSH port "
+                        "(22/tcp on a public IP); stopping it.")
+            self._stop_pod(self.pod_id)
+            self._replace_capacity_blocked_pod(reason="no_direct_ssh", clouds=self._later_clouds() or (self.cloud,))
+            return self.start()
         raise RuntimeError("Worker did not become ready before startup_timeout_seconds; GPU capacity may be unavailable")
 
     def stop(self):
@@ -1057,7 +919,102 @@ class Deployment:
         if pod_id == self.pod_id:
             self.state["last_status"] = pod["desiredStatus"]
             self.save()
-        self.notify("Runpod confirms the worker is stopped. Persistent storage remains billed.")
+        self.notify("Runpod confirms the worker is stopped. Its Pod disk remains billed.")
+
+    def created_pods(self):
+        """Pods this deployment created that still exist, as (pod, reason) rows.
+
+        A Pod qualifies by this deployment's unique generated name (the
+        original ``NAME-DEPLOYMENT_ID`` or a ``-rHEX`` replacement) or by an ID
+        recorded in its state. A Pod pinned by runpod.pod_id was not created
+        by this tool and is never included.
+        """
+        base = self.cfg["name"] + "-" + self.state["deployment_id"]
+        generated = re.compile(re.escape(base) + r"(?:-r[0-9a-f]{12})?")
+        intent = self.state.get("pod_replacement") or {}
+        recorded = {self.state.get("pod_id"), intent.get("candidate_id"), *self.state.get("previous_pod_ids", [])}
+        rows = []
+        for pod in self.api.list_pods():
+            pod_id, name = pod.get("id"), pod.get("name")
+            if not isinstance(pod_id, str) or not pod_id or pod_id == self.cfg.get("pod_id"):
+                continue
+            if (isinstance(name, str) and generated.fullmatch(name)) or pod_id in recorded:
+                rows.append(pod)
+        return rows
+
+    def _forget_pod(self, pod_id, name):
+        """Drop every saved reference to a deleted Pod in one durable save."""
+        if self.state.get("pod_id") == pod_id:
+            self.state.pop("pod_id", None)
+            self.state.pop("last_status", None)
+            self.require_bootstrap(save=False)
+        self.state["previous_pod_ids"] = [kept for kept in self.state.get("previous_pod_ids", []) if kept != pod_id]
+        intent = self.state.get("pod_replacement")
+        if isinstance(intent, dict) and (intent.get("candidate_id") == pod_id or
+                                         (intent.get("spec") or {}).get("name") == name):
+            self.state.pop("pod_replacement", None)
+        spec = self.state.get("pod_creation_spec")
+        if isinstance(spec, dict) and spec.get("name") == name:
+            for key in ("pod_creation_pending", "pod_creation_spec", "allocation"):
+                self.state.pop(key, None)
+        self.save()
+
+    def delete_pod(self, pod):
+        """Delete one Pod and confirm it is gone; a 404 means already deleted."""
+        pod_id = pod["id"]
+        self.notify(f"Deleting worker {pod_id}…")
+        try:
+            self.api.delete_pod(pod_id)
+        except RunpodAmbiguousOutcome:
+            pass  # Read back before deciding anything.
+        except RunpodAPIError as exc:
+            if not _resource_missing(exc):
+                raise
+        for attempt in range(4):
+            try:
+                current = self.api.get_pod(pod_id)
+            except RunpodAPIError as exc:
+                if not _resource_missing(exc):
+                    raise
+                break
+            if current.get("desiredStatus") == "TERMINATED":
+                break
+            if attempt == 3:
+                raise RuntimeError(f"DELETE NOT CONFIRMED for Runpod worker {pod_id}; it may still bill. "
+                                   "Rerun runpod cleanup or delete it in the Runpod console.")
+            time.sleep(3)
+        self._forget_pod(pod_id, pod.get("name"))
+        self.notify(f"Deleted worker {pod_id} and its Pod disk.")
+
+    def cleanup(self, *, assume_yes=False, confirm=input):
+        """Delete every Pod this deployment created, after explicit confirmation."""
+        pods = self.created_pods()
+        if self.cfg.get("pod_id"):
+            self.notify(f"Worker {self.cfg['pod_id']} is pinned by runpod.pod_id and is never deleted by cleanup.")
+        if not pods:
+            self.notify("No Runpod Pods created by this deployment exist.")
+            return 0
+        self.notify("Runpod Pods created by this deployment:")
+        for pod in pods:
+            status = pod.get("desiredStatus") or "unknown status"
+            self.notify(f"  {pod['id']}  {pod.get('name', '')}  ({status})")
+        if not assume_yes:
+            answer = confirm(f"Delete these {len(pods)} Pods and their Pod disks? This cannot be undone. "
+                             "Type 'delete' to confirm: ")
+            if answer.strip() != "delete":
+                self.notify("Nothing was deleted.")
+                return 1
+        failures = []
+        for pod in pods:
+            try:
+                self.delete_pod(pod)
+            except Exception as exc:
+                failures.append(safe_error_text(exc, self.secrets))
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        self.notify("Network volumes and Ceph objects were not touched; the next bootstrap or encode "
+                    "creates and fully sets up a new worker.")
+        return 0
 
     def upload(self, local_path, remote_path):
         target = shlex.quote(remote_path)
@@ -1317,15 +1274,27 @@ def run_command(args):
                 if not _resource_missing(exc):
                     raise
                 pod = {"desiredStatus": "deleted in Runpod; run bootstrap to create a new worker"}
+            legacy_volumes = list(deployment.state.get("retained_network_volumes", []))
+            for volume_id in [deployment.state.get("volume_id"),
+                              *deployment.state.get("volumes_by_center", {}).values()]:
+                if volume_id and volume_id not in legacy_volumes:
+                    legacy_volumes.append(volume_id)
             summary = {"pod_id": deployment.pod_id, "status": pod.get("desiredStatus", "not created"),
-                       "volume_id": deployment.state.get("volume_id"),
+                       "cloud": deployment.state.get("cloud", "SECURE") if deployment.pod_id else None,
+                       "storage": ("network volume " + deployment.state["volume_id"]
+                                   if deployment.state.get("volume_id") else "Pod disk") if deployment.pod_id else None,
                        "data_center_id": deployment.state.get("data_center_id"),
                        "revision": deployment.state.get("revision"),
                        "bootstrapped": deployment.state.get("bootstrapped", False),
                        "bootstrap_required": deployment.state.get("bootstrap_required", False),
-                       "retained_storage": {"volumes_by_center": deployment.state.get("volumes_by_center", {}),
-                                            "billed_separately": True},
-                       "previous_pod_ids": deployment.state.get("previous_pod_ids", [])}
+                       "network_volumes": {"ids": legacy_volumes, "in_use": bool(deployment.state.get("volume_id")),
+                                           "billed_separately": True},
+                       "previous_pod_ids": deployment.state.get("previous_pod_ids", []),
+                       "previous_pods_billed_for_disk_until_terminated": True}
+            if deployment.state.get("volume_creation_pending"):
+                request = deployment.state.get("volume_creation") or {}
+                summary["unconfirmed_network_volume_creation"] = {
+                    "name": request.get("name"), "status": "an older run may have created it; inspect Runpod"}
             if deployment.state.get("pod_replacement"):
                 intent = deployment.state["pod_replacement"]
                 spec = intent.get("spec") or {}
@@ -1337,6 +1306,10 @@ def run_command(args):
         if args.runpod_action == "stop":
             deployment.stop()
             return 0
+        if args.runpod_action == "cleanup":
+            if not args.yes and not sys.stdin.isatty():
+                raise ValueError("runpod cleanup needs an interactive confirmation; pass --yes to delete without one")
+            return deployment.cleanup(assume_yes=args.yes)
         if args.runpod_action not in {"bootstrap", "encode"} and not deployment.pod_id:
             raise ValueError("No saved worker; run runpod bootstrap first")
         # Fail configuration checks before allocating or starting paid compute.
@@ -1356,29 +1329,29 @@ def run_command(args):
         service_ready = False
         try:
             forced_bootstrap = False
+            saved_pod = deployment.pod_id
             if args.runpod_action in {"bootstrap", "encode"}:
-                saved_volume = deployment.state.get("volume_id")
                 deployment.provision()
                 if args.runpod_action == "encode" and (
-                        deployment.state.get("volume_id") != saved_volume
+                        deployment.pod_id != saved_pod
                         or not deployment.state.get("revision")
                         or not deployment.state.get("bootstrapped")):
-                    # The saved revision and smoke flags describe storage that
-                    # was deleted or never existed. Mark it durably so a crash
+                    # The saved revision and smoke flags describe a disk that was
+                    # deleted or never existed. Mark it durably so a crash
                     # after this point still forces the full local setup.
                     deployment.require_bootstrap()
             deployment.start()
-            # A host-capacity replacement can switch worker, GPU, region, and
-            # storage DURING start(), after the pre-start flag was calculated;
-            # re-check the durable flag, then the same storage conditions.
+            # A replacement can switch worker, cloud, GPU, and region DURING
+            # start(), after the pre-start flag was calculated; re-check the
+            # durable flag, then the same worker conditions.
             forced_bootstrap = bool(deployment.state.get("bootstrap_required"))
             if args.runpod_action == "encode" and not forced_bootstrap and (
-                    deployment.state.get("volume_id") != saved_volume
+                    deployment.pod_id != saved_pod
                     or not deployment.state.get("revision")
                     or not deployment.state.get("bootstrapped")):
                 forced_bootstrap = True
             if forced_bootstrap and args.runpod_action == "encode" and args.no_update:
-                deployment.notify("--no-update ignored: this deployment's storage changed or was never "
+                deployment.notify("--no-update ignored: this worker's Pod disk is new or was never "
                                   "bootstrapped; installing code, models, and the smoke check before encoding.")
             updated = False
             needs_update = args.runpod_action in {"bootstrap", "update"} or forced_bootstrap

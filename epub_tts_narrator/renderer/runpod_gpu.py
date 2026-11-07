@@ -1,6 +1,7 @@
 """Managed GPU selection policy for Runpod deployments.
 
-Pure catalog logic with no network or saved-state access. The lifecycle caller
+Pure catalog logic with no network or saved-state access. Each call ranks
+one cloud (Secure or Community); the caller walks runpod.cloud_types in order. The lifecycle caller
 persists the chosen identity before creating any Pod, so an ambiguous create
 can never re-resolve to a different GPU. Unknown or malformed catalog data
 never selects a GPU: preferred H100 candidates are skipped in favor of the
@@ -26,12 +27,15 @@ H100_CANDIDATE_IDS = frozenset({
 # configured per-hour cap (which may be higher or lower).
 PREFERRED_H100_HOURLY_LIMIT = 2.60
 _AVAILABLE = frozenset({"HIGH", "MEDIUM", "LOW"})
+# Runpod's two Pod clouds, as the v2 API names them, and their catalog price keys.
+CLOUD_PRICE_KEYS = {"SECURE": "secure", "COMMUNITY": "community"}
+CLOUD_LABELS = {"SECURE": "Secure Cloud", "COMMUNITY": "Community Cloud"}
 
 
-def catalog_price(gpu):
-    """Return the secure hourly price when a positive finite number, else None."""
+def catalog_price(gpu, cloud="SECURE"):
+    """Return the cloud's hourly price when a positive finite number, else None."""
     price = gpu.get("price")
-    price = price.get("secure") if isinstance(price, dict) else None
+    price = price.get(CLOUD_PRICE_KEYS[cloud]) if isinstance(price, dict) else None
     if (isinstance(price, bool) or not isinstance(price, (int, float))
             or not math.isfinite(price) or price <= 0):
         return None
@@ -51,7 +55,7 @@ def available_in(gpu, data_center_id):
 
 
 def select_gpu(rows, *, fallback_id, prefer_h100, data_center_id, max_hourly_price,
-               h100_hourly_limit=PREFERRED_H100_HOURLY_LIMIT):
+               h100_hourly_limit=PREFERRED_H100_HOURLY_LIMIT, cloud="SECURE"):
     """Choose (gpu_id, price) for one managed allocation, or raise ValueError.
 
     When prefer_h100 is set, any available H100 candidate strictly under
@@ -67,14 +71,14 @@ def select_gpu(rows, *, fallback_id, prefer_h100, data_center_id, max_hourly_pri
         for gpu in rows:
             if gpu["id"] not in H100_CANDIDATE_IDS or not available_in(gpu, data_center_id):
                 continue
-            price = catalog_price(gpu)
+            price = catalog_price(gpu, cloud)
             if price is not None and price < h100_hourly_limit and price <= max_hourly_price:
                 candidates.append((price, gpu["id"]))
         if candidates:
             price, gpu_id = min(candidates)
             return gpu_id, price
     gpu = next((row for row in rows if row["id"] == fallback_id), None)
-    price = catalog_price(gpu) if gpu is not None else None
+    price = catalog_price(gpu, cloud) if gpu is not None else None
     if gpu is None or not available_in(gpu, data_center_id):
         raise ValueError(f"Configured GPU {fallback_id} is unavailable; no resources were created")
     if (price is None or price > max_hourly_price
@@ -88,26 +92,31 @@ class Placement:
     gpu_type_id: str
     data_center_id: str
     hourly_price: float
+    cloud: str = "SECURE"
 
 
-def select_placement(rows, data_centers, *, fallback_id, prefer_h100, max_hourly_price,
-                     preferred_data_center="", volume_data_centers=(), pinned_data_center=None):
-    """Choose US compute colocated with supported storage; location hints only break ties."""
-    if not isinstance(rows, list) or not isinstance(data_centers, list):
-        raise ValueError("Runpod returned an invalid GPU or US datacenter catalog; no allocation is safe")
+def select_placement(rows, *, fallback_id, prefer_h100, max_hourly_price, cloud="SECURE",
+                     preferred_data_center=""):
+    """Choose US compute in one cloud; the location hint only breaks ties.
+
+    Workers keep /workspace on a host-local Pod disk, so no storage type
+    constrains the location: every US datacenter that the cloud's catalog
+    reports for an eligible GPU is a candidate.
+    """
+    if cloud not in CLOUD_PRICE_KEYS:
+        raise ValueError("Unknown Runpod cloud type; no allocation is safe")
+    if not isinstance(rows, list):
+        raise ValueError("Runpod returned an invalid GPU catalog; no allocation is safe")
+    identifiers = sorted({center["id"] for row in rows if isinstance(row, dict)
+                          and isinstance(row.get("dataCenters"), list)
+                          for center in row["dataCenters"] if isinstance(center, dict)
+                          and isinstance(center.get("id"), str) and center["id"].startswith("US-")})
     candidates = []
-    for center in data_centers:
-        if not isinstance(center, dict):
-            continue
-        identifier = center.get("id")
-        volume_types = center.get("networkVolumeTypes")
-        if (not isinstance(identifier, str) or not identifier.startswith("US-")
-                or not isinstance(volume_types, list) or "STANDARD" not in volume_types
-                or (pinned_data_center is not None and identifier != pinned_data_center)):
-            continue
+    for identifier in identifiers:
         try:
             gpu_id, price = select_gpu(rows, fallback_id=fallback_id, prefer_h100=prefer_h100,
-                                       data_center_id=identifier, max_hourly_price=max_hourly_price)
+                                       data_center_id=identifier, max_hourly_price=max_hourly_price,
+                                       cloud=cloud)
         except ValueError:
             continue
         gpu = next(row for row in rows if isinstance(row, dict) and row.get("id") == gpu_id)
@@ -116,10 +125,9 @@ def select_placement(rows, data_centers, *, fallback_id, prefer_h100, max_hourly
                     and row.get("id") == identifier and isinstance(row.get("availability"), str)
                     and row["availability"] in _AVAILABLE)
         gpu_class = 0 if prefer_h100 and gpu_id in H100_CANDIDATE_IDS else 1
-        rank = (gpu_class, price, stock, identifier not in volume_data_centers,
-                identifier != preferred_data_center, identifier, gpu_id)
-        candidates.append((rank, Placement(gpu_id, identifier, float(price))))
+        rank = (gpu_class, price, stock, identifier != preferred_data_center, identifier, gpu_id)
+        candidates.append((rank, Placement(gpu_id, identifier, float(price), cloud)))
     if not candidates:
-        raise ValueError("No eligible US datacenter has available compute and standard network volumes within "
+        raise ValueError(f"No US datacenter on Runpod {CLOUD_LABELS[cloud]} has available compute within "
                          "the configured GPU policy and hourly price cap; no resources were created")
     return min(candidates, key=lambda candidate: candidate[0])[1]

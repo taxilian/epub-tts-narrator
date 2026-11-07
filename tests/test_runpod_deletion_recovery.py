@@ -1,4 +1,4 @@
-"""Deletion recovery: encode recovers deleted or never-created Runpod resources.
+"""Deletion recovery: encode recovers deleted or never-created Runpod workers.
 
 Uses the real Deployment and run_command flow against a stateful fake provider
 API; only SSH, the local git transfer, the chapter client, and the local book
@@ -76,7 +76,7 @@ class FakeRunpodAPI:
         count = sum(1 for key in self.pods if key.startswith("pod_new"))
         pod_id = f"pod_new{count + 1}"
         self.pods[pod_id] = {"name": spec["name"], "image": spec["image"], "status": "EXITED",
-                             "cost": 2.0, "gpu": deepcopy(spec["gpu"]), "cloud": "SECURE",
+                             "cost": 2.0, "gpu": deepcopy(spec["gpu"]), "cloud": spec.get("cloud", "SECURE"),
                              "dataCenterId": spec["dataCenterIds"][0], "spec": deepcopy(spec),
                              "mounts": deepcopy(spec["mounts"])}
         if self.crash_after_pod_create:
@@ -90,7 +90,7 @@ class FakeRunpodAPI:
         if pod is None:
             raise not_found()
         return {"id": pod_id, "name": pod["name"], "image": pod["image"], "gpu": deepcopy(pod["gpu"]),
-                "mounts": deepcopy(pod["mounts"]), "cloud": "SECURE", "dataCenterId": pod["dataCenterId"],
+                "mounts": deepcopy(pod["mounts"]), "cloud": pod["cloud"], "dataCenterId": pod["dataCenterId"],
                 "cost": pod["cost"], "status": pod["status"]}
 
     def start_pod(self, pod_id):
@@ -220,10 +220,12 @@ class DeletionRecoveryTests(unittest.TestCase):
         result, render = self.run_driver(self.args("encode", "book"))
         self.assertEqual(result, 0)
         render.assert_called_once()
-        self.assertEqual(len(self.api.created("create_volume")), 1)
+        self.assertEqual(self.api.created("create_volume"), [])
         self.assertEqual(len(self.api.created("create_pod")), 1)
         state = self.read_state()
-        self.assertEqual(state["volume_id"], "volume_new")
+        self.assertNotIn("volume_id", state)
+        self.assertEqual(state["cloud"], "SECURE")
+        self.assertEqual(self.api.pods["pod_new1"]["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
         self.assertEqual(state["pod_id"], "pod_new1")
         self.assertEqual(state["revision"], "fixture-head")
         self.assertTrue(state["bootstrapped"])
@@ -233,75 +235,40 @@ class DeletionRecoveryTests(unittest.TestCase):
         self.assertEqual([call[1] for call in self.api.created("start_pod")], ["pod_new1"])
         self.assertEqual(self.api.pods["pod_new1"]["status"], "RUNNING")
 
-    def test_encode_with_deleted_pod_and_retained_volume_keeps_the_fast_path(self):
-        self.retained_volume()
-        self.write_state(pod_id="pod_old", volume_id="volume_kept", revision="fixture-head",
-                         bootstrapped=True, api_key="fixture-worker-secret", deployment_id="d" * 12)
-        result, render = self.run_driver(self.args("encode", "book"))
-        self.assertEqual(result, 0)
-        render.assert_called_once()
-        self.assertEqual(self.api.created("create_volume"), [])
-        self.assertEqual(len(self.api.created("create_pod")), 1)
-        state = self.read_state()
-        self.assertEqual(state["pod_id"], "pod_new1")
-        self.assertEqual(state["volume_id"], "volume_kept")
-        self.assertEqual(state["revision"], "fixture-head")
-        self.assertTrue(state["bootstrapped"])
-        self.assertIn("install(full=False)", self.actions())
-        self.assertIn("launch(prepare=False)", self.actions())
-        self.assertNotIn("smoke()", self.actions())
-        self.assertNotIn("deploy_code", self.actions())
-        self.assertEqual(self.api.pods["pod_new1"]["spec"]["mounts"]["network"][0]["volumeId"], "volume_kept")
-        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
-        self.assertIn("Saved worker pod_old no longer exists", notices)
-
-    def test_encode_with_pod_and_volume_deleted_fully_bootstraps_replacement_storage(self):
-        self.write_state(pod_id="pod_old", volume_id="volume_old", revision="stale-revision",
-                         bootstrapped=True, api_key="fixture-worker-secret", deployment_id="d" * 12)
-        result, render = self.run_driver(self.args("encode", "book"))
-        self.assertEqual(result, 0)
-        render.assert_called_once()
-        self.assertEqual(len(self.api.created("create_volume")), 1)
-        self.assertEqual(len(self.api.created("create_pod")), 1)
-        state = self.read_state()
-        self.assertEqual(state["volume_id"], "volume_new")
-        self.assertEqual(state["revision"], "fixture-head")
-        self.assertTrue(state["bootstrapped"])
-        for expected in ("deploy_code('local')", "install(full=True)", "smoke()"):
-            self.assertIn(expected, self.actions())
-        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
-        self.assertIn("persistent volume volume_old no longer exists", notices)
-        self.assertIn("Saved worker pod_old no longer exists", notices)
-
-    def test_encode_with_deleted_volume_stops_the_live_pod_before_any_replacement(self):
-        for previous_status in ("RUNNING", "EXITED"):
-            with self.subTest(previous_status=previous_status):
+    def test_encode_with_deleted_pod_fully_bootstraps_a_new_pod_disk(self):
+        for volume in (None, "volume_kept"):
+            with self.subTest(volume=volume):
                 self.setUp()
-                self.live_pod(status=previous_status)
-                self.write_state(pod_id="pod_old", volume_id="volume_old", revision="stale-revision",
-                                 bootstrapped=True, api_key="fixture-worker-secret", deployment_id="d" * 12)
-                result, render = self.run_driver(self.args("encode", "book"))
+                state = dict(pod_id="pod_old", revision="fixture-head", bootstrapped=True,
+                             api_key="fixture-worker-secret", deployment_id="d" * 12)
+                if volume:
+                    self.retained_volume(volume)
+                    state["volume_id"] = volume
+                self.write_state(**state)
+                result, render = self.run_driver(self.args("encode", "book", "--no-update"))
                 self.assertEqual(result, 0)
                 render.assert_called_once()
-                if previous_status == "RUNNING":
-                    # The confirmed stop of the old worker precedes every paid
-                    # replacement, and the old pod is never started again.
-                    first_create = next(index for index, call in enumerate(self.api.calls)
-                                        if call[0] in {"create_volume", "create_pod"})
-                    self.assertLess(self.api.calls.index(("stop_pod", "pod_old")), first_create)
-                self.assertNotIn(("start_pod", "pod_old"), self.api.calls)
-                self.assertEqual(self.api.pods["pod_old"]["status"], "EXITED")
-                self.assertEqual(self.api.pods["pod_new1"]["status"], "RUNNING")
-                self.assertEqual([call[1] for call in self.api.created("start_pod")], ["pod_new1"])
-                state = self.read_state()
-                self.assertNotEqual(state["pod_id"], "pod_old")
-                self.assertEqual(state["volume_id"], "volume_new")
-                self.assertEqual(len(self.api.created("create_volume")), 1)
+                self.assertEqual(self.api.created("create_volume"), [])
+                self.assertEqual(self.api.created("get_volume"), [])
                 self.assertEqual(len(self.api.created("create_pod")), 1)
-                self.assertIn("deploy_code('local')", self.actions())
-                self.assertIn("smoke()", self.actions())
+                state = self.read_state()
+                self.assertEqual(state["pod_id"], "pod_new1")
+                self.assertNotIn("volume_id", state)
+                self.assertEqual(state.get("retained_network_volumes", []), [volume] if volume else [])
+                if volume:
+                    self.assertIn(volume, self.api.volumes)  # retained, never deleted
+                self.assertTrue(state["bootstrapped"])
+                self.assertNotIn("bootstrap_required", state)
+                # --no-update cannot skip the setup of an empty Pod disk.
+                for expected in ("deploy_code('local')", "install(full=True)", "launch(prepare=True)", "smoke()"):
+                    self.assertIn(expected, self.actions())
+                self.assertEqual(self.api.pods["pod_new1"]["spec"]["mounts"],
+                                 {"persistent": {"size": 150, "path": "/workspace"}})
+                notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+                self.assertIn("Saved worker pod_old no longer exists", notices)
 
     def test_healthy_existing_deployment_encodes_without_any_full_bootstrap(self):
+        # A worker created before Pod disks keeps its network volume as-is.
         self.retained_volume()
         self.live_pod(pod_id="pod_kept", status="EXITED")
         self.write_state(pod_id="pod_kept", volume_id="volume_kept", revision="fixture-head",
@@ -311,11 +278,12 @@ class DeletionRecoveryTests(unittest.TestCase):
         render.assert_called_once()
         self.assertEqual(self.api.created("create_volume"), [])
         self.assertEqual(self.api.created("create_pod"), [])
+        self.assertEqual(self.read_state()["volume_id"], "volume_kept")
         self.assertIn("install(full=False)", self.actions())
         self.assertNotIn("deploy_code", self.actions())
         self.assertNotIn("smoke()", self.actions())
 
-    def test_missing_configured_pins_fail_before_any_resource_creation_or_stopping(self):
+    def test_missing_configured_pod_pin_fails_before_any_resource_creation_or_stopping(self):
         self.settings["deployment"]["pod_id"] = "pod_pin"
         deployment = self.build_deployment(self.settings)
         with self.assertRaisesRegex(ValueError, "runpod.pod_id"):
@@ -324,24 +292,15 @@ class DeletionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.api.created("create_pod"), [])
         self.assertEqual(self.api.created("stop_pod"), [])
 
-        del self.settings["deployment"]["pod_id"]
-        self.isolate("volume-pin")
-        self.settings["deployment"]["volume_id"] = "volume_pin"
-        self.live_pod()
-        deployment = self.build_deployment(self.settings)
-        with self.assertRaisesRegex(ValueError, "runpod.volume_id"):
-            deployment.provision()
-        self.assertEqual(self.api.created("create_volume"), [])
-        self.assertEqual(self.api.created("create_pod"), [])
-        self.assertEqual(self.api.created("stop_pod"), [])
-
-    def test_deleted_volume_cannot_silently_replace_an_explicit_pod_pin(self):
+    def test_live_pinned_pod_is_used_as_is_without_volume_checks(self):
         self.live_pod(pod_id="pod_pinned", status="RUNNING")
         self.settings["deployment"]["pod_id"] = "pod_pinned"
         self.write_state(pod_id="pod_pinned", volume_id="volume_deleted", revision="fixture-head",
                          bootstrapped=True, api_key="fixture-worker-secret", deployment_id="d" * 12)
-        with self.assertRaisesRegex(ValueError, "runpod.pod_id"):
-            self.build_deployment(self.settings).provision()
+        deployment = self.build_deployment(self.settings)
+        deployment.provision()
+        self.assertEqual(deployment.pod_id, "pod_pinned")
+        self.assertEqual(self.api.created("get_volume"), [])
         self.assertEqual(self.api.created("stop_pod"), [])
         self.assertEqual(self.api.created("create_volume"), [])
         self.assertEqual(self.api.created("create_pod"), [])
@@ -374,7 +333,7 @@ class DeletionRecoveryTests(unittest.TestCase):
         self.api.crash_after_pod_create = True
         with self.assertRaises(KeyboardInterrupt):
             self.run_driver(self.args("encode", "book"))
-        self.assertEqual(len(self.api.created("create_volume")), 1)
+        self.assertEqual(self.api.created("create_volume"), [])
         self.assertEqual(len(self.api.created("create_pod")), 1)
         pending = self.read_state()
         self.assertTrue(pending["pod_creation_pending"])
@@ -383,7 +342,7 @@ class DeletionRecoveryTests(unittest.TestCase):
         result, render = self.run_driver(self.args("encode", "book"))
         self.assertEqual(result, 0)
         render.assert_called_once()
-        self.assertEqual(len(self.api.created("create_volume")), 1)
+        self.assertEqual(self.api.created("create_volume"), [])
         self.assertEqual(len(self.api.created("create_pod")), 1)
         state = self.read_state()
         self.assertEqual(state["pod_id"], "pod_new1")

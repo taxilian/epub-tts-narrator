@@ -316,5 +316,28 @@ class RunpodConfigTests(unittest.TestCase):
         self.assertFalse(load_settings(self.path)["deployment"]["prefer_h100"])
 
 
+    def test_cloud_types_default_to_secure_and_accept_an_ordered_preference(self):
+        self.assertEqual(load_settings(self.path)["deployment"]["cloud_types"], ["secure"])
+        for value in (["community", "secure"], ["secure", "community"], ["community"]):
+            with self.subTest(value=value):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"cloud_types": value}})
+                settings = load_settings(self.path)
+                self.assertEqual(settings["deployment"]["cloud_types"], value)
+                # The worker projection revalidates the same deployment table.
+                self.remote(settings)
+        for value in ([], ["spot"], ["SECURE"], ["secure", "secure"], "community", [1]):
+            with self.subTest(value=value):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"cloud_types": value}})
+                with self.assertRaisesRegex(ValueError, "runpod.cloud_types"):
+                    load_settings(self.path)
+
+    def test_network_volume_pin_is_retired_with_guidance(self):
+        write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"volume_id": "volume_old"}})
+        with self.assertRaisesRegex(ValueError, "volume_id is no longer supported.*Pod disk"):
+            load_settings(self.path)
+        # An empty legacy key is harmless and dropped.
+        write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"volume_id": ""}})
+        self.assertNotIn("volume_id", load_settings(self.path)["deployment"])
+
 if __name__ == "__main__":
     unittest.main()

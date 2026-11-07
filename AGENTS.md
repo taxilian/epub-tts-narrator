@@ -62,10 +62,10 @@ epub-tts-narrator/
 | Casting workflow | `epub_tts_narrator/renderer/casting.py`, `renderer/casting_batch.py` | `CastingSession` owns choices; Gemini bulk jobs use isolated workers under one series lease with model-affine verification |
 | Recognition workers (local thread + remote `serve`) | `renderer/recognition_workers.py`, `renderer/pool.py:_recognize`, `renderer/server.py` `/v1/recognize` | One recognizer call per lane job; remote must match the controller's path-free recognizer identity exactly |
 | TTS engine plug/unplug | `epub_tts_narrator/renderer/engines.py` | `create_engine`; entry-point groups `epub_tts_narrator.tts` + legacy `audiobook_renderer.tts` |
-| Deployment | `deploy/runpod/README.md`, `renderer/runpod.py`, `renderer/fish_speech_engine.py` | Pinned inference contract; do not improvise versions; Pod inference is our `serve` on Fish's library (stock Fish/SGLang servers cannot carry history) |
+| Deployment | `deploy/runpod/README.md`, `renderer/runpod.py`, `renderer/runpod_gpu.py`, `renderer/fish_speech_engine.py` | Pinned inference contract; do not improvise versions; Pod inference is our `serve` on Fish's library (stock Fish/SGLang servers cannot carry history); `runpod.cloud_types` orders Secure/Community Cloud; workers use host-local Pod disks (no network volumes) and new Pods are fully reprovisioned |
 | Benchmarks/evals | `scripts/` (validate_identity.py is the README-blessed one); `scripts/benchmark_chapter_pipeline.py` (prepare/run chapter-pipeline A/B with telemetry) | Standalone; live-model runs need `--config`; fake runs are permanently ineligible |
 | Commands/config reference | `README.md`, `ANALYSIS.md`, `RENDERER.md`, `REMOTE_RENDERING.md` | Docs are the automation surface — there is no CI |
-| Checkout command shortcuts | `justfile` | `just analyze/plan/cast/render/assemble/test`; forwards arguments via quoted positional parameters using `.venv-renderer/bin/python`; bare `just` lists recipes |
+| Checkout command shortcuts | `justfile` | `just analyze/plan/cast/render/assemble/runpod-cleanup/test`; forwards arguments via quoted positional parameters using `.venv-renderer/bin/python`; bare `just` lists recipes |
 
 ## CODE MAP
 

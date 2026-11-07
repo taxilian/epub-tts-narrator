@@ -55,6 +55,7 @@ just plan "path/to/book.epub"
 just cast runs/book-01
 just render runs/book-01 --chapters 3 --chapters-only
 just assemble runs/book-01
+just runpod-cleanup          # delete every Runpod Pod this deployment created (asks first)
 just test
 just test -p test_epub.py     # optional unittest discovery arguments
 ```

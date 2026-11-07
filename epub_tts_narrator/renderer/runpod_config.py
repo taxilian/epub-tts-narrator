@@ -29,8 +29,11 @@ DEPLOYMENT_DEFAULTS = {
     # Fallback GPU; when prefer_h100 is set, an affordable available H100 wins.
     "gpu_type_id": DEFAULT_GPU_TYPE_ID,
     "prefer_h100": True,
+    # Runpod clouds in preference order; the first with an eligible placement
+    # wins and a confirmed refusal falls back once to the next.
+    "cloud_types": ["secure"],
     "data_center_id": "",
-    "volume_id": "",
+    # Host-local Pod disk mounted at /workspace (Runpod's "volume disk").
     "volume_size_gb": 150,
     "container_disk_gb": 20,
     "max_hourly_price": 2.60,
@@ -143,17 +146,31 @@ def _validated_renderer(config, directory):
         return load_config(path, require_verifier=False)
 
 
+_CLOUD_TYPES = ("secure", "community")
+
+
 def _deployment_settings(values, directory):
+    if isinstance(values, dict) and "volume_id" in values:
+        if values["volume_id"] != "":
+            raise ValueError("runpod.volume_id is no longer supported: workers keep /workspace on a "
+                             "host-local Pod disk instead of a network volume. Remove volume_id; existing "
+                             "network volumes are left untouched in Runpod and keep billing until deleted.")
+        values = {key: value for key, value in values.items() if key != "volume_id"}
     if not isinstance(values, dict) or set(values) - DEPLOYMENT_DEFAULTS.keys():
         raise ValueError("Unknown key or invalid table in runpod configuration")
     settings = _merge(DEPLOYMENT_DEFAULTS, values)
-    for key in ("name", "image", "gpu_type_id", "data_center_id", "volume_id", "pod_id", "state_dir"):
+    clouds = settings["cloud_types"]
+    if (not isinstance(clouds, list) or not clouds or len(set(map(str, clouds))) != len(clouds)
+            or any(not isinstance(cloud, str) or cloud not in _CLOUD_TYPES for cloud in clouds)):
+        raise ValueError('runpod.cloud_types must be a nonempty list of distinct "secure" or "community" '
+                         'values in preference order, for example ["community", "secure"]')
+    for key in ("name", "image", "gpu_type_id", "data_center_id", "pod_id", "state_dir"):
         value = settings[key]
         if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError(f"runpod.{key} must be a string without control characters")
         if key in {"name", "gpu_type_id", "state_dir"} and not value.strip():
             raise ValueError(f"runpod.{key} must not be empty")
-    for key in ("name", "data_center_id", "volume_id", "pod_id"):
+    for key in ("name", "data_center_id", "pod_id"):
         value = settings[key]
         if value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
             raise ValueError(f"runpod.{key} must contain only letters, numbers, dots, dashes or underscores")

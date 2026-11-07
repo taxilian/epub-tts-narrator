@@ -136,58 +136,85 @@ class RunpodGpuPolicyTests(unittest.TestCase):
 
 
 class USPlacementTests(unittest.TestCase):
-    def choose(self, rows, centers, **overrides):
+    def choose(self, rows, **overrides):
         options = dict(fallback_id=FALLBACK, prefer_h100=True, max_hourly_price=2.60,
-                       preferred_data_center="US-NC-2", volume_data_centers=())
+                       preferred_data_center="US-NC-2")
         options.update(overrides)
-        return runpod_gpu.select_placement(rows, centers, **options)
+        return runpod_gpu.select_placement(rows, **options)
 
-    def centers(self, *identifiers):
-        return [{"id": identifier, "networkVolumeTypes": ["STANDARD"]} for identifier in identifiers]
+    def test_configured_location_is_only_a_hint(self):
+        row = catalog_row(FALLBACK, datacenters=("US-NC-2", "US-CO-1"))
+        self.assertEqual(self.choose([row]).data_center_id, "US-NC-2")
+        row["dataCenters"][0]["availability"] = "LOW"
+        self.assertEqual(self.choose([row]).data_center_id, "US-CO-1")
+        self.assertEqual(self.choose([row], preferred_data_center="").data_center_id, "US-CO-1")
 
-    def test_configured_location_is_only_a_hint_and_gpu_only_locations_are_skipped(self):
-        centers = self.centers("US-CO-1") + [{"id": "US-NC-2", "networkVolumeTypes": []}]
-        result = self.choose([catalog_row(FALLBACK, datacenters=("US-NC-2", "US-CO-1"))], centers)
-        self.assertEqual(result.data_center_id, "US-CO-1")
+    def test_any_us_location_in_the_catalog_is_eligible_without_storage_constraints(self):
+        # Workers use a host-local Pod disk, so GPU-only locations are fine.
+        result = self.choose([catalog_row(FALLBACK, datacenters=("US-NC-1",))])
+        self.assertEqual((result.gpu_type_id, result.data_center_id, result.cloud), (FALLBACK, "US-NC-1", "SECURE"))
 
-    def test_existing_volume_is_a_tie_breaker_not_a_datacenter_lock(self):
-        centers = self.centers("US-NC-1", "US-CO-1")
-        result = self.choose([catalog_row(FALLBACK, datacenters=("US-CO-1",))], centers,
-                             volume_data_centers=("US-NC-1",))
-        self.assertEqual(result.data_center_id, "US-CO-1")
-        result = self.choose([catalog_row(FALLBACK, datacenters=("US-CO-1", "US-NC-1"))], centers,
-                             preferred_data_center="US-CO-1", volume_data_centers=("US-NC-1",))
-        self.assertEqual(result.data_center_id, "US-NC-1")
-
-    def test_an_affordable_us_h100_beats_reusing_an_rtx_volume(self):
-        rows = [catalog_row(FALLBACK, 2.49, datacenters=("US-NC-1",)),
+    def test_an_affordable_us_h100_beats_a_cheaper_fallback_in_another_region(self):
+        rows = [catalog_row(FALLBACK, 2.49, datacenters=("US-NC-2",)),
                 catalog_row("NVIDIA H100 PCIe", 2.59, datacenters=("US-CO-1",))]
-        result = self.choose(rows, self.centers("US-NC-1", "US-CO-1"), volume_data_centers=("US-NC-1",))
+        result = self.choose(rows)
         self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
         self.assertEqual(result.data_center_id, "US-CO-1")
 
-    def test_non_us_and_storage_incompatible_locations_are_never_selected(self):
+    def test_non_us_locations_are_never_selected(self):
         rows = [catalog_row("NVIDIA H100 PCIe", 1.00, datacenters=("CA-MTL-3", "EU-RO-1")),
                 catalog_row(FALLBACK, 2.49, datacenters=("US-CO-1",))]
-        result = self.choose(rows, self.centers("CA-MTL-3", "EU-RO-1", "US-CO-1"),
-                             preferred_data_center="CA-MTL-3", volume_data_centers=("CA-MTL-3",))
-        self.assertEqual(result.data_center_id, "US-CO-1")
-
-    def test_volume_preference_does_not_beat_stronger_gpu_availability(self):
-        row = catalog_row(FALLBACK, 2.49, datacenters=("US-NC-1", "US-CO-1"))
-        row["dataCenters"][0]["availability"] = "LOW"
-        result = self.choose([row], self.centers("US-NC-1", "US-CO-1"), volume_data_centers=("US-NC-1",))
+        result = self.choose(rows, preferred_data_center="CA-MTL-3")
         self.assertEqual(result.data_center_id, "US-CO-1")
 
     def test_no_eligible_us_placement_fails_before_allocation(self):
-        with self.assertRaisesRegex(ValueError, "US"):
-            self.choose([catalog_row(FALLBACK, 2.49, datacenters=("CA-MTL-3",))], self.centers("CA-MTL-3"))
+        with self.assertRaisesRegex(ValueError, "US datacenter on Runpod Secure Cloud"):
+            self.choose([catalog_row(FALLBACK, 2.49, datacenters=("CA-MTL-3",))])
+        with self.assertRaisesRegex(ValueError, "invalid GPU catalog"):
+            self.choose({"gpus": []})
 
     def test_invalid_stock_entries_do_not_mask_valid_stock_for_the_same_location(self):
         row = catalog_row("NVIDIA H100 PCIe", 2.19, datacenters=("US-CO-1",))
         row["dataCenters"].insert(0, {"id": "US-CO-1", "availability": []})
-        result = self.choose([row], self.centers("US-CO-1"))
+        result = self.choose([row])
         self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
+
+
+class CloudPriceTests(unittest.TestCase):
+    def row(self, secure, community, gpu_id=FALLBACK):
+        row = catalog_row(gpu_id, secure, datacenters=("US-CO-1",))
+        row["price"]["community"] = community
+        return row
+
+    def test_each_cloud_is_priced_from_its_own_catalog_key(self):
+        row = self.row(2.0, 1.25)
+        self.assertEqual(catalog_price(row), 2.0)
+        self.assertEqual(catalog_price(row, "SECURE"), 2.0)
+        self.assertEqual(catalog_price(row, "COMMUNITY"), 1.25)
+        result = runpod_gpu.select_placement([row], fallback_id=FALLBACK, prefer_h100=True,
+                                             max_hourly_price=2.60, cloud="COMMUNITY")
+        self.assertEqual((result.cloud, result.hourly_price), ("COMMUNITY", 1.25))
+
+    def test_community_price_decides_the_h100_preference_and_cap(self):
+        rows = [self.row(2.0, 1.25), self.row(2.99, 2.10, gpu_id="NVIDIA H100 PCIe")]
+        secure = runpod_gpu.select_placement(rows, fallback_id=FALLBACK, prefer_h100=True, max_hourly_price=2.60)
+        community = runpod_gpu.select_placement(rows, fallback_id=FALLBACK, prefer_h100=True,
+                                                max_hourly_price=2.60, cloud="COMMUNITY")
+        self.assertEqual(secure.gpu_type_id, FALLBACK)
+        self.assertEqual(community.gpu_type_id, "NVIDIA H100 PCIe")
+        with self.assertRaisesRegex(ValueError, "Community Cloud"):
+            runpod_gpu.select_placement([self.row(2.0, 3.0)], fallback_id=FALLBACK, prefer_h100=False,
+                                        max_hourly_price=2.60, cloud="COMMUNITY")
+
+    def test_missing_community_price_is_never_selected(self):
+        with self.assertRaises(ValueError):
+            runpod_gpu.select_placement([catalog_row(FALLBACK, datacenters=("US-CO-1",))], fallback_id=FALLBACK,
+                                        prefer_h100=False, max_hourly_price=2.60, cloud="COMMUNITY")
+
+    def test_unknown_cloud_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown Runpod cloud"):
+            runpod_gpu.select_placement([], fallback_id=FALLBACK, prefer_h100=False,
+                                        max_hourly_price=2.60, cloud="SPOT")
 
 
 if __name__ == "__main__":

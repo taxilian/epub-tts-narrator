@@ -434,11 +434,15 @@ class RunpodLifecycleTests(unittest.TestCase):
             self.assertIs(deployment.encode(self.args("encode", "book")), result)
         self.notify.assert_called_once_with("Completed audiobook: /audio/book")
 
-    def test_create_spec_uses_persistent_volume_and_exposes_only_required_ports(self):
+    def test_create_spec_uses_a_pod_disk_and_exposes_only_required_ports(self):
         deployment = self.deployment()
         deployment.provision()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["mounts"], {"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]})
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
+        self.api.create_volume.assert_not_called()
+        self.api.get_volume.assert_not_called()
+        self.assertTrue(deployment.state["bootstrap_required"])
+        self.assertEqual(deployment.state["cloud"], "SECURE")
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
         self.assertEqual(spec["image"], self.settings["deployment"]["image"])
         self.assertEqual(spec["disk"], self.settings["deployment"]["container_disk_gb"])
@@ -454,16 +458,18 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertNotIn("fixture-provider-secret", json.dumps(spec))
         self.assertNotIn("fixture-ceph-secret", json.dumps(spec))
 
-    def capacity_deployment(self):
+    def capacity_deployment(self, *, legacy_volume=False):
         """Fake provider with a stopped old host and a separately schedulable Pod."""
         deployment = self.deployment()
-        deployment.state.update(pod_id="old_pod", volume_id="volume_fixture", bootstrapped=True,
-                                revision="fixture-revision")
+        deployment.state.update(pod_id="old_pod", bootstrapped=True, revision="fixture-revision")
+        if legacy_volume:
+            deployment.state["volume_id"] = "volume_fixture"
         deployment.save()
+        mounts = ({"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]} if legacy_volume
+                  else {"persistent": {"size": 150, "path": "/workspace"}})
         old = {"id": "old_pod", "name": "original-worker", "image": deployment.cfg["image"],
                "gpu": {"id": deployment.cfg["gpu_type_id"], "count": 1}, "cloud": "SECURE",
-               "dataCenterId": "US-FIXTURE-1", "status": "EXITED", "cost": 2.0,
-               "mounts": {"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]}}
+               "dataCenterId": "US-FIXTURE-1", "status": "EXITED", "cost": 2.0, "mounts": mounts}
         pods = {"old_pod": old}
         self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
         self.api.get_pod_details.side_effect = lambda pod_id: deepcopy(pods[pod_id])
@@ -473,7 +479,8 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.get_pod.side_effect = read
         def create(spec):
             pods["new_pod"] = dict(deepcopy(old), id="new_pod", name=spec["name"], status="RUNNING",
-                                   image=spec["image"], mounts=deepcopy(spec["mounts"]),
+                                   image=spec["image"], mounts=deepcopy(spec["mounts"]), cloud=spec["cloud"],
+                                   dataCenterId=spec["dataCenterIds"][0],
                                    gpu={"id": spec["gpu"]["id"], "count": 1})
             return deepcopy(pods["new_pod"])
         self.api.create_pod.side_effect = create
@@ -488,10 +495,13 @@ class RunpodLifecycleTests(unittest.TestCase):
         deployment.ssh = Mock(return_value=b"")
         return deployment, pods, create
 
-    def test_capacity_replacement_preserves_volume_revision_and_application_identity(self):
+    def test_capacity_replacement_keeps_application_identity_and_requires_a_full_setup(self):
         deployment, pods, _ = self.capacity_deployment()
-        identity = {key: deployment.state[key] for key in ("deployment_id", "api_key", "revision", "bootstrapped")}
+        identity = {key: deployment.state[key] for key in ("deployment_id", "api_key")}
         deployment.start()
+        self.assertTrue(deployment.state["bootstrap_required"])
+        self.assertNotIn("revision", deployment.state)
+        self.assertNotIn("bootstrapped", deployment.state)
         self.assertEqual(deployment.pod_id, "new_pod")
         self.assertEqual(deployment.state["previous_pod_ids"], ["old_pod"])
         self.assertEqual(pods["old_pod"]["status"], "EXITED")
@@ -502,9 +512,25 @@ class RunpodLifecycleTests(unittest.TestCase):
         spec = self.api.create_pod.call_args.args[0]
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
         self.assertEqual(spec["gpu"]["id"], deployment.cfg["gpu_type_id"])
-        self.assertEqual(spec["mounts"], pods["old_pod"]["mounts"])
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
         self.assertNotEqual(spec["name"], deployment.cfg["name"] + "-" + deployment.state["deployment_id"])
         self.api.start_pod.assert_called_once_with("old_pod")
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("keeps billing until it is deleted (runpod cleanup", notices)
+
+    def test_capacity_replacement_of_a_network_volume_worker_moves_to_a_pod_disk(self):
+        deployment, pods, _ = self.capacity_deployment(legacy_volume=True)
+        deployment.start()
+        self.assertEqual(deployment.pod_id, "new_pod")
+        spec = self.api.create_pod.call_args.args[0]
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
+        self.assertNotIn("volume_id", deployment.state)
+        self.assertEqual(deployment.state["retained_network_volumes"], ["volume_fixture"])
+        self.assertTrue(deployment.state["bootstrap_required"])
+        self.api.get_volume.assert_not_called()
+        self.api.create_volume.assert_not_called()
+        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
+        self.assertIn("volume_fixture is no longer used", notices)
 
     def test_fixed_pod_capacity_failure_never_replaces(self):
         self.settings["deployment"]["pod_id"] = "old_pod"
@@ -525,8 +551,8 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.api.create_pod.assert_not_called()
                 self.api.create_volume.assert_not_called()
 
-    def test_replacement_requires_confirmed_stopped_matching_source_and_volume(self):
-        for change in ("running", "gpu", "image", "datacenter", "mount", "missing_volume", "volume_datacenter"):
+    def test_replacement_requires_a_confirmed_stopped_matching_source(self):
+        for change in ("running", "gpu", "image", "cloud", "storage"):
             with self.subTest(change=change):
                 deployment, pods, _ = self.capacity_deployment()
                 if change == "running":
@@ -535,14 +561,10 @@ class RunpodLifecycleTests(unittest.TestCase):
                     pods["old_pod"]["gpu"]["id"] = "another-gpu"
                 elif change == "image":
                     pods["old_pod"]["image"] = "another-image"
-                elif change == "datacenter":
-                    pods["old_pod"]["dataCenterId"] = "another-datacenter"
-                elif change == "mount":
-                    pods["old_pod"]["mounts"]["network"][0]["volumeId"] = "another-volume"
-                elif change == "missing_volume":
-                    deployment.state.pop("volume_id")
+                elif change == "cloud":
+                    pods["old_pod"].pop("cloud")
                 else:
-                    self.api.get_volume.return_value["dataCenterId"] = "another-datacenter"
+                    pods["old_pod"]["mounts"] = {}
                 with self.assertRaises(RuntimeError):
                     deployment._replace_capacity_blocked_pod()
                 self.api.create_pod.assert_not_called()
@@ -700,19 +722,16 @@ class RunpodLifecycleTests(unittest.TestCase):
         for secret in deployment.secrets:
             self.assertNotIn(secret, output.getvalue())
 
-    def test_encode_after_replacement_uses_runtime_install_and_current_worker_configuration(self):
+    def test_encode_after_replacement_fully_sets_up_the_new_pod_disk(self):
         deployment, pods, _ = self.capacity_deployment()
-        deployment.prepare_encode = Mock()
-        deployment.stop_service = Mock()
-        deployment.configure = Mock()
-        deployment.install = Mock()
-        deployment.launch = Mock()
-        deployment.encode = Mock()
-        deployment.deploy_code = Mock()
-        self.assertEqual(self.run_fake(deployment, self.args("encode", "book")), 0)
-        deployment.install.assert_called_once_with(full=False)
-        deployment.launch.assert_called_once_with(prepare=False)
-        deployment.deploy_code.assert_not_called()
+        for name in ("prepare_encode", "stop_service", "configure", "install", "launch", "encode",
+                     "deploy_code", "smoke", "activate"):
+            setattr(deployment, name, Mock())
+        self.assertEqual(self.run_fake(deployment, self.args("encode", "book", "--no-update")), 0)
+        deployment.deploy_code.assert_called_once_with("local")
+        deployment.install.assert_called_once_with(full=True)
+        deployment.launch.assert_called_once_with(prepare=True)
+        deployment.smoke.assert_called_once_with()
         self.assertIn("new_pod-8082", deployment.url)
         self.assertEqual(pods["new_pod"]["status"], "RUNNING")
 
@@ -726,10 +745,13 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.api.create_volume.assert_not_called()
                 self.api.create_pod.assert_not_called()
 
-    def test_gpu_datacenter_without_network_storage_is_rejected_before_allocating(self):
-        self.api.datacenters.return_value = {"dataCenters": [
-            {"id": "US-FIXTURE-1", "networkVolumeTypes": []},
-            {"id": "US-SUPPORTED-1", "networkVolumeTypes": ["STANDARD"]}]}
+    def test_only_us_compute_is_allocated_and_storage_types_do_not_constrain_it(self):
+        self.api.datacenters.return_value = {"dataCenters": [{"id": "US-FIXTURE-1", "networkVolumeTypes": []}]}
+        self.deployment().provision()
+        self.assertEqual(self.api.create_pod.call_args.args[0]["dataCenterIds"], ["US-FIXTURE-1"])
+        self.api.create_pod.reset_mock()
+        self.isolated_state("non-us")
+        self.api.catalog_gpus.return_value["gpus"][0]["dataCenters"] = [{"id": "CA-MTL-3", "availability": "HIGH"}]
         with self.assertRaisesRegex(ValueError, "US"):
             self.deployment().provision()
         self.api.create_volume.assert_not_called()
@@ -781,27 +803,23 @@ class RunpodLifecycleTests(unittest.TestCase):
         with self.assertRaises(RunpodAPIError):
             deployment.provision()
         self.assertNotIn("pod_creation_pending", deployment.state)
-        self.assertEqual(deployment.state["volume_id"], "volume_fixture")
+        self.assertNotIn("allocation", deployment.state)
+        self.api.create_pod.assert_called_once()  # Secure-only: no other cloud to fall back to
 
-    def test_retry_with_current_datacenter_reuses_saved_volume(self):
-        self.settings["deployment"]["data_center_id"] = "US-CO-1"
-        self.api.catalog_gpus.return_value["gpus"][0]["dataCenters"] = [
-            {"id": "US-CO-1", "availability": "HIGH"}]
-        self.api.get_volume.return_value = {"id": "saved_volume", "dataCenterId": "US-CO-1"}
+    def test_saved_network_volume_is_retained_but_never_mounted_by_a_new_worker(self):
         deployment = self.deployment()
-        deployment.state["volume_id"] = "saved_volume"
+        deployment.state.update(volume_id="saved_volume", volumes_by_center={"US-CO-1": "other_volume"})
         deployment.provision()
         self.api.create_volume.assert_not_called()
-        self.api.get_volume.assert_called_once_with("saved_volume")
+        self.api.get_volume.assert_not_called()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["dataCenterIds"], ["US-CO-1"])
-        self.assertEqual(spec["mounts"]["network"][0]["volumeId"], "saved_volume")
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
+        self.assertEqual(deployment.state["retained_network_volumes"], ["saved_volume"])
+        self.assertEqual(deployment.state["volumes_by_center"], {"US-CO-1": "other_volume"})
 
-    def test_deleted_saved_pod_is_replaced_by_bootstrap_reusing_the_volume(self):
-        self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
+    def test_deleted_saved_pod_is_replaced_with_a_fresh_pod_disk(self):
         deployment = self.deployment()
-        deployment.state["pod_id"] = "pod_deleted_elsewhere"
-        deployment.state["volume_id"] = "volume_fixture"
+        deployment.state.update(pod_id="pod_deleted_elsewhere", revision="fixture-revision", bootstrapped=True)
         deployment.save()
         self.api.get_pod.side_effect = RunpodAPIError(
             "Runpod could not find the requested resource (HTTP 404)", status=404)
@@ -811,40 +829,12 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(deployment.pod_id, "pod_fixture")
         self.api.create_pod.assert_called_once()
         self.api.create_volume.assert_not_called()
-        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"]["network"][0]["volumeId"],
-                         "volume_fixture")
+        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"],
+                         {"persistent": {"size": 150, "path": "/workspace"}})
+        self.assertTrue(deployment.state["bootstrap_required"])
+        self.assertNotIn("revision", deployment.state)
         notices = " ".join(call.args[0] for call in self.notify.call_args_list)
         self.assertIn("no longer exists", notices)
-
-    def test_deleted_saved_volume_is_replaced_by_bootstrap_too(self):
-        deployment = self.deployment()
-        deployment.state["pod_id"] = "pod_deleted_elsewhere"
-        deployment.state["volume_id"] = "volume_deleted_elsewhere"
-        deployment.save()
-        missing = RunpodAPIError("Runpod could not find the requested resource (HTTP 404)", status=404)
-        self.api.get_pod.side_effect = missing
-        self.api.get_volume.side_effect = missing
-
-        deployment.provision()
-
-        self.assertEqual(deployment.pod_id, "pod_fixture")
-        self.assertEqual(deployment.state["volume_id"], "volume_fixture")
-        self.api.create_volume.assert_called_once()
-        self.api.create_pod.assert_called_once()
-        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
-        self.assertIn("persistent volume volume_deleted_elsewhere no longer exists", notices)
-
-    def test_missing_configured_volume_is_a_configuration_error(self):
-        self.settings["deployment"]["volume_id"] = "volume_from_config"
-        deployment = self.deployment()
-        self.api.get_volume.side_effect = RunpodAPIError(
-            "Runpod could not find the requested resource (HTTP 404)", status=404)
-
-        with self.assertRaisesRegex(ValueError, "runpod.volume_id"):
-            deployment.provision()
-
-        self.api.create_volume.assert_not_called()
-        self.api.create_pod.assert_not_called()
 
     def test_stop_treats_a_pod_deleted_elsewhere_as_nothing_to_stop(self):
         deployment = self.deployment()
@@ -883,46 +873,25 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertIn("deleted", status["status"])
         self.assertIn("bootstrap", status["status"])
 
-    def test_volume_timeout_is_reconciled_before_another_volume_creation(self):
+    def test_legacy_pending_volume_creation_is_reported_but_never_resumed(self):
         deployment = self.deployment()
-        self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
-        with self.assertRaises(RunpodAmbiguousOutcome):
-            deployment.provision()
-        self.assertTrue(deployment.state["volume_creation_pending"])
-        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"] + "-us-fixture-1"
-        self.api.list_volumes.return_value = [{"name": name, "id": "recovered_volume", "dataCenterId": "US-FIXTURE-1"}]
+        deployment.state.update(volume_creation_pending=True,
+                                volume_creation={"name": "legacy-volume", "size": 150, "data_center_id": "US-FIXTURE-1"})
+        deployment.save()
         deployment.provision()
-        self.api.create_volume.assert_called_once()
-        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"]["network"][0]["volumeId"], "recovered_volume")
-
-    def test_unconfirmed_volume_creation_retries_once_inventory_shows_nothing(self):
-        deployment = self.deployment()
-        self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
-        with self.assertRaises(RunpodAmbiguousOutcome):
-            deployment.provision()
-        self.assertTrue(deployment.state["volume_creation_pending"])
-        self.api.list_volumes.return_value = []
-        self.api.create_volume.side_effect = None
-
-        deployment.provision()
-
-        self.assertEqual(deployment.state["volume_id"], "volume_fixture")
-        self.assertNotIn("volume_creation_pending", deployment.state)
-        self.assertEqual(self.api.create_volume.call_count, 2)  # the first raised ambiguous; this retry created
-        notices = " ".join(call.args[0] for call in self.notify.call_args_list)
-        self.assertIn("made nothing", notices)
-        self.assertIn("runpod.data_center_id", notices)
-
-    def test_unconfirmed_volume_creation_with_duplicate_names_refuses_to_create(self):
-        deployment = self.deployment()
-        self.api.create_volume.side_effect = RunpodAmbiguousOutcome("uncertain")
-        with self.assertRaises(RunpodAmbiguousOutcome):
-            deployment.provision()
-        name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"] + "-us-fixture-1"
-        self.api.list_volumes.return_value = [{"name": name, "id": "volume_a"}, {"name": name, "id": "volume_b"}]
-        with self.assertRaisesRegex(RuntimeError, "multiple volumes share its name"):
-            deployment.provision()
-        self.api.create_volume.assert_called_once()
+        self.api.create_volume.assert_not_called()
+        self.api.list_volumes.assert_not_called()
+        self.assertEqual(self.api.create_pod.call_args.args[0]["mounts"],
+                         {"persistent": {"size": 150, "path": "/workspace"}})
+        self.api.get_pod.return_value = {"desiredStatus": "EXITED"}
+        output = StringIO()
+        with patch("epub_tts_narrator.renderer.runpod_config.load_settings", return_value=self.settings), \
+                patch("epub_tts_narrator.renderer.runpod.Deployment", return_value=deployment), \
+                redirect_stdout(output):
+            run_command(self.args("status"))
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary["unconfirmed_network_volume_creation"]["name"], "legacy-volume")
+        self.assertEqual(summary["storage"], "Pod disk")
 
     def test_pending_pod_recovery_does_not_depend_on_current_stock(self):
         deployment = self.deployment()
@@ -1266,7 +1235,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(spec["gpu"]["id"], self.H100)
         self.assertEqual(deployment.state["gpu_type_id"], self.H100)
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
-        self.assertEqual(spec["mounts"]["network"][0]["volumeId"], "volume_fixture")
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
 
     def test_chosen_gpu_is_persisted_before_the_creation_post(self):
         deployment = self.deployment()
@@ -1354,13 +1323,13 @@ class RunpodLifecycleTests(unittest.TestCase):
                     self.assertEqual(deployment.pod_id, "pod_fixture")
         self.assertNotIn("pod_creation_pending", deployment.state)
 
-    def test_capacity_replacement_prefers_h100_target_and_preserves_volume_and_old_pod(self):
+    def test_capacity_replacement_prefers_h100_target_and_keeps_old_pod_stopped(self):
         deployment, pods, _ = self.capacity_deployment()
         self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
         deployment.start()
         spec = self.api.create_pod.call_args.args[0]
         self.assertEqual(spec["gpu"]["id"], self.H100)
-        self.assertEqual(spec["mounts"], pods["old_pod"]["mounts"])
+        self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
         self.assertEqual(pods["old_pod"]["status"], "EXITED")
         self.assertEqual(deployment.state["gpu_type_id"], self.H100)

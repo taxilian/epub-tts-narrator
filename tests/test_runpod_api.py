@@ -133,17 +133,22 @@ class RunpodAPITests(unittest.TestCase):
                 self.assertEqual(self.opener.open.call_count, 1)
         self.sleep.assert_not_called()
 
-    def test_volume_operations_use_v1(self):
-        self.opener.open.return_value = response([])
-        self.assertEqual(self.api.list_volumes(), [])
-        self.assertEqual(self.opener.open.call_args.args[0].full_url, "https://rest.runpod.io/v1/networkvolumes")
-        spec = {"name": "models", "size": 150, "dataCenterId": "US-KS-2"}
-        self.opener.open.return_value = response(dict(spec, id="vol_1"), status=201)
-        self.assertEqual(self.api.create_volume(spec)["id"], "vol_1")
-        self.assertEqual(json.loads(self.opener.open.call_args.args[0].data), spec)
-        self.opener.open.return_value = response(dict(spec, id="vol_1"))
-        self.assertEqual(self.api.get_volume("vol_1")["size"], 150)
-        self.assertTrue(self.opener.open.call_args.args[0].full_url.endswith("/networkvolumes/vol_1"))
+    def test_delete_pod_uses_v2_accepts_an_empty_reply_and_never_retries(self):
+        self.opener.open.return_value = response(raw=b"")
+        self.assertIsNone(self.api.delete_pod("pod_1"))
+        request = self.opener.open.call_args.args[0]
+        self.assertEqual((request.get_method(), request.full_url), ("DELETE", "https://api.runpod.io/v2/pods/pod_1"))
+        self.opener.open.reset_mock()
+        self.opener.open.side_effect = TimeoutError("secret-value")
+        with self.assertRaises(RunpodAmbiguousOutcome):
+            self.api.delete_pod("pod_1")
+        self.assertEqual(self.opener.open.call_count, 1)
+        with self.assertRaises(ValueError):
+            self.api.delete_pod("../pods")
+
+    def test_no_network_volume_or_datacenter_storage_client_exists(self):
+        for name in ("list_volumes", "get_volume", "create_volume", "datacenters"):
+            self.assertFalse(hasattr(self.api, name), name)
 
     def test_catalog_uses_v2_and_comma_separated_arrays(self):
         self.opener.open.return_value = response({"gpus": []})
@@ -151,10 +156,10 @@ class RunpodAPITests(unittest.TestCase):
                                                countryCodes=["US", "CA"], count=1), {"gpus": []})
         self.assertEqual(self.opener.open.call_args.args[0].full_url,
                          "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&countryCodes=US%2CCA&count=1")
-        self.opener.open.return_value = response({"dataCenters": []})
-        self.assertEqual(self.api.datacenters(include="GPU_AVAILABILITY"), {"dataCenters": []})
+        self.opener.open.return_value = response({"gpus": []})
+        self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud="COMMUNITY", count=1)
         self.assertEqual(self.opener.open.call_args.args[0].full_url,
-                         "https://api.runpod.io/v2/catalog/datacenters?include=GPU_AVAILABILITY")
+                         "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=COMMUNITY&count=1")
 
     def test_transient_get_retries_are_bounded(self):
         self.opener.open.side_effect = [URLError("credential-url-must-not-escape"),
@@ -177,9 +182,9 @@ class RunpodAPITests(unittest.TestCase):
         self.assertEqual(self.opener.open.call_count, 3)
 
     def test_mutation_transport_failure_never_retries(self):
-        for method, argument in ((self.api.create_pod, {}), (self.api.create_volume, {}),
+        for method, argument in ((self.api.create_pod, {}), (lambda spec: self.api.update_pod("pod_1", spec), {}),
                                  (self.api.start_pod, "pod_1"), (self.api.stop_pod, "pod_1")):
-            with self.subTest(method=method.__name__):
+            with self.subTest(method=getattr(method, "__name__", "update_pod")):
                 self.opener.open.reset_mock()
                 self.opener.open.side_effect = TimeoutError("secret-value")
                 with self.assertRaises(RunpodAmbiguousOutcome) as caught:
@@ -194,22 +199,22 @@ class RunpodAPITests(unittest.TestCase):
     def test_server_error_on_create_is_ambiguous_and_not_retried(self):
         self.opener.open.side_effect = HTTPError("https://private.invalid", 502, "fixture-secret", {}, BytesIO(b"secret-body"))
         with self.assertRaises(RunpodAmbiguousOutcome) as caught:
-            self.api.create_volume({"name": "fixture"})
+            self.api.create_pod({"name": "fixture"})
         self.assertEqual(caught.exception.status, 502)
-        self.assertIn("POST /networkvolumes", str(caught.exception))
+        self.assertIn("POST /pods", str(caught.exception))
         self.assertIn("rerun this command to reconcile", str(caught.exception))
         self.assertNotIn("secret", str(caught.exception))
         self.assertEqual(self.opener.open.call_count, 1)
 
     def test_server_error_exposes_bounded_redacted_json_diagnosis(self):
-        detail = 'Data center "US-NC-2" does not support network volumes.'
+        detail = 'Data center "US-NC-2" could not place this pod.'
         body = json.dumps({"error": detail + " fixture-explicit-key private-password", "status": 500,
                            "password": "private-password", "request": {"api_key": "fixture-explicit-key"}}).encode()
         self.opener.open.side_effect = HTTPError("https://private.invalid", 500, "ignored", {}, BytesIO(body))
         with self.assertRaises(RunpodAmbiguousOutcome) as caught:
-            self.api.create_volume({"name": "fixture"})
+            self.api.create_pod({"name": "fixture"})
         message = str(caught.exception)
-        self.assertIn("does not support network volumes", message)
+        self.assertIn("could not place this pod", message)
         self.assertIn("US-NC-2", message)
         self.assertNotIn("fixture-explicit-key", message)
         self.assertNotIn("private-password", message)

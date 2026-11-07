@@ -60,9 +60,12 @@ Operational notes specific to chapter rendering:
   while the chapter service's `[chapter_server].idle_timeout_seconds` governs
   idle shutdown while serving — see "Idle shutdown and independent downloads"
   below.
-- The persistent network volume retains model files, environments, registered
-  voices, and accepted checkpoints, so unchanged models are not downloaded
-  again. Storage remains billed while compute is stopped.
+- Each worker's host-local Pod disk retains model files, environments,
+  registered voices, and accepted checkpoints across stop and start, so
+  unchanged models are not downloaded again. A new or replacement Pod starts
+  with an empty disk and is fully reprovisioned; network volumes are not used.
+  `[runpod].cloud_types` chooses Secure and/or Community Cloud in preference
+  order. The Pod disk remains billed while compute is stopped.
 
 ## Manual client setup
 
@@ -401,8 +404,10 @@ download_expiry_seconds = 3600
 
 Merge these values into the existing server tables; TOML does not allow
 duplicate tables. `persistent_data = true` asserts that the operator actually
-mounted storage that survives a Pod stop. It does not provision that storage.
-Use a network volume if results/checkpoints must also survive Pod termination.
+mounted storage that survives a Pod stop, such as a Pod disk. It does not
+provision that storage. A Pod disk does not survive Pod termination; completed
+artifacts are already in object storage, and checkpoints of unfinished work are
+lost with the Pod.
 
 Completed artifacts are uploaded to independent object storage before the job
 becomes complete. Signed download URLs keep working after the GPU stops, until
