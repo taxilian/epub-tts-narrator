@@ -5,9 +5,12 @@ codec tokens, so the Runpod worker runs ``audiobook-render serve`` with this
 engine inside Fish's own environment instead. It calls the same unmodified
 library functions the stock server uses for Drama 3: ``init_model``,
 ``load_codec_model``, ``build_drama3_prompt`` (whose ``history`` argument holds
-completed user/assistant turns), ``generate_drama3`` and ``set_seed``.
-Reference encoding mirrors Fish's ``VQManager.encode_reference``. Every import
-is lazy; the coordinator never loads torch.
+completed user/assistant turns) and ``set_seed``. Decoding is Fish's
+``generate_drama3`` loop reproduced step for step in ``fish_drama3_decode`` so
+``silence_stop`` can end a take that has gone silent; takes that end on their
+own get Fish's exact frames. Reference encoding mirrors Fish's
+``VQManager.encode_reference``. Every import is lazy; the coordinator never
+loads torch.
 
 With ``batch_rows`` above 1 (``serve``'s ``server.batch_rows``), prompts are
 still built per request with Fish's ``build_drama3_prompt`` and each request
@@ -33,6 +36,8 @@ from typing import Any
 from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
 from .engines import EngineError, HistorySynthesis, _checkpoint_fingerprints
 from .fish_http import read_reference
+from .frame_budget import frame_budget
+from .silence_stop import SilenceWatch
 from .request_sampling import current_sampling
 
 MAX_BATCH_ROWS = 32
@@ -207,6 +212,17 @@ class FishSpeechCudaEngine(HistorySynthesis):
             self._references[key] = (transcript, codes.cpu())
         return self._references[key]
 
+    def _silence_watch(self, text, codec):
+        """Ends a take whose audio has gone silent (``silence_stop``)."""
+        def decode(frames):
+            import torch
+            with self._codec_lock, torch.inference_mode():
+                codes = (torch.stack(list(frames)) if torch.is_tensor(frames[0])
+                         else torch.tensor(frames, dtype=torch.long))
+                codes = codes.to(codec.device).T.contiguous()
+                return codec.from_indices(codes[None])[0].squeeze().float().cpu().numpy()
+        return SilenceWatch(text, decode, sample_rate=codec.sample_rate)
+
     def _generate_wire(self, text, references, history, output_path, *, seed):
         output_path = Path(output_path)
         if output_path.exists():
@@ -219,7 +235,8 @@ class FishSpeechCudaEngine(HistorySynthesis):
             import soundfile as sf
             import torch
             from fish_speech.models.text2semantic.fish_omni.generate import (
-                Drama3DecodeGraphs, Drama3PromptTooLongError, build_drama3_prompt, generate_drama3)
+                Drama3DecodeGraphs, Drama3PromptTooLongError, build_drama3_prompt)
+            from .fish_drama3_decode import generate_drama3_watched
             from fish_speech.utils import set_seed
             capacity = Drama3DecodeGraphs.graph_capacity(model)
             for selected, kept in candidates(text, references, history):
@@ -235,7 +252,7 @@ class FishSpeechCudaEngine(HistorySynthesis):
                     continue
                 if capacity - len(prompt) < 1:
                     continue
-                max_new_tokens = min(self.max_new_tokens, capacity - len(prompt))
+                max_new_tokens = frame_budget(text, min(self.max_new_tokens, capacity - len(prompt)))
                 sampling = current_sampling() or {}
                 temperature = sampling.get("temperature", self.temperature)
                 top_k = sampling.get("top_k", self.top_k)
@@ -245,15 +262,16 @@ class FishSpeechCudaEngine(HistorySynthesis):
                     # sampling, and its own frames back.
                     rows, finish_reason = self._scheduler.submit(
                         prompt, max_new_tokens, temperature=temperature, top_k=top_k,
-                        top_p=top_p, seed=seed).result()
+                        top_p=top_p, seed=seed, watch=self._silence_watch(text, codec)).result()
                     frames = torch.tensor(rows, dtype=torch.long).reshape(len(rows), -1)
                 else:
                     # Fish's set_seed clamps above 2**31; fold uint32 attempt seeds.
                     set_seed(seed % (1 << 31))
                     with torch.inference_mode():
-                        frames, finish_reason = generate_drama3(
+                        frames, finish_reason = generate_drama3_watched(
                             model, prompt, max_new_tokens=max_new_tokens,
-                            temperature=temperature, top_k=top_k, top_p=top_p)
+                            temperature=temperature, top_k=top_k, top_p=top_p,
+                            watch=self._silence_watch(text, codec))
                 if finish_reason != "eos" or not len(frames):
                     raise EngineError(f"Drama 3 did not finish the text: {finish_reason!r}")
                 with self._codec_lock, torch.inference_mode():

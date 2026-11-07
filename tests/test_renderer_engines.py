@@ -137,6 +137,15 @@ class RendererEngineTests(unittest.TestCase):
         self.assertTrue(kwargs["single_chunk"])
         self.assertNotIn("accept", kwargs)
 
+    def test_short_line_is_given_a_frame_budget_not_the_whole_limit(self):
+        from epub_tts_narrator.renderer.frame_budget import frame_budget
+        self.generate(self.segment(text="<|speaker:0|> Hello."))
+        with patch.object(self.engine, "_reference", return_value=FakeReference("Saved.", object())):
+            self.engine.synthesize("Hello.", {}, self.output, seed=1)
+        budget = self.model.generate.call_args.kwargs["max_new_tokens"]
+        self.assertEqual(budget, frame_budget("Hello.", 2048))
+        self.assertLess(budget, 2048)
+
     def test_synthesis_trims_wrapping_quotes_before_applying_delivery(self):
         source = '\u2003“ \' Hello, don\'t call it "easy". \' ”\n'
         expected = '<whisper>Hello, don\'t call it "easy".</whisper>'

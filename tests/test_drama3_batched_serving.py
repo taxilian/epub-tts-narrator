@@ -146,7 +146,7 @@ class CudaEngineBatchIdentityTests(unittest.TestCase):
         batched = engine.identity
         self.assertEqual(engine.concurrent_requests, 8)
         self.assertEqual({key: batched[key] for key in ("decoder", "decoder_version", "batch_rows", "sampler")},
-                         {"decoder": "batched", "decoder_version": 1, "batch_rows": 8, "sampler": "counter-hash-v1"})
+                         {"decoder": "batched", "decoder_version": 2, "batch_rows": 8, "sampler": "counter-hash-v2"})
         self.assertEqual({k: v for k, v in batched.items() if k not in ("decoder", "decoder_version", "batch_rows", "sampler")},
                          single)
 

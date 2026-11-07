@@ -30,6 +30,7 @@ from .drama3_design import (
     generate_scene_voice, validate_scene_fields,
 )
 from .drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS, get_drama3_model
+from .frame_budget import frame_budget
 from .speech_text import speech_text_parts, trim_speech_text
 from .performance_compiler import compile_performance, trim_performance
 
@@ -522,7 +523,7 @@ class Drama3MLXEngine(HistorySynthesis):
         rows = streaming_rows(text, self._reference(voice), kept, model.tokenizer, model.model.config)
         mx.random.seed(seed)
         frames, finish_reason = generate_frames(
-            model.model, rows, max_new_tokens=self.max_new_tokens or 2048,
+            model.model, rows, max_new_tokens=frame_budget(text, self.max_new_tokens or 2048),
             temperature=self.temperature, top_k=self.top_k, top_p=self.top_p)
         if not len(frames):
             raise EngineError("Drama 3 returned no audio frames")
@@ -576,7 +577,7 @@ class Drama3MLXEngine(HistorySynthesis):
                     iterator = iter(model.generate(
                         text, references=prompt_references, previous_takes=previous,
                         temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
-                        max_new_tokens=self.max_new_tokens, single_chunk=True,
+                        max_new_tokens=frame_budget(text, self.max_new_tokens), single_chunk=True,
                         seed=seed, attempts=1,
                     ))
                     try:

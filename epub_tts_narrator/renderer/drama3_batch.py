@@ -29,8 +29,8 @@ from __future__ import annotations
 _GOLDEN = 0x9E3779B97F4A7C15 - (1 << 64)
 _MIX1 = 0xBF58476D1CE4E5B9 - (1 << 64)
 _MIX2 = 0x94D049BB133111EB - (1 << 64)
-SAMPLER = "counter-hash-v1"
-DECODER_VERSION = 1
+SAMPLER = "counter-hash-v2"
+DECODER_VERSION = 2
 
 
 def _shift(x, bits):
@@ -46,14 +46,25 @@ def _splitmix(x):
     return x ^ _shift(x, 31)
 
 
+def exponential_noise(hashes):
+    """Exponential(1) noise, strictly positive, from uniformly random int64 hashes.
+
+    The top 23 bits keep ``bits + 0.5`` exact in float32, so the uniform lies
+    in (0, 1) and never rounds to 1.0. Noise of 0 would turn a dropped token's
+    0 / 0 into NaN, which ``argmax`` selects.
+    """
+    import torch
+    bits = _shift(hashes, 41)
+    uniform = (bits.to(torch.float32) + 0.5) * (1.0 / (1 << 23))
+    return -torch.log(uniform)
+
+
 def sampling_noise(seed, step, draw, width):
     """Exponential(1) noise [rows, width] fixed by each row's (seed, step, draw)."""
     import torch
     key = _splitmix(seed * _GOLDEN + _splitmix(step * 64 + draw + 1))
     columns = torch.arange(width, device=seed.device, dtype=torch.int64)
-    bits = _shift(_splitmix(key[:, None] + columns[None, :] * _GOLDEN), 40)
-    uniform = (bits.to(torch.float32) + 0.5) * (1.0 / (1 << 24))
-    return -torch.log(uniform)
+    return exponential_noise(_splitmix(key[:, None] + columns[None, :] * _GOLDEN))
 
 
 def sample_rows(logits, temperature, top_k, top_p, noise):

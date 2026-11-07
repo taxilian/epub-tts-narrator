@@ -91,6 +91,44 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.submit(scheduler, frames(5, 6, 7, 8), max_new=2).result(timeout=5),
                          (frames(5, 6), "length"))
 
+    def test_a_watch_ends_only_its_own_request_as_silence(self):
+        class StopAfter:
+            def __init__(self, count):
+                self.count, self.seen = count, []
+
+            def observe(self, codes):
+                self.seen.append(list(codes))
+                return len(self.seen) >= self.count
+
+        _backend, scheduler = self.scheduler(2)
+        watch = StopAfter(2)
+        silent = scheduler.submit(frames(5, 6, 7, 8) + frames(EOS), 50, temperature=0.7, top_k=30,
+                                  top_p=0.7, seed=0, watch=watch)
+        other = self.submit(scheduler, frames(9, 9, 9) + frames(EOS))
+        self.assertEqual(silent.result(timeout=5), (frames(5, 6), "silence"))
+        # The watch sees the codes of each kept frame, never the main token.
+        self.assertEqual(watch.seen, [row[1:] for row in frames(5, 6)])
+        self.assertEqual(other.result(timeout=5), (frames(9, 9, 9), "eos"))
+
+    def test_a_failing_watch_fails_only_its_own_request(self):
+        class Broken:
+            def observe(self, codes):
+                raise RuntimeError("codec unavailable")
+
+        _backend, scheduler = self.scheduler(2)
+        broken = scheduler.submit(frames(5, 6) + frames(EOS), 50, temperature=0.7, top_k=30,
+                                  top_p=0.7, seed=0, watch=Broken())
+        healthy = self.submit(scheduler, frames(9, 9) + frames(EOS))
+        with self.assertRaisesRegex(RuntimeError, "codec unavailable"):
+            broken.result(timeout=5)
+        self.assertEqual(healthy.result(timeout=5), (frames(9, 9), "eos"))
+        self.assertEqual(self.submit(scheduler, frames(3) + frames(EOS)).result(timeout=5), (frames(3), "eos"))
+
+    def test_a_watch_without_observe_is_rejected(self):
+        _backend, scheduler = self.scheduler(1)
+        with self.assertRaisesRegex(ValueError, "observe"):
+            scheduler.submit(frames(EOS), 5, temperature=0.7, top_k=30, top_p=0.7, seed=0, watch=object())
+
     def test_non_finite_logits_fail_only_that_request(self):
         _backend, scheduler = self.scheduler(2)
         broken = self.submit(scheduler, frames(5) + ["nan"])

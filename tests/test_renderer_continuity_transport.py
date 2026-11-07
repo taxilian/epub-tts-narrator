@@ -158,7 +158,7 @@ class _FakeTensor(list):
 
 
 @contextmanager
-def fake_fish_speech(limit_rows=None):
+def fake_fish_speech(limit_rows=None, finish="eos"):
     """Stand-ins for the pinned Fish library functions the CUDA engine calls."""
     calls = {"prompts": [], "seeds": []}
 
@@ -200,7 +200,7 @@ def fake_fish_speech(limit_rows=None):
 
     def generate(model, prompt, **options):
         calls["sampling"] = options
-        return Frames(), "eos"
+        return Frames(), finish
 
     numpy = __import__("numpy")
     codec = types.SimpleNamespace(
@@ -222,7 +222,9 @@ def fake_fish_speech(limit_rows=None):
                "fish_speech.models.text2semantic.fish_omni.generate": generate_module,
                "fish_speech.utils": types.SimpleNamespace(set_seed=lambda seed: calls["seeds"].append(seed)),
                "torch": torch}
-    with patch.dict(sys.modules, modules):
+    # The engine decodes through Fish's loop reproduced in fish_drama3_decode.
+    with patch.dict(sys.modules, modules), patch(
+            "epub_tts_narrator.renderer.fish_drama3_decode.generate_drama3_watched", generate):
         yield calls, model, codec
 
 
@@ -242,8 +244,8 @@ class FishSpeechCudaEngineTests(unittest.TestCase):
         self.engine = FishSpeechCudaEngine(self.root)
         self.engine._reference_codes = lambda voice, codec: (voice["reference_text"], f"codes-{voice['voice_id']}")
 
-    def run_wire(self, history, limit_rows=None):
-        with fake_fish_speech(limit_rows) as (calls, model, codec):
+    def run_wire(self, history, limit_rows=None, finish="eos"):
+        with fake_fish_speech(limit_rows, finish) as (calls, model, codec):
             self.engine._model, self.engine._codec = model, codec
             narrator = dict(voice(self.root, "narrator", "a"), speaker=1)
             hero = dict(voice(self.root, "hero", "b"), speaker=0)
@@ -262,6 +264,25 @@ class FishSpeechCudaEngineTests(unittest.TestCase):
         self.assertEqual((calls["sampling"]["temperature"], calls["sampling"]["top_p"], calls["sampling"]["top_k"]),
                          (0.7, 0.7, 30))
         self.assertEqual((metadata["history_turns"], size, len(codes)), (2, 4096, 10))
+
+    def test_short_line_is_given_a_frame_budget_not_the_whole_limit(self):
+        from epub_tts_narrator.renderer.frame_budget import frame_budget
+        calls, _ = self.run_wire([])
+        self.assertEqual(calls["sampling"]["max_new_tokens"], frame_budget("New line.", 2048))
+        self.assertLess(calls["sampling"]["max_new_tokens"], 2048)
+
+    def test_every_take_is_watched_for_silence_with_its_own_text(self):
+        from epub_tts_narrator.renderer.silence_stop import SilenceWatch, stop_seconds
+        calls, _ = self.run_wire([])
+        watch = calls["sampling"]["watch"]
+        self.assertIsInstance(watch, SilenceWatch)
+        self.assertEqual(watch.limit, stop_seconds("<|speaker:0|> New line."))
+
+    def test_a_take_ended_by_silence_is_an_unfinished_take_and_is_never_published(self):
+        from epub_tts_narrator.renderer.engines import EngineError
+        with self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
+            self.run_wire([], finish="silence")
+        self.assertEqual(list(self.root.glob("take-*.wav")), [])
 
     def test_prompt_overflow_drops_latest_then_pinned(self):
         history = [("<|speaker:1|> Pinned.", [[1] * 2] * 10), ("<|speaker:0|> Latest.", [[2] * 2] * 10)]

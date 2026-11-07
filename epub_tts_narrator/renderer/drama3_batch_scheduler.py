@@ -34,6 +34,9 @@ class BatchRequest:
     top_k: int
     top_p: float
     seed: int
+    # Optional per-request stop check: ``observe(codes) -> bool`` per frame
+    # (see silence_stop.SilenceWatch); True ends the request as "silence".
+    watch: Any = None
     future: Future = field(default_factory=Future)
 
 
@@ -50,8 +53,9 @@ class Drama3BatchScheduler:
     ``step(slots) -> [(frame, finite), ...]`` in slot order, and
     ``release(slot)``. A frame is ``[main token, code 0, ..., code N-1]``.
     Results are ``(frames, finish_reason)`` exactly like a single-request
-    decode: frames exclude the end-of-speech token, and ``"length"`` means the
-    request's ``max_new_tokens`` ran out first.
+    decode: frames exclude the end-of-speech token, ``"length"`` means the
+    request's ``max_new_tokens`` ran out first, and ``"silence"`` means its
+    watch ended it after the audio went silent.
     """
 
     def __init__(self, backend, *, name="drama3-batch"):
@@ -70,10 +74,12 @@ class Drama3BatchScheduler:
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
-    def submit(self, prompt, max_new_tokens, *, temperature, top_k, top_p, seed) -> Future:
+    def submit(self, prompt, max_new_tokens, *, temperature, top_k, top_p, seed, watch=None) -> Future:
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("max_new_tokens must be a positive integer")
-        request = BatchRequest(prompt, max_new_tokens, temperature, top_k, top_p, seed)
+        if watch is not None and not callable(getattr(watch, "observe", None)):
+            raise ValueError("watch must provide observe(codes)")
+        request = BatchRequest(prompt, max_new_tokens, temperature, top_k, top_p, seed, watch)
         with self._condition:
             if self._failure is not None:
                 raise SchedulerClosed("The Drama 3 batch scheduler stopped after an internal error") from self._failure
@@ -174,7 +180,15 @@ class Drama3BatchScheduler:
                     self._finish(slot, result=(row.frames, "eos"))
                 else:
                     row.frames.append(list(frame))
-                    if len(row.frames) >= row.request.max_new_tokens:
+                    watch = row.request.watch
+                    try:
+                        silent = watch is not None and watch.observe(frame[1:])
+                    except BaseException as exc:  # a failed check fails only its own request
+                        self._finish(slot, error=exc)
+                        continue
+                    if silent:
+                        self._finish(slot, result=(row.frames, "silence"))
+                    elif len(row.frames) >= row.request.max_new_tokens:
                         self._finish(slot, result=(row.frames, "length"))
         for slot in list(self._active):
             self._finish(slot, error=SchedulerClosed("The Drama 3 batch scheduler closed"))

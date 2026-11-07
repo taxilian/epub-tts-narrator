@@ -397,19 +397,28 @@ history could recover.
 **Status (2026-11-07, RTX PRO 6000):** the decoder itself runs 303.8 frames per
 second at 8 rows against 41.2 for Fish's own graph-captured decoder (7.4×), and
 generation-only serving of the 24-passage corpus doubled (3.09× realtime at 8
-concurrent requests against 1.52× at 1). But it is **not ready for books**:
-across runs it produced about 43% more audio than Fish's decoder for the same
-passages (366–368 s against 256.7 s), because a few passages fail to stop
-(8.2 s became 27.8 s, 16.1 s became 91.6 s), even with one request at a time.
-Every layer, cache and recurrent state matches Fish exactly for identical
-inputs, captured graphs equal eager decoding, and the sampler's distribution
-matches Fish's; whether the counter-hash noise stream or a numerical difference
-in the masked attention causes the run-ons is not yet isolated. On the GPU,
-multi-step logits comparisons are not reproducible between processes (kernel
-selection varies), so `check_drama3_batching.py --checkpoint` reports drift
-there even when nothing is wrong; its per-step state comparison is the useful
-signal. With batching on, Whisper verification on the same GPU becomes the
-pipeline bottleneck, so the full verified pipeline did not speed up.
+concurrent requests against 1.52× at 1). It stays off by default until it has
+rendered a real book.
+
+Its takes now match Fish's in quality. An early build produced about 43% more
+audio than Fish (366–368 s against 256.7 s) because its sampling noise could be
+exactly 0, which let a token outside top-k/top-p win through 0 / 0 = NaN on
+about 0.3% of steps. Sampler `counter-hash-v2` fixed that. Afterwards, 4 runs
+of Fish's decoder and 7 of ours on the corpus (seed variants, 1 or 8 rows, 1 or
+8 concurrent requests) gave a mean of 294 s and 297 s of audio. Passages that
+failed to stop (over 1.5× and 3 s above Fish's median) were 3 of 96 Fish takes,
+one of which reached the frame limit, and 12 of 168 of ours; that difference is
+not significant (p = 0.14). Run-ons follow the seed and are equally common at
+1 row and at 8. With fixed seeds both decoders reproduce their totals exactly
+between processes, so one run is one sample: compare decoders over several seed
+variants, never one run against another. Verification acceptance on single
+attempts was 85/96 for Fish and 153/168 for ours. At 8 concurrent requests the
+whole single-attempt pipeline (generation plus Whisper verification on the same
+GPU) finished the corpus in 249–254 s, against 377–606 s for one request at a
+time through either decoder. On the GPU, multi-step logits comparisons are not
+reproducible between processes (kernel selection varies), so
+`check_drama3_batching.py --checkpoint` reports drift there even when nothing is
+wrong; its per-step state comparison is the useful signal.
 
 `runpod.inference_batch_rows` (default 1, at most 16) makes the single Drama 3
 copy decode that many passages together, one frame per step. The chapter
