@@ -25,6 +25,7 @@ from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import make_render_plan
 from audition_fixtures import prepare_document
+from shared_fixtures import rebind_audiobook_filename
 from test_contracts import valid_document
 from test_renderer_workflow import write_tone, FFMPEG, FFPROBE
 
@@ -1031,7 +1032,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.assertTrue({"chapter.m4a", "chapter.flac"}.issubset(downloads))
         self.assertFalse(any(name.endswith(".wav") for name in downloads))
         self.assertEqual(result["status"], "complete")
-        book = self.root / "output" / "book.m4b"
+        book = self.root / "output" / result["audio"]["audiobook"]["path"]
+        self.assertNotEqual(book.name, "book.m4b")
         self.assertTrue(book.is_file())
         self.assertEqual(len(probe_audio(book, ffprobe=FFPROBE)["chapters"]), 2)
         sync = read_json(self.root / "output" / "sync.json")
@@ -1042,6 +1044,9 @@ class ChapterOrchestrationTests(unittest.TestCase):
 
         # A revised script updates the same complete audiobook, retaining the
         # unchanged remote chapter and the server's accepted unchanged clips.
+        original_book_name = book.name
+        rebind_audiobook_filename(self.root / "output", "Existing Remote Book.m4b")
+        book = self.root / "output" / "Existing Remote Book.m4b"
         previous = read_json(self.root / "output" / "render.json")
         self.config["_publication_expected"] = digest(previous)
         unchanged_chapter = file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a")
@@ -1067,6 +1072,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
                          previous["chapter_identities"]["chapter-0002"])
         self.assertEqual(revised, read_json(self.root / "output" / "render.json"))
         self.assertEqual(revised["bundle_hash"], self.bundle["bundle_hash"])
+        self.assertEqual(revised["audio"]["audiobook"]["path"], book.name)
+        self.assertFalse((self.root / "output" / original_book_name).exists())
         self.assertEqual(unchanged_chapter, file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a"))
         self.assertEqual(len(probe_audio(book, ffprobe=FFPROBE)["chapters"]), 2)
         self.assertEqual(list(self.root.glob(".output.previous-*")), [])

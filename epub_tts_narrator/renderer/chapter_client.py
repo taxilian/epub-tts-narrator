@@ -1183,9 +1183,12 @@ def assemble_remote(bundle, config, *, notify=print):
 def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
     from .assembly import package_audio
     from .book_metadata import publication_assets
+    from .book_output import resolve_audiobook_filename
+    from .publication import published_book
     from .workflow import _publish
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
+    previous = published_book(output, bundle["source"]["book"]["id"])
     with tempfile.TemporaryDirectory(prefix=".remote-audiobook-", dir=output.parent) as temporary:
         scratch = Path(temporary)
         stage = scratch / "ready"
@@ -1231,7 +1234,9 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                             total_chapters=len(bundle["chapters"]))
             chapters.append(composed)
         book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
-        audio = package_audio(chapters, stage, book=book, cover_path=cover,
+        filename = resolve_audiobook_filename(
+            book, previous["audio"] if previous is not None else None, output)
+        audio = package_audio(chapters, stage, book=book, cover_path=cover, audiobook_name=filename,
                               chapter_format=config["render"]["chapter_format"],
                               aac_bitrate=config["render"]["aac_bitrate"], mp3_bitrate=config["render"]["mp3_bitrate"],
                               ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
@@ -1253,5 +1258,5 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
         publication = ({"expected": config["_publication_expected"]}
                        if "_publication_expected" in config else {})
         _publish(stage, output, **publication)
-    notify(f"Audiobook ready: {output / 'book.m4b'}")
+    notify(f"Audiobook ready: {output / audio['audiobook']['path']}")
     return result
