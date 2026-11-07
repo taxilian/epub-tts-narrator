@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from .assembly import _wave_info
+from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, write_json
 from .interrupts import run_subprocess
 
@@ -69,11 +70,17 @@ class SampleNormalizer:
     def _cached(self, folder, identity, info):
         if folder.is_symlink() or not folder.is_dir():
             raise ValueError("Voice preview cache must be a regular directory")
-        audio, metadata = folder / "sample.wav", folder / "normalization.json"
-        if any(path.is_symlink() or not path.is_file() for path in (audio, metadata)):
+        metadata = folder / "normalization.json"
+        if metadata.is_symlink() or not metadata.is_file():
             raise ValueError("Voice preview cache is incomplete; remove this preview directory and retry: " + str(folder))
         record = read_json(metadata)
-        if (not isinstance(record, dict) or record.get("identity") != identity
+        if not isinstance(record, dict):
+            raise ValueError("Voice preview cache failed integrity checks; remove this preview directory and retry: " + str(folder))
+        filename = validate_audio_filename(record.get("audio_file", "sample.wav"), suffix=".wav")
+        audio = folder / filename
+        if audio.is_symlink() or not audio.is_file():
+            raise ValueError("Voice preview cache is incomplete; remove this preview directory and retry: " + str(folder))
+        if (record.get("identity") != identity
                 or record.get("audio_sha256") != file_hash(audio)
                 or _wave_info(audio, 44100) != info):
             raise ValueError("Voice preview cache failed integrity checks; remove this preview directory and retry: " + str(folder))
@@ -99,7 +106,7 @@ class SampleNormalizer:
             # from exposing a partial WAV or a mismatched measurement report.
             staged = Path(temporary) / "ready"
             staged.mkdir()
-            audio = staged / "sample.wav"
+            audio = staged / descriptive_audio_filename("loudness-sample", source.stem, suffix=".wav")
             measured = self._run(source, self._filter(), None)
             audio_filter = (self._filter() + ":linear=true"
                             f":measured_I={float(measured['input_i'])}"
@@ -116,7 +123,7 @@ class SampleNormalizer:
                     or float(result["output_tp"]) > self.settings["true_peak_db"] + .2):
                 raise ValueError("Voice sample normalization could not meet the loudness/peak targets")
             write_json(staged / "normalization.json", {
-                "identity": identity, "audio_sha256": file_hash(audio), **info,
+                "identity": identity, "audio_file": audio.name, "audio_sha256": file_hash(audio), **info,
                 "input_lufs": float(measured["input_i"]),
                 "output_lufs": float(result["output_i"]),
                 "input_true_peak_db": float(measured["input_tp"]),

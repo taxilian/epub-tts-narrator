@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from epub_tts_narrator.renderer.common import file_hash
+from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.loudness import SampleNormalizer
 
 
@@ -87,6 +87,40 @@ class SampleLoudnessTests(unittest.TestCase):
         self.assertNotEqual(changed.prepare(source), preview)
         signal(copied, 3000)
         self.assertNotEqual(restarted.prepare(copied), preview)
+
+    def test_preview_name_identifies_source_and_purpose(self):
+        # Given a source waveform with a meaningful basename.
+        source = signal(self.root / "hero-audition.wav")
+
+        # When preparing the real normalized preview.
+        preview = self.normalizer.prepare(source)
+
+        # Then the new artifact and receipt identify the same descriptive path.
+        self.assertEqual(preview.name, "hero-audition-loudness-sample.wav")
+        record = read_json(preview.parent / "normalization.json")
+        self.assertEqual(record["audio_file"], preview.name)
+        self.assertEqual(record["audio_sha256"], file_hash(preview))
+
+    def test_legacy_sample_cache_resumes_without_rename_or_ffmpeg(self):
+        # Given a valid old preview directory using sample.wav and no audio_file field.
+        source = signal(self.root / "legacy-hero.wav")
+        current = self.normalizer.prepare(source)
+        legacy = current.parent / "sample.wav"
+        current.rename(legacy)
+        receipt = current.parent / "normalization.json"
+        saved = read_json(receipt)
+        saved.pop("audio_file")
+        write_json(receipt, saved)
+        before = receipt.read_bytes()
+
+        # When reopening that exact content through a fresh normalizer.
+        restarted = SampleNormalizer(self.normalizer.cache_dir)
+        with patch.object(restarted, "_run", side_effect=AssertionError("unexpected FFmpeg call")):
+            preview = restarted.prepare(source)
+
+        # Then the old audio and receipt remain byte-identical and reusable.
+        self.assertEqual(preview, legacy.resolve())
+        self.assertEqual(receipt.read_bytes(), before)
 
     def test_corrupted_cache_is_not_played(self):
         source = signal(self.root / "source.wav")
