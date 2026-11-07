@@ -9,6 +9,7 @@ import shutil
 import tempfile
 
 from .common import digest, file_hash, read_json, regular_file
+from .run_locks import acquire_directory_lock
 
 
 def published_book(directory, book_id):
@@ -94,13 +95,14 @@ _UNSPECIFIED = object()
 def publish(stage, destination, *, expected=_UNSPECIFIED):
     """Publish completed staging; roll back the previous book on a failed rename."""
     stage, destination = Path(stage), Path(destination)
-    reservation = destination.parent / ("." + destination.name + ".publish.lock")
+    reservation_path = destination.parent / ("." + destination.name + ".publish.lock")
     try:
-        reservation.mkdir()
+        reservation = acquire_directory_lock(reservation_path)
     except FileExistsError as exc:
         raise ValueError(
-            f"Another process may be publishing this output. If it was forcibly terminated, "
-            f"confirm it has stopped before removing the stale lock: {reservation}") from exc
+            f"Another process may be publishing this output, or the lock cannot be proven stale: "
+            f"{reservation_path}. A marked lock left by a crashed process is reclaimed automatically "
+            f"when you rerun.") from exc
     backup = None
     try:
         if destination.exists() or destination.is_symlink():

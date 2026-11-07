@@ -3,6 +3,8 @@
 from copy import deepcopy
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -82,6 +84,22 @@ class PublicationSafetyTests(unittest.TestCase):
             check_selection(partial, ["chapter-0002"], partial=True)
         check_selection(partial, ["chapter-0001"], partial=True)
         check_selection(partial, ["chapter-0001", "chapter-0002"], partial=False)
+
+    def test_abandoned_publish_lock_is_reclaimed_after_a_crash(self):
+        stage = self.root / "ready"
+        managed_output(stage)
+        lock = self.root / ".output.publish.lock"
+        crashed = subprocess.run([
+            sys.executable, "-c",
+            "import os, sys; from epub_tts_narrator.renderer.run_locks import acquire_directory_lock; "
+            "acquire_directory_lock(sys.argv[1]); os._exit(130)",
+            str(lock),
+        ])
+        self.assertEqual(crashed.returncode, 130)
+        self.assertTrue((lock / "owner.json").is_file())
+        publish(stage, self.output)
+        self.assertFalse(lock.exists())
+        self.assertEqual(read_json(self.output / "render.json")["status"], "complete")
 
     def test_publish_checks_partial_selection_again_after_staging(self):
         stage = self.root / "ready"

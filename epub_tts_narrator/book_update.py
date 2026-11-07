@@ -573,6 +573,7 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
     ones added. Any failure restores every replaced file and removes added ones.
     """
     from .cli import export_bundle
+    from .renderer.run_locks import acquire_directory_lock
     from .voice_profile_guard import refresh_locks, require_valid_profiles
     directory = Path(directory).resolve()
     require_valid_profiles(directory)
@@ -584,11 +585,13 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
             raise ValueError("The saved book changed while its new chapters were analyzed; rerun the update")
         if _render_active(directory):
             raise ValueError(f"Rendering is active; finish it before updating the book: {directory}")
-        lock = directory / ".analysis-update.lock"
+        lock_path = directory / ".analysis-update.lock"
         try:
-            lock.mkdir()
+            lock = acquire_directory_lock(lock_path)
         except FileExistsError as exc:
-            raise ValueError(f"Analysis revision already active or interrupted; inspect {lock}") from exc
+            raise ValueError(
+                f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
+                f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
         stack.callback(lock.rmdir)
         sidecars = _rebind_sidecars(directory, original, document)
         transaction = directory / ".analysis-revisions" / uuid.uuid4().hex

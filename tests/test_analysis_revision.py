@@ -4,6 +4,8 @@ import contextlib
 import hashlib
 import io
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -108,6 +110,19 @@ class AnalysisRevisionTests(unittest.TestCase):
         (self.paths[1] / ".audio-render.lock").mkdir()
         with self.assertRaisesRegex(ValueError, "Rendering is active"):
             revise_directories({self.paths[0]: self.revision()})
+
+    def test_abandoned_analysis_update_lock_is_reclaimed_after_a_crash(self):
+        lock = self.paths[0] / ".analysis-update.lock"
+        crashed = subprocess.run([
+            sys.executable, "-c",
+            "import os, sys; from epub_tts_narrator.renderer.run_locks import acquire_directory_lock; "
+            "acquire_directory_lock(sys.argv[1]); os._exit(130)",
+            str(lock),
+        ])
+        self.assertEqual(crashed.returncode, 130)
+        self.assertTrue((lock / "owner.json").is_file())
+        revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+        self.assertFalse(lock.exists())
 
     def test_partial_publication_failure_restores_all_originals(self):
         before = self.managed()

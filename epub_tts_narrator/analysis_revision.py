@@ -260,12 +260,15 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     transaction = None
     installed = []
     try:
+        from .renderer.run_locks import acquire_directory_lock
         for path in paths:
-            lock = path / ".analysis-update.lock"
+            lock_path = path / ".analysis-update.lock"
             try:
-                lock.mkdir()
+                lock = acquire_directory_lock(lock_path)
             except FileExistsError as exc:
-                raise ValueError(f"Analysis revision already active or interrupted; inspect {lock}") from exc
+                raise ValueError(
+                    f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
+                    f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
             locks.append(lock)
         transaction = paths[0] / ".analysis-revisions" / uuid.uuid4().hex
         transaction.mkdir(parents=True)
