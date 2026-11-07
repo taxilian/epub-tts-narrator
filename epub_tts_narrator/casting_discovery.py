@@ -471,7 +471,8 @@ def _preflight_budget(build, atoms, limit, label):
 
 def discover_candidates(source, requests, batches, *, policy, series_registry=None,
                         workers=1, region_chars=DISCOVERY_REGION_CHARS,
-                        progress=lambda message: None):
+                        progress=lambda message: None,
+                        meter=lambda fraction, stage: None):
     """Discover cast candidates with independent, source-bounded region requests.
 
     Returns {"cast", "pending_merges", "scene_summaries", "regions", "provenance"}.
@@ -492,6 +493,8 @@ def discover_candidates(source, requests, batches, *, policy, series_registry=No
         raise ValueError("Casting discovery workers must be an integer from 1 to 8")
     if type(region_chars) is not int or region_chars < 256:
         raise ValueError("Casting discovery region_chars must be an integer of at least 256")
+    if not callable(meter):
+        raise ValueError("Casting discovery meter must be callable")
     initial_regions = discovery_regions(atoms, region_chars)
     seed = seed_cast()
     series_value = series_context(series_registry, source) if series_registry is not None else None
@@ -525,14 +528,22 @@ def discover_candidates(source, requests, batches, *, policy, series_registry=No
     progress(f"Discovering cast candidates across {len(atoms)} source unit(s) "
              f"in {len(initial_regions)} source region(s) with {workers} worker(s)")
     progress_lock = Lock()
+    completed_regions = [0]
+    meter(0.05, f"Casting discovery 0/{len(initial_regions)}")
 
     def safe_progress(message):
         with progress_lock:
             progress(message)
 
     def discover_region(region):
-        return run_partitioned(region, build, execute, fits=fits, progress=safe_progress,
-                               label="Casting discovery", requests=requests)
+        result = run_partitioned(region, build, execute, fits=fits, progress=safe_progress,
+                                 label="Casting discovery", requests=requests)
+        with progress_lock:
+            completed_regions[0] += 1
+            completed = completed_regions[0]
+        meter(0.05 + 0.20 * completed / len(initial_regions),
+              f"Casting discovery {completed}/{len(initial_regions)}")
+        return result
 
     if workers == 1 or len(initial_regions) == 1:
         grouped = [discover_region(region) for region in initial_regions]

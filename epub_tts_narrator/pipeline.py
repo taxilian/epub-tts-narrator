@@ -1012,6 +1012,7 @@ class CachedRequests:
 
 def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
             max_request_chars=200000, policy=None, progress=lambda message: None,
+            meter=lambda fraction, stage: None,
             whole_book_discovery=False, attribution_workers=1, cast_review_notes="",
             series_registry=None, identity_consensus=True, attribution_review=False,
             attribution_review_chunk_chars=60000, attribution_review_notes="",
@@ -1020,6 +1021,8 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         raise ValueError("whole_book_discovery must be a boolean")
     if type(attribution_workers) is not int or not 1 <= attribution_workers <= 8:
         raise ValueError("attribution_workers must be an integer from 1 to 8")
+    if not callable(meter):
+        raise ValueError("meter must be callable")
     if not isinstance(cast_review_notes, str):
         raise ValueError("cast_review_notes must be a string")
     if type(cast_reconciliation_rounds) is not int or not 1 <= cast_reconciliation_rounds <= 3:
@@ -1079,10 +1082,11 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         compact_attribution_prompt += TYPOGRAPHY_GUIDANCE
         compact_attribution_legacy_prompt += TYPOGRAPHY_GUIDANCE
     from .casting_workflow import gather_cast, summary_for_units
+    meter(0.0, "Casting discovery")
     casting = gather_cast(source, requests, batches, policy=policy, series_registry=series_registry,
                           identity_consensus=identity_consensus, workers=attribution_workers,
                           review_notes="\n".join(note for note in [cast_review_notes, *cast_reconciliation_notes] if note),
-                          progress=progress)
+                          progress=progress, meter=meter)
     cast, issues = casting["cast"], casting["issues"]
     summaries = casting["scene_summaries"]
     identity_provenance = casting["identity"]
@@ -1095,8 +1099,10 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
     # inherited voice ownership are final here, attribution has not started, so
     # every downstream stage fingerprints one coherent cast.
     from .voice_ensemble import design_ensemble
+    meter(0.45, "Designing voice cast")
     cast, ensemble_provenance = design_ensemble(source, cast, requests, policy=policy,
                                               adaptive=True, progress=progress)
+    meter(0.50, "Attribution")
     segments = []
     attribution_subdivisions = [None] * len(batches)
 
@@ -1140,7 +1146,10 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
     if attribution_workers == 1:
         for index in range(len(batches)):
             segments.extend(attribute_batch(index, segments[-6:]))
-            progress(f"Attributing voices {index + 1}/{len(batches)} complete")
+            completed = index + 1
+            progress(f"Attributing voices {completed}/{len(batches)} complete")
+            meter(0.50 + 0.40 * completed / len(batches),
+                  f"Attribution {completed}/{len(batches)}")
     else:
         # Keep only a bounded window in flight. Workers read the full reconciled
         # cast and actual neighboring source, never another worker's annotations.
@@ -1177,6 +1186,8 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
                     results[pending.pop(future)] = future.result()
                     completed += 1
                     progress(f"Attributing voices {completed}/{len(batches)} complete")
+                    meter(0.50 + 0.40 * completed / len(batches),
+                          f"Attribution {completed}/{len(batches)}")
                 while next_index < len(batches) and len(pending) < attribution_workers and not cancelled.is_set():
                     pending[executor.submit(attribute_independently, next_index)] = next_index
                     next_index += 1
@@ -1213,24 +1224,29 @@ def analyze(source, client, cache_dir, *, chunk_chars=12000, repair_attempts=1,
         document["provenance"]["attribution_subdivisions"] = [
             row for row in attribution_subdivisions if row is not None
         ]
+    meter(0.90, "Reviewing performance")
     from .attribution_performance import review_inline_performance
     document = review_inline_performance(document, requests, workers=min(5, attribution_workers), progress=progress)
     document = apply_bracket_delivery(document, policy.get("bracketed_text", BRACKET_DIRECTION))
     if attribution_review:
+        meter(0.93, "Reviewing attribution")
         from .attribution_review import audit_attribution
         document = audit_attribution(document, requests, workers=min(5, attribution_workers),
                                      review_chunk_chars=attribution_review_chunk_chars,
                                      review_notes=attribution_review_notes or cast_review_notes,
                                      progress=progress)
+    meter(0.96, "Completing speakers")
     from .narration_boundaries import repair_narration_boundaries
     document = repair_narration_boundaries(document, progress=progress)
     from .speaker_completion import complete_speakers
     document = complete_speakers(document, requests, workers=min(5, attribution_workers), progress=progress)
     document = repair_narration_boundaries(document, progress=progress)
+    meter(0.99, "Validating analysis")
     state = readiness(document)
     if state["errors"]:
         raise ValueError("; ".join(state["errors"][:12]))
     document["readiness"] = state
+    meter(1.0, "Complete")
     return document
 
 

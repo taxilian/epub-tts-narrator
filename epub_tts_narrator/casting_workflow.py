@@ -30,7 +30,8 @@ def _unreviewed_merges(source, cast, pending, issues):
 
 
 def gather_cast(source, requests, batches, *, policy, series_registry=None,
-                identity_consensus=True, workers=1, review_notes="", progress=lambda message: None):
+                identity_consensus=True, workers=1, review_notes="", progress=lambda message: None,
+                meter=lambda fraction, stage: None):
     """Build a canonical cast without a configured number of discovery passes."""
     from .casting_discovery import discover_candidates
     from .casting_coverage import verify_coverage
@@ -39,7 +40,8 @@ def gather_cast(source, requests, batches, *, policy, series_registry=None,
 
     discovered = discover_candidates(source, requests, batches, policy=policy,
                                      series_registry=series_registry,
-                                     workers=workers, progress=progress)
+                                     workers=workers, progress=progress, meter=meter)
+    meter(0.25, "Auditing identities")
     cast = discovered["cast"]
     issues = []
     _add_issues(issues, discovered["provenance"]["issues"])
@@ -56,11 +58,13 @@ def gather_cast(source, requests, batches, *, policy, series_registry=None,
     else:
         cast = _unreviewed_merges(source, cast, pending, issues)
     check_cast(source, cast)
+    meter(0.32, "Casting coverage")
 
     before_coverage = deepcopy(cast)
     coverage = verify_coverage(source, cast, requests, batches, policy=policy,
                                review_notes=review_notes, progress=progress)
     cast = coverage["cast"]
+    meter(0.40, "Rechecking identities")
     _add_issues(issues, coverage.get("issues", []))
     pending = coverage["pending_merges"]
     dirty = coverage["dirty_regions"]
@@ -101,6 +105,7 @@ def gather_cast(source, requests, batches, *, policy, series_registry=None,
         identity_passes.append(continuity)
         _add_issues(issues, additions)
     check_cast(source, cast)
+    meter(0.45, "Casting complete")
 
     identity = deepcopy(identity_passes[-1]) if identity_passes else None
     if identity is not None and len(identity_passes) > 1:

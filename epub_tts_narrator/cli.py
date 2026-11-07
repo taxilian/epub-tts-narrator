@@ -647,7 +647,8 @@ def main(argv=None):
                         cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
                         cast_reconciliation_notes=settings["cast_reconciliation_notes"],
                         series_registry=registry,
-                        policy=config["performance_policy"], progress=progress)
+                        policy=config["performance_policy"], progress=progress,
+                        meter=stream_console.set_progress)
                     if edits is not None:
                         document = apply_edits(document, edits)
                     complete("analyzed")

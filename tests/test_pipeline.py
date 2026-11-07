@@ -280,6 +280,16 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(all("description" not in voice and "traits" not in voice
                             and "speechTraits" not in voice for voice in final_cast_sent["voices"]))
 
+    def test_analysis_reports_monotonic_overall_progress_through_completion(self):
+        events = []
+        self.run_analysis(meter=lambda fraction, stage: events.append((fraction, stage)))
+        self.assertEqual(events[0][0], 0.0)
+        self.assertEqual(events[-1][0], 1.0)
+        self.assertEqual(events[-1][1], "Complete")
+        self.assertEqual([value for value, _ in events], sorted(value for value, _ in events))
+        self.assertTrue(any(stage.startswith("Casting discovery") for _, stage in events))
+        self.assertTrue(any(stage.startswith("Attribution ") for _, stage in events))
+
     def test_slim_discovery_gathers_cast_and_ensemble_authors_the_published_profiles(self):
         client = SlimDiscoveryClient()
         document = self.run_analysis(client)

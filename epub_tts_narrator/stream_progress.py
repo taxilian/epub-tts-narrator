@@ -38,6 +38,21 @@ class StreamConsole:
         self._last_draw = 0.0
         self._thread = None
         self._pending = ""
+        self._overall = 0.0
+        self._stage = ""
+
+    def set_progress(self, fraction, stage):
+        if not self.enabled:
+            return
+        try:
+            fraction = min(1.0, max(0.0, float(fraction)))
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            self._overall = max(self._overall, fraction)
+            self._stage = str(stage)
+            if self._active:
+                self._draw_locked(monotonic())
 
     def close(self):
         if not self.enabled:
@@ -165,7 +180,8 @@ class StreamConsole:
             first = "Waiting for provider response"
         if quiet >= 1:
             first += f" · quiet {_seconds(quiet)}"
-        second = (f"LLM {len(states)} active | elapsed {_seconds(now - oldest)} | "
+        second = (f"LLM {len(states)} active | overall {self._overall:.0%} "
+                  f"{self._stage} | elapsed {_seconds(now - oldest)} | "
                   f"{events} events | thought {reasoning:,} chars | "
                   f"answer {content:,} chars | {_size(received)} received")
         self._clear_locked()
