@@ -227,21 +227,29 @@ class EncodingIntegrationTests(unittest.TestCase):
         self.assertTrue(manifest["chapters"][1]["skipped"])
         self.assertIsNone(manifest["chapters"][1]["path"])
         self.assertFalse((output / "chapters/chapter-0002.m4a").exists())
-        inspection = probe_audio(output / "book.m4b")
+        book_path = output / manifest["audiobook"]["path"]
+        self.assertEqual(book_path.name, "Book = #; é.m4b")
+        self.assertFalse((output / "book.m4b").exists())
+        self.assertEqual(sync["audio_file"], book_path.name)
+        inspection = probe_audio(book_path)
         self.assertEqual(len(inspection["chapters"]), 2)
         self.assertEqual(inspection["chapters"][0]["tags"]["title"], chapters[0]["title"])
         self.assertEqual(inspection["format"]["tags"]["title"], "Book = #;\\ é")
         self.assertTrue(any(stream.get("disposition", {}).get("attached_pic")
                             for stream in inspection["streams"]))
-        self.assertEqual(sync["audio_sha256"], hashlib.sha256((output / "book.m4b").read_bytes()).hexdigest())
+        self.assertEqual(sync["audio_sha256"], hashlib.sha256(book_path.read_bytes()).hexdigest())
         with self.assertRaisesRegex(ValueError, "already exists"):
             package_audio(chapters, output, book={})
 
     def test_mp3_chapters_still_produce_aac_book_from_pcm(self):
         output = self.root / "output"
-        manifest = package_audio(self.chapters(), output, book={"title": "Book"}, chapter_format="mp3")
+        manifest = package_audio(self.chapters(), output, book={"title": "Book"}, chapter_format="mp3",
+                                 audiobook_name="Recorded Book Name.m4b")
         chapter = probe_audio(output / "chapters/chapter-0001.mp3")
-        book = probe_audio(output / "book.m4b")
+        book_path = output / manifest["audiobook"]["path"]
+        book = probe_audio(book_path)
+        self.assertEqual(book_path.name, "Recorded Book Name.m4b")
+        self.assertEqual(json.loads((output / "sync.json").read_text())["audio_file"], book_path.name)
         self.assertEqual(chapter["streams"][0]["codec_name"], "mp3")
         self.assertEqual(book["streams"][0]["codec_name"], "aac")
         self.assertEqual(manifest["frames"], 57330)
