@@ -95,6 +95,52 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(read_json(directory / "accepted.json"), accepted)
         self.assertEqual(file_hash(directory / failed["audio_file"]), failed["audio_sha256"])
 
+    def test_contextual_take_cleanup_uses_recorded_audio_names(self):
+        # Given an accepted take whose normalized and RAW names carry request context.
+        request = {"kind": "speech", "chunk": {"chunk_id": "chunk-42"}}
+        directory = self.work / "clips" / digest(request)
+        directory.mkdir(parents=True)
+        normalized = directory / "attempt-001-chunk-42-voice-mara-take.wav"
+        raw = directory / "attempt-001-chunk-42-voice-mara-raw.wav"
+        unrelated = directory / "attempt-001-other-voice-raw.wav"
+        for path, data in ((normalized, b"normalized"), (raw, b"raw"), (unrelated, b"unrelated")):
+            path.write_bytes(data)
+        record = {"request": request, "request_hash": digest(request), "attempt": 1,
+                  "audio_file": normalized.name, "raw_file": raw.name,
+                  "audio_sha256": file_hash(normalized), "report": {"passed": True}}
+        write_json(directory / "attempt-001.json", record)
+        write_json(directory / "accepted.json", record)
+
+        # When cleaning accepted intermediates.
+        report = clean_take_intermediates(directory)
+
+        # Then only the exact accepted RAW source is removed; all other artifacts survive.
+        self.assertEqual(report["files_removed"], 1)
+        self.assertFalse(raw.exists())
+        self.assertEqual(normalized.read_bytes(), b"normalized")
+        self.assertEqual(unrelated.read_bytes(), b"unrelated")
+        self.assertEqual(read_json(directory / "accepted.json"), record)
+
+    def test_discard_interrupted_raw_recognizes_contextual_pending_take(self):
+        # Given a pending take with no normalized output and a contextual RAW orphan.
+        request = {"kind": "speech", "chunk": {"chunk_id": "chunk-42"}}
+        directory = self.work / "clips" / digest(request)
+        directory.mkdir(parents=True)
+        raw = directory / "attempt-1001-chunk-42-voice-mara-raw.wav"
+        raw.write_bytes(b"interrupted raw")
+        record = {"request": request, "request_hash": digest(request), "attempt": 1001,
+                  "audio_file": None, "raw_file": raw.name, "audio_sha256": None,
+                  "report": {"passed": False, "reasons": ["generation_incomplete"]}}
+        write_json(directory / "attempt-1001.json", record)
+
+        # When discarding interrupted generation before a fresh attempt.
+        removed = discard_interrupted_raw(directory)
+
+        # Then the owned orphan is removed and its attempt record remains.
+        self.assertEqual(removed, 1)
+        self.assertFalse(raw.exists())
+        self.assertEqual(read_json(directory / "attempt-1001.json"), record)
+
     def test_winner_acceptance_is_sufficient_without_attempt_record(self):
         directory, _ = self.take()
         (directory / "attempt-001.json").unlink()

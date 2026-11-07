@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import stat
 
+from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json
 
 
@@ -19,8 +20,9 @@ _HASH = re.compile(r"[0-9a-f]{64}")
 # Per-run retry limits do not limit cumulative take IDs. Keep canonical
 # minimum-three-digit names, including attempts beyond 999, recognizable.
 _ATTEMPT_NUMBER = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})"
-_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
-_ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})\.(?:wav|json)")
+_LEGACY_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
+_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?![0-9]).*-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
+_ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?:\.json|\.wav|-.+-take\.wav)")
 _SPEECH = {"speech", "paragraph_speech", "speech_recovery_part"}
 _STORES = ("clips", "chapters", "mixes", "completed-chapters", "speech-cache")
 
@@ -113,20 +115,22 @@ def _request(record, path):
 
 def _normalized(record, directory, plan, *, request_hash, attempt=None):
     number = record.get("attempt")
-    expected_name = f"attempt-{number:03d}.wav" if type(number) is int else None
+    selected_name = None
     if 'exhaustion_selection' in record.get('engine_metadata', {}):
         from .exhaustion_selection import validate_record
         validate_record(record)
         if not _hash(record.get('audio_sha256')):
             raise ValueError('Selected audio requires its bound checksum')
-        expected_name = 'selection-' + record['audio_sha256'] + '.wav'
+        selected_name = 'selection-' + record['audio_sha256'] + '.wav'
     if (type(number) is not int or number < 1
             or attempt is not None and number != attempt
             or record.get("request_hash") != request_hash
-            or record.get("audio_file") != expected_name
             or not isinstance(record.get("report"), dict)):
         raise ValueError(f"Cleanup found invalid normalized take metadata: {directory}")
-    wav = directory / record["audio_file"]
+    filename = validate_audio_filename(record.get("audio_file"), suffix=".wav")
+    if selected_name is not None and filename != selected_name:
+        raise ValueError(f"Cleanup found invalid normalized take metadata: {directory}")
+    wav = directory / filename
     plan.check_file(wav, record.get("audio_sha256"))
     if not _hash(record.get("audio_sha256")):
         raise ValueError(f"Cleanup needs a normalized audio checksum: {wav}")
@@ -156,6 +160,7 @@ def _take(directory, plan, *, require_directory_identity=False):
         _file(raw)
         attempt = int(match[1])
         metadata = directory / f"attempt-{attempt:03d}.json"
+        owner = None
         if _exists(metadata):
             record = _json(metadata)
             plan.check_file(metadata)
@@ -167,7 +172,16 @@ def _take(directory, plan, *, require_directory_identity=False):
             if record.get("audio_file") is None and record.get("audio_sha256") is None:
                 continue
             _normalized(record, directory, plan, request_hash=accepted["request_hash"], attempt=attempt)
-        elif attempt != accepted["attempt"]:
+            owner = record
+        elif attempt == accepted["attempt"]:
+            owner = accepted
+        else:
+            continue
+        recorded_raw = owner.get("raw_file")
+        if recorded_raw is not None:
+            if raw.name != validate_audio_filename(recorded_raw, suffix=".wav"):
+                continue
+        elif _LEGACY_RAW.fullmatch(raw.name) is None:
             continue
         plan.remove_file(raw, "speech_intermediates")
 
@@ -210,6 +224,7 @@ def discard_interrupted_raw(directory):
                 raise ValueError(f"Cleanup found an invalid accepted attempt: {accepted_path}")
             protected.add(number)
     paths = sorted(directory.iterdir())
+    records = {}
     for metadata in paths:
         match = _ATTEMPT.fullmatch(metadata.name)
         if match is None or metadata.suffix != ".json":
@@ -223,6 +238,7 @@ def discard_interrupted_raw(directory):
             raise ValueError(f"Cleanup found mismatched attempt metadata: {metadata}")
         if not isinstance(record.get("report"), dict):
             raise ValueError(f"Cleanup found invalid verification metadata: {metadata}")
+        records[number] = record
         if record["report"].get("passed") is True:
             protected.add(number)
     for raw in paths:
@@ -231,9 +247,21 @@ def discard_interrupted_raw(directory):
             continue
         _file(raw)
         number = int(match[1])
-        normalized = directory / f"attempt-{number:03d}.wav"
-        if _exists(normalized):
-            plan.check_file(normalized)
+        record = records.get(number)
+        recorded_raw = record.get("raw_file") if record is not None else None
+        if recorded_raw is not None:
+            if raw.name != validate_audio_filename(recorded_raw, suffix=".wav"):
+                continue
+        elif _LEGACY_RAW.fullmatch(raw.name) is None:
+            continue
+        normalized_candidates = {directory / f"attempt-{number:03d}.wav"}
+        if record is not None and record.get("audio_file") is not None:
+            normalized_candidates.add(directory / validate_audio_filename(record["audio_file"], suffix=".wav"))
+        normalized_candidates.update(directory.glob(f"attempt-{number:03d}-*-take.wav"))
+        if any(_exists(normalized) for normalized in normalized_candidates):
+            for normalized in normalized_candidates:
+                if _exists(normalized):
+                    plan.check_file(normalized)
             continue
         if number not in protected:
             plan.remove_file(raw, "interrupted_speech")
