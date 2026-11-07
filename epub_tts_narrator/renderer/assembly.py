@@ -589,7 +589,7 @@ def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
     codec = (aac_codec_arguments(aac_bitrate) if chapter_format == "m4a"
              else ["-c:a", "libmp3lame", "-b:a", mp3_bitrate])
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=target.parent) as temporary:
-        staged = Path(temporary) / f"chapter.{chapter_format}"
+        staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
               "-i", str(Path(chapter["wav_path"]).resolve()), "-map", "0:a:0"]
              + codec + ["-metadata", f"title={chapter['title']}",

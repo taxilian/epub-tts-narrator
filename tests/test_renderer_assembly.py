@@ -14,7 +14,7 @@ import zipfile
 import zlib
 
 from epub_tts_narrator.renderer.assembly import (
-    compose_chapter, extract_cover, normalize_clip, package_audio, probe_audio,
+    compose_chapter, encode_chapter, extract_cover, normalize_clip, package_audio, probe_audio,
 )
 
 
@@ -244,6 +244,33 @@ class EncodingIntegrationTests(unittest.TestCase):
         empty = compose_chapter([], self.root / "empty.wav")
         empty.update(id="empty", title="Empty", script_path="scripts/empty.jsonl")
         return [chapters[0], empty, chapters[1]]
+
+    def test_chapter_encoding_stages_under_the_actual_destination_basename(self):
+        # Given one lossless chapter and descriptive encoded destinations.
+        from epub_tts_narrator.renderer import assembly
+        chapter = compose_chapter([clip(self.wav)], self.root / "chapter-0007.wav")
+        chapter.update(id="ch7", title="Seventh chapter")
+        run = assembly._run
+
+        for chapter_format in ("m4a", "mp3"):
+            with self.subTest(chapter_format=chapter_format):
+                outputs = []
+                def record_run(arguments, **kwargs):
+                    outputs.append(Path(arguments[-1]).name)
+                    return run(arguments, **kwargs)
+                target = self.root / f"chapter-0007.{chapter_format}"
+
+                # When FFmpeg encodes and FFprobe inspects the actual staged output.
+                with patch("epub_tts_narrator.renderer.assembly._run", side_effect=record_run):
+                    result = encode_chapter(chapter, target, book={"title": "Book", "authors": ["Author"]},
+                                            ordinal=7, total_chapters=9, chapter_format=chapter_format)
+
+                # Then neither tool ever sees a generic chapter basename.
+                self.assertEqual(outputs, [target.name, target.name])
+                self.assertEqual(Path(result["path"]), target)
+                self.assertEqual(result["sha256"], hashlib.sha256(target.read_bytes()).hexdigest())
+                self.assertEqual(result["frames"], chapter["frames"])
+                target.unlink()
 
     def test_m4a_chapters_and_m4b_cover_metadata_and_pcm_sync(self):
         cover = self.root / "cover.png"
