@@ -9,7 +9,7 @@ from threading import Lock
 
 
 _GENERATION_FILE = re.compile(
-    r"attempt-([0-9]{3,})(?:\.json|\.wav|-.+-take\.wav|"
+    r"attempt-([0-9]{3,})(?![0-9])(?:\.json|\.wav|-.+-take\.wav|"
     r".*-(?:raw|recovery-raw|regenerated-[0-9a-f]{16})\.wav)"
 )
 
