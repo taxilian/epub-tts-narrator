@@ -14,6 +14,7 @@ from time import monotonic
 import unicodedata
 
 from .assembly import normalize_clip, package_audio
+from .audio_naming import descriptive_audio_filename
 from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .chapter_records import signed_record
@@ -1108,7 +1109,8 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
         if existing is not None and not existing.get("inherited"):
             raise ValueError("Voice already exists; immutable bindings cannot be replaced by import")
         with tempfile.TemporaryDirectory(prefix=".import-", dir=store.directory) as temp:
-            wav = Path(temp) / "reference.wav"
+            wav = Path(temp) / descriptive_audio_filename(
+                "import-normalized-reference", voice_id, Path(audio).stem, suffix=".wav")
             normalize_clip(audio, wav, sample_rate=config["render"]["sample_rate"], ffmpeg=config["render"]["ffmpeg"])
             report = validate_audio(wav, transcript, verifier, config["quality"], purpose="reference")
             if not report["passed"]:
