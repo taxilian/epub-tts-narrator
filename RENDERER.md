@@ -461,8 +461,11 @@ edited paragraph from a serial update):
   unchanged is kept although an earlier take it heard is now different; only
   takes generated afterwards hear the current history. Reuse is tied to the
   take's own line (chunk ID): an identical line elsewhere is never moved into
-  this position, and one take never fills two positions in a chapter. The
-  cost is a possible small seam in delivery right after the changed take.
+  this position, and one take never fills two positions in a chapter. Only
+  takes that passed ordinary verification are kept this way. A best-effort
+  exhaustion choice regenerates when its history changes, since the new
+  history may produce a take that passes. The cost is a possible small seam in
+  delivery right after the changed take.
   `cache-report` counts these as hits and separately as
   `history_changed_hits`. A take reused this way is never published under the
   new history's cache identity, so `strict` still sees it as generated after

@@ -164,6 +164,27 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual([text for text, options in self.model.calls[6:]], [tagged("Final words.")])
         self.assertEqual(histories(self.model)[6], [tagged("Other words."), tagged("Changed words.")])
 
+    def test_tolerant_history_reuse_keeps_only_ordinarily_verified_takes(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer import speech_cache
+        self.run_chapter()
+        self.chunks[2]["spoken_text"] = self.chunks[2]["segment"]["text"] = "Changed words."
+        ordinary = speech_cache.ordinarily_verified
+
+        def best_effort_fourth(record):
+            # Treat the fourth line's take as a best-effort exhaustion choice.
+            return ordinary(record) and record["request"]["chunk"]["spoken_text"] != "Fourth words."
+
+        with patch.object(speech_cache, "ordinarily_verified", side_effect=best_effort_fourth):
+            self.run_chapter()
+        # Its history changed, so the best-effort take is not kept: it gets a
+        # fresh chance at an ordinarily verified take.
+        self.assertEqual([text for text, options in self.model.calls[4:]],
+                         [tagged("Changed words."), tagged("Fourth words.")])
+        self.assertTrue(ordinary({"report": {"passed": True}, "engine_metadata": {}}))
+        self.assertFalse(ordinary({"report": {"passed": True, "text_confirmation_method": "llm_exhaustion_selection"}}))
+        self.assertFalse(ordinary({"report": {"passed": True}, "engine_metadata": {"exhaustion_selection": {}}}))
+
     def test_tolerant_history_reuse_never_moves_a_take_to_another_line(self):
         self.run_chapter()
         # The second line now says what the fourth said; the fourth line's

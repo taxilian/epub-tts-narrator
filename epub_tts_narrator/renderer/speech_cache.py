@@ -12,6 +12,14 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .speech_identity import generation_compatible, generation_identity, synthesis_engine_identity
 
 
+def ordinarily_verified(record):
+    """True for a take accepted by ordinary verification, not a best-effort choice."""
+    report = record.get("report") or {}
+    return (report.get("passed") is True
+            and report.get("text_confirmation_method") != "llm_exhaustion_selection"
+            and "exhaustion_selection" not in (record.get("engine_metadata") or {}))
+
+
 class SpeechCache:
     def __init__(self, work, voices):
         self.work = Path(work)
@@ -264,6 +272,10 @@ class SpeechCache:
                 if saved is None:
                     continue
                 record = saved[2]
+                if not ordinarily_verified(record):
+                    # Only takes that passed ordinary verification survive a
+                    # history change; a best-effort choice regenerates.
+                    continue
                 if not generation_compatible(dict(entry["identity"], continuity=identity["continuity"]), identity,
                         saved_engine=record["request"]["engine"], current_engine=request["engine"],
                         engine_metadata=record.get("engine_metadata")):
@@ -324,6 +336,10 @@ class SpeechCache:
                     and entry["accepted_sha256"] == file_hash(path)), None)
             if original is not None and tolerate_history:
                 if without_history(original) is None or without_history(identity) is None:
+                    return False
+                if original.get("continuity") != identity.get("continuity") and not ordinarily_verified(record):
+                    # A best-effort choice is kept only for its exact history;
+                    # a changed history may now yield an ordinarily verified take.
                     return False
                 original = dict(original, continuity=identity["continuity"])
             return original is not None and generation_compatible(original, identity,
