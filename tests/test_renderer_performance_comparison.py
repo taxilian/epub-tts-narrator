@@ -118,6 +118,8 @@ class PerformanceComparisonTests(unittest.TestCase):
             self.assertEqual(file_hash(prepared["directory"] / "snapshot" / name), checksum)
         for voice_id in make_plan(self.bundle, self.resolved)["voice_ids"]:
             self.assertEqual(prepared["voice_store"].load(voice_id)["asset_hash"], self.store.load(voice_id)["asset_hash"])
+            self.assertEqual(Path(prepared["voice_store"].load(voice_id)["reference_audio"]).name,
+                             Path(self.store.load(voice_id)["reference_audio"]).name)
         self.assertEqual(inventory(self.root / "book"), original_book)
         self.assertEqual(inventory(self.root / "voices"), original_voices)
         raw = (self.directory / "comparison.json").read_text()

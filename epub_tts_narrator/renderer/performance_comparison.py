@@ -229,7 +229,7 @@ def prepare_comparison(bundle, config, chapter_number, directory):
             copied.add(key)
             source = Path(item["reference_audio"]).parent
             target = store._candidate_folder(*key)
-            for name in ("reference.wav", "voice.json", "voice.sha256"):
+            for name in (Path(item["reference_audio"]).name, "voice.json", "voice.sha256"):
                 destination = target / name
                 inventory[str(destination.relative_to(root))] = _copy(source / name, destination)
             if item["candidate_id"] != VoiceStore.LEGACY_CANDIDATE:
