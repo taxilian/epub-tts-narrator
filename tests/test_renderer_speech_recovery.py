@@ -167,7 +167,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         marker = read_json(self.parent / "speech-recovery.json")
         final = self.parent.parent / marker["recovery_request_hash"]
         self.assertFalse((final / "accepted.json").exists())
-        self.assertFalse((final / "attempt-001.wav").exists())
+        self.assertFalse(any(final.glob("attempt-001*.wav")))
         self.assertTrue(next((final / "parts").glob("*/accepted.json")).is_file())
         self.bad_part = None
         wav, accepted = self.recover(retry_budget=SpeechRetryBudget())
@@ -209,7 +209,8 @@ class SpeechRecoveryTests(unittest.TestCase):
         with self.assertRaises(VerificationUnavailable):
             self.recover(verifier=wrapped)
         marker = read_json(self.parent / "speech-recovery.json")
-        wav = self.parent.parent / marker["recovery_request_hash"] / "attempt-001.wav"
+        directory = self.parent.parent / marker["recovery_request_hash"]
+        wav = directory / read_json(directory / "attempt-001.json")["audio_file"]
         previous = wav.read_bytes()
         self.verifier.final_transcript = None
         reused, accepted = self.recover(verifier=wrapped)
@@ -225,7 +226,7 @@ class SpeechRecoveryTests(unittest.TestCase):
             self.recover()
         marker = read_json(self.parent / "speech-recovery.json")
         directory = self.parent.parent / marker["recovery_request_hash"]
-        wav = directory / "attempt-001.wav"
+        wav = directory / read_json(directory / "attempt-001.json")["audio_file"]
         previous = wav.read_bytes()
         record = read_json(directory / "attempt-001.json")
         self.assertTrue(record["report"]["retry_on_resume"])
@@ -255,10 +256,10 @@ class SpeechRecoveryTests(unittest.TestCase):
                     self.recover()
                 marker = read_json(self.parent / "speech-recovery.json")
                 directory = self.parent.parent / marker["recovery_request_hash"]
-                self.assertFalse((directory / "attempt-001.wav").exists())
+                self.assertFalse(any(directory.glob("attempt-001-*-take.wav")))
                 self.assertFalse((directory / "accepted.json").exists())
-                self.assertEqual([path.name for path in directory.glob("*.wav")],
-                                 ["attempt-001-raw.wav"])
+                pending = read_json(directory / "attempt-001.json")
+                self.assertEqual([path.name for path in directory.glob("*.wav")], [pending["raw_file"]])
                 self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(normalization_calls), 3)
         wav, accepted = self.recover()
@@ -266,7 +267,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.verifier.calls), 3)
-        self.assertFalse((directory / "attempt-001-recovery-raw.wav").exists())
+        self.assertFalse(list(directory.glob("*-recovery-raw.wav")))
 
     def test_marker_tampering_and_changed_audio_are_rejected(self):
         wav, accepted = self.recover()

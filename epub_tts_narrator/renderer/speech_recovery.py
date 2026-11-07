@@ -8,6 +8,7 @@ import re
 import tempfile
 import wave
 
+from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .speech_text import trim_speech_text
 
@@ -130,7 +131,7 @@ def _concatenate(parts, target, sample_rate):
     if target.exists() or target.is_symlink():
         raise ValueError("Speech recovery output already exists")
     with tempfile.TemporaryDirectory(prefix=".recovery-join-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "joined.wav"
+        staged = Path(temporary) / target.name
         with wave.open(str(staged), "wb") as output:
             output.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
             for path, record in parts:
@@ -210,7 +211,13 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
         if not _existing_marker(parent, marker):
             write_json(parent / _MARKER, marker)
         directory.mkdir(parents=True, exist_ok=True)
-        if not (directory / "attempt-001.wav").exists():
+        attempt_path = directory / "attempt-001.json"
+        joined_name = speech_take_filename(request, 1)
+        if attempt_path.exists() or attempt_path.is_symlink():
+            saved_attempt = read_json(regular_file(attempt_path))
+            if saved_attempt.get("audio_file") is not None:
+                joined_name = validate_audio_filename(saved_attempt["audio_file"], suffix=".wav")
+        if not (directory / joined_name).exists():
             # An interrupted join or normalization has no accepted full waveform.
             # Recreate that cheap assembly from verified children, without keeping
             # successive orphan raw names or disturbing pending normalized audio.
