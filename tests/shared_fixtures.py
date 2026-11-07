@@ -4,10 +4,12 @@ from copy import deepcopy
 import hashlib
 import io
 import os
+from pathlib import Path
 import shutil
 import wave
 import zipfile
 
+from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 
@@ -31,6 +33,34 @@ class Terminal(io.StringIO):
 def snapshot(directory):
     return {str(path.relative_to(directory)): path.read_bytes()
             for path in directory.rglob("*") if path.is_file()}
+
+
+def rebind_audiobook_filename(directory, filename, *, record_path=True):
+    """Simulate an intact preexisting publication with its recorded output name."""
+    directory = Path(directory)
+    record = read_json(directory / "render.json")
+    audio = record["audio"]
+    sync = read_json(directory / "sync.json")
+    current = audio.get("audiobook", {}).get("path") or sync.get("audio_file") or "book.m4b"
+    if current != filename:
+        (directory / current).rename(directory / filename)
+    audiobook = audio.setdefault("audiobook", {})
+    if record_path:
+        audiobook["path"] = filename
+    else:
+        audiobook.pop("path", None)
+    sync["audio_file"] = filename
+    write_json(directory / "sync.json", sync)
+    if isinstance(audio.get("sync"), dict):
+        audio["sync"]["sha256"] = file_hash(directory / "sync.json")
+    write_json(directory / "audio-manifest.json", audio)
+    files = record["files_sha256"]
+    files.pop(current, None)
+    files[filename] = file_hash(directory / filename)
+    files["sync.json"] = file_hash(directory / "sync.json")
+    files["audio-manifest.json"] = file_hash(directory / "audio-manifest.json")
+    write_json(directory / "render.json", record)
+    return record
 
 
 def pcm_hash(path):

@@ -14,7 +14,7 @@ from epub_tts_narrator.renderer.common import digest, file_hash, read_json, writ
 from epub_tts_narrator.renderer.publication import check_selection, published_book, publish
 from epub_tts_narrator.renderer.workflow import render
 from audition_fixtures import prepare_document
-from shared_fixtures import renderer_config
+from shared_fixtures import rebind_audiobook_filename, renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 
@@ -46,6 +46,31 @@ class PublicationSafetyTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.output = self.root / "output"
         self.previous = managed_output(self.output)
+
+    def test_custom_recorded_filename_is_accepted_as_the_owned_book(self):
+        # Given an intact existing publication whose manifest records a custom basename.
+        self.previous = rebind_audiobook_filename(self.output, "Existing Custom Name.m4b")
+
+        # When validating publication ownership.
+        published = published_book(self.output, "fixture-book")
+
+        # Then the recorded file, not book.m4b, is the required owned audiobook.
+        self.assertEqual(published, self.previous)
+        self.assertFalse((self.output / "book.m4b").exists())
+
+    def test_unsafe_recorded_filename_is_refused_before_replacement(self):
+        # Given a manifest whose persisted name attempts to escape the publication.
+        malformed = deepcopy(self.previous)
+        malformed["audio"]["audiobook"] = {"path": "../outside.m4b"}
+        write_json(self.output / "audio-manifest.json", malformed["audio"])
+        malformed["files_sha256"]["audio-manifest.json"] = file_hash(self.output / "audio-manifest.json")
+        write_json(self.output / "render.json", malformed)
+
+        # When validating it, then the existing output remains intact and no outside file is created.
+        with self.assertRaisesRegex(ValueError, "audio.audiobook.path"):
+            published_book(self.output, "fixture-book")
+        self.assertTrue((self.output / "book.m4b").is_file())
+        self.assertFalse((self.root / "outside.m4b").exists())
 
     def test_untracked_files_and_even_empty_directories_block_replacement(self):
         for name, is_directory in (("notes.txt", False), ("personal-notes", True)):
