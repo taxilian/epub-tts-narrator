@@ -15,7 +15,7 @@ from epub_tts_narrator.renderer.common import digest, file_hash, read_json, writ
 from epub_tts_narrator.renderer.publication import published_book, publish
 from epub_tts_narrator.renderer.refresh_metadata import _audio_payload_hash, refresh_metadata
 from epub_tts_narrator.source_epub import source_epub_hint
-from shared_fixtures import FFMPEG, FFPROBE, renderer_config, snapshot
+from shared_fixtures import FFMPEG, FFPROBE, rebind_audiobook_filename, renderer_config, snapshot
 import test_renderer_assembly as audio_fixtures
 
 
@@ -95,14 +95,18 @@ class RefreshMetadataTests(unittest.TestCase):
             (links / f"chapter-{number:02d}.m4a").symlink_to(
                 f"../chapters/chapter-{number:04d}.m4a")
         saved = snapshot(self.output)
+        book_name = previous["audio"]["audiobook"]["path"]
+        book_path = self.output / book_name
+        self.assertEqual(book_name, "Legacy title.m4b")
         original_sync = read_json(self.output / "sync.json")
-        original_probe = probe_audio(self.output / "book.m4b", ffprobe=FFPROBE)
-        original_payload = _audio_payload_hash(self.output / "book.m4b", FFMPEG)
+        original_probe = probe_audio(book_path, ffprobe=FFPROBE)
+        original_payload = _audio_payload_hash(book_path, FFMPEG)
         config_before = deepcopy(self.config)
         result = refresh_metadata(self.bundle, self.config, notify=lambda message: None)
 
         self.assertEqual(self.config, config_before)
-        self.assertEqual(_audio_payload_hash(self.output / "book.m4b", FFMPEG), original_payload)
+        self.assertEqual(result["audio"]["audiobook"]["path"], book_name)
+        self.assertEqual(_audio_payload_hash(book_path, FFMPEG), original_payload)
         self.assertEqual(result, published_book(self.output, self.book_id))
         self.assertEqual(result["audio"]["chapters"], previous["audio"]["chapters"])
         for number in (1, 2):
@@ -111,17 +115,17 @@ class RefreshMetadataTests(unittest.TestCase):
             self.assertEqual(link.resolve(), self.output / "chapters" / f"chapter-{number:04d}.m4a")
             self.assertNotIn(link.relative_to(self.output).as_posix(), result["files_sha256"])
         self.assertNotIn("publication_key", result)
-        checksum = file_hash(self.output / "book.m4b")
+        checksum = file_hash(book_path)
         self.assertEqual(read_json(self.output / "sync.json"),
                          dict(original_sync, audio_sha256=checksum))
         self.assertEqual(result["audio"]["audiobook"]["sha256"], checksum)
         self.assertEqual(result["audio"]["sync"]["sha256"], file_hash(self.output / "sync.json"))
         self.assertTrue(result["audio"]["audiobook"]["cover_embedded"])
-        self.assertNotEqual(saved["book.m4b"], (self.output / "book.m4b").read_bytes())
+        self.assertNotEqual(saved[book_name], book_path.read_bytes())
         for name, data in saved.items():
-            if name not in {"book.m4b", "sync.json", "audio-manifest.json", "render.json"}:
+            if name not in {book_name, "sync.json", "audio-manifest.json", "render.json"}:
                 self.assertEqual((self.output / name).read_bytes(), data, name)
-        inspection = probe_audio(self.output / "book.m4b", ffprobe=FFPROBE)
+        inspection = probe_audio(book_path, ffprobe=FFPROBE)
         self.assertEqual(inspection["chapters"], original_probe["chapters"])
         covers = [stream for stream in inspection["streams"]
                   if stream.get("disposition", {}).get("attached_pic")]
@@ -139,6 +143,25 @@ class RefreshMetadataTests(unittest.TestCase):
         self.assertEqual(source_epub_hint(self.directory, self.book_id), self.epub)
         for name in ("artwork/cover.jpg", "artwork/original-cover.png"):
             self.assertIn(name, result["files_sha256"])
+        self.assert_no_staging()
+
+    def test_legacy_book_without_path_remuxes_under_book_m4b(self):
+        # Given an old published book whose manifest predates audiobook.path.
+        self.publish_original()
+        rebind_audiobook_filename(self.output, "book.m4b", record_path=False)
+        original_payload = _audio_payload_hash(self.output / "book.m4b", FFMPEG)
+
+        # When refreshing only cover and metadata.
+        result = refresh_metadata(self.bundle, self.config, notify=lambda message: None)
+
+        # Then the remux preserves the legacy name, encoded packets, sync, and checksum references.
+        book = self.output / "book.m4b"
+        self.assertTrue(book.is_file())
+        self.assertFalse((self.output / "Legacy title.m4b").exists())
+        self.assertEqual(result["audio"]["audiobook"]["path"], "book.m4b")
+        self.assertEqual(read_json(self.output / "sync.json")["audio_file"], "book.m4b")
+        self.assertEqual(result["files_sha256"]["book.m4b"], file_hash(book))
+        self.assertEqual(_audio_payload_hash(book, FFMPEG), original_payload)
         self.assert_no_staging()
 
     def test_remux_failure_preserves_the_complete_previous_publication(self):
