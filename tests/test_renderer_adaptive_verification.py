@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.phonetic_review import PronunciationReviewer
 from epub_tts_narrator.renderer.quality import text_confirmation_unavailable
@@ -171,7 +172,8 @@ class AdaptiveVerificationResumeTests(unittest.TestCase):
                 with self.assertRaises(VerificationUnavailable):
                     take()
             self.assertEqual(len(generations), 1)
-            wav = root / "takes" / "attempt-001.wav"
+            pending = read_json(root / "takes" / "attempt-001.json")
+            wav = root / "takes" / pending["audio_file"]
             before = wav.read_bytes()
             client.error = None
             reused, accepted = take()

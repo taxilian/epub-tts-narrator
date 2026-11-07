@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
 from epub_tts_narrator.renderer.workflow import VerificationUnavailable, verified_take
 from epub_tts_narrator.jev import JevTranscriptJudge
@@ -142,7 +143,8 @@ class RelaxedJevTests(unittest.TestCase):
                 with self.assertRaises(VerificationUnavailable):
                     verified_take(expected, generate, directory, {"fixture": True}, verifier, config, purpose="speech")
                 self.assertEqual(len(generated), 1)
-                saved = Path(directory, "attempt-001.wav").read_bytes()
+                pending = read_json(Path(directory, "attempt-001.json"))
+                saved = Path(directory, pending["audio_file"]).read_bytes()
                 path, record = verified_take(expected, generate, directory, {"fixture": True},
                                              verifier, config, purpose="speech")
             self.assertEqual(len(generated), 1)
