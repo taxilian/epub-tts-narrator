@@ -6,8 +6,9 @@ loopback as our own `audiobook-render serve` process with
 `engine.type = "fish_speech_cuda"`, inside the pinned, unmodified Fish Speech
 environment. It calls Fish's library directly because chapter continuity needs
 prior turns with codec tokens and returned codes, which Fish's stock
-`api_server.py` does not offer. Inference serializes requests; several chapter
-coordinators overlap verification and CPU assembly with synthesis. Built-in JEV and
+`api_server.py` does not offer. Each Drama 3 copy serves one request at a time;
+`runpod.inference_replicas` can load several copies on one large GPU (below), and
+several chapter coordinators overlap verification and CPU assembly with synthesis. Built-in JEV and
 pronunciation reviews use a separate bounded queue so network waits do not
 occupy the recognition/model thread.
 
@@ -335,6 +336,37 @@ pinned commit `35e973de` and at `main` on 2026-11-05), so it cannot carry chapte
 history and is rejected. A future batched backend would need custom SGLang
 preprocessing and vocoder stages that accept history and return codes.
 
+Fish's pinned Drama 3 decoder is itself single-request: it allocates caches for
+one row, captures its CUDA decode graphs for one row, and its attention takes one
+shared position for every row, so requests with different prompt lengths cannot
+share a batch without reimplementing parts of the model.
+
+### Several model copies on one GPU
+
+`runpod.inference_replicas` (default 1, at most 4) loads that many independent
+Drama 3 copies on the Pod's one GPU. Each copy is its own inference process on a
+private loopback port (8080, then 8090, 8091, 8092) and serves one request at a
+time; the chapter service sees one single-request worker per copy, so up to that
+many passages from different chapters generate at once. Passages inside one
+chapter stay sequential because each one's history is the previous accepted take.
+
+Each copy needs about 42 GB of GPU memory for weights and codec plus its caches
+and graphs. Before loading anything the worker checks that GPU 0 has at least
+44 GB per copy and stops with the shortfall otherwise; leave room for CUDA
+Whisper too when `verification.device = "cuda"`. An 80 GB H100 holds one copy,
+so more than one replica requires `prefer_h100 = false` and a large-memory
+`gpu_type_id` such as the 96 GB RTX PRO 6000. All copies load together at
+startup, and the smoke check generates and verifies a sample from every copy.
+
+Without MPS the copies time-slice the GPU. `runpod.inference_mps = true` starts a
+private NVIDIA Multi-Process Service daemon (`nvidia-cuda-mps-control`, which
+must be present in the container) for the inference copies only, so their
+kernels can run concurrently; Whisper and the chapter service do not join it.
+The daemon is stopped whenever the worker stops. Changing either setting takes
+effect at the next `runpod update`, or at an `encode` that finds the
+configuration changed. Measure before relying on any speedup; see the benchmark
+section below.
+
 ### Optional CUDA verification
 
 CPU recognition remains the default. To move Whisper onto the same GPU, add
@@ -460,8 +492,9 @@ instead. Do not mount `/workspace` over `/opt`.
 - The inference service loads Drama 3 like the stock server (bfloat16, no
   compilation, codec on the tower device) and generates one chunk per request
   with `build_drama3_prompt(history=...)` and `generate_drama3`, Fish's default
-  sampling (`temperature`/`top_p` 0.7, `top_k` 30) and `set_seed`. Inference
-  concurrency is **1**; no second model copy is loaded.
+  sampling (`temperature`/`top_p` 0.7, `top_k` 30) and `set_seed`. Each copy
+  serves **one** request at a time; `runpod.inference_replicas` (default 1)
+  loads independent copies, never a shared or batched model.
 - Requests and responses use protocol `audiobook-history-wav-v2`: speaker-tagged
   references, up to two history turns with codes, and a MessagePack response
   with the WAV and the generated codes.

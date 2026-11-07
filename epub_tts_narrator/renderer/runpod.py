@@ -1131,7 +1131,8 @@ if pidfile.exists():
         q = shlex.quote
         return (f"{q(self.cfg['app_dir'] + '/.venv/bin/python')} -u "
                 f"{q(self.cfg['app_dir'] + '/deploy/runpod/worker.py')} --config {q(self.cfg['remote_config'])} "
-                f"--fish-source {q(self.cfg['fish_source'])} {action}")
+                f"--fish-source {q(self.cfg['fish_source'])}"
+                f"{' --mps' if self.cfg.get('inference_mps') else ''} {action}")
 
     def launch(self, *, prepare=False):
         # A cold worker must prove run-scoped ownership support in maintenance

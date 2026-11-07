@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.benchmark_rendering import TimedVerifier, generate, load_corpus, pipeline, select_cases, summarize, summarize_pipeline, verify
+from scripts.benchmark_rendering import TimedVerifier, generate, load_corpus, pipeline, select_cases, selected_workers, summarize, summarize_pipeline, verify
 from epub_tts_narrator.renderer.common import digest, file_hash, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
@@ -19,6 +19,26 @@ from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
 
 def row(duration=10, elapsed=2, **changes):
     return {"warmup": False, "audio_seconds": duration, "latency_seconds": elapsed, **changes}
+
+
+class WorkerSelectionTests(unittest.TestCase):
+    def config(self):
+        return {"render_pool": {"workers": [
+            {"name": "drama3-cuda", "type": "fish_http", "concurrency": 1},
+            {"name": "drama3-cuda-2", "type": "fish_http", "concurrency": 1}]}}
+
+    def test_all_selects_every_remote_copy_at_the_requested_per_worker_concurrency(self):
+        config = self.config()
+        workers = selected_workers(config, "all", 1)
+        self.assertEqual([(w["name"], w["concurrency"]) for w in workers], [("drama3-cuda", 1), ("drama3-cuda-2", 1)])
+        self.assertEqual(config["render_pool"]["workers"], workers)
+        with self.assertRaisesRegex(ValueError, "remote workers only"):
+            selected_workers({"render_pool": {"workers": [{"name": "m", "type": "local", "concurrency": 1}]}}, "all", 1)
+
+    def test_single_worker_selection_is_unchanged(self):
+        self.assertEqual([w["name"] for w in selected_workers(self.config(), "drama3-cuda-2", 4)], ["drama3-cuda-2"])
+        with self.assertRaisesRegex(ValueError, "Select one remote worker"):
+            selected_workers(self.config(), None, 1)
 
 
 class SummaryTests(unittest.TestCase):

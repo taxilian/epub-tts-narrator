@@ -52,7 +52,30 @@ DEPLOYMENT_DEFAULTS = {
     "git_ref": "main",
     "idle_timeout_seconds": 300,
     "pod_id": "",
+    # Independent Drama 3 copies on the one GPU, each serving one request at
+    # a time on its own loopback port; each needs its own GPU memory.
+    "inference_replicas": 1,
+    # Run the copies through NVIDIA's Multi-Process Service so their kernels
+    # can share the GPU concurrently instead of time-slicing.
+    "inference_mps": False,
 }
+
+MAX_INFERENCE_REPLICAS = 4
+_FIRST_EXTRA_INFERENCE_PORT = 8090
+
+
+def inference_ports(replicas):
+    """Private loopback ports: 8080 for the first copy, then 8090, 8091, ..."""
+    return [8080] + [_FIRST_EXTRA_INFERENCE_PORT + index for index in range(replicas - 1)]
+
+
+def inference_workers(replicas):
+    """One single-request history worker per Drama 3 copy, in port order."""
+    return [{"name": "drama3-cuda" if index == 0 else f"drama3-cuda-{index + 1}",
+             "type": "fish_http", "protocol": "fish_inline", "model": "drama-3",
+             "url": f"http://127.0.0.1:{port}/v1/tts", "api_key": "", "concurrency": 1,
+             "multi_speaker": True, "timeout_seconds": 600.0}
+            for index, port in enumerate(inference_ports(replicas))]
 
 _REMOTE_SECTIONS = frozenset({
     "engine", "render_pool", "verification", "quality", "render", "jev",
@@ -187,13 +210,24 @@ def _deployment_settings(values, directory):
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:
             raise ValueError(f"runpod.{key} must be an integer from {low} through {high}")
-    if settings["service_port"] in {22, 8080}:
-        raise ValueError("runpod.service_port must differ from SSH port 22 and native speech port 8080")
+    replicas = settings["inference_replicas"]
+    if type(replicas) is not int or not 1 <= replicas <= MAX_INFERENCE_REPLICAS:
+        raise ValueError(f"runpod.inference_replicas must be an integer from 1 through {MAX_INFERENCE_REPLICAS}")
+    if type(settings["inference_mps"]) is not bool:
+        raise ValueError("runpod.inference_mps must be true or false")
+    reserved = {22, *inference_ports(MAX_INFERENCE_REPLICAS)}
+    if settings["service_port"] in reserved:
+        raise ValueError("runpod.service_port must differ from SSH port 22 and the private speech ports "
+                         + ", ".join(str(port) for port in sorted(reserved - {22})))
     price = settings["max_hourly_price"]
     if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price <= 100:
         raise ValueError("runpod.max_hourly_price must be a positive hourly limit at most 100")
     if type(settings["prefer_h100"]) is not bool:
         raise ValueError("runpod.prefer_h100 must be true or false")
+    if settings["inference_replicas"] > 1 and settings["prefer_h100"]:
+        # Each Drama 3 copy needs about 42 GB; an 80 GB H100 holds only one.
+        raise ValueError("runpod.inference_replicas above 1 needs a GPU that holds several Drama 3 copies; "
+                         "set prefer_h100 = false and choose a large-memory gpu_type_id")
     for key in ("app_dir", "fish_source", "remote_config", "model_dir", "whisper_dir", "data_dir"):
         value = settings[key]
         if (not isinstance(value, str) or not value.startswith("/workspace/")
@@ -278,11 +312,9 @@ def build_remote_config(local_renderer_config, override_raw, pod_id, auth_key, *
         raise ValueError("render_pool.scheduler must be legacy or pipeline")
     config["render_pool"] = {
         "model_revision": native.revision,
-        # Our inference service (Fish's library on CUDA) on private loopback.
-        "workers": [{"name": "drama3-cuda", "type": "fish_http", "protocol": "fish_inline",
-                     "model": "drama-3", "url": "http://127.0.0.1:8080/v1/tts",
-                     "api_key": "", "concurrency": 1, "multi_speaker": True,
-                     "timeout_seconds": 600.0}],
+        # Our inference service (Fish's library on CUDA) on private loopback,
+        # one single-request worker per Drama 3 copy on the GPU.
+        "workers": inference_workers(settings["inference_replicas"]),
     }
     if scheduler == "pipeline":
         # Project the validated scheduler controls and honor automatic

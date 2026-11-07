@@ -223,7 +223,18 @@ class GpuSampler:
                                             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=4)
                         if p.returncode == 0:
                             rows = [[float(x.strip()) for x in line.split(",")] for line in p.stdout.splitlines()]
-                            self.samples.append({"time": time.time(), "gpus": rows})
+                            sample = {"time": time.time(), "gpus": rows}
+                            # Per-process GPU memory (MiB), e.g. one row per model copy.
+                            apps = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                                                   "--format=csv,noheader,nounits"],
+                                                  capture_output=True, text=True, timeout=4)
+                            try:
+                                if apps.returncode == 0:
+                                    sample["processes"] = [[int(x.strip()) for x in line.split(",")]
+                                                           for line in apps.stdout.splitlines() if line.strip()]
+                            except ValueError:
+                                pass
+                            self.samples.append(sample)
                     except (OSError, ValueError, subprocess.TimeoutExpired):
                         pass
                     self.stop.wait(1)
@@ -244,10 +255,16 @@ def selected_workers(config, worker_name, concurrency):
             raise ValueError("Local MLX comparison requires concurrency 1")
         # Keep all lazy model operations on the existing persistent MLX thread.
         workers = [{"name": "benchmark-local", "type": "local", "concurrency": 1}]
+    elif worker_name == "all":
+        # Every configured remote worker as configured, e.g. one per Drama 3
+        # copy on a multi-copy Runpod GPU; --concurrency applies per worker.
+        if any(w["type"] == "local" for w in workers):
+            raise ValueError("--worker all measures remote workers only")
+        workers = [dict(w, concurrency=concurrency) for w in workers]
     else:
         workers = [w for w in workers if worker_name is None or w["name"] == worker_name]
         if len(workers) != 1 or workers[0]["type"] == "local":
-            raise ValueError("Select one remote worker, or use --worker local")
+            raise ValueError("Select one remote worker, --worker all, or --worker local")
         workers = [dict(workers[0], concurrency=concurrency)]
     config.setdefault("render_pool", {})["workers"] = workers
     return workers
@@ -348,7 +365,8 @@ def pipeline(args):
     report = {"format": "epub-tts-render-benchmark-results", "version": 1, "mode": "pipeline",
               "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
               "started_utc": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
-              "concurrency": args.concurrency, "results": [], "status": "warming",
+              "concurrency": args.concurrency, "workers": [w["name"] for w in workers],
+              "results": [], "status": "warming",
               "quality": deepcopy(config["quality"]), "transport_protocol": workers[0].get("protocol", "local"),
               "seed_control": "unsupported_stochastic" if "sglang" in workers[0].get("protocol", "") else "requested; see backend metadata",
               "timing_note": "First-pass generation, normalization and verification overlap under production admission and worker limits. Warmups are excluded. No retries, assembly or publication. Pipeline makespan is the throughput denominator; per-row times overlap.",

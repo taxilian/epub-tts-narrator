@@ -33,6 +33,7 @@ from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import load_config
 from epub_tts_narrator.renderer.diagnostics import configured_secrets, safe_error_text
 from epub_tts_narrator.renderer.drama3_models import DEFAULT_DRAMA3_MODEL, DRAMA3_MODELS
+from epub_tts_narrator.renderer.runpod_config import MAX_INFERENCE_REPLICAS, inference_ports
 
 
 APPLICATION_ROOT = Path(__file__).resolve().parents[2]
@@ -42,23 +43,30 @@ WHISPER_REPOSITORY = "Systran/faster-whisper-large-v3"
 WHISPER_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 RECEIPT = ".epub-tts-prepared.json"
 FISH_URL = "http://127.0.0.1:8080/v1/tts"
+# GPU memory one Drama 3 copy needs: about 41.5 GB of bf16 weights and codec
+# plus its caches and captured decode graphs. Checked before any copy loads.
+REPLICA_GPU_MEMORY_MIB = 44 * 1024
+MPS_ROOT = Path("/tmp/epub-tts-mps")
 SMOKE_TEXT = ("The little boat crossed the quiet lake. We reached the far shore before sunset, "
               "then walked home together beneath the stars.")
 
 
 def validate_worker(config):
-    """Check this image's deliberately narrow, single-model deployment profile."""
+    """Check this image's deliberately narrow deployment profile: 1-4 Drama 3
+    copies on one GPU, each a single-request loopback history worker."""
     if config["remote_chapters"]["url"]:
         raise ValueError("The worker config must not set remote_chapters.url")
     workers = config["render_pool"]["workers"]
-    if len(workers) != 1:
-        raise ValueError("Use exactly one private CUDA worker")
-    worker = workers[0]
-    if (worker["type"] != "fish_http" or worker.get("api_key")
-            or worker.get("protocol", "fish_inline") != "fish_inline"
-            or worker["url"] != FISH_URL or worker["concurrency"] != 1):
-        raise ValueError("Use one loopback history worker (protocol fish_inline, concurrency 1) "
-                         "with no internal API key")
+    if not 1 <= len(workers) <= MAX_INFERENCE_REPLICAS:
+        raise ValueError(f"Use 1 through {MAX_INFERENCE_REPLICAS} private CUDA workers")
+    expected = [f"http://127.0.0.1:{port}/v1/tts" for port in inference_ports(len(workers))]
+    for worker, url in zip(workers, expected):
+        if (worker["type"] != "fish_http" or worker.get("api_key")
+                or worker.get("protocol", "fish_inline") != "fish_inline"
+                or worker["url"] != url or worker["concurrency"] != 1):
+            raise ValueError("Use loopback history workers (protocol fish_inline, concurrency 1) on ports "
+                             + ", ".join(str(port) for port in inference_ports(len(workers)))
+                             + " with no internal API key")
     if not config["engine"].get("checkpoint"):
         raise ValueError("engine.checkpoint must name the native Drama 3 model directory")
     if not re.fullmatch(r"[0-9a-f]{40}", config["render_pool"]["model_revision"]):
@@ -70,8 +78,32 @@ def validate_worker(config):
     api_key = config["chapter_server"]["api_key"]
     if not api_key or api_key.upper().startswith("REPLACE-WITH"):
         raise ValueError("Set chapter_server.api_key to a new random application key before starting the worker")
-    if config["chapter_server"]["port"] == 8080:
-        raise ValueError("chapter_server.port must differ from the private Fish port 8080")
+    if config["chapter_server"]["port"] in inference_ports(MAX_INFERENCE_REPLICAS):
+        raise ValueError("chapter_server.port must differ from the private speech ports")
+
+
+def replica_ports(config):
+    return [int(urlsplit(worker["url"]).port) for worker in config["render_pool"]["workers"]]
+
+
+def check_gpu_memory(replicas, *, query=None):
+    """Fail before loading anything when GPU 0 cannot hold every copy."""
+    if query is None:
+        def query():
+            result = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits",
+                                     "--id=0"], capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode:
+                raise RuntimeError("nvidia-smi could not report GPU memory")
+            return result.stdout
+    try:
+        total = int(query().strip().splitlines()[0])
+    except (ValueError, IndexError):
+        raise RuntimeError("nvidia-smi returned an unreadable GPU memory total") from None
+    needed = replicas * REPLICA_GPU_MEMORY_MIB
+    if total < needed:
+        raise ValueError(f"{replicas} Drama 3 copies need about {needed // 1024} GB of GPU memory; "
+                         f"GPU 0 has {total // 1024} GB. Lower runpod.inference_replicas or use a larger GPU.")
+    return total
 
 
 def model_specs(config):
@@ -372,26 +404,34 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
                          headers={"Authorization": f"Bearer {service['api_key']}"})
     if not isinstance(capabilities, dict) or capabilities.get("protocol") != PROTOCOL:
         raise RuntimeError("The authenticated chapter service is not ready")
-    print("Smoke test: authenticated chapter service is ready; generating a short GPU sample.", flush=True)
-    settings = {**config["render_pool"]["workers"][0], "timeout_seconds": 300}
-    engine = (engine_factory or FishHTTPEngine)(settings, config["engine"])
+    workers = config["render_pool"]["workers"]
+    copies = f"each of the {len(workers)} Drama 3 copies" if len(workers) > 1 else "a short GPU sample"
+    print(f"Smoke test: authenticated chapter service is ready; generating {copies}.", flush=True)
+    engines = [(engine_factory or FishHTTPEngine)({**worker, "timeout_seconds": 300}, config["engine"])
+               for worker in workers]
     verifier = None
     scratch = Path(service["data_dir"]) / "deployment-smoke"
     scratch.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix="check-", dir=scratch) as temporary:
             directory = Path(temporary)
-            audio = directory / "sample.wav"
-            # A self-contained smoke check cannot require any book's cast. The
-            # inference service accepts an empty reference list for this probe.
-            engine._request(SMOKE_TEXT, [], [], audio, 4101)
+            samples = []
+            for index, engine in enumerate(engines):
+                path = directory / f"sample-{index + 1}.wav"
+                # A self-contained smoke check cannot require any book's cast. The
+                # inference service accepts an empty reference list for this probe.
+                engine._request(SMOKE_TEXT, [], [], path, 4101)
+                samples.append(path)
+            audio = samples[0]
             device = config["verification"]["device"].upper()
             print(f"Smoke test: checking generated words with {device} Whisper.", flush=True)
             verifier = (verifier_factory or create_verifier)(
                 config["verification"], config.get("jev"), config.get("provider"))
-            report = validate_audio(audio, SMOKE_TEXT, verifier, config["quality"], purpose="reference")
-            if not report["passed"]:
-                raise RuntimeError("GPU smoke speech did not pass verification: " + ", ".join(report["reasons"]))
+            for index, sample in enumerate(samples):
+                report = validate_audio(sample, SMOKE_TEXT, verifier, config["quality"], purpose="reference")
+                if not report["passed"]:
+                    copy = f" from copy {index + 1}" if len(samples) > 1 else ""
+                    raise RuntimeError(f"GPU smoke speech{copy} did not pass verification: " + ", ".join(report["reasons"]))
             samples, rate = sf.read(audio, dtype="int16", always_2d=True)
             compressed = directory / "chapter.flac"
             sf.write(compressed, samples, rate, subtype="PCM_16", format="FLAC")
@@ -408,7 +448,8 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
                 roundtrip(config, artifact)
             print("Smoke test passed: GPU speech, Whisper, M4A/FLAC and Ceph round trips; temporary objects deleted.", flush=True)
     finally:
-        engine.close()
+        for engine in engines:
+            engine.close()
         if verifier is not None:
             verifier.close()
 
@@ -469,31 +510,54 @@ def stop_children(children, *, grace_seconds=15):
         process.wait()
 
 
-def inference_config(config):
-    """The inference service's own minimal TOML: CUDA engine and loopback server."""
+def inference_config(config, port=8080):
+    """One copy's own minimal TOML: CUDA engine and loopback server on its port."""
     engine = config["engine"]
     service = Path(config["chapter_server"]["data_dir"]) / "runtime"
     service.mkdir(parents=True, exist_ok=True)
-    path = service / "inference.toml"
+    path = service / ("inference.toml" if port == 8080 else f"inference-{port}.toml")
     lines = ["[engine]", 'type = "fish_speech_cuda"', f"checkpoint = {json.dumps(str(engine['checkpoint']))}"]
     for key in ("temperature", "top_p"):
         lines.append(f"{key} = {float(engine[key])!r}")
     for key in ("top_k", "max_new_tokens"):
         lines.append(f"{key} = {int(engine[key])}")
-    lines += ["", "[server]", 'host = "127.0.0.1"', "port = 8080", ""]
+    lines += ["", "[server]", 'host = "127.0.0.1"', f"port = {int(port)}", ""]
     staged = path.with_suffix(".tmp")
     staged.write_text("\n".join(lines))
     os.replace(staged, path)
     return path
 
 
-def inference_command(config, *, fish_source=FISH_SOURCE):
+def inference_command(config, *, fish_source=FISH_SOURCE, port=8080):
     """Our renderer server in Fish's environment, calling Fish's library on CUDA."""
     fish_python = fish_source / ".venv/bin/python"
     if not fish_python.is_file():
         raise ValueError(f"Worker image is missing {fish_python}")
     return [str(fish_python), "-u", "-m", "epub_tts_narrator.renderer", "serve",
-            "--config", str(inference_config(config))], fish_source
+            "--config", str(inference_config(config, port))], fish_source
+
+
+def mps_environment(root=MPS_ROOT):
+    return {"CUDA_MPS_PIPE_DIRECTORY": str(root / "pipe"), "CUDA_MPS_LOG_DIRECTORY": str(root / "log")}
+
+
+def start_mps(*, root=MPS_ROOT, run=subprocess.run, which=None):
+    """Start a private MPS control daemon; only the inference copies join it."""
+    import shutil
+    binary = (which or shutil.which)("nvidia-cuda-mps-control")
+    if not binary:
+        raise ValueError("runpod.inference_mps needs nvidia-cuda-mps-control in the worker container")
+    variables = mps_environment(root)
+    for directory in variables.values():
+        Path(directory).mkdir(parents=True, exist_ok=True)
+    result = run([binary, "-d"], env={**os.environ, **variables}, capture_output=True, timeout=30, check=False)
+    if result.returncode:
+        raise RuntimeError("Could not start the NVIDIA MPS control daemon")
+    return binary, variables
+
+
+def stop_mps(binary, variables, *, run=subprocess.run):
+    run([binary], input=b"quit\n", env={**os.environ, **variables}, capture_output=True, timeout=30, check=False)
 
 
 def inference_environment(config, backend_directory, *, application_python=APPLICATION_PYTHON):
@@ -519,9 +583,11 @@ def inference_environment(config, backend_directory, *, application_python=APPLI
 
 
 def serve(config, config_path, *, fish_source=FISH_SOURCE,
-          application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True, maintenance=False):
+          application_python=APPLICATION_PYTHON, startup_timeout=600, chapters=True, maintenance=False,
+          mps=False, gpu_memory=check_gpu_memory, mps_control=(start_mps, stop_mps)):
     check(config, application_python=application_python)
-    native_command, native_directory = inference_command(config, fish_source=fish_source)
+    ports = replica_ports(config)
+    natives = [inference_command(config, fish_source=fish_source, port=port) for port in ports]
     if chapters and not application_python.is_file():
         raise ValueError(f"Worker image is missing {application_python}")
     chapter_command = [str(application_python), "-u", "-m", "epub_tts_narrator.renderer.cli",
@@ -537,19 +603,32 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE,
 
     handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
     children = []
+    mps_daemon = None
     with worker_lease(config):
         try:
             for number in handlers:
                 signal.signal(number, on_signal)
-            print("Starting the private Fish CUDA process; model loading may take several minutes.", flush=True)
-            native = subprocess.Popen(native_command, cwd=native_directory, start_new_session=True,
-                                      env=inference_environment(config, native_directory,
-                                                                application_python=application_python))
-            children.append(native)
-            backend = config["render_pool"]["workers"][0]
-            wait_ready(native, stop, timeout=startup_timeout, worker=backend)
-            if stop.is_set():
-                raise WorkerStopped()
+            if len(ports) > 1:
+                gpu_memory(len(ports))
+            extra = {}
+            if mps:
+                mps_daemon = mps_control[0]()
+                extra = mps_daemon[1]
+                print("NVIDIA MPS is running; the Drama 3 copies share the GPU concurrently.", flush=True)
+            copies = f"{len(ports)} private Fish CUDA processes" if len(ports) > 1 else "the private Fish CUDA process"
+            print(f"Starting {copies}; model loading may take several minutes.", flush=True)
+            # All copies load together; each serves one request at a time.
+            started = []
+            for native_command, native_directory in natives:
+                environment = inference_environment(config, native_directory, application_python=application_python)
+                native = subprocess.Popen(native_command, cwd=native_directory, start_new_session=True,
+                                          env={**environment, **extra})
+                children.append(native)
+                started.append(native)
+            for native, backend in zip(started, config["render_pool"]["workers"]):
+                wait_ready(native, stop, timeout=startup_timeout, worker=backend)
+                if stop.is_set():
+                    raise WorkerStopped()
             chapter = None
             if chapters:
                 mode = " in maintenance mode; queued books remain paused" if maintenance else ""
@@ -561,8 +640,7 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE,
             else:
                 print("Fish CUDA is ready for isolated benchmarking; chapter jobs are not running.", flush=True)
             while not stop.wait(0.5):
-                native_status = native.poll()
-                if native_status is not None:
+                if any(native.poll() is not None for native in started):
                     raise RuntimeError("Fish CUDA process exited; stopping the chapter service")
                 chapter_status = chapter.poll() if chapter is not None else None
                 if chapter_status is not None:
@@ -573,8 +651,12 @@ def serve(config, config_path, *, fish_source=FISH_SOURCE,
             try:
                 stop_children(children)
             finally:
-                for number, handler in handlers.items():
-                    signal.signal(number, handler)
+                try:
+                    if mps_daemon is not None:
+                        mps_control[1](*mps_daemon)
+                finally:
+                    for number, handler in handlers.items():
+                        signal.signal(number, handler)
     return 128 + received_signal[0] if received_signal else 0
 
 
@@ -588,6 +670,8 @@ def main(argv=None):
                         help="Seconds to allow the private CUDA process to load (1–3600)")
     parser.add_argument("--fish-source", type=Path, default=FISH_SOURCE,
                         help="Persistent, pinned Fish Speech checkout (default: beside the application)")
+    parser.add_argument("--mps", action="store_true",
+                        help="Share the GPU between the Drama 3 copies through NVIDIA MPS")
     parser.add_argument("command", choices=("prepare", "check", "serve", "serve-maintenance", "serve-tts", "smoke", "run-application"))
     args = parser.parse_args(arguments[:separator])
     config = None
@@ -622,7 +706,7 @@ def main(argv=None):
                 signal.signal(signal.SIGALRM, previous_handler)
         else:
             return serve(config, args.config, startup_timeout=args.startup_timeout,
-                         fish_source=args.fish_source,
+                         fish_source=args.fish_source, mps=args.mps,
                          chapters=args.command != "serve-tts", maintenance=args.command == "serve-maintenance")
         return 0
     except KeyboardInterrupt:
