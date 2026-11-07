@@ -18,7 +18,7 @@ from epub_tts_narrator.renderer.clip_repair_contract import (
 )
 from epub_tts_narrator.renderer.clip_repair_execute import execute_plan
 from epub_tts_narrator.renderer.clip_repair_state import ClipRepairState
-from epub_tts_narrator.renderer.common import digest, file_hash, write_json
+from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_audio, validate_policy
 from epub_tts_narrator.renderer.quality import validation_key as make_validation_key
@@ -761,7 +761,7 @@ class BacklogAttemptHookTests(unittest.TestCase):
         landing = self.asr_samples()
         self.assertEqual(len(landing), 1)
         self.assertEqual(landing[0]["pending_count"], 1)
-        expected_bytes = (self.root / "takes" / "attempt-001.wav").stat().st_size
+        expected_bytes = (self.root / "takes" / accepted["audio_file"]).stat().st_size
         self.assertEqual(landing[0]["materialized_bytes"], expected_bytes)
         settled = self.budget.snapshot()
         self.assertEqual(settled["pending_count"], 0)
@@ -782,7 +782,8 @@ class BacklogAttemptHookTests(unittest.TestCase):
         self.assertTrue(self.probe.samples == [] or all(
             snapshot["pending_count"] == 1
             for _, snapshot in self.probe.samples))
-        self.assertTrue((self.root / "takes" / "attempt-001.wav").exists())
+        failed = read_json(self.root / "takes" / "attempt-001.json")
+        self.assertTrue((self.root / "takes" / failed["audio_file"]).exists())
         settled = self.budget.snapshot()
         self.assertEqual(settled["pending_count"], 0)
         self.assertEqual(settled["materialized_bytes"], 0)
@@ -1101,7 +1102,8 @@ class BacklogBoundaryTests(unittest.TestCase):
             thread = threading.Thread(target=attempt)
             thread.start()
             self.assertTrue(normalize_entered.wait(WORKER_WAIT))
-            raw = self.root / "takes" / "attempt-001-raw.wav"
+            pending = read_json(self.root / "takes" / "attempt-001.json")
+            raw = self.root / "takes" / pending["raw_file"]
             self.assertTrue(raw.exists())
             snapshot = self.budget.snapshot()
             self.assertEqual(snapshot["pending_count"], 1)
