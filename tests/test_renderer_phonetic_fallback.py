@@ -220,15 +220,17 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         before = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge)
         with self.assertRaises(SpeechVerificationFailed):
             self.take(before)
-        wav = self.root / "takes" / "attempt-001.wav"
+        old_report_path = self.root / "takes" / "attempt-001.json"
+        old_report = read_json(old_report_path)
+        wav = self.root / "takes" / old_report["audio_file"]
         old_bytes = wav.read_bytes()
-        old_report = read_json(wav.with_suffix(".json"))
         reviewer = PronunciationReviewer(PairClient())
         after = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge, reviewer)
         regenerated, accepted = self.take(after)
-        self.assertEqual(regenerated.name, "attempt-002.wav")
+        self.assertEqual(accepted["attempt"], 2)
+        self.assertEqual(regenerated, self.root / "takes" / accepted["audio_file"])
         self.assertEqual(wav.read_bytes(), old_bytes)
-        self.assertEqual(read_json(wav.with_suffix(".json")), old_report)
+        self.assertEqual(read_json(old_report_path), old_report)
         self.assertEqual(len(self.calls), 2)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "phonetic_primary")
@@ -243,7 +245,8 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
             with self.assertRaises(VerificationUnavailable):
                 self.take(verifier)
         self.assertEqual(len(self.calls), 1)
-        wav = self.root / "takes" / "attempt-001.wav"
+        pending = read_json(self.root / "takes" / "attempt-001.json")
+        wav = self.root / "takes" / pending["audio_file"]
         old_bytes = wav.read_bytes()
         client.error = None
         reused, accepted = self.take(verifier)
