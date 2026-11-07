@@ -257,6 +257,7 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertEqual(pending["report"]["reasons"], ["generation_incomplete"])
         self.assertTrue(pending["report"]["retry_on_resume"])
         self.assertIsNone(pending["audio_file"])
+        self.assertEqual(pending["raw_file"], self.calls[0]["path"].name)
         self.assertFalse(self.calls[0]["path"].exists())
         wav, accepted = self.take(SpeechRetryBudget())
         self.assertEqual(wav.name, accepted["audio_file"])

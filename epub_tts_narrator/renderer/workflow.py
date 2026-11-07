@@ -623,7 +623,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                                 "attempt": attempt, "seed": seed, "validation_key": validation_key,
                                 "report": {"passed": False, "reasons": ["generation_incomplete"],
                                            "retry_on_resume": True},
-                                "engine_metadata": {}, "audio_file": None, "audio_sha256": None,
+                                "engine_metadata": {}, "audio_file": None, "raw_file": raw.name,
+                                "audio_sha256": None,
                             })
                         from .cleanup import discard_interrupted_raw
                         try:
