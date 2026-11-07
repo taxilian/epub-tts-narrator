@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 
+from .audio_naming import descriptive_audio_filename
 from .chapter_protocol import require_hash
 from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
@@ -442,7 +443,10 @@ class _Handler(BaseHTTPRequestHandler):
                 root = Path(directory)
                 voices = []
                 for index, reference in enumerate(references):
-                    path = root / f"reference-{index}.wav"
+                    owner = (f"speaker-{reference['speaker']}" if reference.get("speaker") is not None
+                             else f"index-{index}")
+                    path = root / descriptive_audio_filename("reference", self.request_id, owner,
+                                                             suffix=".wav")
                     path.write_bytes(reference["audio"])
                     if not reference.get("cache_hit"):
                         try:
@@ -455,7 +459,8 @@ class _Handler(BaseHTTPRequestHandler):
                     voices.append({"kind": "reference", "reference_audio": str(path),
                                    "reference_text": reference["text"], "speaker": reference["speaker"],
                                    "reference_sha256": hashlib.sha256(reference["audio"]).hexdigest()})
-                output = root / "take.wav"
+                output = root / descriptive_audio_filename("synthesis-take", self.request_id,
+                                                           suffix=".wav")
                 reused = sum(1 for reference in references if reference.get("cache_hit"))
                 suffix = f", {reused} reused" if reused else ""
                 queued_at = time.monotonic()
@@ -536,7 +541,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             with tempfile.TemporaryDirectory(prefix="audiobook-asr-") as directory:
-                path = Path(directory) / "take.wav"
+                path = Path(directory) / descriptive_audio_filename(
+                    "recognition-input", self.request_id, body["call"], suffix=".wav")
                 path.write_bytes(body["audio"])
                 try:
                     inspect_wav(path)

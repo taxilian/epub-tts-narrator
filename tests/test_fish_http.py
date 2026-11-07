@@ -109,6 +109,8 @@ class FakeEngine:
         try:
             self.calls.append({"text": text, "seed": seed, "temperature": self.temperature,
                                "thread": threading.get_ident(), "history": list(history),
+                               "output_path": Path(path).name,
+                               "reference_paths": [Path(v["reference_audio"]).name for v in voices],
                                "references": [(Path(v["reference_audio"]).read_bytes(), v["reference_text"], v["speaker"])
                                               for v in voices]})
             time.sleep(0.02)
@@ -535,6 +537,33 @@ class FishHTTPTests(unittest.TestCase):
         self.assertEqual((metadata["history_turns"], metadata["history_available"]), (0, 0))
         self.assertEqual(metadata["history_sha256"], "0" * 64)
         self.assertFalse(list(self.root.glob(".fish-*")))
+
+    def test_synthesis_scratch_names_carry_request_speaker_and_purpose(self):
+        self.client.synthesize("Hello.", self.voice, self.root / "take.wav", seed=3)
+
+        call = self.engine.calls[0]
+        self.assertRegex(call["output_path"], r"^request-\d{6}-synthesis-take\.wav$")
+        self.assertRegex(call["reference_paths"][0], r"^request-\d{6}-speaker-0-reference\.wav$")
+        self.assertEqual(call["references"][0][0], wav_bytes())
+
+    def test_dialogue_reference_names_identify_each_speaker_of_one_request(self):
+        voice2 = {**self.voice, "reference_text": "Another voice.", "voice_id": "character-2"}
+        turns = [{"text": "First.", "voice": self.voice}, {"text": "Second.", "voice": voice2}]
+        self.client.synthesize_dialogue(turns, self.root / "dialogue.wav", seed=2)
+
+        self.assertEqual(len(self.engine.calls), 1)
+        reference_paths = self.engine.calls[0]["reference_paths"]
+        self.assertRegex(reference_paths[0], r"^request-\d{6}-speaker-0-reference\.wav$")
+        self.assertRegex(reference_paths[1], r"^request-\d{6}-speaker-1-reference\.wav$")
+
+    def test_speakerless_reference_names_fall_back_to_their_index(self):
+        with self.post(self.json_body()) as response:
+            import msgpack
+            self.assertEqual(msgpack.unpackb(response.read(), raw=False)["audio"], wav_bytes())
+
+        self.assertEqual(len(self.engine.calls), 1)
+        self.assertRegex(self.engine.calls[0]["reference_paths"][0],
+                         r"^request-\d{6}-index-0-reference\.wav$")
 
     def test_dialogue_matches_reference_tags_and_reuses_same_voice(self):
         voice2 = {**self.voice, "reference_text": "Another voice.", "voice_id": "character-2"}

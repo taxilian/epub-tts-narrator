@@ -40,9 +40,11 @@ class Recognizer:
         self.identity = identity(backend, path, **changes)
         self.text = text
         self.threads = []
+        self.inputs = []
         self.gate = None
 
     def _result(self, path):
+        self.inputs.append(Path(path).name)
         self.threads.append(get_ident())
         if self.gate is not None and not self.gate.wait(5):
             raise AssertionError("recognizer was never released")
@@ -189,6 +191,15 @@ class RecognitionServerTests(unittest.TestCase):
         recognition_thread = self.server.recognition_runtime.run(get_ident)
         self.assertEqual(set(self.primary.threads) | set(self.reference.threads), {recognition_thread})
         self.assertNotEqual(recognition_thread, self.server.inference_runtime.run(get_ident))
+
+    def test_recognition_scratch_input_name_carries_request_call_and_purpose(self):
+        self.client.verify(self.expected)
+        self.client.recognize("transcribe", self.audio)
+        self.client.recognize("corroborate_reference", self.audio)
+
+        self.assertRegex(self.primary.inputs[0], r"^request-\d{6}-transcribe-recognition-input\.wav$")
+        self.assertRegex(self.reference.inputs[0],
+                         r"^request-\d{6}-corroborate_reference-recognition-input\.wav$")
 
     def test_recognition_does_not_wait_for_synthesis_on_the_worker(self):
         self.client.verify(self.expected)
