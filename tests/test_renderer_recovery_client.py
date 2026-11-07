@@ -211,8 +211,10 @@ class RecoveryModelRetryIntegrationTests(unittest.TestCase):
                 self.render_chunk()
         self.assertEqual(api.call_count, 3)
         self.assertEqual(len(self.engine.calls), 3)
-        candidates = list((self.work / "clips").glob("*/attempt-003.wav"))
-        self.assertEqual(len(candidates), 1)
+        records = list((self.work / "clips").glob("*/attempt-003.json"))
+        self.assertEqual(len(records), 1)
+        candidate = read_json(records[0])
+        candidates = [records[0].parent / candidate["audio_file"]]
         original = candidates[0].read_bytes()
 
         def request(_client, encoded, _headers):
