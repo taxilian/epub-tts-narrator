@@ -559,6 +559,9 @@ def main(argv=None):
             config = load_config(args.config)
             include_auxiliary = config["extraction"]["include_auxiliary"] if args.input.suffix.lower() == ".epub" else False
             source = source_from(args.input, include_auxiliary)
+            if args.command == "analyze" and args.strategy == "narrator":
+                from .front_matter import drop_front_matter
+                source = drop_front_matter(source)
             for warning in source["warnings"]:
                 print(f"Extraction: {warning}", file=sys.stderr)
             if args.command == "extract":
