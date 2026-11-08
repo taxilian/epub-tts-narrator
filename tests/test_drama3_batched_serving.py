@@ -98,6 +98,14 @@ class BatchedServingTests(unittest.TestCase):
         # The shared engine's own attributes were never rewritten per request.
         self.assertEqual(engine.temperature, 1.0)
 
+    def test_health_reports_how_many_requests_the_worker_decodes_at_once(self):
+        from urllib.request import urlopen
+        batching = self.serve(BatchingFakeEngine(), batch_rows=2)
+        plain = self.serve(FakeEngine())
+        for url, expected in ((batching, 2), (plain, 1)):
+            with self.subTest(expected=expected), urlopen(url.replace("/v1/tts", "/health"), timeout=5) as response:
+                self.assertEqual(json.loads(response.read())["concurrent_requests"], expected)
+
     def test_single_request_engines_keep_the_serialized_path(self):
         engine = FakeEngine()
         url = self.serve(engine)

@@ -403,7 +403,10 @@ class _Handler(BaseHTTPRequestHandler):
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
         health = {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True,
                   "history_layouts": sorted(getattr(self.server.engine, "history_layouts", {"directing"})),
-                  "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else [])}
+                  "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else []),
+                  # Requests this worker decodes at once (server.batch_rows on a
+                  # batching engine); a controller's worker concurrency should match.
+                  "concurrent_requests": getattr(self.server.engine, "concurrent_requests", 1)}
         if self.server.recognizers is not None:
             health.update(recognition_protocol=RECOGNITION_PROTOCOL, recognition=self.server.recognition)
         self._json(200, health)
