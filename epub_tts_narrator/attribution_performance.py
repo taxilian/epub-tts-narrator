@@ -62,8 +62,9 @@ def mechanical_stretch(original, replacement):
     Every changed run must shrink (``of`` -> ``off`` or ``god`` -> ``good``
     grow a run and are word changes, not elongations), at least one ORIGINAL
     changed run must span at least 3 characters (``off`` -> ``of`` is an
-    ordinary spelling change), the shrink stays within 8 characters and a
-    32-character run, and every other run stays identical. Such
+    ordinary spelling change), the source run stays within 32 characters, and
+    every other run stays identical. Shrinks over 8 characters are allowed only
+    when a source run of at least 9 characters collapses to at most 2. Such
     normalizations are deterministic and need no model review.
     """
     if not isinstance(original, str) or not isinstance(replacement, str) or original == replacement:
@@ -88,8 +89,10 @@ def mechanical_stretch(original, replacement):
         source_count, model_count = source_end - source_start, model_end - model_start
         if source_count == model_count:
             continue
+        shrink = source_count - model_count
         if (not letter.isalpha() or model_count >= source_count
-                or source_count < 3 or source_count > 32 or source_count - model_count > 8):
+                or source_count < 3 or source_count > 32
+                or shrink > 8 and not (source_count >= 9 and model_count <= 2)):
             return False
         elongated = True
     return elongated

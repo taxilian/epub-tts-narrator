@@ -144,9 +144,15 @@ def seed_cast():
 
 
 def base_document(source, cast, segments, issues=None, provenance=None):
-    return {"format": "epub-audiobook-analysis", "version": 1, "source": source,
-            "cast": cast, "segments": segments, "issues": issues or [],
-            "provenance": provenance or {}}
+    document = {"format": "epub-audiobook-analysis", "version": 1, "source": source,
+                "cast": cast, "segments": segments, "issues": issues or [],
+                "provenance": provenance or {}}
+    if document["provenance"].get("strategy") == "narrator_read":
+        # Narrator-read model notes are already attached here. Add deterministic
+        # edits before its existing gate decides whether inline review is needed.
+        from .stretch_edits import attach_stretch_proposals
+        attach_stretch_proposals(document)
+    return document
 
 
 def segment(source, block_id, start, text, role, kind="narration", *, basis="explicit",

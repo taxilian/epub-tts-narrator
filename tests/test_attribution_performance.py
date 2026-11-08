@@ -8,7 +8,7 @@ from threading import Event, Lock
 import unittest
 
 from epub_tts_narrator.attribution_compact import parse_proposals
-from epub_tts_narrator.attribution_performance import review_inline_performance
+from epub_tts_narrator.attribution_performance import mechanical_stretch, review_inline_performance
 from epub_tts_narrator.performance_plan import text_sha256, validate_performance
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.provider import ProviderError
@@ -128,6 +128,12 @@ class InlinePerformanceTests(unittest.TestCase):
         self.assertNotIn("inline_proposals", published)
         self.assertEqual(result["provenance"]["inline_performance"]["counts"], {"mechanical": 1})
         self.assertEqual(result["provenance"]["inline_performance"]["batches"], [])
+
+    def test_long_run_shrinks_above_eight_require_a_short_final_run(self):
+        self.assertTrue(mechanical_stretch("s" * 15 + "hi", "sshi"))
+        self.assertTrue(mechanical_stretch("s" * 15 + "hi", "shi"))
+        self.assertFalse(mechanical_stretch("s" * 12 + "hi", "ssshi"))
+        self.assertFalse(mechanical_stretch("s" * 33 + "hi", "sshi"))
 
     def test_rejected_and_uncertain_proposals_retain_source_and_drop_dependent_controls(self):
         proposals = {
