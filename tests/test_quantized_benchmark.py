@@ -120,6 +120,32 @@ class BenchmarkReferenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 reference(directory)
 
+    def test_reference_file_override_reads_that_wav_when_its_checksum_matches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            audio = directory / "narrator-book-voice.wav"
+            audio.write_bytes(b"override recording")
+            digest = hashlib.sha256(audio.read_bytes()).hexdigest()
+            (directory / "reference.wav").write_bytes(b"legacy recording")
+            (directory / "voice.json").write_text(json.dumps({
+                "reference_file": audio.name, "reference_text": "Override words.",
+                "reference_sha256": digest}))
+
+            actual = reference(directory)
+
+            self.assertEqual(actual["reference_audio"], str(audio.resolve()))
+            self.assertEqual(actual["reference_text"], "Override words.")
+            self.assertEqual(actual["reference_sha256"], digest)
+
+    def test_unsafe_reference_file_values_are_rejected_without_touching_files(self):
+        for bad in ("../escape.wav", "notes.txt", "/etc/reference.wav", "nested/reference.wav"):
+            with self.subTest(reference_file=bad), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                (directory / "voice.json").write_text(json.dumps({
+                    "reference_file": bad, "reference_text": "x", "reference_sha256": "0" * 64}))
+                with self.assertRaises(ValueError):
+                    reference(directory)
+
 
 class FixedTranscriptVerifier:
     """The only substituted component is the external speech recognizer."""

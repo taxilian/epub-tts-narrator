@@ -18,6 +18,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from epub_tts_narrator.renderer.audio_naming import validate_audio_filename
+
 CASES = [
     {"name": "narration", "turns": [
         {"speaker": 0, "text": "Lena and I watched the harbor wake. The lantern was still warm, and someone had left the door open."},
@@ -56,7 +58,11 @@ def packages():
 
 def reference(directory):
     meta = json.loads((directory / "voice.json").read_text())
-    wav = (directory / "reference.wav").resolve()
+    try:
+        name = validate_audio_filename(meta.get("reference_file", "reference.wav"), suffix=".wav")
+    except ValueError as exc:
+        raise ValueError(f"{directory}: invalid voice.json reference_file: {exc}") from exc
+    wav = (directory / name).resolve()
     digest = checksum(wav)
     if digest != meta["reference_sha256"]:
         raise ValueError(f"Reference checksum mismatch: {wav}")

@@ -6,6 +6,7 @@ from copy import deepcopy
 import json
 import re
 
+from .audio_naming import validate_audio_filename
 from .common import digest
 from .config import RENDER_CONTRACT
 
@@ -18,6 +19,22 @@ ARTIFACT_NAMES = frozenset({
     "chapter.m4a", "chapter.flac", "chapter.json", "sync.json", "verification.json", "manifest.json",
 })
 FAILED_PARAGRAPH_FIELD = "failed_paragraph="
+
+
+def is_artifact_name(name):
+    """Recognize fixed JSON and legacy names plus safe recorded compressed audio."""
+    if not isinstance(name, str):
+        return False
+    if name in ARTIFACT_NAMES:
+        return True
+    for suffix in (".m4a", ".flac"):
+        if name.endswith(suffix):
+            try:
+                validate_audio_filename(name, suffix=suffix)
+            except ValueError:
+                return False
+            return True
+    return False
 _CHUNK_ID = re.compile(r"[0-9a-f]{32,64}\Z")
 
 

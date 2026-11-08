@@ -79,6 +79,47 @@ class SimultaneousMixerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "integrity"):
             prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
 
+    def test_new_mixture_cache_records_a_descriptive_audio_name_and_reuses_it(self):
+        lanes = self.lanes()
+        mixed = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        name = record["audio_file"]
+        self.assertIn("simultaneous-mix", name)
+        self.assertIn(f"key-{folder.name[:16]}", name)
+        self.assertTrue(all(f"voice{index}" in name for index in range(2)))
+        self.assertEqual(Path(mixed["wav_path"]).name, name)
+        self.assertEqual(file_hash(folder / name), record["audio_sha256"])
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", name})
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+            self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
+
+    def test_legacy_mixture_cache_without_recorded_name_still_loads_without_remixing(self):
+        lanes = self.lanes()
+        prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        (folder / record.pop("audio_file")).rename(folder / "mix.wav")
+        record.pop("record_sha256")
+        write_json(folder / "mix.json", dict(record, record_sha256=digest(record)))
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+            reused = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        self.assertEqual(Path(reused["wav_path"]).name, "mix.wav")
+
+    def test_mixture_cache_refuses_an_invalid_recorded_audio_filename(self):
+        lanes = self.lanes()
+        prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        folder = next((self.root / "mixes").iterdir())
+        record = read_json(folder / "mix.json")
+        original = record.pop("audio_file")
+        record.pop("record_sha256")
+        for bad in ("../escape.wav", "nested/mix.wav", "mix.mp3"):
+            tampered = dict(record, audio_file=bad)
+            write_json(folder / "mix.json", dict(tampered, record_sha256=digest(tampered)))
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "Recorded audio filename"):
+                prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", original})
+
     def test_truncated_lane_and_cancelling_audio_never_publish(self):
         lanes = self.lanes()
         short = Path(lanes[1]["wav_path"])
@@ -224,8 +265,8 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertEqual(lanes[0]["request_hash"], lanes[1]["request_hash"])
         self.assertEqual(lanes[0]["audio_sha256"], lanes[1]["audio_sha256"])
         self.assertTrue(all(lane["report"]["passed"] for lane in lanes))
-        assemble(self.bundle, self.config, notify=lambda _: None)
-        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+        result = assemble(self.bundle, self.config, notify=lambda _: None)
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_analysis_update_lock_blocks_render_and_assemble_before_audio(self):
         lock = self.root / "bundle" / ".analysis-update.lock"
@@ -275,7 +316,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertFalse((self.root / "work" / ".render.lock").exists())
 
     def test_each_performer_is_verified_and_source_sync_is_shared_once(self):
-        self.run_render()
+        result = self.run_render()
         first, second = self.engine.speech_calls[:2]
         self.assertEqual(first["text"], self.group_spoken)
         self.assertEqual(second["text"], self.group_spoken)
@@ -294,7 +335,7 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         self.assertEqual([lane["voice_id"] for lane in group["speaker_lanes"]], ["voice_mara", "voice_lena"])
         self.assertEqual(sum(item["chunk_id"] == group["chunk_id"] for item in sync["segments"]), 1)
         self.assertFalse(any("mixes" in path for path in self.verifier.calls))
-        self.assertTrue((output / "book.m4b").is_file())
+        self.assertTrue((output / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_failed_second_lane_cannot_publish_a_mix_chapter_or_book(self):
         self.verifier.failed_voice = "voice_lena"
@@ -321,8 +362,8 @@ class SimultaneousWorkflowTests(unittest.TestCase):
                              for row in self.engine.speech_calls), 1)
         with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("ASR or TTS called")):
             self.run_render(chapters_only=True)
-            assemble(self.bundle, self.config, notify=lambda _: None)
-        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+            result = assemble(self.bundle, self.config, notify=lambda _: None)
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_changed_lane_verification_cannot_pass_restoration(self):
         self.run_render(chapters_only=True)

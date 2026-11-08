@@ -144,7 +144,7 @@ class PublicationMetadataEncodingTests(unittest.TestCase):
             chapter.update(id="ch0001", title="Chapter One", script_path="scripts/chapter-0001.jsonl")
             book = PublicationMetadataTests.book()
             result = package_audio([chapter], root / "out", book=book, cover_path=cover)
-            inspection = probe_audio(root / "out" / "book.m4b")
+            inspection = probe_audio(root / "out" / result["audiobook"]["path"])
             actual = inspection["format"]["tags"]
             for key, value in book_tags(book).items():
                 if key != "publisher":  # FFmpeg's iTunes muxer may omit this nonstandard tag.

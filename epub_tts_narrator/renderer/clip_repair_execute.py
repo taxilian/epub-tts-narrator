@@ -5,6 +5,7 @@ import tempfile
 import uuid
 
 from .assembly import normalize_clip
+from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .clip_repair_contract import approved, confirm_part, logical_text
 from .clip_repair_state import ClipRecoveryUnavailable
@@ -27,13 +28,15 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
         session.save()
     attempt = state['attempt']
     candidate_path = directory / f'attempt-{attempt:03d}.json'
-    target = directory / f'attempt-{attempt:03d}.wav'
+    target = directory / speech_take_filename(request, attempt)
     key = validation_key(logical_text(request), verifier, config['quality'], purpose='speech')
     base = {'request': request, 'request_hash': digest(request), 'attempt': attempt,
             'seed': request.get('base_seed', config['render']['seed']), 'validation_key': key}
     if candidate_path.exists():
         previous = read_json(regular_file(candidate_path))
-        if (previous.get('audio_file') == target.name and previous.get('report', {}).get('reasons')
+        if previous.get('audio_file') is not None:
+            target = directory / validate_audio_filename(previous['audio_file'], suffix='.wav')
+        if (previous.get('audio_file') is not None and previous.get('report', {}).get('reasons')
                 not in (['generation_incomplete'], ['verification_pending'])):
             from .exhaustion_selection import validate_record
             validate_record(previous)
@@ -79,7 +82,8 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                     session.save()
                     return None
                 saved['starts'] += 1
-                saved['raw_file'] = f'part-{number:03d}-start-{saved["starts"]:03d}-raw.wav'
+                saved['raw_file'] = speech_take_filename(
+                    request, attempt, role=f'part-{number:03d}-start-{saved["starts"]:03d}-raw')
                 session.save()
                 seed = int(digest({'request': request, 'part': number, 'start': saved['starts']})[:8], 16) % 2**32
                 try:
@@ -99,18 +103,18 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
             if attempt_ticket is not None:
                 charged += raw.stat().st_size
                 attempt_ticket.update_bytes(charged)
-            wav = folder / f'part-{number:03d}.wav'
+            wav = folder / speech_take_filename(request, attempt, role=f'part-{number:03d}-take')
             with tempfile.TemporaryDirectory(prefix='.normalize-part-', dir=folder) as staging:
-                normalized = Path(staging) / 'normalized.wav'
+                normalized = Path(staging) / wav.name
                 normalize_clip(raw, normalized, sample_rate=config['render']['sample_rate'], ffmpeg=config['render']['ffmpeg'])
                 if wav.exists() or wav.is_symlink():
-                    regular_file(wav).rename(folder / f'part-{number:03d}-orphan-{uuid.uuid4().hex}.wav')
+                    regular_file(wav).rename(folder / f'{wav.stem}-orphan-{uuid.uuid4().hex}.wav')
                 os.replace(normalized, wav)
             saved.update(audio_file=wav.name, audio_sha256=file_hash(regular_file(wav)))
             session.save()
         if 'joined_sha256' not in state:
             with tempfile.TemporaryDirectory(prefix='.clip-join-', dir=directory) as staging:
-                joined = Path(staging) / 'joined.wav'
+                joined = Path(staging) / target.name
                 _concatenate([(folder / part['audio_file'], part) for part in state['parts']],
                              joined, config['render']['sample_rate'])
                 checksum = file_hash(joined)

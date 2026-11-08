@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.quality import validation_key, word_spacing_equivalence
 from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
 from epub_tts_narrator.renderer.workflow import SpeechRetryBudget, SpeechVerificationFailed
@@ -196,15 +197,18 @@ class WordSpacingResumeTests(unittest.TestCase):
                 self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(len(self.calls), 2)
         old_judge_calls = len(judge.calls)
-        first = self.root / "takes" / "attempt-001.wav"
+        first_report_path = self.root / "takes" / "attempt-001.json"
+        first_record = read_json(first_report_path)
+        first = self.root / "takes" / first_record["audio_file"]
         saved_audio = first.read_bytes()
-        first_report = first.with_suffix(".json").read_bytes()
+        first_report = first_report_path.read_bytes()
         # Rejected attempts remain diagnostics even after a verification change.
         # Only a successful new take becomes reusable speech.
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
-        self.assertEqual(wav.name, "attempt-003.wav")
+        self.assertEqual(accepted["attempt"], 3)
+        self.assertEqual(wav, self.root / "takes" / accepted["audio_file"])
         self.assertEqual(first.read_bytes(), saved_audio)
-        self.assertEqual(first.with_suffix(".json").read_bytes(), first_report)
+        self.assertEqual(first_report_path.read_bytes(), first_report)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "word_spacing")
         self.assertEqual(len(self.calls), 3)

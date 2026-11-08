@@ -26,9 +26,10 @@ import tempfile
 import threading
 import time
 
+from .audio_naming import descriptive_audio_filename
 from .chapter_executor import MAX_PARALLEL_CHAPTERS
 from .chapter_protocol import (
-    ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix,
+    FAILED_PARAGRAPH_FIELD, PROTOCOL, failed_paragraph_suffix, is_artifact_name,
     require_hash, validate_spec, validate_voice_manifest,
 )
 from .chapter_sessions import ClientSessions, require_session_id
@@ -249,7 +250,10 @@ class ChapterJobs:
         if folder.is_symlink():
             raise ValueError("Voice references must not use symlinks")
         manifest = validate_voice_manifest(read_json(regular_file(folder / "manifest.json")))
-        audio = regular_file(folder / "reference.flac")
+        legacy = folder / "reference.flac"
+        filename = legacy.name if legacy.exists() or legacy.is_symlink() else descriptive_audio_filename(
+            "reference", asset_id, suffix=".flac")
+        audio = regular_file(folder / filename)
         if digest(manifest) != asset_id or file_hash(audio) != manifest["audio_sha256"]:
             raise ValueError("Registered voice failed its integrity check")
         return {"asset_hash": asset_id, "reference_audio": str(audio),
@@ -299,7 +303,7 @@ class ChapterJobs:
         try:
             with tempfile.TemporaryDirectory(prefix=".voice-", dir=self.root / "voices") as temporary:
                 folder = Path(temporary)
-                target = folder / "reference.flac"
+                target = folder / descriptive_audio_filename("reference", asset_id, suffix=".flac")
                 with target.open("wb") as stream:
                     stream.write(audio)
                     stream.flush()
@@ -507,7 +511,7 @@ class ChapterJobs:
         return {"acknowledged": True}
 
     def artifact(self, job_id, name):
-        if name not in ARTIFACT_NAMES:
+        if not is_artifact_name(name):
             raise KeyError("Unknown artifact")
         with self._condition, self._connect() as db:
             row = self._row(db, job_id)
@@ -744,7 +748,7 @@ class ChapterJobs:
                 raise RenderPaused("The chapter's rendering client disconnected before assembly")
             paths = self.executor.assemble(spec, prepared, self.root / "render-work",
                                            lambda message: self._log(job_id, message))
-            if not isinstance(paths, dict) or not paths or set(paths) - ARTIFACT_NAMES:
+            if not isinstance(paths, dict) or not paths or any(not is_artifact_name(name) for name in paths):
                 raise ValueError("Executor returned an unsupported artifact; WAV transfers are forbidden")
             artifacts = []
             for name, supplied in sorted(paths.items()):

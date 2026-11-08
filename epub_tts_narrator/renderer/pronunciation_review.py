@@ -15,6 +15,7 @@ import sys
 import wave
 
 from ..pronunciation_groups import entry_words, family_words, find_pronunciation, natural_spelling
+from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .audition import AudioPlayer, display
 from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json
 from .run_locks import acquire_directory_lock
@@ -162,10 +163,16 @@ def _preview_audio(path):
     return {"frames": frames, "sample_rate": rate, "duration_seconds": frames / rate}
 
 
+def _preview_path(folder, record, specification):
+    field, legacy = specification
+    filename = validate_audio_filename(record.get(field, legacy), suffix=Path(legacy).suffix)
+    return folder / filename
+
+
 def _remove_redundant_wavs(folder, state):
-    for name, field, hasher in (("raw.wav", "raw_sha256", file_hash),
-                                ("normalized.wav", "pcm_sha256", pcm_sha256)):
-        path = folder / name
+    for specification, field, hasher in ((("raw_file", "raw.wav"), "raw_sha256", file_hash),
+                                         (("normalized_file", "normalized.wav"), "pcm_sha256", pcm_sha256)):
+        path = _preview_path(folder, state, specification)
         if path.exists() or path.is_symlink():
             if hasher(regular_file(path)) != state.get(field):
                 raise ValueError("Redundant pronunciation preview audio changed; it has been retained")
@@ -185,8 +192,11 @@ def _retry_rejected_take(folder, state, request):
             or rejected.get("raw_sha256") != state.get("raw_sha256")):
         raise ValueError("Pronunciation preview rejection audit changed; audio has been retained")
     removable = []
-    for name, field in (("raw.wav", "raw_sha256"), ("normalized.wav", "normalized_sha256")):
-        path = folder / name
+    sources = dict(state)
+    sources.update(rejected)
+    for specification, field in ((("raw_file", "raw.wav"), "raw_sha256"),
+                                 (("normalized_file", "normalized.wav"), "normalized_sha256")):
+        path = _preview_path(folder, sources, specification)
         if path.exists() or path.is_symlink():
             if file_hash(regular_file(path)) != rejected.get(field):
                 raise ValueError("Rejected pronunciation preview changed; audio has been retained")
@@ -201,9 +211,11 @@ def _retry_rejected_take(folder, state, request):
 
 def _reject_preview(folder, state, reason):
     """Checkpoint a physical rejection without authorizing a retry loop."""
+    normalized = _preview_path(folder, state, ("normalized_file", "normalized.wav"))
     rejection = {"request_sha256": digest(state["request"]), "take": state["take"],
                  "seed": state["take_seed"], "raw_sha256": state["raw_sha256"],
-                 "normalized_sha256": file_hash(regular_file(folder / "normalized.wav")),
+                 "raw_file": state.get("raw_file", "raw.wav"), "normalized_file": normalized.name,
+                 "normalized_sha256": file_hash(regular_file(normalized)),
                  "reason": str(reason), "kind": "physically_invalid_audio"}
     rejection["sha256"] = digest(rejection)
     state.setdefault("rejections", []).append(rejection)
@@ -608,12 +620,13 @@ class PronunciationReviewSession:
         folder.mkdir(exist_ok=True)
         lock = acquire_directory_lock(folder / ".preview.lock")
         try:
-            state_path, audio = folder / "preview.json", folder / "sample.flac"
+            state_path = folder / "preview.json"
             state = read_json(regular_file(state_path)) if state_path.exists() or state_path.is_symlink() else None
             if state is not None:
                 if not isinstance(state, dict) or state.get("format") != _FORMAT or state.get("request") != request:
                     raise ValueError("Pronunciation preview request changed")
                 if state.get("status") == "ready":
+                    audio = _preview_path(folder, state, ("audio_file", "sample.flac"))
                     if file_hash(regular_file(audio)) != state.get("audio_sha256"):
                         raise ValueError("Pronunciation preview changed; remove its cache entry to regenerate")
                     _remove_redundant_wavs(folder, state)
@@ -628,8 +641,18 @@ class PronunciationReviewSession:
                                "purpose": purpose}
             state.setdefault("take", 1)
             state.setdefault("take_seed", request["seed"])
+            owner = (word, context["voice_id"], f"take-{state['take']:03d}")
+            state.setdefault("audio_file", descriptive_audio_filename(
+                "listening-preview", *owner, suffix=".flac"))
+            raw_name = "raw.wav" if state.get("raw_sha256") is not None else descriptive_audio_filename(
+                "raw-preview", *owner, suffix=".wav")
+            state.setdefault("raw_file", raw_name)
+            state.setdefault("normalized_file", descriptive_audio_filename(
+                "normalized-preview", *owner, suffix=".wav"))
             write_json(state_path, state)
-            raw, normalized = folder / "raw.wav", folder / "normalized.wav"
+            raw = _preview_path(folder, state, ("raw_file", "raw.wav"))
+            normalized = _preview_path(folder, state, ("normalized_file", "normalized.wav"))
+            audio = _preview_path(folder, state, ("audio_file", "sample.flac"))
             if state.get("raw_sha256") is None:
                 if raw.exists() or raw.is_symlink():
                     regular_file(raw).unlink()
@@ -672,9 +695,10 @@ class PronunciationReviewSession:
         try:
             state_path = folder / "preview.json"
             state = read_json(regular_file(state_path))
+            audio = _preview_path(folder, state, ("audio_file", "sample.flac"))
             if (state.get("status") != "ready" or state.get("request") != preview["request"]
                     or state.get("audio_sha256") != preview.get("audio_sha256")
-                    or file_hash(regular_file(folder / "sample.flac")) != preview["audio_sha256"]):
+                    or file_hash(regular_file(audio)) != preview["audio_sha256"]):
                 raise ValueError("Pronunciation preview changed during playback; play it again before confirming")
             state["played"] = {"request_sha256": digest(state["request"]), "audio_sha256": state["audio_sha256"]}
             write_json(state_path, state)

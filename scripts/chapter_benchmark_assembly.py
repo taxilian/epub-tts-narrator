@@ -30,7 +30,7 @@ def _decoded_chapter(folder, record, scratch, render):
     wav = scratch / f"{chapter['id']}.wav"
     if composed["frames"]:
         _run_audio([render["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-                    "-i", str(folder / "chapter.flac"), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
+                    "-i", str(folder / metadata["lossless_file"]), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
         if pcm_sha256(wav) != metadata.get("pcm_data_sha256"):
             raise ValueError("Decoded chapter master differs from the server's lossless PCM")
     else:
@@ -82,5 +82,6 @@ def assemble_book(corpus, downloaded, config, destination, *, notify=lambda mess
         write_json(stage / "render.json", result)
         _publish(stage, destination)
     seconds = time.perf_counter() - began
-    notify(f"Benchmark book assembled: {destination / 'book.m4b'}")
-    return {"seconds": seconds, "path": str(destination / "book.m4b"), "result": result}
+    book_path = destination / audio["audiobook"]["path"]
+    notify(f"Benchmark book assembled: {book_path}")
+    return {"seconds": seconds, "path": str(book_path), "result": result}

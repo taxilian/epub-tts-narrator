@@ -44,6 +44,16 @@ class ChapterStorageTests(unittest.TestCase):
             self.publisher.publish("a" * 64, "chapter.wav", self.path, file_hash(self.path))
         self.client.upload_file.assert_not_called()
 
+    def test_numbered_audio_can_be_uploaded_but_traversal_cannot(self):
+        sha = file_hash(self.path)
+        self.client.head_object.return_value = {"ContentLength": self.path.stat().st_size,
+                                                  "Metadata": {"sha256": sha}}
+        record = self.publisher.publish("a" * 64, "chapter-0042.flac", self.path, sha)
+        self.assertTrue(record["key"].endswith("/chapter-0042.flac"))
+        with self.assertRaisesRegex(ValueError, "compressed"):
+            self.publisher.publish("a" * 64, "../chapter-0042.flac", self.path, sha)
+        self.client.upload_file.assert_called_once()
+
     def test_storage_config_change_does_not_sign_wrong_object(self):
         with self.assertRaisesRegex(ValueError, "different storage"):
             self.publisher.url({"bucket": "other", "endpoint_url": self.settings["endpoint_url"], "region": "test-1"})

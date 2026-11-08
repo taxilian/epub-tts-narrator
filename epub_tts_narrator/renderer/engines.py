@@ -27,6 +27,7 @@ import unicodedata
 from typing import Any, Protocol
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
+from .audio_naming import temporary_audio_prefix
 from .drama3_design import (
     DESIGN_TEMPLATE_SHA256, DESIGN_TEMPLATE_VERSION,
     generate_scene_voice, validate_scene_fields,
@@ -745,7 +746,8 @@ class Drama3MLXEngine(HistorySynthesis):
         temp_name = None
         try:
             with tempfile.NamedTemporaryFile(
-                prefix=".take-", suffix=".wav", dir=output_path.parent, delete=False,
+                prefix=temporary_audio_prefix(output_path, "drama3-mlx", suffix=".wav"),
+                suffix=".wav", dir=output_path.parent, delete=False,
             ) as staged:
                 temp_name = staged.name
             self._soundfile.write(temp_name, segment.audio, rate, subtype="FLOAT")

@@ -88,7 +88,7 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 4)
         self.assertEqual(len({call["seed"] for call in self.calls}), 4)
         self.assertEqual(accepted["attempt"], 4)
-        self.assertEqual(wav.name, "attempt-004.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assert_snapshot_unchanged(before)
         self.assertEqual(
             [read_json(self.root / "takes" / f"attempt-{number:03d}.json")["report"]["passed"]
@@ -127,7 +127,7 @@ class SpeechRetryTests(unittest.TestCase):
         before = self.snapshot()
         replacement_verifier = FixtureVerifier(self.fixtures, version=2)
         wav, accepted = self.take(SpeechRetryBudget(), verifier=replacement_verifier)
-        self.assertEqual(wav.name, "attempt-003.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(replacement_verifier.calls), 1)
         self.assertEqual(len(self.calls), 3)
@@ -141,7 +141,7 @@ class SpeechRetryTests(unittest.TestCase):
         rejected = read_json(directory / "attempt-002.json")
         write_json(directory / "accepted.json", rejected)
         (directory / "attempt-002.json").unlink()
-        old_wav = (directory / "attempt-002.wav").read_bytes()
+        old_wav = (directory / rejected["audio_file"]).read_bytes()
 
         def unavailable(path, seed):
             self.assertFalse((directory / "accepted.json").exists())
@@ -151,7 +151,7 @@ class SpeechRetryTests(unittest.TestCase):
             self.take(SpeechRetryBudget(), generate=unavailable)
         self.assertFalse((directory / "accepted.json").exists())
         self.assertEqual(read_json(directory / "attempt-002.json"), rejected)
-        self.assertEqual((directory / "attempt-002.wav").read_bytes(), old_wav)
+        self.assertEqual((directory / rejected["audio_file"]).read_bytes(), old_wav)
         self.assertEqual(len(self.verifier.calls), 2)
 
     def test_failed_legacy_acceptance_never_survives_pending_verification(self):
@@ -182,7 +182,7 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertFalse((directory / "accepted.json").exists())
         self.assertEqual(len(self.calls), 1)
         wav, accepted = self.take(SpeechRetryBudget())
-        self.assertEqual(wav.name, "attempt-001.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 1)
 
@@ -190,10 +190,10 @@ class SpeechRetryTests(unittest.TestCase):
         with patch.object(workflow, "validate_audio", side_effect=KeyboardInterrupt("verification interrupted")):
             with self.assertRaises(KeyboardInterrupt):
                 self.take(SpeechRetryBudget())
-        wav = self.root / "takes" / "attempt-001.wav"
-        original_bytes = wav.read_bytes()
-        pending_path = wav.with_suffix(".json")
+        pending_path = self.root / "takes" / "attempt-001.json"
         pending = read_json(pending_path)
+        wav = self.root / "takes" / pending["audio_file"]
+        original_bytes = wav.read_bytes()
         self.assertEqual(pending["report"]["reasons"], ["generation_incomplete"])
         self.assertTrue(pending["report"]["retry_on_resume"])
         orphan = self.root / "takes" / "attempt-002-raw.wav"
@@ -225,11 +225,11 @@ class SpeechRetryTests(unittest.TestCase):
             return self.generate(path, seed)
 
         wav, accepted = self.take(SpeechRetryBudget(), generate=generate_after_discard)
-        self.assertEqual(wav.name, "attempt-1001.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertEqual(accepted["attempt"], 1001)
         self.assertEqual(len(self.calls), 1)
         self.assertNotIn(self.calls[0]["seed"], old_seeds)
-        self.assertEqual(self.calls[0]["path"].name, "attempt-1001-raw.wav")
+        self.assertEqual(self.calls[0]["path"].name, accepted["raw_file"])
         self.assertEqual(metadata.read_bytes(), before[metadata])
         self.assertTrue(all(not old.exists() for old in before if old.suffix == ".wav"))
         self.assertEqual(len(self.verifier.calls), 1)
@@ -257,9 +257,10 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertEqual(pending["report"]["reasons"], ["generation_incomplete"])
         self.assertTrue(pending["report"]["retry_on_resume"])
         self.assertIsNone(pending["audio_file"])
-        self.assertFalse((directory / "attempt-1001-raw.wav").exists())
+        self.assertEqual(pending["raw_file"], self.calls[0]["path"].name)
+        self.assertFalse(self.calls[0]["path"].exists())
         wav, accepted = self.take(SpeechRetryBudget())
-        self.assertEqual(wav.name, "attempt-1002.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertEqual(accepted["attempt"], 1002)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 2)
@@ -292,7 +293,7 @@ class SpeechRetryTests(unittest.TestCase):
                     self.take(SpeechRetryBudget())
         self.assertEqual(len(self.calls), 1)
         wav, accepted = self.take(SpeechRetryBudget())
-        self.assertEqual(wav.name, "attempt-001.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 1)
 
@@ -306,7 +307,7 @@ class SpeechRetryTests(unittest.TestCase):
         self.verifier.wrong_texts.clear()
         wav, accepted = self.take(SpeechRetryBudget())
         self.assertEqual(accepted["attempt"], 13)
-        self.assertEqual(wav.name, "attempt-013.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assert_snapshot_unchanged(failures)
         wav.unlink()
         replacement, replacement_record = self.take(SpeechRetryBudget())
@@ -380,7 +381,7 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertTrue(all(read_json(path)["audio_file"] is None for path in before))
         self.config["quality"]["min_duration_seconds"] = 0.10
         wav, accepted = self.take(SpeechRetryBudget())
-        self.assertEqual(wav.name, "attempt-003.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertEqual(accepted["attempt"], 3)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 3)

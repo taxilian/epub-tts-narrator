@@ -25,13 +25,16 @@ from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.workflow import make_render_plan
 from audition_fixtures import prepare_document
+from shared_fixtures import rebind_audiobook_filename
 from test_contracts import valid_document
 from test_renderer_workflow import write_tone, FFMPEG, FFPROBE
 
 
-def fixture_artifacts(spec, mutate=None, mutate_manifest=None):
+def fixture_artifacts(spec, mutate=None, mutate_manifest=None, *, descriptive=False):
     """A complete transport fixture; real codec coverage uses ChapterExecutor below."""
     chapter = spec["chapter"]
+    audio_file = f"chapter-{chapter['number']:04d}.m4a" if descriptive else "chapter.m4a"
+    lossless_file = f"chapter-{chapter['number']:04d}.flac" if descriptive else "chapter.flac"
     segments, cursor = [], 0
     for chunk in chapter["chunks"]:
         row = chunk["segment"]
@@ -64,8 +67,8 @@ def fixture_artifacts(spec, mutate=None, mutate_manifest=None):
                 "source_fingerprint": spec["source_fingerprint"], "voice_bindings": spec["voice_bindings"],
                 "id": chapter["id"], "number": chapter["number"], "title": chapter["title"],
                 "frames": cursor, "channels": 1, "sample_rate": 44100, "segments": segments,
-                "status": "complete" if cursor else "empty", "audio_file": "chapter.m4a" if cursor else None,
-                "lossless_file": "chapter.flac" if cursor else None,
+                "status": "complete" if cursor else "empty", "audio_file": audio_file if cursor else None,
+                "lossless_file": lossless_file if cursor else None,
                 "encoded_sha256": audio_hash, "pcm_data_sha256": "a" * 64 if cursor else None}
     context = {"spec_hash": digest(spec), "source_fingerprint": spec["source_fingerprint"],
                "voice_assets": spec["voice_bindings"], "engine": {"engine": "fixture"},
@@ -86,7 +89,7 @@ def fixture_artifacts(spec, mutate=None, mutate_manifest=None):
             "segments": deepcopy(segments)}
     files = {"chapter.json": metadata, "sync.json": sync, "verification.json": verification}
     if cursor:
-        files.update({"chapter.m4a": encoded, "chapter.flac": b"fLaCfixture"})
+        files.update({audio_file: encoded, lossless_file: b"fLaCfixture"})
     if mutate:
         mutate(files)
     data = {name: value if isinstance(value, bytes) else json.dumps(value).encode() for name, value in files.items()}
@@ -154,6 +157,25 @@ class DownloadTests(unittest.TestCase):
             self.client.websocket("job", 0)
         self.assertIsNone(connect.call_args.kwargs["proxy"])
 
+    def test_staged_download_names_destination_and_stage_without_leftovers(self):
+        # Given an HTTP boundary serving a numbered chapter artifact.
+        target = self.root / "chapter-0042.flac"
+        artifact = {**self.artifact, "name": "chapter-0042.flac",
+                    "url": "/v1/jobs/job/artifacts/chapter-0042.flac"}
+        original = tempfile.mkstemp
+        with patch("tempfile.mkstemp", side_effect=lambda *a, **k: original(*a, **k)) as mkstemp:
+            self.client.download(artifact, target)
+
+        # Then the staged file names its destination and download stage,
+        # publishes the exact bytes, and leaves no hidden temporary behind.
+        prefix = mkstemp.call_args.kwargs["prefix"]
+        self.assertTrue(prefix.startswith("."))
+        self.assertIn("chapter-0042.flac", prefix)
+        self.assertIn("download", prefix)
+        self.assertLessEqual(len(prefix.encode("utf-8")) + 8, 255)
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual([path.name for path in self.root.iterdir()], ["chapter-0042.flac"])
+
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
 class ChapterOrchestrationTests(unittest.TestCase):
@@ -196,7 +218,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.store = Mock()
         self.store.load.return_value = self.voice
 
-    def fake_client(self):
+    def fake_client(self, *, descriptive=False):
         owner = self
         class FakeClient:
             settings = owner.config["remote_chapters"]
@@ -226,7 +248,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
                 if path == "v1/jobs":
                     spec = payload["spec"]
                     job_id = digest(spec)
-                    files = fixture_artifacts(spec)
+                    files = fixture_artifacts(spec, descriptive=descriptive)
                     artifacts = []
                     for name, data in files.items():
                         url = f"/{job_id}/{name}"
@@ -244,6 +266,20 @@ class ChapterOrchestrationTests(unittest.TestCase):
             def download(self, artifact, target):
                 target.write_bytes(self.artifacts[artifact["url"]])
         return FakeClient
+
+    def start_numbered_job(self, *, number=1):
+        bindings = {key: "a" * 64 for key in self.plan["voice_ids"]}
+        selection = deepcopy(_selection(self.bundle, self.plan["chapters"][0], self.config, bindings))
+        selection["chapter"].update(id=f"chapter-{number:04d}", number=number)
+        selection["total_chapters"] = number
+        spec = {**selection, "renderer_fingerprint": "f" * 64}
+        client = self.fake_client(descriptive=True)(self.config["remote_chapters"])
+        submitted = client.request("POST", "v1/jobs", {"spec": spec})
+        folder = self.root / "work" / "remote-chapters" / digest(selection)
+        if folder.exists():
+            shutil.rmtree(folder)
+        record = {"id": submitted["id"], "selection": selection, "spec": spec, "last_event": 0}
+        return client, folder, record
 
     def test_registers_flac_once_queues_all_chapters_and_resumes_without_service(self):
         client = self.fake_client()(self.config["remote_chapters"])
@@ -303,6 +339,66 @@ class ChapterOrchestrationTests(unittest.TestCase):
                                   notify=lambda _: None, chapters_only=True)
         factory.assert_not_called()
         self.assertTrue(all(link.is_symlink() and link.resolve().is_file() for link in linked))
+
+    def test_numbered_artifacts_drive_download_checksums_links_and_offline_resume(self):
+        client = self.fake_client(descriptive=True)(self.config["remote_chapters"])
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        self.assertEqual({Path(item["audio_file"]).name for item in result["chapters"]},
+                         {"chapter-0001.m4a", "chapter-0002.m4a"})
+        before = {}
+        for cache in (self.root / "work" / "remote-chapters").glob("*/cache.json"):
+            folder = cache.parent
+            metadata = read_json(folder / "chapter.json")
+            audio = folder / metadata["audio_file"]
+            master = folder / metadata["lossless_file"]
+            self.assertTrue(audio.is_file())
+            self.assertTrue(master.is_file())
+            self.assertEqual(file_hash(audio), metadata["encoded_sha256"])
+            self.assertEqual(read_json(folder / "sync.json")["audio_file"], metadata["audio_file"])
+            link = self.root / "work" / "chapter-links" / f"chapter-{metadata['number']:02d}.m4a"
+            self.assertEqual(link.resolve(), audio.resolve())
+            before[cache] = {path: file_hash(path) for path in folder.iterdir() if path.is_file()}
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            resumed = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                            notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        self.assertEqual(resumed, result)
+        self.assertEqual(before, {cache: {path: file_hash(path) for path in cache.parent.iterdir() if path.is_file()}
+                                  for cache in before})
+
+    def test_chapter_only_download_defers_numbered_master_and_links_chapter_42(self):
+        client, folder, record = self.start_numbered_job(number=42)
+        _wait_jobs(client, {record["id"]: (folder, record)}, lambda _: None,
+                   include_masters=False, session="d" * 64)
+        self.assertTrue((folder / "chapter-0042.m4a").is_file())
+        self.assertFalse((folder / "chapter-0042.flac").exists())
+        link = self.root / "work" / "chapter-links" / "chapter-42.m4a"
+        self.assertEqual(link.resolve(), (folder / "chapter-0042.m4a").resolve())
+        descriptor = _read_cache(folder, record["selection"])
+        self.assertTrue(_cached_artifacts_present(folder, descriptor, require_masters=False))
+        self.assertFalse(_cached_artifacts_present(folder, descriptor))
+
+    def test_completed_numbered_inventory_rejects_duplicates_wrong_chapter_extra_and_traversal(self):
+        mutations = {
+            "duplicate": lambda artifacts: artifacts.append(deepcopy(artifacts[0])),
+            "wrong chapter": lambda artifacts: [item.update(name="chapter-0002.m4a")
+                                                  for item in artifacts if item["name"] == "chapter-0001.m4a"],
+            "extra artifact": lambda artifacts: artifacts.append(
+                dict(next(item for item in artifacts if item["name"] == "chapter-0001.m4a"),
+                     name="chapter-0002.m4a")),
+            "traversal": lambda artifacts: [item.update(name="../chapter-0001.m4a")
+                                             for item in artifacts if item["name"] == "chapter-0001.m4a"],
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                client, folder, record = self.start_numbered_job()
+                mutate(client.jobs[record["id"]]["artifacts"])
+                with self.assertRaises(ChapterClientError):
+                    _wait_jobs(client, {record["id"]: (folder, record)}, lambda _: None,
+                               include_masters=False, session="d" * 64)
+                self.assertFalse((folder / "cache.json").exists())
 
     def test_single_speaker_worker_accepts_unchanged_uniform_paragraphs(self):
         from test_renderer_workflow import EXAMPLE
@@ -482,7 +578,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(len(rerun["chapters"]), 2)
 
-    def metadata_fixture(self, *, spec=None, mutate=None, mutate_manifest=None):
+    def metadata_fixture(self, *, spec=None, mutate=None, mutate_manifest=None, descriptive=False):
         if spec is None:
             bindings = {key: "a" * 64 for key in self.plan["voice_ids"]}
             spec = _selection(self.bundle, self.plan["chapters"][0], self.config, bindings)
@@ -492,7 +588,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         for path in folder.iterdir():
             path.unlink()
         artifacts = []
-        for name, data in fixture_artifacts(spec, mutate, mutate_manifest).items():
+        for name, data in fixture_artifacts(spec, mutate, mutate_manifest, descriptive=descriptive).items():
             (folder / name).write_bytes(data)
             artifacts.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
         record = {"spec": spec, "selection": {"chapter": spec["chapter"]}, "artifacts": artifacts}
@@ -555,6 +651,39 @@ class ChapterOrchestrationTests(unittest.TestCase):
             self.assertNotIn(key, descriptor)
         # Migration is consumed once: only the descriptor remains.
         self.assertIsNone(_migrate_legacy_job(folder, selection))
+
+    def test_legacy_receipts_and_generic_audio_resume_without_any_service_calls(self):
+        voices = {voice_id: self.voice for voice_id in self.plan["voice_ids"]}
+        bindings, _ = _voice_assets(voices, self.root / "receipt-assets", FFMPEG)
+        before = {}
+        for chapter in self.plan["chapters"]:
+            selection = _selection(self.bundle, chapter, self.config, bindings)
+            spec = {**deepcopy(selection), "renderer_fingerprint": "f" * 64}
+            folder = self.root / "work" / "remote-chapters" / digest(selection)
+            folder.mkdir(parents=True)
+            files = fixture_artifacts(spec)
+            artifacts = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(),
+                          "size": len(data), "url": f"https://objects.example/{name}"}
+                         for name, data in files.items()]
+            record = {"format": PROTOCOL, "version": 1, "id": digest(spec), "selection": selection,
+                      "spec": spec, "last_event": 99, "state": "completed", "artifacts": artifacts}
+            write_json(folder / "job.json", dict(record, record_sha256=digest(record)))
+            for name, data in files.items():
+                (folder / name).write_bytes(data)
+            before[folder] = {name: data for name, data in files.items()}
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
+            first = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                          notify=lambda _: None, chapters_only=True)
+            second = _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        factory.assert_not_called()
+        self.assertEqual(first, second)
+        for folder, files in before.items():
+            self.assertEqual({name: (folder / name).read_bytes() for name in files}, files)
+            self.assertFalse((folder / "job.json").exists())
+            self.assertTrue((folder / "cache.json").is_file())
+        self.assertEqual({Path(item["audio_file"]).name for item in first["chapters"]},
+                         {"chapter.m4a"})
 
     def test_incomplete_legacy_receipts_and_leftovers_cannot_steer_a_fresh_run(self):
         voices = {voice_id: self.voice for voice_id in self.plan["voice_ids"]}
@@ -702,6 +831,26 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with self.assertRaises((ChapterClientError, ValueError, FileNotFoundError)):
             _validate_metadata(folder, record)
 
+    def test_legacy_metadata_without_filename_fields_falls_back_to_generic_files(self):
+        def remove_pointers(files):
+            files["chapter.json"].pop("audio_file")
+            files["chapter.json"].pop("lossless_file")
+        folder, record = self.metadata_fixture(mutate=remove_pointers)
+        metadata = _validate_metadata(folder, record)
+        self.assertEqual(metadata["audio_file"], "chapter.m4a")
+        self.assertEqual(metadata["lossless_file"], "chapter.flac")
+
+    def test_numbered_metadata_uses_recorded_names_for_manifest_and_deferred_master(self):
+        folder, record = self.metadata_fixture(descriptive=True)
+        metadata = _validate_metadata(folder, record)
+        self.assertEqual(metadata["audio_file"], "chapter-0001.m4a")
+        self.assertEqual(metadata["lossless_file"], "chapter-0001.flac")
+        (folder / metadata["lossless_file"]).unlink()
+        _validate_metadata(folder, record)
+        (folder / metadata["audio_file"]).unlink()
+        with self.assertRaises((ChapterClientError, ValueError, FileNotFoundError)):
+            _validate_metadata(folder, record)
+
     def test_empty_chapter_metadata_remains_valid(self):
         _, record = self.metadata_fixture()
         spec = deepcopy(record["spec"])
@@ -731,6 +880,49 @@ class ChapterOrchestrationTests(unittest.TestCase):
         folder, record = self.metadata_fixture(spec=spec, mutate=change_turn)
         with self.assertRaisesRegex(ChapterClientError, "source turns"):
             _validate_metadata(folder, record)
+
+    def test_voice_transfer_uses_descriptive_name_and_reuses_it_without_reencoding(self):
+        # Given a WAV reference owned by a specific remote voice.
+        bindings, assets = _voice_assets({"hero": self.voice}, self.root / "named-assets", FFMPEG)
+        path = assets[bindings["hero"]]["path"]
+        record = read_json(path.parent / (digest({"audio": file_hash(Path(self.voice["reference_audio"])),
+                                                   "encoding": "flac-v1"}) + ".json"))
+
+        # Then the physical cache file names its source role and owner in metadata.
+        self.assertIn("hero", path.name)
+        self.assertIn("reference", path.name)
+        self.assertIn("remote-reference", path.name)
+        self.assertNotRegex(path.name, r"^[0-9a-f]{64}\.flac$")
+        self.assertEqual(record["audio_file"], path.name)
+
+        # When reopening the exact saved conversion, no encoder runs again.
+        with patch("epub_tts_narrator.renderer.chapter_client._run_audio",
+                   side_effect=AssertionError("unexpected reencode")):
+            resumed_ids, resumed = _voice_assets({"hero": self.voice}, self.root / "named-assets", FFMPEG)
+        self.assertEqual(resumed[resumed_ids["hero"]]["path"], path)
+
+    def test_legacy_hash_named_voice_transfer_resumes_without_rename_or_reencode(self):
+        # Given a previously valid hash-named FLAC and its original JSON receipt.
+        bindings, assets = _voice_assets({"hero": self.voice}, self.root / "legacy-transfer", FFMPEG)
+        current = assets[bindings["hero"]]["path"]
+        conversion_key = digest({"audio": file_hash(Path(self.voice["reference_audio"])),
+                                 "encoding": "flac-v1"})
+        legacy = current.parent / (conversion_key + ".flac")
+        current.rename(legacy)
+        receipt = current.parent / (conversion_key + ".json")
+        saved = read_json(receipt)
+        saved.pop("audio_file")
+        write_json(receipt, saved)
+        before = receipt.read_bytes()
+
+        # When reusing the old cache through the public conversion boundary.
+        with patch("epub_tts_narrator.renderer.chapter_client._run_audio",
+                   side_effect=AssertionError("unexpected reencode")):
+            resumed_ids, resumed = _voice_assets({"hero": self.voice}, self.root / "legacy-transfer", FFMPEG)
+
+        # Then the established bytes and receipt stay in place without migration.
+        self.assertEqual(resumed[resumed_ids["hero"]]["path"], legacy)
+        self.assertEqual(receipt.read_bytes(), before)
 
     def test_same_audio_different_transcript_has_distinct_registered_identity(self):
         bindings, assets = _voice_assets({"one": self.voice,
@@ -1019,8 +1211,11 @@ class ChapterOrchestrationTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", InProcessClient):
             _render_remote_locked(self.bundle, self.config, self.plan, self.store,
                                   notify=lambda _: None, chapters_only=True)
-            self.assertIn("chapter.flac", downloads)
-            self.assertIn("chapter.m4a", downloads)
+            recorded_audio = set()
+            for checkpoint in (self.root / "work" / "remote-chapters").glob("*/chapter.json"):
+                metadata = read_json(checkpoint)
+                recorded_audio.update((metadata["audio_file"], metadata["lossless_file"]))
+            self.assertTrue(recorded_audio <= set(downloads))
             calls_before_assembly = len(engine.speech_calls)
             # Cached durable artifact URLs suffice even after the job API stops.
             with patch.object(InProcessClient, "request", side_effect=AssertionError("service offline")):
@@ -1028,10 +1223,10 @@ class ChapterOrchestrationTests(unittest.TestCase):
                                                notify=lambda _: None, chapters_only=False)
         self.assertEqual(len(engine.speech_calls), calls_before_assembly)
         self.assertTrue(all(audio.startswith(b"fLaC") for audio in uploads))
-        self.assertTrue({"chapter.m4a", "chapter.flac"}.issubset(downloads))
         self.assertFalse(any(name.endswith(".wav") for name in downloads))
         self.assertEqual(result["status"], "complete")
-        book = self.root / "output" / "book.m4b"
+        book = self.root / "output" / result["audio"]["audiobook"]["path"]
+        self.assertNotEqual(book.name, "book.m4b")
         self.assertTrue(book.is_file())
         self.assertEqual(len(probe_audio(book, ffprobe=FFPROBE)["chapters"]), 2)
         sync = read_json(self.root / "output" / "sync.json")
@@ -1042,6 +1237,9 @@ class ChapterOrchestrationTests(unittest.TestCase):
 
         # A revised script updates the same complete audiobook, retaining the
         # unchanged remote chapter and the server's accepted unchanged clips.
+        original_book_name = book.name
+        rebind_audiobook_filename(self.root / "output", "Existing Remote Book.m4b")
+        book = self.root / "output" / "Existing Remote Book.m4b"
         previous = read_json(self.root / "output" / "render.json")
         self.config["_publication_expected"] = digest(previous)
         unchanged_chapter = file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a")
@@ -1067,6 +1265,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
                          previous["chapter_identities"]["chapter-0002"])
         self.assertEqual(revised, read_json(self.root / "output" / "render.json"))
         self.assertEqual(revised["bundle_hash"], self.bundle["bundle_hash"])
+        self.assertEqual(revised["audio"]["audiobook"]["path"], book.name)
+        self.assertFalse((self.root / "output" / original_book_name).exists())
         self.assertEqual(unchanged_chapter, file_hash(self.root / "output" / "chapters" / "chapter-0002.m4a"))
         self.assertEqual(len(probe_audio(book, ffprobe=FFPROBE)["chapters"]), 2)
         self.assertEqual(list(self.root.glob(".output.previous-*")), [])

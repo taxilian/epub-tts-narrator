@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from audition_fixtures import prepare_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
@@ -136,10 +137,22 @@ class ModelVoiceBindingTests(unittest.TestCase):
         source = self.root / "supplied.wav"
         text = "An existing recording keeps its voice."
         self.designer.write_audio(text, source, 1729)
-        imported = import_voice(self.bundle, self.voice_id, source, text, self.config,
-                                self.engine, self.verifier)
+        from epub_tts_narrator.renderer import workflow
+        staged = []
+        normalize = workflow.normalize_clip
+        def record_staging(source_path, target_path, **kwargs):
+            staged.append(Path(target_path))
+            return normalize(source_path, target_path, **kwargs)
+        with patch("epub_tts_narrator.renderer.workflow.normalize_clip", side_effect=record_staging):
+            imported = import_voice(self.bundle, self.voice_id, source, text, self.config,
+                                    self.engine, self.verifier)
         session = self.session()
 
+        self.assertEqual(len(staged), 1)
+        self.assertIn(self.voice_id, staged[0].name)
+        self.assertIn("supplied", staged[0].name)
+        self.assertIn("import-normalized-reference", staged[0].name)
+        self.assertNotEqual(staged[0].name, "reference.wav")
         self.assertEqual(self.reuse(session.store)["asset_hash"], imported["asset_hash"])
         self.assertEqual(self.reuse(session.store, self.playback(EIGHT_BIT))["asset_hash"], imported["asset_hash"])
         self.assertEqual(imported["creation"]["engine"], self.engine.identity)

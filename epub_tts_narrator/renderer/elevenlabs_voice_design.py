@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 import wave
 
+from .audio_naming import temporary_audio_prefix
 from .common import digest, read_json, regular_file
 from .diagnostics import safe_error_text
 from .engines import EngineError, _seed
@@ -45,7 +46,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _publish(path, content):
     """Publish a whole file exclusively; never replace an existing candidate."""
-    with tempfile.NamedTemporaryFile(prefix=".elevenlabs-", dir=path.parent) as stage:
+    with tempfile.NamedTemporaryFile(prefix=temporary_audio_prefix(path, "elevenlabs-design"),
+                                     dir=path.parent) as stage:
         stage.write(content)
         stage.flush()
         os.fsync(stage.fileno())

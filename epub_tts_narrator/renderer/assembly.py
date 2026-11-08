@@ -25,6 +25,9 @@ import zipfile
 from epub_tts_narrator.epub import (
     MAX_ARCHIVE_BYTES, _Archive, _parse_xml, _resolve_href, _tag,
 )
+from .book_output import (
+    LEGACY_AUDIOBOOK_FILENAME, default_audiobook_filename, validate_audiobook_filename,
+)
 from .pacing import audio_edges, punctuation_pause
 from .interrupts import run_subprocess
 
@@ -97,7 +100,7 @@ def _normalize_clip(input_path: str | Path, output_path: str | Path, *,
         raise ValueError(f"Output already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".normalize-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "audio.wav"
+        staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
               "-protocol_whitelist", "file,pipe", "-i", str(source),
               "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar",
@@ -136,7 +139,7 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
     target.parent.mkdir(parents=True, exist_ok=True)
     peak = 0
     with tempfile.TemporaryDirectory(prefix=".mix-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "mix.wav"
+        staged = Path(temporary) / target.name
         with ExitStack() as handles:
             inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
             destination = handles.enter_context(wave.open(str(staged), "wb"))
@@ -291,7 +294,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     timings, cursor, pending_pause, previous_tail = [], 0, 0, 0
     pending_punctuation = 0
     with tempfile.TemporaryDirectory(prefix=".compose-", dir=target.parent) as temporary:
-        staged = Path(temporary) / "chapter.wav"
+        staged = Path(temporary) / target.name
         with wave.open(str(staged), "wb") as destination:
             destination.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
 
@@ -607,7 +610,7 @@ def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
     codec = (aac_codec_arguments(aac_bitrate) if chapter_format == "m4a"
              else ["-c:a", "libmp3lame", "-b:a", mp3_bitrate])
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=target.parent) as temporary:
-        staged = Path(temporary) / f"chapter.{chapter_format}"
+        staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
               "-i", str(Path(chapter["wav_path"]).resolve()), "-map", "0:a:0"]
              + codec + ["-metadata", f"title={chapter['title']}",
@@ -626,7 +629,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                   chapter_format: str = "m4a", aac_bitrate: str = "128k",
                   mp3_bitrate: str = "128k", ffmpeg: str = "ffmpeg",
                   ffprobe: str = "ffprobe", source_fingerprint: str | None = None,
-                  notify=lambda message: None) -> dict:
+                  audiobook_name: str | None = None, notify=lambda message: None) -> dict:
     """Encode chapter files and a single AAC M4B from the same lossless WAVs.
 
     The caller owns the staging directory and publishes it only after success.
@@ -637,9 +640,10 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
     for bitrate in (aac_bitrate, mp3_bitrate):
         if not isinstance(bitrate, str) or not re.fullmatch(r"[1-9][0-9]{0,2}k", bitrate):
             raise ValueError("Audio bitrate must be a positive value such as 128k")
+    filename = validate_audiobook_filename(audiobook_name) if audiobook_name is not None else None
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
-    for name in ("chapters", "book.m4b", "sync.json", "audio-manifest.json"):
+    for name in ("chapters", "sync.json", "audio-manifest.json"):
         if (target / name).exists() or (target / name).is_symlink():
             raise ValueError(f"Audio package output already exists: {target / name}")
     if not chapters:
@@ -691,6 +695,11 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
         cursor += info["frames"]
     if cursor == 0:
         raise ValueError("Audiobook has no speech audio to package")
+    filename = filename or default_audiobook_filename(book)
+    book_path = target / filename
+    for name in {filename, LEGACY_AUDIOBOOK_FILENAME}:
+        if (target / name).exists() or (target / name).is_symlink():
+            raise ValueError(f"Audio package output already exists: {target / name}")
     chapter_dir = target / "chapters"
     chapter_dir.mkdir()
     cover = Path(cover_path).resolve() if cover_path is not None else None
@@ -720,7 +729,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                            aac_bitrate=aac_bitrate, mp3_bitrate=mp3_bitrate,
                            ffmpeg=ffmpeg, ffprobe=ffprobe)
         record["sha256"] = _hash(output)
-    notify(f"Combining {len(audio_chapters)} chapters into book.m4b")
+    notify(f"Combining {len(audio_chapters)} chapters into {filename}")
     with tempfile.TemporaryDirectory(prefix=".encode-", dir=target) as temporary:
         scratch = Path(temporary)
         concat = scratch / "chapters.ffconcat"
@@ -744,19 +753,19 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
         if cover is not None:
             command += ["-map", "2:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
         command += metadata_arguments(book)
-        command += ["-movflags", "+faststart", "-f", "ipod", str(target / "book.m4b")]
+        command += ["-movflags", "+faststart", "-f", "ipod", str(book_path)]
         _run(command)
-    inspection = _check_encoded(target / "book.m4b", cursor, sample_rate,
-                                chapters=[record for _, record in audio_chapters],
-                                cover=cover is not None, ffprobe=ffprobe)
+    inspection = _check_encoded(book_path, cursor, sample_rate,
+                                 chapters=[record for _, record in audio_chapters],
+                                 cover=cover is not None, ffprobe=ffprobe)
     check_book_tags(inspection, book)
     sync = {
         "format": "audiobook-renderer-sync", "version": 1, "book_id": book.get("id"),
         "source_fingerprint": source_fingerprint, "sample_rate": sample_rate,
         "timebase": f"1/{sample_rate}", "range_end": "exclusive",
         "timing_basis": "PCM sample frames; segment ranges exclude inserted pauses",
-        "precision": "chunk", "audio_file": "book.m4b",
-        "audio_sha256": _hash(target / "book.m4b"),
+        "precision": "chunk", "audio_file": filename,
+        "audio_sha256": _hash(book_path),
         "playback_note": "Use codec delay/padding-aware playback. Chapter tags may round to milliseconds.",
         "chapters": records, "segments": timings,
     }
@@ -767,7 +776,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
         "source_fingerprint": source_fingerprint, "sample_rate": sample_rate,
         "channels": 1, "frames": cursor, "duration_seconds": cursor / sample_rate,
         "chapter_format": chapter_format, "chapters": records,
-        "audiobook": {"path": "book.m4b", "sha256": sync["audio_sha256"], "codec": "aac",
+        "audiobook": {"path": filename, "sha256": sync["audio_sha256"], "codec": "aac",
                       "cover_embedded": cover is not None},
         "sync": {"path": "sync.json", "sha256": _hash(target / "sync.json")},
         "encoded_audio_duration_seconds": float(next(

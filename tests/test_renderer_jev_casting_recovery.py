@@ -199,7 +199,7 @@ class JevCastingRecoveryTests(unittest.TestCase):
         fixture.checked.clear()
         fixture.verdict = "passed"
         selected = fixture.run(fixture.new_session())
-        self.assertEqual(fixture.checked, [path.parent / "attempt-002.wav"])
+        self.assertEqual(fixture.checked, [path.parent / record["audio_file"]])
         self.assertEqual(len(fixture.engine.calls), 2)
         self.assertEqual(selected["creation"]["seed"], record["seed"])
         self.assertEqual((path.parent / "attempt-001.json").read_bytes(), rejected)

@@ -178,14 +178,16 @@ class PipelineLifecycleTests(unittest.TestCase):
         # never re-run. The accepted audio may be re-transcribed once per
         # cache-hit validation, so only distinct files and counts bind.
         self.assertEqual(verifier.remaining_failures, 0)
-        transcribed = [Path(path).name for path in verifier.calls]
-        self.assertEqual(set(transcribed), {"attempt-001.wav", "attempt-002.wav"})
-        self.assertEqual(transcribed.count("attempt-001.wav"), 1)
-        self.assertGreaterEqual(transcribed.count("attempt-002.wav"), 1)
         accepted = self.accepted_records()
         self.assertEqual(len(accepted), 1)
         attempts = sorted(accepted[0].parent.glob("attempt-*.json"))
         self.assertEqual(len(attempts), 2)
+        records = [read_json(path) for path in attempts]
+        recorded_names = {record["attempt"]: record["audio_file"] for record in records}
+        transcribed = [Path(path).name for path in verifier.calls]
+        self.assertEqual(set(transcribed), set(recorded_names.values()))
+        self.assertEqual(transcribed.count(recorded_names[1]), 1)
+        self.assertGreaterEqual(transcribed.count(recorded_names[2]), 1)
         self.assertIs(read_json(attempts[0])["report"]["passed"], False)
         self.assertIs(read_json(accepted[0])["report"]["passed"], True)
 

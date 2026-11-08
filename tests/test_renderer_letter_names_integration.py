@@ -225,7 +225,8 @@ class LetterNamesResumeTests(unittest.TestCase):
         verifier = ReferenceTextJudgingVerifier(recognizer, judge)
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
         waveform = wav.read_bytes()
-        saved_report = wav.with_suffix(".json").read_bytes()
+        report_path = wav.parent / f"attempt-{accepted['attempt']:03d}.json"
+        saved_report = report_path.read_bytes()
         recognitions = list(recognizer.calls)
         self.assertEqual(len(self.calls), 1)
         self.assertTrue(accepted["report"]["passed"], accepted)
@@ -235,7 +236,7 @@ class LetterNamesResumeTests(unittest.TestCase):
         again = self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(again, (wav, accepted))
         self.assertEqual(wav.read_bytes(), waveform)
-        self.assertEqual(wav.with_suffix(".json").read_bytes(), saved_report)
+        self.assertEqual(report_path.read_bytes(), saved_report)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(recognizer.calls, recognitions)
         self.assertEqual(judge.calls, [])

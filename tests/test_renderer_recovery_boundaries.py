@@ -21,11 +21,13 @@ class NormalizationCheckpointTests(unittest.TestCase):
     def test_published_unbound_normalization_resumes_from_raw_and_retains_orphan(self):
         from epub_tts_narrator.renderer.clip_repair_execute import normalize_clip
 
+        published = []
         def interrupted(raw, output, **options):
             normalize_clip(raw, output, **options)
-            stable = raw.parent / 'part-001.wav'
+            stable = raw.parent / output.name
             if output != stable:
                 shutil.copyfile(output, stable)
+            published.append(stable)
             raise KeyboardInterrupt('offline interruption after normalized WAV publication')
 
         with patch('epub_tts_narrator.renderer.clip_repair_execute.normalize_clip', side_effect=interrupted):
@@ -34,7 +36,8 @@ class NormalizationCheckpointTests(unittest.TestCase):
         state_path = next((self.work / 'clips').glob('*/clip-repair.json'))
         before = read_json(state_path)['parts'][0]
         folder = state_path.parent / 'clip-repair-parts'
-        orphan_hash = file_hash(folder / 'part-001.wav')
+        self.assertEqual(len(published), 1)
+        orphan_hash = file_hash(published[0])
         self.assertIn('raw_sha256', before)
         self.assertNotIn('audio_sha256', before)
         self.assertEqual(len(self.engine.calls), 4)
@@ -48,7 +51,7 @@ class NormalizationCheckpointTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 5)
         self.assertEqual(len(self.client.repair_calls), 1)
         self.assertEqual(len(self.client.review_calls), 2)
-        self.assertEqual([file_hash(path) for path in folder.glob('part-001-orphan-*.wav')], [orphan_hash])
+        self.assertEqual([file_hash(path) for path in folder.glob(f'{published[0].stem}-orphan-*.wav')], [orphan_hash])
 
 
 class FormatClient:

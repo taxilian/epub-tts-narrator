@@ -608,16 +608,74 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertNotIn("DO_NOT_ECHO", Path(corrected["path"]).with_name("preview.json").read_text())
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_preview_names_identify_word_voice_and_artifact_stage(self):
+        # Given an explicit listening preview for a saved character voice.
+        preview = self.session.audition("Mara")
+        path = Path(preview["path"])
+        state = read_json(path.with_name("preview.json"))
+
+        # Then every newly created stage has a contextual recorded basename.
+        voice_id = self.engine.calls[0]["voice"]["voice_id"]
+        for field, suffix, role in (("audio_file", ".flac", "listening-preview"),
+                                    ("raw_file", ".wav", "raw-preview"),
+                                    ("normalized_file", ".wav", "normalized-preview")):
+            with self.subTest(field=field):
+                self.assertIn("Mara", state[field])
+                self.assertIn(voice_id, state[field])
+                self.assertIn(role, state[field])
+                self.assertTrue(state[field].endswith(suffix))
+        self.assertEqual(path.name, state["audio_file"])
+        self.assertNotEqual(path.name, "sample.flac")
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_legacy_ready_preview_and_playback_receipt_remain_valid(self):
+        # Given an old ready FLAC and preview state without filename fields.
+        current = self.session.audition("Mara")
+        path = Path(current["path"])
+        legacy = path.with_name("sample.flac")
+        path.rename(legacy)
+        state_path = path.with_name("preview.json")
+        state = read_json(state_path)
+        for field in ("audio_file", "raw_file", "normalized_file"):
+            state.pop(field)
+        write_json(state_path, state)
+        registry = Path(self.bundle["directory"], "pronunciations.json").read_bytes()
+        calls = len(self.engine.calls)
+
+        # When reopening and marking the old exact preview as played.
+        resumed = self.session.audition("Mara", cached_only=True)
+        receipt = self.session.mark_played(resumed)
+
+        # Then no synthesis or registry rewrite occurs, and the old name remains authoritative.
+        self.assertEqual(Path(resumed["path"]), legacy)
+        self.assertEqual(receipt["audio_sha256"], state["audio_sha256"])
+        self.assertEqual(len(self.engine.calls), calls)
+        self.assertEqual(Path(self.bundle["directory"], "pronunciations.json").read_bytes(), registry)
+        self.assertNotIn("audio_file", read_json(state_path))
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_interrupted_compression_reuses_completed_speech_on_resume(self):
         with patch("epub_tts_narrator.renderer.chapter_executor._flac_master", side_effect=RuntimeError("encoder interrupted")):
             with self.assertRaisesRegex(RuntimeError, "encoder interrupted"):
                 self.session.audition("Mara")
         self.assertEqual(len(self.engine.calls), 1)
-        state = read_json(next(self.session.directory.rglob("preview.json")))
+        state_path = next(self.session.directory.rglob("preview.json"))
+        state = read_json(state_path)
         self.assertEqual(state["status"], "generated")
+        raw = state_path.with_name(state["raw_file"])
+        raw.rename(state_path.with_name("raw.wav"))
+        state_path.with_name(state["normalized_file"]).unlink()
+        for field in ("audio_file", "raw_file", "normalized_file"):
+            state.pop(field)
+        write_json(state_path, state)
+
         resumed = self.session.audition("Mara")
+
         self.assertEqual(resumed["status"], "ready")
         self.assertEqual(len(self.engine.calls), 1)
+        self.assertIn("normalized-preview", resumed["normalized_file"])
+        self.assertIn("listening-preview", resumed["audio_file"])
+        self.assertNotEqual(resumed["audio_file"], "sample.flac")
         self.assertEqual(list(self.session.directory.rglob("*.wav")), [])
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
@@ -710,8 +768,9 @@ class PronunciationReviewTests(unittest.TestCase):
         state = read_json(state_path)
         self.assertEqual(state["status"], "rejected")
         self.assertEqual(state["take"], 1)
-        self.assertEqual(state["rejections"][0]["raw_sha256"], file_hash(state_path.with_name("raw.wav")))
-        self.assertEqual(state["rejections"][0]["normalized_sha256"], file_hash(state_path.with_name("normalized.wav")))
+        self.assertEqual(state["rejections"][0]["raw_sha256"], file_hash(state_path.with_name(state["raw_file"])))
+        self.assertEqual(state["rejections"][0]["normalized_sha256"],
+                         file_hash(state_path.with_name(state["normalized_file"])))
         self.assertIn("silent", state["rejections"][0]["reason"])
         self.assertFalse(list(self.session.directory.rglob("*.flac")))
         resumed = self.session.audition("Mara")
@@ -729,9 +788,10 @@ class PronunciationReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Play again"):
                 self.session.audition("Mara")
         state_path = next(self.session.directory.rglob("preview.json"))
-        raw = state_path.with_name("raw.wav")
+        state = read_json(state_path)
+        raw = state_path.with_name(state["raw_file"])
         original_raw = raw.read_bytes()
-        normalized = state_path.with_name("normalized.wav")
+        normalized = state_path.with_name(state["normalized_file"])
         normalized.write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "changed.*retained"):
             self.session.audition("Mara")

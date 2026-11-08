@@ -23,6 +23,7 @@ import urllib.request
 from urllib.parse import urlencode
 import wave
 
+from .audio_naming import temporary_audio_prefix
 from .engines import EngineError, _seed
 from .diagnostics import safe_error_text
 
@@ -63,7 +64,7 @@ def _write_exclusive(path, content):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            prefix=".gemini-", dir=path.parent, delete=False,
+            prefix=temporary_audio_prefix(path, "gemini-design"), dir=path.parent, delete=False,
         ) as stage:
             temporary = Path(stage.name)
             stage.write(content)

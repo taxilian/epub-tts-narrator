@@ -66,7 +66,8 @@ class StagedWorkflowTests(unittest.TestCase):
             self.assertEqual(file_hash(c["audio_file"]),
                              file_hash(self.root / "output" / "chapters" / f"chapter-{c['number']:04d}.m4a"))
         output = self.root / "output"
-        self.assertEqual(len(probe_audio(output / "book.m4b", ffprobe=FFPROBE)["chapters"]), 2)
+        book_path = output / final["audio"]["audiobook"]["path"]
+        self.assertEqual(len(probe_audio(book_path, ffprobe=FFPROBE)["chapters"]), 2)
         sync = read_json(output / "sync.json")
         self.assertEqual(len(sync["segments"]), 4)
         self.assertEqual(len(read_json(output / "verification.json")), 4)

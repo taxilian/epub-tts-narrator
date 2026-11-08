@@ -153,24 +153,29 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
     def verification_interruption(self):
         first = self.session()
         first.update_prompt("voice_mara", self.prompt, self.script)
-        with patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=KeyboardInterrupt):
+        normalized = []
+        def interrupt(path, *args, **kwargs):
+            normalized.append(Path(path))
+            raise KeyboardInterrupt
+        with patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 first.ensure_ready("voice_mara")
         first.close()
         records = list(self.root.rglob("attempt-001-generation.json"))
         self.assertEqual(len(records), 1)
-        self.assertTrue((records[0].parent / "attempt-001.wav").is_file())
+        self.assertEqual(len(normalized), 1)
+        self.assertTrue(normalized[0].is_file())
         self.assertFalse((records[0].parent / "attempt-001.json").exists())
-        return records[0]
+        return records[0], normalized[0]
 
     def test_interrupted_verification_retains_generation_metadata_and_audio(self):
-        record = self.verification_interruption()
-        before = (record.parent / "attempt-001.wav").read_bytes()
+        record, wav = self.verification_interruption()
+        before = wav.read_bytes()
         selected = self.session().ensure_ready("voice_mara")
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(selected["creation"]["generated_voice_id"], "fixture_preview_1")
         self.assertTrue(selected["creation"]["description_applied"])
-        self.assertEqual((record.parent / "attempt-001.wav").read_bytes(), before)
+        self.assertEqual(wav.read_bytes(), before)
 
     def test_interruption_before_normalized_checksum_revalidates_raw_binding(self):
         first = self.session()
@@ -192,7 +197,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
         self.assertIsNotNone(read_json(path)["normalized_sha256"])
 
     def test_changed_generation_metadata_is_not_trusted(self):
-        path = self.verification_interruption()
+        path, _ = self.verification_interruption()
         record = read_json(path)
         record["engine_metadata"]["requested_description"] = "A different voice description."
         # Even a correctly checksummed record must match the exact request.
@@ -203,7 +208,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
 
     def test_changed_raw_audio_is_not_trusted(self):
-        path = self.verification_interruption()
+        path, _ = self.verification_interruption()
         record = read_json(path)
         raw = path.parent / record["raw_file"]
         raw.write_bytes(raw.read_bytes() + b"altered")
@@ -212,8 +217,7 @@ class ElevenLabsCastingResumeTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
 
     def test_changed_normalized_audio_is_not_trusted(self):
-        path = self.verification_interruption()
-        wav = path.parent / "attempt-001.wav"
+        path, wav = self.verification_interruption()
         wav.write_bytes(wav.read_bytes() + b"altered")
         with self.assertRaisesRegex(RenderBlocked, "audio changed after ElevenLabs generation"):
             self.session().ensure_ready("voice_mara")

@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
+from .audio_naming import temporary_audio_prefix
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, HistorySynthesis, _seed, _text
 from .interrupts import stop_if_requested
@@ -434,7 +435,9 @@ class FishHTTPEngine(HistorySynthesis):
                 if result.get("history_layout", "directing") != layout:
                     raise FishHTTPError(f"Render worker {self.name} did not apply the requested "
                                         f"{layout!r} history layout", retryable=False)
-                with tempfile.NamedTemporaryFile(prefix=".fish-", suffix=".wav", dir=output.parent, delete=False) as stream:
+                with tempfile.NamedTemporaryFile(
+                        prefix=temporary_audio_prefix(output, "fish-http", suffix=".wav"),
+                        suffix=".wav", dir=output.parent, delete=False) as stream:
                     staged = Path(stream.name)
                     stream.write(result["audio"])
                 metadata = inspect_wav(staged)

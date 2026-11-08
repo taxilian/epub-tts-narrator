@@ -155,12 +155,14 @@ class BenchmarkFixture(unittest.TestCase):
         return next(case["chunk"]["spoken_text"] for case in corpus["cases"] if case["group"] == group)
 
     def assert_valid_m4b(self, run_dir):
-        book = run_dir / "book" / "book.m4b"
+        report = read_json(run_dir / "report.json")
+        self.assertEqual(report["status"], "complete")
+        book = Path(report["book"]["path"])
+        corpus, _ = load_corpus(self.frozen)
+        self.assertEqual(book.name, f"{corpus['book']['title']}.m4b")
         self.assertTrue(book.is_file(), book)
         subprocess.run([FFMPEG, "-v", "error", "-i", str(book), "-f", "null", "-"],
                        check=True, timeout=60)
-        report = read_json(run_dir / "report.json")
-        self.assertEqual(report["status"], "complete")
         return report
 
     def assert_clean_teardown(self):

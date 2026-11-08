@@ -34,14 +34,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .audio_naming import descriptive_audio_filename, temporary_audio_prefix, validate_audio_filename
 from .bundle import chunk_speakers
 from .common import USER_AGENT, RejectRedirects, digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .chapter_protocol import (
-    PROTOCOL, ARTIFACT_NAMES, FAILED_PARAGRAPH_FIELD, SAFE_RENDER_KEYS, validate_spec,
+    PROTOCOL, FAILED_PARAGRAPH_FIELD, SAFE_RENDER_KEYS, is_artifact_name, validate_spec,
 )
 from .chapter_records import (
-    CHAPTER_FORMAT, MANIFEST_FORMAT, VERIFICATION_FORMAT, audio_pointers,
-    expected_artifact_names, signed_record, sync_record,
+    CHAPTER_FORMAT, MANIFEST_FORMAT, VERIFICATION_FORMAT, expected_artifact_names,
+    recorded_audio_pointers, signed_record, sync_record,
 )
 
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -178,12 +179,12 @@ class ChapterClient:
     def download(self, artifact, target):
         name, expected = artifact.get("name"), artifact.get("sha256")
         size = artifact.get("size")
-        if (not isinstance(name, str) or name != Path(name).name or name in {"", ".", ".."}
-                or name not in ARTIFACT_NAMES
-                or not isinstance(expected, str) or not _HASH.fullmatch(expected)
+        if (not is_artifact_name(name) or not isinstance(expected, str) or not _HASH.fullmatch(expected)
                 or type(size) is not int or not 0 <= size <= 32 * 1024**3):
             raise ChapterClientError("Invalid compressed chapter artifact metadata")
         target = Path(target)
+        if target.name != name:
+            raise ChapterClientError("Chapter download destination must match its recorded artifact name")
         if target.exists() or target.is_symlink():
             if target.is_symlink() or not target.is_file():
                 raise ChapterClientError("Chapter download destination must be a regular file")
@@ -203,7 +204,8 @@ class ChapterClient:
             raise ChapterClientError("Chapter artifact URL must use HTTPS or the configured service origin")
         headers = self.headers if same_origin else {}
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".download-", dir=target.parent)
+        fd, temporary = tempfile.mkstemp(prefix=temporary_audio_prefix(target, "download"),
+                                         dir=target.parent)
         received, checksum = 0, hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as stream:
@@ -285,9 +287,18 @@ def _voice_assets(voices, work, ffmpeg):
             already_flac = stream.read(4) == b"fLaC"
         expected_pcm = None if already_flac else _reference_pcm_hash(source)
         conversion_key = digest({"audio": original_hash, "encoding": "flac-v1"})
-        target, record = directory / f"{conversion_key}.flac", directory / f"{conversion_key}.json"
-        if record.exists() and target.exists():
-            saved = read_json(regular_file(record))
+        legacy_target, record = directory / f"{conversion_key}.flac", directory / f"{conversion_key}.json"
+        fresh_target = directory / descriptive_audio_filename(
+            "remote-reference", voice_id, source.stem, conversion_key[:16], suffix=".flac")
+        saved = read_json(regular_file(record)) if record.exists() or record.is_symlink() else None
+        if saved is not None:
+            filename = validate_audio_filename(saved.get("audio_file", legacy_target.name), suffix=".flac")
+            target = directory / filename
+        elif legacy_target.exists() or legacy_target.is_symlink():
+            target = legacy_target
+        else:
+            target = fresh_target
+        if saved is not None and (target.exists() or target.is_symlink()):
             if file_hash(regular_file(target)) != saved.get("sha256"):
                 raise ChapterClientError("Saved compressed voice transfer copy changed")
             if already_flac and file_hash(target) != original_hash:
@@ -298,8 +309,12 @@ def _voice_assets(voices, work, ffmpeg):
         else:
             if target.exists() or target.is_symlink():
                 raise ChapterClientError("Incomplete compressed voice cache; remove the orphaned transfer copy")
+            target = fresh_target
+            if target.exists() or target.is_symlink():
+                raise ChapterClientError("Incomplete compressed voice cache; remove the orphaned transfer copy")
             with tempfile.TemporaryDirectory(prefix=".voice-flac-", dir=directory) as temporary:
-                converted = Path(temporary) / "reference.flac"
+                converted = Path(temporary) / descriptive_audio_filename(
+                    "remote-reference-conversion", voice_id, source.stem, conversion_key[:16], suffix=".flac")
                 if already_flac:
                     shutil.copyfile(source, converted)
                 else:
@@ -312,7 +327,7 @@ def _voice_assets(voices, work, ffmpeg):
                     raise ChapterClientError("Voice reference changed during compression")
                 target.hardlink_to(converted)
             write_json(record, {"sha256": file_hash(target), "source_sha256": original_hash,
-                                "pcm_sha256": expected_pcm})
+                                "pcm_sha256": expected_pcm, "audio_file": target.name})
         manifest = {"version": 1, "audio_sha256": file_hash(target),
                     "reference_text": voice["reference_text"]}
         asset_id = digest(manifest)
@@ -425,7 +440,7 @@ def _read_cache(folder, selection):
             or record.get("selection") != selection or not isinstance(spec, dict)
             or {key: value for key, value in spec.items() if key != "renderer_fingerprint"} != selection
             or not artifacts or len(names) != len(artifacts) or len(set(names)) != len(names)
-            or any(name not in ARTIFACT_NAMES for name in names)
+            or any(not is_artifact_name(name) for name in names)
             or any(not isinstance(item.get("sha256"), str) or not _HASH.fullmatch(item["sha256"])
                    or type(item.get("size")) is not int or item["size"] < 0
                    for item in artifacts)):
@@ -482,8 +497,9 @@ def _clear_stale_chapter_folder(folder):
     them would either obstruct this run's downloads or silently mix old
     bytes. Accepted local chapter audio lives elsewhere and is never touched.
     """
-    for name in ("job.json", *ARTIFACT_NAMES):
-        path = Path(folder) / name
+    for path in Path(folder).iterdir():
+        if path.name != "job.json" and not is_artifact_name(path.name):
+            continue
         if path.exists() or path.is_symlink():
             regular_file(path).unlink()
 
@@ -531,14 +547,15 @@ def _event(record, event, notify):
         notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: {safe_message}")
 
 
-def _publish_download_link(folder, record, notify):
+def _publish_download_link(folder, record, notify, *, metadata=None):
     from .workflow import _publish_chapter_link
-    if not any(item["name"] == "chapter.m4a" for item in record["artifacts"]):
+    metadata = metadata if metadata is not None else _validate_metadata(folder, record)
+    if metadata["audio_file"] is None:
         return
     work = Path(folder).parent.parent
     _regular_directory(work / "chapter-links")
     _publish_chapter_link({"render": {"output_dir": str(work)}},
-                          {"encoded_path": str(Path(folder) / "chapter.m4a"),
+                          {"encoded_path": str(Path(folder) / metadata["audio_file"]),
                            "track_number": record["selection"]["chapter"]["number"]},
                           notify=notify)
 
@@ -549,6 +566,7 @@ def _completed_download(client, folder, record, status, *, include_masters=True,
         raise ChapterClientError("Completed chapter job has no artifacts")
     names = [artifact.get("name") for artifact in artifacts if isinstance(artifact, dict)]
     if (len(names) != len(artifacts) or len(set(names)) != len(names)
+            or any(not is_artifact_name(name) for name in names)
             or not {"chapter.json", "sync.json", "verification.json", "manifest.json"}.issubset(names)):
         raise ChapterClientError("Completed chapter job lacks its timing/verification metadata")
     folder = _regular_directory(folder)
@@ -556,18 +574,30 @@ def _completed_download(client, folder, record, status, *, include_masters=True,
     if notify is not None:
         notify(f"Chapter {chapter['number']} / {record['selection']['total_chapters']}: "
                "downloading verified chapter artifacts")
+    chapter_artifact = next(artifact for artifact in artifacts if artifact["name"] == "chapter.json")
+    client.download(chapter_artifact, folder / "chapter.json")
+    try:
+        chapter_metadata = read_json(regular_file(folder / "chapter.json"))
+        pointers = recorded_audio_pointers(chapter_metadata)
+        expected = expected_artifact_names(chapter_metadata) | {"manifest.json"}
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ChapterClientError("Completed chapter job has invalid recorded audio filenames") from exc
+    if set(names) != expected:
+        raise ChapterClientError("Chapter service artifact inventory differs from its recorded audio filenames")
     for artifact in artifacts:
-        if artifact["name"] == "chapter.flac" and not include_masters:
+        if artifact["name"] == "chapter.json":
+            continue
+        if artifact["name"] == pointers["lossless_file"] and not include_masters:
             continue
         client.download(artifact, folder / artifact["name"])
-    _validate_metadata(folder, record, artifacts=artifacts)
+    metadata = _validate_metadata(folder, record, artifacts=artifacts)
     # The durable cache descriptor binds these validated files to their exact
     # selection and hashes. Keep expiring signed links privately in it, so
     # masters can be fetched directly from durable storage after GPU shutdown.
     _write_cache(folder, _cache_descriptor(record["selection"], record["spec"], artifacts))
     record["artifacts"] = [{key: artifact[key] for key in ("name", "sha256", "size", "url")} for artifact in artifacts]
     record["state"] = "completed"
-    _publish_download_link(folder, record, notify or (lambda _: None))
+    _publish_download_link(folder, record, notify or (lambda _: None), metadata=metadata)
     legacy = folder / "job.json"
     if legacy.exists() or legacy.is_symlink():
         regular_file(legacy).unlink()
@@ -651,7 +681,7 @@ def _validate_artifact_manifest(folder, spec, metadata, verification, artifacts)
             or context.get("voice_assets") != spec["voice_bindings"]
             or any(context.get(key) != verification.get(key) for key in ("engine", "verifier", "quality_version", "quality"))):
         raise ChapterClientError("Downloaded chapter artifact manifest does not match its verified job")
-    expected = expected_artifact_names(metadata["frames"])
+    expected = expected_artifact_names(metadata)
     inventory = manifest.get("artifacts")
     if not isinstance(inventory, dict) or set(inventory) != expected:
         raise ChapterClientError("Downloaded chapter artifact inventory is incomplete or unexpected")
@@ -662,11 +692,11 @@ def _validate_artifact_manifest(folder, spec, metadata, verification, artifacts)
             raise ChapterClientError("Downloaded chapter artifact inventory is invalid")
         path = folder / name
         # Chapter-only downloads intentionally defer the lossless master.
-        if name != "chapter.flac" or path.exists() or path.is_symlink():
+        if name != metadata["lossless_file"] or path.exists() or path.is_symlink():
             if file_hash(regular_file(path)) != item["sha256"] or path.stat().st_size != item["bytes"]:
                 raise ChapterClientError("Downloaded chapter artifact differs from its manifest")
         records[name] = {"sha256": item["sha256"], "size": item["bytes"]}
-    if metadata["frames"] and metadata.get("encoded_sha256") != inventory["chapter.m4a"]["sha256"]:
+    if metadata["frames"] and metadata.get("encoded_sha256") != inventory[metadata["audio_file"]]["sha256"]:
         raise ChapterClientError("Downloaded chapter audio differs from its synchronization checksum")
     if artifacts is not None:
         if (not isinstance(artifacts, list) or len(artifacts) != len(expected) + 1
@@ -735,14 +765,16 @@ def _validate_metadata(folder, record, *, artifacts=None):
                != [chunk["chunk_id"] for chunk in chapter["chunks"]]):
         raise ChapterClientError("Downloaded chapter metadata does not match its submitted source and timeline")
     audio = bool(metadata["frames"])
-    pointers = audio_pointers(metadata["frames"])
+    try:
+        pointers = recorded_audio_pointers(metadata)
+    except ValueError as exc:
+        raise ChapterClientError("Downloaded chapter audio metadata has invalid recorded filenames") from exc
     if (metadata.get("status") != pointers["status"]
-            or metadata.get("audio_file") != pointers["audio_file"]
-            or metadata.get("lossless_file") != pointers["lossless_file"]
             or any(not isinstance(metadata.get(key), str) or not _HASH.fullmatch(metadata[key])
                    for key in ("encoded_sha256", "pcm_data_sha256") if audio)
             or (not audio and (metadata.get("encoded_sha256") is not None or metadata.get("pcm_data_sha256") is not None))):
         raise ChapterClientError("Downloaded chapter audio metadata is incomplete")
+    metadata = dict(metadata, audio_file=pointers["audio_file"], lossless_file=pointers["lossless_file"])
     _validate_timing_sources(metadata, chapter["chunks"])
     verification = read_json(regular_file(folder / "verification.json"))
     acceptance = verification.get("acceptance") if isinstance(verification, dict) else None
@@ -773,10 +805,19 @@ def _validate_metadata(folder, record, *, artifacts=None):
 def _cached_artifacts_present(folder, record, *, require_masters=True):
     if not record.get("artifacts"):
         return False
+    lossless_file = None
+    if not require_masters:
+        try:
+            metadata = read_json(regular_file(Path(folder) / "chapter.json"))
+            lossless_file = recorded_audio_pointers(metadata)["lossless_file"]
+        except FileNotFoundError:
+            return False
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ChapterClientError("Saved chapter metadata has invalid recorded filenames") from exc
     present = True
     for item in record["artifacts"]:
         name = item["name"]
-        if name == "chapter.flac" and not require_masters:
+        if name == lossless_file:
             continue
         if name != Path(name).name:
             raise ChapterClientError("Invalid saved chapter artifact name")
@@ -1125,7 +1166,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
             else:
                 folder, record = cached[chapter["id"]]
                 metadata = _validate_metadata(folder, record)
-                audio = str(folder / "chapter.m4a") if metadata["frames"] else None
+                audio = str(folder / metadata["audio_file"]) if metadata["frames"] else None
             completed.append({"number": chapter["number"], "audio_file": audio})
         return {"chapters": completed}
     return _assemble_downloads(bundle, config, plan, cached, local, notify=notify)
@@ -1183,9 +1224,12 @@ def assemble_remote(bundle, config, *, notify=print):
 def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
     from .assembly import package_audio
     from .book_metadata import publication_assets
+    from .book_output import resolve_audiobook_filename
+    from .publication import published_book
     from .workflow import _publish
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
+    previous = published_book(output, bundle["source"]["book"]["id"])
     with tempfile.TemporaryDirectory(prefix=".remote-audiobook-", dir=output.parent) as temporary:
         scratch = Path(temporary)
         stage = scratch / "ready"
@@ -1213,7 +1257,7 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                 wav = scratch / f"{chapter['id']}.wav"
                 if composed["frames"]:
                     _run_audio([config["render"]["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-                                "-i", str(folder / "chapter.flac"), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
+                                "-i", str(folder / metadata["lossless_file"]), "-map", "0:a:0", "-c:a", "pcm_s16le", str(wav)])
                     if pcm_sha256(wav) != metadata.get("pcm_data_sha256"):
                         raise ChapterClientError("Decoded chapter master differs from the server's lossless PCM")
                 else:
@@ -1222,8 +1266,8 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                 composed["wav_path"] = str(wav)
                 # WAV container hashes need not equal the server's transient WAV.
                 composed.pop("pcm_sha256", None)
-                encoded = folder / f"chapter.{config['render']['chapter_format']}"
-                if encoded.exists():
+                encoded = folder / metadata["audio_file"] if metadata["audio_file"] is not None else None
+                if encoded is not None and encoded.exists():
                     composed["encoded_path"] = str(encoded)
                     composed["encoded_sha256"] = file_hash(encoded)
                 acceptance.append(read_json(regular_file(folder / "verification.json")))
@@ -1231,7 +1275,9 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                             total_chapters=len(bundle["chapters"]))
             chapters.append(composed)
         book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
-        audio = package_audio(chapters, stage, book=book, cover_path=cover,
+        filename = resolve_audiobook_filename(
+            book, previous["audio"] if previous is not None else None, output)
+        audio = package_audio(chapters, stage, book=book, cover_path=cover, audiobook_name=filename,
                               chapter_format=config["render"]["chapter_format"],
                               aac_bitrate=config["render"]["aac_bitrate"], mp3_bitrate=config["render"]["mp3_bitrate"],
                               ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"],
@@ -1253,5 +1299,5 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
         publication = ({"expected": config["_publication_expected"]}
                        if "_publication_expected" in config else {})
         _publish(stage, output, **publication)
-    notify(f"Audiobook ready: {output / 'book.m4b'}")
+    notify(f"Audiobook ready: {output / audio['audiobook']['path']}")
     return result

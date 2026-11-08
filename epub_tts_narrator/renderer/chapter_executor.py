@@ -19,9 +19,10 @@ from threading import Lock, RLock
 
 from .bundle import chunk_speakers
 from .chapter_cache import chapter_settings, prepare_chapter
-from .chapter_protocol import ARTIFACT_NAMES
+from .chapter_protocol import is_artifact_name
 from .chapter_records import (
-    chapter_record, manifest_record, signed_record, sync_record, verification_record,
+    audio_pointers, chapter_record, expected_artifact_names, manifest_record, signed_record, sync_record,
+    verification_record,
 )
 from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
 from .quality import QUALITY_VERSION
@@ -76,12 +77,16 @@ def _exported_paths(folder, expected_identity):
         raise ValueError("Chapter artifacts are incomplete")
     result = {"manifest.json": folder / "manifest.json"}
     for name, record in records.items():
-        if name not in ARTIFACT_NAMES or name == "manifest.json":
+        if not is_artifact_name(name) or name == "manifest.json":
             raise ValueError("Unexpected chapter artifact")
         path = regular_file(folder / name)
         if not isinstance(record, dict) or record.get("sha256") != file_hash(path) or record.get("bytes") != path.stat().st_size:
             raise ValueError("Chapter artifact failed integrity checks")
         result[name] = path
+    chapter = read_json(result["chapter.json"])
+    expected = expected_artifact_names(chapter)
+    if chapter.get("status") != manifest.get("status") or set(records) != expected:
+        raise ValueError("Chapter artifacts do not match their recorded audio filenames")
     return result
 
 
@@ -273,12 +278,17 @@ class ChapterExecutor:
                 context=prepared["context"], notify=notify, censorship_policy=config["censorship"])
             stage = Path(temporary) / "ready"
             stage.mkdir()
+            pointers = audio_pointers(composed["frames"], composed["number"],
+                                      audio_file=composed.get("audio_file"), lossless_file=composed.get("lossless_file"))
             pcm_hash = None
             if composed["frames"]:
+                audio_file, lossless_file = pointers["audio_file"], pointers["lossless_file"]
+                if audio_file is None or lossless_file is None:
+                    raise ValueError("A completed chapter must declare its audio filenames")
                 notify(f"Compressing lossless chapter master {spec['chapter']['number']} / {spec['total_chapters']}")
-                pcm_hash = _flac_master(composed["wav_path"], stage / "chapter.flac", config["render"]["ffmpeg"])
-                shutil.copyfile(regular_file(composed["encoded_path"]), stage / "chapter.m4a")
-                if file_hash(stage / "chapter.m4a") != composed["encoded_sha256"]:
+                pcm_hash = _flac_master(composed["wav_path"], stage / lossless_file, config["render"]["ffmpeg"])
+                shutil.copyfile(regular_file(composed["encoded_path"]), stage / audio_file)
+                if file_hash(stage / audio_file) != composed["encoded_sha256"]:
                     raise ValueError("Encoded chapter changed during export")
             chapter = chapter_record(composed, spec=spec, pcm_data_sha256=pcm_hash)
             write_json(stage / "chapter.json", chapter)

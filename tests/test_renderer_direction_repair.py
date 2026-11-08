@@ -130,7 +130,7 @@ class DirectionRepairTests(unittest.TestCase):
         from epub_tts_narrator.renderer.workflow import validate_audio
 
         def interrupt(wav, *args, **kwargs):
-            if wav.name == 'attempt-004.wav':
+            if wav.name.startswith('attempt-004-') and wav.name.endswith('-take.wav'):
                 raise KeyboardInterrupt('offline interruption before recognition')
             return validate_audio(wav, *args, **kwargs)
 

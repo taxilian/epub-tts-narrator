@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 
+from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, write_json
 
 
@@ -261,7 +262,8 @@ class VoiceStore:
                 or not isinstance(record.get("verification"), dict)
                 or record.get("verification", {}).get("passed") is not True):
             raise ValueError("Persisted reference voice has no verified transcript")
-        path = self._regular_file(folder / "reference.wav")
+        filename = validate_audio_filename(record.get("reference_file", "reference.wav"), suffix=".wav")
+        path = self._regular_file(folder / filename)
         if file_hash(path) != record.get("reference_sha256"):
             raise ValueError("Persisted voice reference changed; refusing to regenerate or replace it")
         return dict(record, candidate_id=candidate_id, reference_audio=str(path.resolve()),
@@ -474,12 +476,20 @@ class VoiceStore:
         self._prepare_directory(destination.parent)
         with tempfile.TemporaryDirectory(prefix=".voice-", dir=self.directory) as temp:
             stage = Path(temp)
-            shutil.copyfile(wav_path, stage / "reference.wav")
+            display_name = None
+            if isinstance(profile, dict):
+                for key in ("name", "display_name"):
+                    if isinstance(profile.get(key), str):
+                        display_name = profile[key]
+                        break
+            context = (voice_id, display_name) if display_name else (voice_id,)
+            filename = descriptive_audio_filename("reference", *context, suffix=".wav")
+            shutil.copyfile(wav_path, stage / filename)
             record = {
                 "format": "audiobook-voice", "version": 1, "kind": "reference",
                 "series_id": self.series_id, "voice_id": voice_id, "profile": profile,
-                "reference_text": reference_text,
-                "reference_sha256": file_hash(stage / "reference.wav"),
+                "reference_text": reference_text, "reference_file": filename,
+                "reference_sha256": file_hash(stage / filename),
                 "created_with": engine_identity, "creation": metadata, "verification": report,
                 "description_applied": metadata.get("description_applied", False),
             }
@@ -490,7 +500,7 @@ class VoiceStore:
             # Reserve first, then publish manifest last, without overwriting.
             destination.mkdir()
             try:
-                os.link(stage / "reference.wav", destination / "reference.wav")
+                os.link(stage / filename, destination / filename)
                 os.link(stage / "voice.sha256", destination / "voice.sha256")
                 os.link(stage / "voice.json", destination / "voice.json")
             except BaseException:

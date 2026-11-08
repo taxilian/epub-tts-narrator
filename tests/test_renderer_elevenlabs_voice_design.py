@@ -124,6 +124,30 @@ class ElevenLabsDesignTests(unittest.TestCase):
                 self.create()
             self.assertEqual(self.output.read_bytes(), b"keep")
 
+    def test_staged_audio_and_cache_publications_name_destination_and_stage(self):
+        # Given the real publication path with the HTTP boundary already faked.
+        staged = []
+        original = tempfile.NamedTemporaryFile
+
+        def record(*args, **kwargs):
+            staged.append(kwargs["prefix"])
+            return original(*args, **kwargs)
+
+        # When the created audio and its preview cache publish through staging.
+        with patch.object(self.designer, "_post", return_value=response()), \
+             patch("tempfile.NamedTemporaryFile", side_effect=record):
+            self.create()
+
+        # Then every staged file names its destination and stage, publishes the
+        # exact bytes, and leaves no hidden temporary behind.
+        self.assertTrue(any("attempt-001-raw" in prefix and "elevenlabs-design" in prefix
+                            for prefix in staged))
+        self.assertTrue(any("elevenlabs-previews-001" in prefix and "elevenlabs-design" in prefix
+                            for prefix in staged))
+        with wave.open(str(self.output), "rb") as audio:
+            self.assertEqual(audio.readframes(2400), b"\x01\x00" * 2400)
+        self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith(".")], [])
+
     def test_credentials_header_redirect_denial_and_403_diagnostics(self):
         response_handle = Mock()
         response_handle.__enter__ = Mock(return_value=response_handle)

@@ -25,6 +25,40 @@ class VoiceRevisionTests(unittest.TestCase):
     def candidate(self):
         return self.store.publish_candidate(*self.args, candidate_id=uuid.uuid4().hex)
 
+    def test_new_reference_records_descriptive_name_and_round_trips(self):
+        # Given a verified voice owned by a named character.
+        # When publishing the real immutable voice store artifact.
+        binding = self.store.publish(*self.args)
+
+        # Then its recorded path identifies the owner and remains checksum-bound.
+        reference = Path(binding["reference_audio"])
+        self.assertEqual(reference.name, "voice-one-Hero-reference.wav")
+        record = read_json(reference.parent / "voice.json")
+        self.assertEqual(record["reference_file"], reference.name)
+        self.assertEqual(record["reference_sha256"], self.store.load("voice-one")["reference_sha256"])
+        self.assertEqual(binding["asset_hash"], digest(record))
+
+    def test_legacy_record_without_reference_file_uses_existing_generic_asset(self):
+        # Given an old v1 record whose only audio is its established reference.wav.
+        folder = self.store.folder("voice-legacy")
+        folder.mkdir(parents=True)
+        audio = folder / "reference.wav"
+        audio.write_bytes(b"old verified waveform")
+        record = {"format": "audiobook-voice", "version": 1, "kind": "reference",
+                  "series_id": "series-one", "voice_id": "voice-legacy", "profile": {},
+                  "reference_text": "Old reference.", "reference_sha256": file_hash(audio),
+                  "created_with": {"engine": "old"}, "creation": {},
+                  "verification": {"passed": True}, "description_applied": False}
+        write_json(folder / "voice.json", record)
+        (folder / "voice.sha256").write_text(file_hash(folder / "voice.json") + "\n")
+
+        # When loading it through the public store.
+        binding = self.store.load("voice-legacy")
+
+        # Then no rename, regeneration, or metadata migration is needed.
+        self.assertEqual(Path(binding["reference_audio"]), audio)
+        self.assertEqual(read_json(folder / "voice.json"), record)
+
     def test_candidate_is_inactive_until_selected(self):
         candidate = self.candidate()
         self.assertIsNone(self.store.load("voice-one"))
@@ -137,7 +171,7 @@ class VoiceRevisionTests(unittest.TestCase):
     def test_symlinks_cannot_redirect_voice_files_or_directories(self):
         candidate = self.candidate()
         folder = Path(candidate["reference_audio"]).parent
-        for name in ("voice.json", "voice.sha256", "reference.wav"):
+        for name in ("voice.json", "voice.sha256", Path(candidate["reference_audio"]).name):
             with self.subTest(name=name):
                 path = folder / name
                 data = path.read_bytes()

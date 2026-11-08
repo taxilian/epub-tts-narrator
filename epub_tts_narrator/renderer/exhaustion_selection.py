@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from .audio_naming import speech_take_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .clip_repair_contract import logical_text, plain, synthesis_request
 from .clip_repair_prompts import SELECT
@@ -203,8 +204,12 @@ def select_retained(directory, request, client):
     validate_selection(request, marker)
     record = deepcopy(selected['record'])
     report = deepcopy(record['report'])
+    filename = speech_take_filename(request, record['attempt'], role='selection')
+    legacy_name = 'selection-' + record['audio_sha256'] + '.wav'
+    if (directory / legacy_name).exists() or (directory / legacy_name).is_symlink():
+        filename = legacy_name
     record.update(request=deepcopy(request), request_hash=digest(request),
-                  audio_file='selection-' + record['audio_sha256'] + '.wav',
+                  audio_file=filename,
                   validation_key=digest({'selection': marker, 'audio': record['audio_sha256']}),
                   report={**report, 'passed': True, 'reasons': [], 'expected_text': logical_text(request),
                           'text_confirmation_method': 'llm_exhaustion_selection',
@@ -219,7 +224,7 @@ def select_retained(directory, request, client):
             raise ValueError('Previously selected audio changed')
     else:
         with tempfile.TemporaryDirectory(prefix='.selection-', dir=directory) as staging:
-            copied = Path(staging) / 'audio.wav'
+            copied = Path(staging) / target.name
             shutil.copyfile(regular_file(selected['audio']), copied)
             if file_hash(copied) != record['audio_sha256']:
                 raise ValueError('Selected audio changed during publication')

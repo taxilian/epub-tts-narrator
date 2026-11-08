@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .quality import text_confirmation_unavailable, validate_audio, validation_key
 from .recurring_resolution import accepted_report, confirm_rewritten_report, failed_take_context
@@ -41,9 +42,9 @@ def recheck_retained_candidates(session, verifier, config, *, notify):
             break
         stop_if_requested()
         name = saved.get("audio_file")
-        if (name != f"attempt-{number:03d}.wav" or saved.get("request") != session.request
-                or saved.get("request_hash") != digest(session.request)):
+        if saved.get("request") != session.request or saved.get("request_hash") != digest(session.request):
             raise RenderBlocked("Retained speech candidate does not match its original request")
+        name = validate_audio_filename(name, suffix=".wav")
         audio = directory / name
         if not audio.exists() and not audio.is_symlink():
             continue

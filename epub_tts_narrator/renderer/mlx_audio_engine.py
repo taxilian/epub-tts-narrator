@@ -22,6 +22,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from .audio_naming import temporary_audio_prefix
 from .drama3_models import (
     MLX_AUDIO_DRAMA3_REQUIREMENT, get_drama3_model, supports_mlx_audio_drama3,
 )
@@ -249,7 +250,8 @@ class MLXAudioDrama3Engine(HistorySynthesis):
             staged_name = None
             try:
                 with tempfile.NamedTemporaryFile(
-                    prefix=".take-", suffix=".wav", dir=output_path.parent, delete=False,
+                    prefix=temporary_audio_prefix(output_path, "mlx-audio", suffix=".wav"),
+                    suffix=".wav", dir=output_path.parent, delete=False,
                 ) as staged:
                     staged_name = staged.name
                 sf.write(staged_name, audio, rate, subtype="FLOAT")

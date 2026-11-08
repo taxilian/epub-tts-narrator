@@ -117,7 +117,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.engine.heard = lambda text, number: variants[number - 1]
         wav, accepted = self.take()
         self.assertEqual(len(self.engine.calls), 3)
-        self.assertEqual(wav.name, "attempt-003.wav")
+        self.assertEqual(wav.name, accepted["audio_file"])
         self.assertEqual(len(self.client.plans), 1)
         self.assertEqual(len(self.client.reviews), 3)
         self.assertEqual([item["attempt"] for item in self.client.plans[0]["failures"]], [1, 2, 3])
@@ -177,7 +177,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 3)
         pending = read_json(self.work / "takes" / "attempt-003.json")
         self.assertTrue(pending["report"]["resolution_pending"])
-        wav = self.work / "takes" / "attempt-003.wav"
+        wav = self.work / "takes" / pending["audio_file"]
         original = wav.read_bytes()
         old_asr_calls = len(self.base.calls)
         self.client.unavailable = False
@@ -241,7 +241,8 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         state_path = next((self.work / "clips").glob("*/speech-resolution.json"))
         saved_state = state_path.read_bytes()
         result, acceptance = self.render_chunk()
-        self.assertEqual(Path(result["wav_path"]).name, "attempt-003.wav")
+        self.assertEqual(Path(result["wav_path"]).name,
+                             read_json(Path(result["wav_path"]).with_name("accepted.json"))["audio_file"])
         self.assertTrue(acceptance["report"]["passed"])
         self.assertEqual(acceptance["report"]["text_confirmation_method"], "recurring_resolution")
         self.assertEqual(len(self.engine.calls), 3)
@@ -253,13 +254,14 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
 
     def test_saved_accept_is_not_replayed_when_fresh_transcription_changes(self):
         self.interrupt_after_saved_decision("accept")
-        candidate = next((self.work / "clips").glob("*/attempt-003.wav"))
+        candidate = next((self.work / "clips").glob("*/attempt-003-*-take.wav"))
         # The waveform is unchanged, but independent recognition now reports a
         # missing complete word. The old decision must not approve that result.
         self.registry[hashlib.sha256(pcm(candidate)).hexdigest()] = HEARD.replace("old ", "")
         self.engine.heard = lambda text, number: text
         result, acceptance = self.render_chunk()
-        self.assertEqual(Path(result["wav_path"]).name, "attempt-004.wav")
+        self.assertEqual(Path(result["wav_path"]).name,
+                             read_json(Path(result["wav_path"]).with_name("accepted.json"))["audio_file"])
         self.assertEqual(len(self.engine.calls), 4)
         self.assertEqual(len(self.client.plans), 1)
         self.assertEqual(acceptance["report"]["metrics"]["wer"], 0)
@@ -322,7 +324,8 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         text = self.prepare_persisted_split()
         existing = {path: path.read_bytes() for path in (self.work / "clips").rglob("*") if path.is_file()}
         result, acceptance = self.render_chunk()
-        self.assertEqual(Path(result["wav_path"]).name, "attempt-003.wav")
+        self.assertEqual(Path(result["wav_path"]).name,
+                             read_json(Path(result["wav_path"]).with_name("accepted.json"))["audio_file"])
         self.assertEqual(len(self.engine.calls), 4, "No new whole or part TTS should be generated")
         self.assertEqual(len(self.client.plans), 1)
         self.assertEqual(self.client.reviews, [])

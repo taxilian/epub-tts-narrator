@@ -401,6 +401,7 @@ def storage_smoke(config, path, *, publisher_factory=None, download=_download_ha
 def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None,
           roundtrip=storage_smoke, normalize=None):
     """Exercise synthesis, recognition, encoding and Ceph using invented text."""
+    from epub_tts_narrator.renderer.audio_naming import descriptive_audio_filename
     from epub_tts_narrator.renderer.chapter_protocol import PROTOCOL
     from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
     from epub_tts_narrator.renderer.quality import validate_audio
@@ -463,10 +464,12 @@ def smoke(config, *, fetch=_get_json, engine_factory=None, verifier_factory=None
                     raise RuntimeError(f"GPU smoke speech{copy}{kind} did not pass verification: "
                                        + ", ".join(report["reasons"]))
             samples, rate = sf.read(audio, dtype="int16", always_2d=True)
-            compressed = directory / "chapter.flac"
+            compressed = directory / descriptive_audio_filename(
+                "worker-smoke-chapter", "deployment-smoke", suffix=".flac")
             sf.write(compressed, samples, rate, subtype="PCM_16", format="FLAC")
             print("Smoke test: encoding M4A and checking compressed Ceph downloads.", flush=True)
-            chapter = directory / "chapter.m4a"
+            chapter = directory / descriptive_audio_filename(
+                "worker-smoke-chapter", "deployment-smoke", suffix=".m4a")
             result = subprocess.run(
                 [config["render"]["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error",
                  "-i", str(compressed), *aac_codec_arguments(config["render"]["aac_bitrate"]),

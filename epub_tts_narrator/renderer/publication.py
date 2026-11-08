@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 
+from .book_output import resolve_audiobook_filename
 from .common import digest, file_hash, read_json, regular_file
 from .run_locks import acquire_directory_lock
 
@@ -25,8 +26,12 @@ def published_book(directory, book_id):
                 or record.get("version") != 1 or record.get("status") != "complete"):
             raise ValueError("not a completed renderer output")
         files = record.get("files_sha256")
+        audio = record.get("audio")
+        if not isinstance(audio, dict):
+            raise ValueError("published audio manifest is invalid")
+        filename = resolve_audiobook_filename(previous_audio=audio, output_dir=directory)
         required = {"source.json", "cast.json", "verification.json", "audio-manifest.json",
-                    "sync.json", "book.m4b"}
+                    "sync.json", filename}
         if not isinstance(files, dict) or not required.issubset(files):
             raise ValueError("published file inventory is incomplete")
         expected_dirs = set()
@@ -58,8 +63,11 @@ def published_book(directory, book_id):
         for name, checksum in files.items():
             if file_hash(regular_file(directory / name)) != checksum:
                 raise ValueError(f"published file was modified: {name}")
+        sync = read_json(regular_file(directory / "sync.json"))
+        if (not isinstance(sync, dict)
+                or sync.get("audio_file") is not None and sync["audio_file"] != filename):
+            raise ValueError("published audiobook filename differs between audio-manifest.json and sync.json")
         source = read_json(regular_file(directory / "source.json"))
-        audio = record.get("audio", {})
         if (not isinstance(source, dict) or not isinstance(source.get("book"), dict)
                 or source["book"].get("id") != book_id
                 or not isinstance(audio, dict) or not isinstance(audio.get("book"), dict)

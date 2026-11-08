@@ -676,7 +676,7 @@ class PoolWorkflowTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(published["engine"], local.identity)
         self.assertEqual(len(self.verifier.calls), count)
-        self.assertTrue((self.root / "output" / "book.m4b").is_file())
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_model_alias_does_not_reuse_changed_sampling_text_or_reference(self):
         self.config["render"]["paragraph_synthesis"] = False

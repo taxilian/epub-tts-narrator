@@ -12,13 +12,14 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.narration_boundaries import repair_narration_boundaries
 from epub_tts_narrator.renderer import chapter_cache
 from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
-from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.speech_text import trim_speech_text
 from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
 from audition_fixtures import prepare_document
 from test_chapter_export import chapter_document
+from shared_fixtures import rebind_audiobook_filename
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 
 
@@ -81,13 +82,17 @@ class IncrementalRendererTests(unittest.TestCase):
         return {path.relative_to(self.output).as_posix(): path.read_bytes()
                 for path in self.output.rglob("*") if path.is_file()}
 
+    def book_path(self, result=None):
+        audio = result["audio"] if result is not None else read_json(self.output / "render.json")["audio"]
+        return self.output / audio["audiobook"]["path"]
+
     def model_counts(self):
         return len(self.engine.voice_calls), len(self.engine.speech_calls), len(self.verifier.calls)
 
     def test_script_revision_replaces_book_and_only_generates_changed_passage(self):
         original = self.run_render()
         before = self.model_counts()
-        old_book = file_hash(self.output / "book.m4b")
+        old_book = file_hash(self.book_path(original))
         old_manifest = (self.output / "audio-manifest.json").read_bytes()
         first_checkpoint = self.checkpoint(1).read_bytes()
         unaffected_checkpoint = self.checkpoint(2).read_bytes()
@@ -105,7 +110,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(self.model_counts(), (before[0], before[1] + 1, before[2] + 1))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[-1:]],
                          [self.document["segments"][1]["text"]])
-        self.assertNotEqual(old_book, file_hash(self.output / "book.m4b"))
+        self.assertNotEqual(old_book, file_hash(self.book_path()))
         self.assertNotEqual(old_manifest, (self.output / "audio-manifest.json").read_bytes())
         self.assertNotEqual(first_checkpoint, self.checkpoint(1).read_bytes())
         self.assertEqual(unaffected_checkpoint, self.checkpoint(2).read_bytes())
@@ -117,10 +122,10 @@ class IncrementalRendererTests(unittest.TestCase):
         corrected = next(segment for segment in sync["segments"] if segment["segment_id"] == "s2")
         self.assertEqual(corrected["role_id"], "mara")
         self.assertEqual(corrected["voice_id"], "v1")
-        self.assertEqual(sync["audio_sha256"], file_hash(self.output / "book.m4b"))
+        self.assertEqual(sync["audio_sha256"], file_hash(self.book_path()))
         manifest = read_json(self.output / "audio-manifest.json")
         self.assertEqual(manifest["sync"]["sha256"], file_hash(self.output / "sync.json"))
-        self.assertEqual(manifest["audiobook"]["sha256"], file_hash(self.output / "book.m4b"))
+        self.assertEqual(manifest["audiobook"]["sha256"], file_hash(self.book_path()))
 
     def test_unchanged_published_book_is_reused_without_models_or_encoding(self):
         original = self.run_render()
@@ -133,6 +138,69 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(current, original)
         self.assertEqual(before, self.output_bytes())
         self.assertEqual(counts, self.model_counts())
+
+    def test_custom_recorded_filename_survives_title_change_and_repackaging(self):
+        # Given an intact custom-named publication needing a publication-key refresh.
+        original = self.run_render()
+        original_name = original["audio"]["audiobook"]["path"]
+        rebind_audiobook_filename(self.output, "Existing Custom Name.m4b")
+        previous = read_json(self.output / "render.json")
+        previous.pop("publication_key")
+        write_json(self.output / "render.json", previous)
+        self.bundle["source"]["book"]["title"] = "Changed Fixture Title"
+
+        # When repackaging without any new speech.
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")):
+            current = self.run_render()
+
+        # Then every published reference retains the recorded name, not the new title or book.m4b.
+        book = self.book_path(current)
+        self.assertEqual(book.name, "Existing Custom Name.m4b")
+        self.assertTrue(book.is_file())
+        self.assertFalse((self.output / original_name).exists())
+        self.assertFalse((self.output / "book.m4b").exists())
+        self.assertEqual(current["audio"]["book"]["title"], "Changed Fixture Title")
+        self.assertEqual(read_json(self.output / "sync.json")["audio_file"], book.name)
+        self.assertEqual(current["files_sha256"][book.name], file_hash(book))
+
+    def test_legacy_book_without_recorded_path_resumes_without_any_encoding(self):
+        # Given an old complete publication with book.m4b and no audiobook.path field.
+        self.run_render()
+        rebind_audiobook_filename(self.output, "book.m4b", record_path=False)
+        before = self.output_bytes()
+        counts = self.model_counts()
+
+        # When resuming the unchanged publication.
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("No chapter encoding")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("No book encoding")):
+            current = self.run_render()
+
+        # Then the exact legacy publication is reused without adding a fresh descriptive output.
+        self.assertEqual(current["status"], "complete")
+        self.assertEqual(self.output_bytes(), before)
+        self.assertEqual(self.model_counts(), counts)
+        self.assertTrue((self.output / "book.m4b").is_file())
+
+    def test_legacy_book_without_recorded_path_keeps_its_name_when_reassembled(self):
+        # Given an old publication and a requested chapter-encoding change.
+        original = self.run_render()
+        original_name = original["audio"]["audiobook"]["path"]
+        rebind_audiobook_filename(self.output, "book.m4b", record_path=False)
+        self.config["render"]["chapter_format"] = "mp3"
+        counts = self.model_counts()
+
+        # When assembling the changed package without generating speech.
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")):
+            result = self.package()
+
+        # Then the old manifest fallback keeps book.m4b and every reference agrees.
+        self.assertEqual(result["audio"]["audiobook"]["path"], "book.m4b")
+        self.assertTrue((self.output / "book.m4b").is_file())
+        self.assertFalse((self.output / original_name).exists())
+        self.assertEqual(read_json(self.output / "sync.json")["audio_file"], "book.m4b")
+        self.assertEqual(result["files_sha256"]["book.m4b"], file_hash(self.output / "book.m4b"))
+        self.assertEqual(self.model_counts(), counts)
 
     def test_runtime_update_reuses_published_book_without_model_alias(self):
         self.engine.identity = {
@@ -270,7 +338,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertFalse((self.root / ".output.publish.lock").exists())
 
     def test_failed_final_encoding_keeps_old_output_and_allows_model_free_retry(self):
-        self.run_render()
+        original = self.run_render()
         before = self.output_bytes()
         self.correct_speaker()
         with patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=ValueError("encoding failed")):
@@ -282,7 +350,8 @@ class IncrementalRendererTests(unittest.TestCase):
             result = self.package()
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["bundle_hash"], self.bundle["bundle_hash"])
-        self.assertNotEqual(before["book.m4b"], (self.output / "book.m4b").read_bytes())
+        book_name = original["audio"]["audiobook"]["path"]
+        self.assertNotEqual(before[book_name], (self.output / book_name).read_bytes())
         self.assertEqual(counts, self.model_counts())
 
     def test_assemble_refreshes_existing_output_for_changed_encoding_without_models(self):
@@ -412,7 +481,7 @@ class IncrementalRendererTests(unittest.TestCase):
 
     def test_modified_published_audio_is_not_silently_overwritten(self):
         self.run_render()
-        book = self.output / "book.m4b"
+        book = self.book_path()
         book.write_bytes(book.read_bytes() + b"User changes")
         before = self.output_bytes()
         counts = self.model_counts()

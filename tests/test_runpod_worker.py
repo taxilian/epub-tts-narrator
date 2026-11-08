@@ -682,7 +682,9 @@ class RunpodWorkerTests(unittest.TestCase):
             generate(worker.SMOKE_TEXT, [], [], destination, seed)
         engine.synthesize.side_effect = referenced
         verifier, roundtrip = Mock(), Mock()
+        encode_commands = []
         def encode(command, **kwargs):
+            encode_commands.append([str(item) for item in command])
             Path(command[-1]).write_bytes(b"fixture m4a")
             return Mock(returncode=0)
         with (patch("epub_tts_narrator.renderer.quality.validate_audio", return_value={"passed": True}),
@@ -692,7 +694,12 @@ class RunpodWorkerTests(unittest.TestCase):
                          verifier_factory=lambda *_: verifier, roundtrip=roundtrip,
                          normalize=lambda source, target, **_: Path(target).write_bytes(Path(source).read_bytes()))
         self.assertEqual(fetch.call_args.kwargs["headers"], {"Authorization": "Bearer test-service-key"})
-        self.assertEqual([call.args[1].suffix for call in roundtrip.call_args_list], [".flac", ".m4a"])
+        self.assertEqual([call.args[1].name for call in roundtrip.call_args_list],
+                         ["deployment-smoke-worker-smoke-chapter.flac", "deployment-smoke-worker-smoke-chapter.m4a"])
+        encode_command = encode_commands[0]
+        self.assertEqual(Path(encode_command[encode_command.index("-i") + 1]).name,
+                         "deployment-smoke-worker-smoke-chapter.flac")
+        self.assertEqual(Path(encode_command[-1]).name, "deployment-smoke-worker-smoke-chapter.m4a")
         self.assertEqual(list((self.root / "data/deployment-smoke").iterdir()), [])
         engine.close.assert_called_once()
         engine.synthesize.assert_called_once()
