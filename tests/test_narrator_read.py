@@ -157,6 +157,39 @@ class QuoteSpanTests(unittest.TestCase):
         self.assertEqual(spans[0]["tag"]["name"], "Mara")
         self.assertEqual(find_tag('"Go," he said.', 0, 5)["pronoun"], "he")
 
+    def test_single_quote_dialogue_is_told_apart_from_apostrophes(self):
+        from epub_tts_narrator.quote_spans import dialogue_style
+        paragraphs = [("‘I don’t know James’ plan,’ Mara said. ‘Do you?’", "p"),
+                      ("'Give 'em hell,' Jon said, 'and come back.'", "p"),
+                      ("‘The boys’ toys are here,’ said Elsie.", "p"),
+                      ("It's Tom's boat now.", "p"), ("‘Wait—’ Mara began.", "p"), ("‘Fine,’ said Jon.", "p")]
+        source = make_source([paragraphs])
+        self.assertEqual(dialogue_style(source), "single")
+        spans = quote_spans(source)
+        self.assertEqual([span["text"] for span in spans],
+                         ["‘I don’t know James’ plan,’", "‘Do you?’", "'Give 'em hell,'", "'and come back.'",
+                          "‘The boys’ toys are here,’", "‘Wait—’", "‘Fine,’"])
+        self.assertEqual(spans[0]["tag"]["name"], "Mara")
+        self.assertEqual(spans[2]["tag"]["name"], "Jon")
+
+    def test_dash_dialogue_splits_speech_from_its_tag(self):
+        from epub_tts_narrator.quote_spans import dialogue_style
+        source = make_source([[("— Hello, Mara said. — How are you?", "p"), ("– Nice weather, said Jon.", "p"),
+                               ("—Stop! Elsie shouted. —Now!", "p"), ("— Just a line.", "p"), ("— Fine.", "p"),
+                               ("The road was long.", "p")]])
+        self.assertEqual(dialogue_style(source), "dash")
+        spans = quote_spans(source)
+        self.assertEqual([span["text"] for span in spans],
+                         ["— Hello,", "— How are you?", "– Nice weather,", "—Stop!", "—Now!", "— Just a line.", "— Fine."])
+        self.assertEqual(spans[0]["tag"]["name"], "Mara")
+
+    def test_a_double_quote_book_ignores_dashes_and_nested_single_quotes(self):
+        from epub_tts_narrator.quote_spans import dialogue_style
+        source = make_source([[('"He said \'go\' and left," Mara said.', "p"), ("— a dash aside.", "p"),
+                               ('"Yes," Jon said.', "p")]])
+        self.assertEqual(dialogue_style(source), "double")
+        self.assertEqual(len(quote_spans(source)), 2)
+
     def test_multi_paragraph_speech_marks_the_continuing_paragraph(self):
         source = make_source([[("\"First part of a speech", "p"), ("\"and its continuation.\"", "p")]])
         spans = quote_spans(source)
@@ -615,6 +648,22 @@ class NarratedAnalyzeTests(unittest.TestCase):
                  for role in document["cast"]["roles"]}
         self.assertEqual(names[self.by_text(document)['"You never listen,"']["role_id"]], "Jon")
 
+    def test_a_truncated_prep_reply_is_read_again_in_two_halves(self):
+        class RunawayPrep(NarratorClient):
+            def complete(self, system, payload):
+                if payload.get("mode") == "narrator_prep" and payload["text"].count("\n") >= 4:
+                    from epub_tts_narrator.provider import OutputTruncatedError
+                    raise OutputTruncatedError("output token limit")
+                return super().complete(system, payload)
+
+        client = RunawayPrep()
+        document = self.analyze(client)
+        self.assertEqual(readiness(document)["errors"], [])
+        preps = [call for call in client.calls if call["mode"] == "narrator_prep"]
+        self.assertGreaterEqual(len(preps), 2)
+        self.assertTrue(all(call["text"].count("\n") < 4 for call in preps))
+        self.assertIn("Mara", {person["name"] for person in document["cast"]["characters"]})
+
     def test_an_alias_naming_a_different_person_is_split_off_after_a_check(self):
         from epub_tts_narrator.narrator_read import alias_conflicts
         self.source = make_source([[('"Coffee," Proof said. While Anderson sleeps, Proof works.', "p"),
@@ -741,6 +790,35 @@ class NarratedAnalyzeTests(unittest.TestCase):
         # Chapter two's helmet never comes off in the text: it ends with its chapter, flagged for review.
         self.assertTrue(any(issue["kind"] == "voice_change" for issue in document["issues"]))
         self.assertEqual(document["provenance"]["narrator_read"]["dropped_ledger_claims"].get("change"), 1)
+
+    def test_bracketed_ability_names_never_reach_spoken_text(self):
+        self.source = make_source([[("Chapter One", "h1"),
+                                    ("Mara pulled on the helmet and called up [Cracked Phantom Armor].", "p"),
+                                    ('"Try [Cracked Phantom Armor] now," Mara said.', "p"),
+                                    ('"It holds," Jon said.', "p")]])
+
+        class Helmeted(NarratorClient):
+            def complete(self, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_prep":
+                    number = next(int(line.partition("|")[0]) for line in payload["text"].splitlines()
+                                  if "pulled on the helmet" in line)
+                    result["change"] = [["Mara", number, "pulled on the helmet", "helmet", ""]]
+                return result
+
+        document = self.analyze(Helmeted())
+        self.assertEqual(readiness(document)["errors"], [])
+        for row in document["segments"]:
+            spoken = row.get("spoken_text", row["text"])
+            self.assertFalse(set(spoken) & set("[]<>"), row)
+        pieces = [row for row in document["segments"] if row["block_id"] == "b000003"]
+        ability = next(row for row in pieces if "Cracked" in row["text"])
+        self.assertEqual(ability["performance"]["kind"], "bracketed")
+        self.assertEqual(ability["spoken_text"], "Cracked Phantom Armor")
+        # Every piece of Mara's split line keeps her role and the helmet effect.
+        spoken_pieces = [row for row in pieces if row["kind"] == "dialogue"]
+        self.assertEqual({row["role_id"] for row in spoken_pieces}, {spoken_pieces[0]["role_id"]})
+        self.assertTrue(all(row.get("voice_effect", {}).get("preset") == "helmet" for row in spoken_pieces))
 
     def test_unsettled_speaker_stays_unresolved_for_human_choice_not_the_narrator(self):
         document = self.analyze(NarratorClient(verify_answer="?"))

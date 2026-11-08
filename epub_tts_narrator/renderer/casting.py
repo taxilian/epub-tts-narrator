@@ -21,7 +21,7 @@ from .diagnostics import configured_secrets, safe_error_text
 from .quality import validate_audio, validation_key, text_confirmation_unavailable
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
-                           default_voice_prompt as _default_voice_prompt, derived_voice_prompt,
+                           default_voice_prompt as _default_voice_prompt,
                            designer_prompt, voice_prompt_description)
 from .workflow import RenderBlocked, SpeechVerificationFailed, VerificationUnavailable, _seed, verified_take
 
@@ -209,15 +209,24 @@ class CastingSession:
             text = (creation.get("requested_reference_text", selected["reference_text"])
                     if selected else self.config["voices"]["reference_text"])
             prompt = creation.get("requested_description")
-            if prompt is None and isinstance(profile.get("derived_from"), dict):
-                # Follow the base voice's current design, including the user's edits.
-                base = self._draft(profile["derived_from"]["voice_id"], self.store.load(profile["derived_from"]["voice_id"]))
-                prompt = derived_voice_prompt(voice_prompt_description(base["prompt"]), profile["derived_from"])
+            derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
+            if prompt is None and derived:
+                # A clone's "prompt" is the direction it is cloned with; E edits it.
+                prompt = derived["instruction"]
             if prompt is None:
                 prompt = _default_voice_prompt(profile)
-            return self._sample_draft(
-                prompt, text,
-                creation.get("sample_source"), voice_id)
+            from .samples import MissingSampleScript
+            try:
+                return self._sample_draft(
+                    prompt, text,
+                    creation.get("sample_source"), voice_id)
+            except MissingSampleScript:
+                if not derived:
+                    raise
+                # The same person: their main voice's audition script serves the clone.
+                base = self._draft(derived["voice_id"], self.store.load(derived["voice_id"]))
+                return {"prompt": prompt, "reference_text": base["reference_text"],
+                        "sample_source": deepcopy(base["sample_source"])}
         if path.is_symlink() or not path.is_file():
             raise ValueError("Casting draft must be a regular file")
         record = read_json(path)
@@ -286,8 +295,11 @@ class CastingSession:
         from .samples import MissingSampleScript, select_sample
 
         selected = list(self._profiles) if voice_ids is None else list(dict.fromkeys(voice_ids))
+        # A clone has a direction, not a design description; refreshing would replace it.
+        selected = [voice_id for voice_id in selected
+                    if not isinstance(self._profiles.get(voice_id, {}).get("derived_from"), dict)]
         if not selected:
-            raise ValueError("Choose at least one voice to refresh")
+            raise ValueError("Choose at least one voice to refresh (cloned voices keep their directions)")
         with self._locked():
             groups, current_prompts, previous = {}, {}, {}
             for voice_id in selected:
@@ -406,10 +418,17 @@ class CastingSession:
                     label = prefix.removesuffix(" voice")
                 else:
                     label = ", ".join(dict.fromkeys(role["kind"].capitalize() for role in roles)) or voice_id
+            clone_stale = False
+            if derived and selected is not None:
+                cloned = selected.get("creation", {}).get("derived_from", {})
+                base_now = self.store.load(derived.get("voice_id"))
+                clone_stale = bool(base_now and cloned.get("reference_sha256") != base_now.get("reference_sha256"))
             rows.append({
                 "voice_id": voice_id,
                 "canonical_voice_id": self.store.canonical_id(voice_id),
                 "label": label,
+                "derived_from": deepcopy(derived),
+                "clone_stale": clone_stale,
                 "characters": characters,
                 "roles": [role["id"] for role in roles],
                 "description": profile["description"],
@@ -1008,14 +1027,7 @@ class CastingSession:
         base = self.store.load(base_id)
         if base is None:
             raise RenderBlocked(f"Voice {voice_id} is cloned from {base_id}; cast {base_id} first.")
-        from .samples import MissingSampleScript
-        try:
-            draft = self._draft(voice_id, self.store.load(voice_id))
-        except MissingSampleScript:
-            # The same person: their main voice's audition script serves the clone.
-            base_draft = self._draft(base_id, base)
-            draft = {"prompt": base_draft["prompt"], "reference_text": base_draft["reference_text"],
-                     "sample_source": deepcopy(base_draft["sample_source"])}
+        draft = self._draft(voice_id, self.store.load(voice_id))
         text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         engine, verifier = self._get_engine(), self._get_verifier()
         binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
@@ -1025,7 +1037,8 @@ class CastingSession:
         wav, accepted, _request, metadata = derive_voice_take(
             engine, verifier, self.config, base, profile, text,
             Path(self.config["render"]["work_dir"]) / "casting-candidates",
-            series_id=self.store.series_id, voice_id=voice_id, notify=self.notify, nonce=nonce)
+            series_id=self.store.series_id, voice_id=voice_id, notify=self.notify, nonce=nonce,
+            instruction=draft["prompt"])
         metadata.update(candidate_id=nonce, created_at=datetime.now(timezone.utc).isoformat(),
                         sample_source=deepcopy(draft["sample_source"]))
         return self.store.publish_candidate(voice_id, deepcopy(profile), wav, metadata["reference_text"],

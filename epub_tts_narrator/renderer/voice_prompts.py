@@ -127,15 +127,6 @@ def designer_prompt(prompt, designer):
     return prefix + safe_voice_description(description)
 
 
-def derived_voice_prompt(base_description, derived_from):
-    """A changed voice of the same person: the base voice's current design plus
-    the change the book describes ("about 16 now, deeper, steadier")."""
-    change = derived_from["instruction"].strip().rstrip(".")
-    return audiobook_voice_prompt(
-        f"{base_description.strip()} The same person later in the story ({derived_from['kind']}): {change}. "
-        "Keep the same accent, manner and recognizable identity; change only what this describes.")
-
-
 def default_voice_prompt(profile):
     """Use the complete prose design; trait records remain evidence metadata."""
     # Never silently trim a distinctive quality out of an overlong default.

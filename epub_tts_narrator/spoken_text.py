@@ -125,9 +125,12 @@ def build_spoken(row):
     performance = row.get("performance", {})
     if not isinstance(performance, dict):
         raise ValueError("Invalid speech performance metadata")
+    # Square brackets are always omitted; angle brackets too, unless a saved
+    # (version 1) spoken form kept them.
+    omitted = "[]" if any(char in row.get("spoken_text", "") for char in "<>") else "[]<>"
     bracketed = (performance.get("kind") == "bracketed"
                  or ("spoken_text" in row and row["spoken_text"] != text
-                     and row["spoken_text"] == text.translate(str.maketrans("", "", "[]"))))
+                     and row["spoken_text"] == text.translate(str.maketrans("", "", omitted))))
     pieces, spans, spoken_cursor = [], [], 0
 
     def append(value, start, end, kind):
@@ -143,7 +146,7 @@ def build_spoken(row):
     def original(start, end):
         cursor = start
         for index in range(start, end):
-            if bracketed and text[index] in "[]":
+            if bracketed and text[index] in omitted:
                 append(text[cursor:index], cursor, index, "source")
                 cursor = index + 1
         append(text[cursor:end], cursor, end, "source")

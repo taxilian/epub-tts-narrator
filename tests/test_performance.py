@@ -65,10 +65,27 @@ class BracketPerformanceTests(unittest.TestCase):
         ranges, warnings = bracket_ranges(doc["source"])
         self.assertEqual(len(warnings), 2)
         self.assertEqual(ranges["b1"], [])
+        legacy = apply_bracket_delivery(doc, version=1)
+        self.assertEqual(validate_document(legacy), [])
+        self.assertEqual(len(legacy["issues"]), 2)
+        self.assertEqual([s["spoken_text"] for s in legacy["segments"] if "spoken_text" in s], ["valid"])
+        # Version 2: each stray delimiter is its own silent group, so none reaches speech.
         result = apply_bracket_delivery(doc)
         self.assertEqual(validate_document(result), [])
+        self.assertEqual(result["provenance"]["bracket_delivery"]["version"], 2)
         self.assertEqual(len(result["issues"]), 2)
-        self.assertEqual([s["spoken_text"] for s in result["segments"] if "spoken_text" in s], ["valid"])
+        self.assertEqual([s["spoken_text"] for s in result["segments"] if "spoken_text" in s], ["", "", "valid"])
+        self.assertFalse(any(set(s.get("spoken_text", s["text"])) & set("[]") for s in result["segments"]))
+
+    def test_angle_brackets_are_delimiters_from_version_two(self):
+        doc = book_with_text("The screen read <Quest Complete> and [Shield] glowed.")
+        result = apply_bracket_delivery(doc)
+        self.assertEqual(validate_document(result), [])
+        spoken = [s["spoken_text"] for s in result["segments"] if "spoken_text" in s]
+        self.assertEqual(spoken, ["Quest Complete", "Shield"])
+        legacy = apply_bracket_delivery(doc, version=1)
+        self.assertEqual(validate_document(legacy), [])
+        self.assertEqual([s["spoken_text"] for s in legacy["segments"] if "spoken_text" in s], ["Shield"])
 
     def test_validator_rejects_rewrites_missing_cues_and_wrong_boundaries(self):
         result = apply_bracket_delivery(book_with_text("A [Fireball] spell."))
@@ -145,7 +162,7 @@ class BracketPerformanceTests(unittest.TestCase):
             self.assertTrue(all(s["voice_id"] == "v1" for s in exported))
 
     def test_resolved_unmatched_warning_stays_resolved_after_corrections(self):
-        doc = apply_bracket_delivery(book_with_text("An unmatched [ remains literal."))
+        doc = apply_bracket_delivery(book_with_text("An unmatched [ remains literal."), version=1)
         issue_id = doc["issues"][0]["id"]
         edits = {"source_fingerprint": fingerprint(doc["source"]),
                  "cast_fingerprint": fingerprint(doc["cast"]),

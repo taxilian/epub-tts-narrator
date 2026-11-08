@@ -125,11 +125,13 @@ def spoken_mapping(row):
     spoken = row.get("spoken_text", text)
     if spoken == text:
         return spoken, list(range(row["start"], row["end"]))
-    # Analyzer's sole text transformation removes square-bracket delimiters.
-    indices = [i for i, char in enumerate(text) if char not in "[]"]
-    if "".join(text[i] for i in indices) != spoken:
-        raise ValueError("Unsupported spoken_text transformation; explicit source mapping is required")
-    return spoken, [row["start"] + i for i in indices]
+    # Analyzer's sole text transformation removes bracket delimiters (square,
+    # and from bracket delivery version 2 angle brackets).
+    for omitted in ("[]<>", "[]"):
+        indices = [i for i, char in enumerate(text) if char not in omitted]
+        if "".join(text[i] for i in indices) == spoken:
+            return spoken, [row["start"] + i for i in indices]
+    raise ValueError("Unsupported spoken_text transformation; explicit source mapping is required")
 
 
 def split_text(text, maximum):

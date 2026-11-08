@@ -140,15 +140,15 @@ Concatenating a block's segment texts reconstructs that canonical block exactly.
 
 ## Bracketed delivery
 
-Balanced square-bracket passages are split at their source boundaries after speaker attribution. They keep the selected role and voice. Each resulting segment has optional `performance` metadata:
+Balanced bracket passages are split at their source boundaries after speaker attribution. `provenance.bracket_delivery.version` 1 recognizes square brackets; version 2 (new analyses) also recognizes angle brackets and turns each unmatched bracket into a one-character group of its own, whose `spoken_text` is empty, so no bracket reaches synthesis. They keep the selected role and voice. Each resulting segment has optional `performance` metadata:
 
 ```json
 {"kind":"bracketed","group_id":"bracket:b000099:381","direction":"Give this text a slight audible change in delivery.","delimiters":"omit","enter":true,"exit":true}
 ```
 
-`text` always retains the exact brackets and source offsets. Without speech normalization, `spoken_text` supplies the same text with square brackets omitted; no words or other punctuation may change. Approved spelling edits below compose with bracket omission. The TTS consumer should synthesize `spoken_text` when present, otherwise `text`, and apply the delivery direction using its own engine settings. An empty `spoken_text` is a control-only segment and needs no audio. Do not speak the words “open bracket” or “close bracket.”
+`text` always retains the exact brackets and source offsets. Without speech normalization, `spoken_text` supplies the same text with the version's bracket delimiters omitted; no words or other punctuation may change. Approved spelling edits below compose with bracket omission. The TTS consumer should synthesize `spoken_text` when present, otherwise `text`, and apply the delivery direction using its own engine settings. An empty `spoken_text` is a control-only segment and needs no audio. Do not speak the words “open bracket” or “close bracket.”
 
-`group_id` joins pieces of one bracket passage across existing speaker segments or paragraphs. `enter` and `exit` identify its outer boundaries. Nested brackets form one delivery group. The cue does not create a new character, force a different voice, or impose fixed silence around a skill name inside a sentence. Unbalanced brackets remain literal and create review issues; groups never cross chapter boundaries. Direction is configurable in `[performance_policy]` as `bracketed_text`.
+`group_id` joins pieces of one bracket passage across existing speaker segments or paragraphs. `enter` and `exit` identify its outer boundaries. Nested brackets form one delivery group. The cue does not create a new character, force a different voice, or impose fixed silence around a skill name inside a sentence. Under version 1, unbalanced brackets remain literal and create review issues (under version 2 they are omitted from speech and still create review issues); groups never cross chapter boundaries. Direction is configurable in `[performance_policy]` as `bracketed_text`.
 
 ## Spoken spelling normalization
 

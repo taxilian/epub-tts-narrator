@@ -321,9 +321,11 @@ class _Validator:
                 for flag in ("enter", "exit"):
                     self.boolean(performance.get(flag), f"{path}.performance.{flag}")
                 self.string(segment.get("spoken_text"), f"{path}.spoken_text", nonempty=False)
+                from .performance import delimiters
                 if (valid_text and "speech_normalization" not in segment
-                        and segment.get("spoken_text") != segment["text"].translate(str.maketrans("", "", "[]"))):
-                    self.error(f"{path}.spoken_text", "may only omit square bracket delimiters from exact text")
+                        and segment.get("spoken_text") != segment["text"].translate(
+                            str.maketrans("", "", delimiters(self.bracket_version)))):
+                    self.error(f"{path}.spoken_text", "may only omit bracket delimiters from exact text")
                 enclosing = next((span for span in bracket_spans
                                   if valid_offsets and span["start"] <= start < end <= span["end"]), None)
                 if enclosing is None:
@@ -416,13 +418,18 @@ class _Validator:
         self.bracket_spans = {}
         self.bracket_direction = None
         bracket_warnings = None
+        self.bracket_version = 1
+        if self.require_bracket_delivery:
+            saved = provenance["bracket_delivery"]
+            if isinstance(saved, dict) and type(saved.get("version")) is int and saved["version"] in (1, 2):
+                self.bracket_version = saved["version"]
         if not self.errors:
             from .performance import bracket_ranges
-            self.bracket_spans, bracket_warnings = bracket_ranges(doc["source"])
+            self.bracket_spans, bracket_warnings = bracket_ranges(doc["source"], version=self.bracket_version)
         if self.require_bracket_delivery:
             marker = self.object(provenance["bracket_delivery"], "provenance.bracket_delivery")
-            if type(marker.get("version")) is not int or marker.get("version") != 1:
-                self.error("provenance.bracket_delivery.version", "must be integer 1")
+            if type(marker.get("version")) is not int or marker.get("version") not in (1, 2):
+                self.error("provenance.bracket_delivery.version", "must be integer 1 or 2")
             self.choice(marker.get("basis"), {"source_delimiters"}, "provenance.bracket_delivery.basis")
             self.string(marker.get("direction"), "provenance.bracket_delivery.direction")
             self.bracket_direction = marker.get("direction")

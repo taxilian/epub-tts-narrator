@@ -9,7 +9,6 @@ from unittest.mock import patch
 from epub_tts_narrator.contracts import VOICE_EFFECT_PRESETS
 from epub_tts_narrator.renderer.voice_bindings import canonical_aliases
 from epub_tts_narrator.renderer.voice_effects import CHAINS, recipe
-from epub_tts_narrator.renderer.voice_prompts import derived_voice_prompt
 
 from audition_fixtures import prepare_bundle, prepare_document
 from epub_tts_narrator.cli import export_bundle
@@ -42,13 +41,6 @@ class VoiceChangeTests(unittest.TestCase):
         self.assertEqual(canonical_aliases(cast()), {})
         # An ordinary alternate role voice still shares the character's reference.
         self.assertEqual(canonical_aliases(cast(derived=False)), {"v_jon_alt": "v_jon"})
-
-    def test_the_derived_prompt_keeps_the_base_design_and_adds_only_the_change(self):
-        prompt = derived_voice_prompt("A warm tenor with a Dublin accent.",
-                                      {"kind": "age", "instruction": "about 40 now, rougher."})
-        self.assertTrue(prompt.startswith("A warm tenor with a Dublin accent."))
-        self.assertIn("(age): about 40 now, rougher.", prompt)
-        self.assertIn("Keep the same accent", prompt)
 
     def test_voice_descriptions_never_carry_a_minor_age_or_a_sexual_reading(self):
         from epub_tts_narrator.renderer.voice_prompts import designer_prompt, safe_voice_description
@@ -136,8 +128,25 @@ class DerivedVoiceCastingTests(unittest.TestCase):
         self.assertEqual(self.engine.speech_calls[-1]["direction"], "A character, high and light")
         self.assertEqual(young["creation"]["method"], "derived_clone")
         self.assertEqual(young["creation"]["derived_from"]["reference_sha256"], base["reference_sha256"])
-        label = next(row["label"] for row in session.rows() if row["voice_id"] == "voice_mara_young")
-        self.assertIn("cloned from", label)
+        row = next(row for row in session.rows() if row["voice_id"] == "voice_mara_young")
+        self.assertIn("cloned from", row["label"])
+        self.assertEqual(row["prompt"], "a small girl, high and light")   # the clone direction E edits
+        self.assertFalse(row["clone_stale"])
+
+    def test_an_edited_clone_direction_is_what_the_clone_uses(self):
+        session = self.session()
+        session.ensure_ready("voice_mara")
+        session.update_prompt("voice_mara_young", "softer, brighter, quicker")
+        young = session.regenerate("voice_mara_young")
+        self.assertEqual(self.engine.speech_calls[-1]["direction"], "Softer, brighter, quicker")
+        self.assertEqual(young["creation"]["derived_from"]["direction"], "Softer, brighter, quicker")
+        # Re-casting the main voice marks the clone as made from an older recording.
+        session.regenerate("voice_mara")
+        row = next(row for row in session.rows() if row["voice_id"] == "voice_mara_young")
+        self.assertTrue(row["clone_stale"])
+        # Refreshing descriptions never replaces a clone's direction.
+        with self.assertRaisesRegex(ValueError, "cloned voices keep their directions"):
+            session.refresh_prompts(voice_ids=["voice_mara_young"])
 
     def test_rendering_creates_the_base_voice_first_and_then_clones_from_it(self):
         session = self.session()

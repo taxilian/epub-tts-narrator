@@ -831,15 +831,17 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
 DERIVED_VOICE_VERSION = 1
 
 
-def derived_direction(derived_from):
-    """The synthesis direction that turns the base voice into its changed self."""
+def derived_direction(derived_from, instruction=None):
+    """The synthesis direction that turns the base voice into its changed self:
+    the analysis's instruction, or the user's edited one from the cast menu."""
     # Storytelling wording, never a minor's age: also the better acting direction.
-    text = safe_voice_description(re.sub(r"[\[<]", "(", re.sub(r"[\]>]", ")", derived_from["instruction"])))
+    raw = instruction if isinstance(instruction, str) and instruction.strip() else derived_from["instruction"]
+    text = safe_voice_description(re.sub(r"[\[<]", "(", re.sub(r"[\]>]", ")", raw)))
     return " ".join(text.split())[:240]
 
 
 def derive_voice_take(engine, verifier, config, base, profile, text, directory, *, series_id, voice_id,
-                      notify=print, resume_attempt=None, nonce=None):
+                      notify=print, resume_attempt=None, nonce=None, instruction=None):
     """Clone a changed voice from ``base``'s reference recording.
 
     The engine speaks ``text`` in the base voice with the change as its
@@ -848,7 +850,7 @@ def derive_voice_take(engine, verifier, config, base, profile, text, directory, 
     (wav, accepted, request, metadata) for publication.
     """
     derived = profile["derived_from"]
-    direction = derived_direction(derived)
+    direction = derived_direction(derived, instruction)
     request = {"kind": "derive_voice", "version": DERIVED_VOICE_VERSION, "engine": engine.identity,
                "series_id": series_id, "voice_id": voice_id, "profile": profile, "text": text,
                "base": {"voice_id": base["voice_id"], "reference_sha256": base["reference_sha256"]},

@@ -1,10 +1,12 @@
 """Deterministic quotation spans and explicit speech tags for the narrator read.
 
 No model calls. Quote spans let the model label short IDs instead of copying
-source anchors; tags give local evidence and a disagreement check. Only double
-quotation marks are recognized (straight and curly). Single-quote dialogue,
-em-dash dialogue, and unquoted speech are left to the model's explicit-anchor
-operation.
+source anchors; tags give local evidence and a disagreement check. A book's
+dialogue style is detected once (``dialogue_style``): double quotation marks
+(straight or curly), single quotation marks (British style, telling quotes from
+apostrophes by position and punctuation), or a leading dash (one paragraph per
+turn, speech split from its tag). Unquoted speech is left to the model's
+explicit-anchor operation.
 """
 
 import re
@@ -74,6 +76,79 @@ def block_quote_spans(text):
     return _straight_quote_spans(text)
 
 
+# Single quotes double as apostrophes ("don't", "James' book", "'em"). An opening
+# quote follows a space, a line start or an opening mark and precedes a word; a
+# closing quote follows the punctuation that ends a spoken phrase.
+_OPEN_BEFORE = " \t\n([{\u2014\u2013-\u201c\""
+_CLOSE_AFTER = ",.!?…;:\u2014\u2013-"
+_ELISIONS = ("em", "tis", "twas", "cause", "til", "bout", "n ", "n'", "round", "nuff")
+
+
+def _single_quote_spans(text):
+    spans, start = [], None
+    for index, char in enumerate(text):
+        if char not in "‘'’":
+            continue
+        before = text[index - 1] if index else " "
+        after = text[index + 1] if index + 1 < len(text) else ""
+        if start is None:
+            if (char in "‘'" and before in _OPEN_BEFORE and after and not after.isspace()
+                    and not after.isdigit() and not text[index + 1:index + 6].casefold().startswith(_ELISIONS)):
+                start = index
+        elif char in "’'" and before in _CLOSE_AFTER and not (after.isalnum()):
+            spans.append((start, index + 1, True))
+            start = None
+        elif char == "‘" and before in _OPEN_BEFORE:
+            # A new opening mark without a close: the earlier speech ran to here.
+            spans.append((start, index, False))
+            start = index
+    if start is not None:
+        spans.append((start, len(text), False))
+    return spans
+
+
+_DASH_OPEN = re.compile(r"\s*(?:—|–|―|--)\s*(?=\S)")
+_DASH_RESUME = re.compile(r"\s+(?:—|–|―|--)\s*(?=\S)")
+
+
+def _dash_spans(text):
+    """A paragraph opening with a dash is one turn; a tag (", she said,") ends the
+    speech, and a later dash resumes it."""
+    opening = _DASH_OPEN.match(text)
+    if not opening:
+        return []
+    spans, start, cursor = [], opening.start(), opening.end()
+    while True:
+        cut = None
+        for mark in re.finditer(r"[,.!?…]", text[cursor:]):
+            at = cursor + mark.end()
+            if any(pattern.match(text[at:at + 80]) for pattern in _AFTER):
+                cut = at
+                break
+        if cut is None:
+            spans.append((start, len(text), True))
+            return spans
+        spans.append((start, cut, True))
+        resume = _DASH_RESUME.search(text, cut)
+        if resume is None:
+            return spans
+        start, cursor = resume.start() + len(resume.group(0)) - len(resume.group(0).lstrip()), resume.end()
+
+
+_FINDERS = {"double": block_quote_spans, "single": _single_quote_spans, "dash": _dash_spans}
+
+
+def dialogue_style(source):
+    """The book's dialogue style: the finder that marks speech in the most paragraphs.
+
+    Double quotation marks win ties; a style needs at least five paragraphs.
+    """
+    counts = {style: sum(1 for block in source["blocks"] if finder(block["text"]))
+              for style, finder in _FINDERS.items()}
+    best = max(("double", "single", "dash"), key=lambda style: counts[style])
+    return best if best == "double" or counts[best] >= max(5, counts["double"] + 1) else "double"
+
+
 def _tag_name(match):
     name = match.group(1)
     if name is None:
@@ -123,20 +198,22 @@ def find_beat(text, start, end, first_in_block):
     return None
 
 
-def quote_spans(source):
+def quote_spans(source, style=None):
     """Return ordered quote spans for every block with stable short IDs.
 
     Each span: {"id": "q12", "block_id", "start", "end", "text", "closed",
     "continues": bool (opens a paragraph after an unclosed speech), "tag": {...}|None}.
+    ``style`` defaults to the book's ``dialogue_style``.
     """
+    finder = _FINDERS[style or dialogue_style(source)]
     spans, previous_unclosed, previous_chapter = [], False, None
     for block in source["blocks"]:
         text = block["text"]
         if block["chapter_id"] != previous_chapter:
             previous_unclosed, previous_chapter = False, block["chapter_id"]
-        found = block_quote_spans(text)
+        found = finder(text)
         for index, (start, end, closed) in enumerate(found):
-            if not text[start:end].strip('"“” \t'):
+            if not text[start:end].strip('"“”‘’\'—–―- \t'):
                 continue
             spans.append({"id": f"q{len(spans) + 1}", "block_id": block["id"], "start": start, "end": end,
                           "text": text[start:end], "closed": closed,

@@ -247,7 +247,8 @@ def prep_read(source, requests, meter, ledger, *, window_chars=PREP_WINDOW_CHARS
     numbers = _numbers(source)
     windows = chapter_groups(source, window_chars)
     progress(f"Narrator read: preparing the cast in {len(windows)} sequential window(s)")
-    for index, window in enumerate(windows, 1):
+
+    def read(ledger, window):
         cast_text, prior_text = render(ledger)
         payload = {"mode": "narrator_prep", "v": PROMPT_VERSION, "cast": cast_text,
                    "text": _render_blocks(window, numbers)}
@@ -258,7 +259,18 @@ def prep_read(source, requests, meter, ledger, *, window_chars=PREP_WINDOW_CHARS
         def validate(response, ledger=ledger, window_numbers=window_numbers):
             return apply_delta(ledger, response, blocks, window_numbers)
 
-        ledger = meter.run(requests, "prep", PREP, payload, validate)
+        try:
+            return meter.run(requests, "prep", PREP, payload, validate)
+        except OutputTruncatedError:
+            if len(window) < 2:
+                raise
+            # A runaway reply: read the two halves in order instead, as markup does.
+            middle = len(window) // 2
+            progress(f"Narrator read: prep output was cut off; reading {len(window)} paragraphs in two halves")
+            return read(read(ledger, window[:middle]), window[middle:])
+
+    for index, window in enumerate(windows, 1):
+        ledger = read(ledger, window)
         seen = sum(1 for row in ledger["characters"] if row["series"] is None or row["seen"])
         progress(f"Narrator read: prep window {index}/{len(windows)} complete; {seen} character(s) in the ledger")
     return recheck_aliases(ledger), len(windows)
@@ -1683,6 +1695,9 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                     stats["simultaneous_unproven"] += 1
                     who = ("unresolved", who[1])
                 delivery = {"direction": "", "evidence": []}
+                if piece.get("delivery"):
+                    # A direction is plain words; brackets are engine control syntax.
+                    piece["delivery"] = " ".join(re.sub(r"[\[\]<>{}]", " ", piece["delivery"]).split())
                 if piece.get("delivery"):
                     # The model's quote must support the delivery; an explicit tag only
                     # counts when it contains the delivery word ("whispered" for "whisper").

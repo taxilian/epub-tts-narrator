@@ -143,6 +143,8 @@ def _menu_lines(rows, width):
                 status += " — inherited"
         if row["selected"] and row["selected"].get("inherited"):
             status += " — inherited"
+        if row.get("clone_stale"):
+            status += " — cloned from an older recording of its main voice; G re-clones"
         canonical = row.get("canonical_voice_id", row["voice_id"])
         if canonical != row["voice_id"] and canonical in labels:
             status += " — shares " + labels[canonical]
@@ -306,9 +308,15 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             return value
 
         say("B or /cancel at any field returns to the menu without saving; Ctrl-C also cancels this edit.")
-        say("Voice prompt: " + row["prompt"])
+        cloned = bool(row.get("derived_from"))
+        if cloned:
+            # A changed voice is cloned from its main voice with this direction.
+            say("Cloned from: " + str(row["derived_from"].get("voice_id")))
+            say("Clone direction: " + row["prompt"])
+        else:
+            say("Voice prompt: " + row["prompt"])
         try:
-            prompt = field("New prompt (Enter keeps current; B cancels): ")
+            prompt = field(("New clone direction" if cloned else "New prompt") + " (Enter keeps current; B cancels): ")
             say("Sample script: " + row["reference_text"])
             source = row.get("sample_source", {})
             if source.get("kind") == "book_excerpt":

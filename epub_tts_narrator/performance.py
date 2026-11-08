@@ -9,12 +9,29 @@ BRACKET_DIRECTION = (
 )
 
 
-def bracket_ranges(source):
-    """Find balanced outer square brackets, including pairs across paragraphs.
+# Version 1 recognizes square brackets. Version 2 (new analyses) also treats
+# angle brackets as delimiters, and gives an unmatched delimiter a group of its
+# own so it is never spoken, which the TTS engine would refuse as control syntax.
+BRACKET_VERSION = 2
+_PAIRS = {1: {"[": "]"}, 2: {"[": "]", "<": ">"}}
+
+
+def delimiters(version=BRACKET_VERSION):
+    """The delimiter characters a bracket-delivery version omits from speech."""
+    return "".join(opening + closing for opening, closing in _PAIRS[version].items())
+
+
+def bracket_ranges(source, *, version=1):
+    """Find balanced outer brackets, including pairs across paragraphs.
 
     Nested pairs form one delivery group. An unmatched bracket is reported, never
-    allowed to consume the rest of a chapter or cross a chapter boundary.
+    allowed to consume the rest of a chapter or cross a chapter boundary; from
+    version 2 it also forms a one-character group so it is left out of speech.
     """
+    if version not in _PAIRS:
+        raise ValueError(f"Unknown bracket delivery version: {version!r}")
+    if version >= 2:
+        return _bracket_ranges(source, _PAIRS[version])
     ranges = {block["id"]: [] for block in source["blocks"]}
     warnings, chapter, pending, stack = [], None, [], []
 
@@ -54,12 +71,74 @@ def bracket_ranges(source):
     return ranges, warnings
 
 
-def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
-    """Split exact source segments at brackets without changing voice attribution."""
+def _bracket_ranges(source, pairs):
+    closers = {closing: opening for opening, closing in pairs.items()}
+    names = {"[": "square bracket", "]": "square bracket", "<": "angle bracket", ">": "angle bracket"}
+    ranges = {block["id"]: [] for block in source["blocks"]}
+    warnings, chapter, pending, stack = [], None, [], []
+
+    def stray(block_id, offset, reason):
+        warnings.append({"block_id": block_id, "offset": offset, "reason": reason})
+        ranges[block_id].append({"block_id": block_id, "start": offset, "end": offset + 1,
+                                 "group_id": f"bracket:{block_id}:{offset}", "first": True, "last": True})
+
+    def finish():
+        # The outermost unclosed opening; anything nested in it was never published.
+        if stack:
+            char, block_id, offset = stack[0]
+            stray(block_id, offset, f"Unmatched opening {names[char]}; left out of speech.")
+
+    for block in source["blocks"]:
+        if chapter != block["chapter_id"]:
+            finish()
+            chapter, pending, stack = block["chapter_id"], [], []
+        for offset, char in enumerate(block["text"]):
+            if char in pairs:
+                if not stack:
+                    pending = []
+                stack.append((char, block["id"], offset))
+            if stack:
+                if not pending or pending[-1]["block_id"] != block["id"]:
+                    pending.append({"block_id": block["id"], "start": offset, "end": offset + 1})
+                else:
+                    pending[-1]["end"] = offset + 1
+            if char in closers:
+                if not stack:
+                    stray(block["id"], offset, f"Unmatched closing {names[char]}; left out of speech.")
+                    continue
+                if stack[-1][0] != closers[char]:
+                    # Inside another group: it is omitted with that group.
+                    warnings.append({"block_id": block["id"], "offset": offset,
+                                     "reason": f"Mismatched closing {names[char]} inside a bracket group."})
+                    continue
+                opening = stack.pop()
+                if not stack:
+                    group_id = f"bracket:{opening[1]}:{opening[2]}"
+                    for index, span in enumerate(pending):
+                        ranges[span["block_id"]].append(dict(
+                            span, group_id=group_id, first=index == 0,
+                            last=index == len(pending) - 1))
+                    pending = []
+    finish()
+    for values in ranges.values():
+        values.sort(key=lambda span: span["start"])
+    return ranges, warnings
+
+
+def apply_bracket_delivery(document, direction=BRACKET_DIRECTION, *, version=None):
+    """Split exact source segments at brackets without changing voice attribution.
+
+    A document that already records bracket delivery keeps its version when the
+    cues are reapplied; a new analysis uses ``BRACKET_VERSION``.
+    """
     if not isinstance(direction, str) or not direction.strip():
         raise ValueError("Bracket delivery direction must be a nonempty string")
+    if version is None:
+        saved = document.get("provenance", {}).get("bracket_delivery", {})
+        version = saved.get("version", BRACKET_VERSION) if isinstance(saved, dict) else BRACKET_VERSION
     result = deepcopy(document)
-    ranges, warnings = bracket_ranges(result["source"])
+    ranges, warnings = bracket_ranges(result["source"], version=version)
+    omitted = delimiters(version)
     segments = []
     for original in result["segments"]:
         spans = ranges[original["block_id"]]
@@ -85,7 +164,7 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
                     "enter": enclosing["first"] and start == enclosing["start"],
                     "exit": enclosing["last"] and end == enclosing["end"],
                 }
-                piece["spoken_text"] = piece["text"].translate(str.maketrans("", "", "[]"))
+                piece["spoken_text"] = piece["text"].translate(str.maketrans("", "", omitted))
             if "speech_normalization" in piece:
                 from .spoken_text import build_spoken
                 piece.pop("spoken_text", None)
@@ -97,7 +176,7 @@ def apply_bracket_delivery(document, direction=BRACKET_DIRECTION):
         from .inline_performance import project_segments
         result["segments"] = project_segments(document["segments"], segments, drops=projection_drops)
     result.setdefault("provenance", {})["bracket_delivery"] = {
-        "version": 1, "basis": "source_delimiters", "direction": direction,
+        "version": version, "basis": "source_delimiters", "direction": direction,
         "groups": len({span["group_id"] for values in ranges.values() for span in values}),
         "warnings": warnings,
     }

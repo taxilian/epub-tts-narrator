@@ -423,8 +423,8 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         # Bracket groups are located by block and offset; the marker counts
         # and warns about the whole merged source.
         from .performance import bracket_ranges
-        ranges, warnings = bracket_ranges(source)
         marker = provenance["bracket_delivery"]
+        ranges, warnings = bracket_ranges(source, version=marker.get("version", 1))
         marker["groups"] = len({span["group_id"] for values in ranges.values() for span in values})
         marker["warnings"] = warnings
         drops = (delta or {}).get("provenance", {}).get("bracket_delivery", {}).get("inline_projection_drops", [])
