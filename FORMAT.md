@@ -30,7 +30,7 @@ An `Evidence` record is `{block_id, quote}`. The quote must be a nonempty exact 
 | Character | `id`, `name`, `aliases` (strings), `description`, `evidence` (Evidence[]), `voice_id` |
 | Role | `id`, `kind` (`narration` or `dialogue`), `character_id` (string or null), `voice_id`, `description` |
 | Voice | `id`, `description`, `traits` (Trait[]); optional `speechTraits` (string), optional `derived_from` (DerivedFrom) |
-| DerivedFrom | `voice_id` (the base voice, itself not derived), `kind` (`age` or `condition`), `instruction` (≤240 characters), `evidence` (Evidence[], nonempty unless the voice has `series_origin`); optional `through_end` (boolean) |
+| DerivedFrom | `voice_id` (the main voice it is cloned from, itself not derived), `kind` (`age` or `condition`), `instruction` (the clone direction, ≤240 characters), `evidence` (Evidence[], nonempty unless the voice has `series_origin`); optional `through_end` (boolean) |
 | Trait | `name`, `value`, `basis` (`text` or `casting`), `evidence` (Evidence[]) |
 | Issue | `id`, `kind`, `target`, `reason`, `resolved` (boolean) |
 
@@ -44,7 +44,7 @@ When continuing a series, introducing `speechTraits` for an inherited voice whos
 
 ### Changing voices
 
-A character whose own voice changes during the book (grows up, a lasting injury or transformation) gets a second dialogue role whose voice is `derived_from` the character's voice. `kind` and `instruction` describe the change ("about 16 now, deeper, steadier"), and `evidence` quotes the text that says so. Segments after the change use that role. `through_end: true` means the change was still in effect when the book ended; a continuing series book then starts the returning character on that same voice (inherited with `series_origin` and empty evidence). The renderer casts a derived voice as its own voice, designed from the base voice's current description plus the change; it is never aliased to the base voice.
+A character whose own voice changes during the book (grows up, a lasting injury or transformation) has one voice per state. The character's main `voice_id` is the voice they have at the **end** of the book, so a later series book inherits it (a child who grows up keeps the grown voice for the rest of the series). Every other state, such as the young child before an age change, is a second dialogue role whose voice is `derived_from` the main voice. `kind` names the change, `instruction` is the short direction the renderer clones that state with ("Boyish, mid-high, clear, earnest, quick"), and `evidence` quotes the text of the change. A character inherited from an earlier book keeps its inherited main voice; that book's later states are derived from it, and the last one still in effect when the book ends has `through_end: true`, so the next book starts the character on it (inherited with `series_origin` and empty evidence). The renderer never designs a derived voice afresh and never aliases it to the main voice: it clones it from the main voice's selected reference recording, speaking with `instruction` as the direction, and verifies it like any reference.
 
 Equipment heard over an unchanged voice is not a new voice. A dialogue segment may carry `voice_effect: {preset, evidence}` with `preset` one of `helmet`, `radio`, `vocoder`, `pa`, `phone`, `underwater`. The renderer applies the preset to that line's accepted audio during chapter composition; verification, censorship and chapter continuity use the dry take, and the effected copy keeps the same length.
 

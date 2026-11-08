@@ -31,7 +31,7 @@ from .retry_budget import SpeechRetryBudget, generation_attempts, whole_strategy
 from .run_locks import acquire_directory_lock
 from .speech_text import trim_speech_text
 from .voice_bindings import design_voice, designer_identity, require_designer
-from .voice_prompts import default_voice_prompt
+from .voice_prompts import default_voice_prompt, designer_prompt, safe_voice_description
 
 
 class RenderBlocked(ValueError):
@@ -818,6 +818,59 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     raise SpeechVerificationFailed(failure, request=request, report=last_report or {})
 
 
+DERIVED_VOICE_VERSION = 1
+
+
+def derived_direction(derived_from):
+    """The synthesis direction that turns the base voice into its changed self."""
+    # Storytelling wording, never a minor's age: also the better acting direction.
+    text = safe_voice_description(re.sub(r"[\[<]", "(", re.sub(r"[\]>]", ")", derived_from["instruction"])))
+    return " ".join(text.split())[:240]
+
+
+def derive_voice_take(engine, verifier, config, base, profile, text, directory, *, series_id, voice_id,
+                      notify=print, resume_attempt=None, nonce=None):
+    """Clone a changed voice from ``base``'s reference recording.
+
+    The engine speaks ``text`` in the base voice with the change as its
+    direction ("the same person earlier in the book, as a small boy..."), and the
+    take passes the same reference verification as any designed voice. Returns
+    (wav, accepted, request, metadata) for publication.
+    """
+    derived = profile["derived_from"]
+    direction = derived_direction(derived)
+    request = {"kind": "derive_voice", "version": DERIVED_VOICE_VERSION, "engine": engine.identity,
+               "series_id": series_id, "voice_id": voice_id, "profile": profile, "text": text,
+               "base": {"voice_id": base["voice_id"], "reference_sha256": base["reference_sha256"]},
+               "direction": direction, "base_seed": config["render"]["seed"]}
+    if nonce is not None:
+        request["nonce"] = nonce
+    directory = Path(directory) / digest(request)
+
+    def generate(path, seed):
+        return {**engine.synthesize(text, base, path, seed=seed, direction=direction),
+                "description_applied": True}
+
+    notify(f"Cloning {voice_id} from {base['voice_id']}: {direction}")
+    wav, accepted = verified_take(text, generate, directory, request, verifier, config,
+                                  notify=notify, purpose="reference", resume_attempt=resume_attempt)
+    reference_text = accepted["report"].get("reference_text", text)
+    metadata = {
+        **accepted.get("engine_metadata", {}),
+        "method": "derived_clone", "description_applied": True,
+        "derived_from": {"voice_id": base["voice_id"], "reference_sha256": base["reference_sha256"],
+                         "kind": derived["kind"], "direction": direction},
+        "requested_description": profile["description"], "requested_reference_text": text,
+        "reference_text": reference_text, "engine": engine.identity,
+        "note": "Cloned from the base voice's reference with the change as its direction; "
+                "listening determines suitability.",
+        "seed": accepted["seed"], "request_hash": accepted["request_hash"],
+        "verifier": deepcopy(verifier.identity), "quality": deepcopy(config["quality"]),
+        "validation_key": make_validation_key(reference_text, verifier, config["quality"], purpose="reference"),
+    }
+    return wav, accepted, request, metadata
+
+
 def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, notify=print,
                  designer=None, bundle=None):
     import sys
@@ -953,6 +1006,13 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
     if existing is not None:
         if any(existing["created_with"].get(key) != binding_identity.get(key) for key in ("engine", "model")):
             raise RenderBlocked("Existing voice was created for a different model; use an explicit compatible binding")
+        cloned = existing.get("creation", {}).get("derived_from")
+        if isinstance(cloned, dict):
+            base = store.load(cloned.get("voice_id"))
+            if base is not None and base.get("reference_sha256") != cloned.get("reference_sha256"):
+                # References are never implicitly replaced; say how to re-clone.
+                notify(f"Note: {voice_id} was cloned from an earlier recording of {cloned['voice_id']}. "
+                       f"Regenerate {voice_id} in the casting menu (G) to clone it from the current one.")
         return existing
     if cleanup_pending:
         raise RenderBlocked(
@@ -972,6 +1032,34 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
             f"Voice {voice_id} has casting edits or saved audition candidates. "
             "Run the cast command to prepare its selected sample before rendering."
         )
+    if isinstance(profile.get("derived_from"), dict):
+        # A changed voice is cloned from its base voice, never designed afresh.
+        base_id = profile["derived_from"]["voice_id"]
+        base = store.load(base_id)
+        if base is None and bundle is not None:
+            base_profile = next((voice for voice in bundle["cast"]["voices"] if voice["id"] == base_id), None)
+            if base_profile is not None:
+                base = ensure_voice(store, base_id, base_profile, engine, verifier, config, work,
+                                    notify=notify, designer=designer, bundle=bundle)
+        if base is None:
+            raise RenderBlocked(f"Voice {voice_id} is derived from {base_id}, which has no reference yet; "
+                                "cast it first.")
+        text = config["voices"]["reference_text"]
+        if bundle is not None:
+            from .samples import MissingSampleScript, select_sample
+            for sample_voice in (requested_id, base_id):
+                # The same person: the main voice's script serves when the clone has none.
+                try:
+                    text = select_sample(bundle, sample_voice, canonical_id=store.canonical_id,
+                                         fallback_text=text)["reference_text"]
+                    break
+                except MissingSampleScript:
+                    continue
+        wav, accepted, _request, metadata = derive_voice_take(
+            engine, verifier, config, base, profile, text, candidate_root, series_id=store.series_id,
+            voice_id=voice_id, notify=notify)
+        return store.publish(voice_id, profile, wav, metadata["reference_text"], binding_identity,
+                             accepted["report"], metadata)
     owned_designer = None
     try:
         settings = resolve_voice_design(config)
@@ -990,7 +1078,7 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                 bundle, requested_id, canonical_id=store.canonical_id, fallback_text=text)
             text = sample["reference_text"]
             sample_source = sample["source"]
-        prompt = default_voice_prompt(profile)
+        prompt = designer_prompt(default_voice_prompt(profile), designer_identity(source))
         request = {"kind": "create_voice", "engine": engine.identity, "designer": designer_identity(source),
                    "series_id": store.series_id, "voice_id": voice_id, "profile": profile,
                    "prompt": prompt, "text": text, "base_seed": config["render"]["seed"]}

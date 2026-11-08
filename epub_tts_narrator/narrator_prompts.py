@@ -79,7 +79,7 @@ VOICE = f"""You are casting voices for a multi-voice audiobook.
 Input: "book" title and narration notes; "voices": [id, name, sex, note, voice evidence quotes, frequent conversation partners].
 For every voice return:
 {{"v":[[id,description,speech_traits,traits]]}}
-description: <=40 words, an audible voice for a voice designer: apparent age, pitch, texture, pace, accent, manner. Explicit voice evidence wins; otherwise choose plausible, restrained, distinct voices. Do not infer accent from names alone; when nothing suggests one, choose and state one plainly (e.g. General American).
+description: <=40 words, the voice an audiobook narrator or voice actor gives this character, for a voice designer: pitch, texture, pace, accent, manner, and how mature or youthful it sounds, described by sound. For a young character never state an age or use words like child, boy, girl, kid or teen: describe youth by sound (light, bright, high placement, quick, eager). Never write "adult performer" or any sexual wording. Explicit voice evidence wins; otherwise choose plausible, restrained, distinct voices. Do not infer accent from names alone; when nothing suggests one, choose and state one plainly (e.g. General American).
 speech_traits: one line <=20 words, stable speech habits plus the accent; no emotions, no brackets.
 traits: "name=value;name=value" for pitch, pace, texture, accent, age (short values).
 Make frequent conversation partners clearly distinguishable. Keep the narrator clear and easy to listen to for hours."""

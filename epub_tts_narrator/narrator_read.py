@@ -1285,7 +1285,14 @@ def _partners(source, labels, extras, spans):
 
 
 def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1, progress=lambda message: None):
-    """Fill descriptions/traits for voices that are not inherited series voices."""
+    """Fill descriptions/traits for voices that are not inherited series voices.
+
+    A character with a lasting voice change is designed once per state in the
+    same request (at the start of the book, and after each change), so the model
+    contrasts them; ``add_voice_variants`` decides which state is the main voice.
+    Returns (cast, designed count, {state key: profile}) with keys
+    ``"start:<ledger id>"`` and change IDs.
+    """
     # Series reconciliation renames IDs; series_origin keeps the local character ID.
     char_local = {f"char_{row['id']}": row for row in ledger["characters"]}
     owners = {}
@@ -1294,27 +1301,51 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
         if local_id in char_local:
             owners.setdefault(item["voice_id"], char_local[local_id])
     narrator_voice = next(role["voice_id"] for role in cast["roles"] if role["id"] == "narrator_main")
-    targets = []
+    targets, inherited_changes = [], []
     for voice in cast["voices"]:
-        if "series_origin" in voice:
-            continue
         row = owners.get(voice["id"])
+        if "series_origin" in voice:
+            # An inherited voice stays as it is; only its later states are designed.
+            if row is not None and any(change["kind"] in IDENTITY_CHANGES for change in row.get("changes", [])):
+                inherited_changes.append((voice, row))
+            continue
         if row is None and voice["id"] != narrator_voice:
             continue
         targets.append((voice, row))
-    if not targets:
-        return cast, 0
+    if not targets and not inherited_changes:
+        return cast, 0, {}
     narration = ledger["narration"]
-    entries = []
+    entries, changes_by_short = [], {}
     for number, (voice, row) in enumerate(targets, 1):
         if row is None:
             entries.append([f"v{number}", "Narrator", "?", f"Main narrator; narration mode {narration['mode'] or 'unknown'}.", "", ""])
             continue
         partner_names = [character(ledger, identifier)["name"] for identifier, _ in partners.get(row["id"], Counter()).most_common(3)
                          if character(ledger, identifier) is not None]
-        entries.append([f"v{number}", row["name"], row["sex"], row["note"],
+        later = [change for change in row.get("changes", []) if change["kind"] in IDENTITY_CHANGES]
+        name = f"{row['name']} (at the start of the book, before any change)" if later else row["name"]
+        entries.append([f"v{number}", name, row["sex"], row["note"],
                         " / ".join(item["quote"] for item in row["voice"][:4]), ", ".join(partner_names)])
-    by_short = {entry[0]: voice for entry, (voice, _row) in zip(entries, targets)}
+        if later:
+            changes_by_short[f"v{number}"] = f"start:{row['id']}"
+        for change in later:
+            # Designed beside the earlier voice, so the model contrasts the two.
+            short = f"v{len(targets) + len(changes_by_short) + 1}"
+            changes_by_short[short] = change["id"]
+            entries.append([short, f"{row['name']} (later: {change['instruction']})", row["sex"],
+                            f"The same person after a {change['kind']} change: {change['instruction']}. "
+                            "Keep their accent and manner; change only what this describes.",
+                            "", ", ".join(partner_names)])
+    for voice, row in inherited_changes:
+        for change in (item for item in row["changes"] if item["kind"] in IDENTITY_CHANGES):
+            short = f"v{len(targets) + len(changes_by_short) + 1}"
+            changes_by_short[short] = change["id"]
+            entries.append([short, f"{row['name']} (later: {change['instruction']})", row["sex"],
+                            f"Their voice so far: {voice['description'][:300]} Now the same person after a "
+                            f"{change['kind']} change: {change['instruction']}. Keep their accent and manner.",
+                            "", ""])
+    by_short = {f"v{number}": voice for number, (voice, _row) in enumerate(targets, 1)
+                if f"v{number}" not in changes_by_short}
     progress(f"Narrator read: designing {len(entries)} voice(s)")
     batches = [entries[start:start + VOICE_BATCH] for start in range(0, len(entries), VOICE_BATCH)]
     book = {"title": source["book"]["title"], "narration": narration["mode"] or "unknown"}
@@ -1361,10 +1392,14 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
 
     cast = deepcopy(cast)
     voices = {voice["id"]: voice for voice in cast["voices"]}
+    change_profiles = {}
     for result in _parallel(run, batches, workers):
         for short, profile in result.items():
-            voices[by_short[short]["id"]].update(profile)
-    return cast, len(entries)
+            if short in changes_by_short:
+                change_profiles[changes_by_short[short]] = profile
+            else:
+                voices[by_short[short]["id"]].update(profile)
+    return cast, len(entries), change_profiles
 
 
 def _segment(block_id, start, text, *, role, kind, basis, reason, evidence=None, candidates=None,
@@ -1465,27 +1500,62 @@ def change_spans(source, ledger):
     return result
 
 
-def add_voice_variants(cast, ledger, *, registry=None, source=None):
-    """A derived voice and dialogue role for each identity change in the ledger,
-    and for a returning character's changed voice carried from the earlier book.
+def _state_profile(profiles, key, fallback_voice, fallback_text):
+    designed = (profiles or {}).get(key)
+    if designed:
+        return deepcopy(designed)
+    return {"description": f"{fallback_voice['description']} {fallback_text}",
+            "traits": [{"name": trait["name"], "value": trait["value"], "basis": "casting", "evidence": []}
+                       for trait in fallback_voice.get("traits", [])],
+            **({"speechTraits": fallback_voice["speechTraits"]} if "speechTraits" in fallback_voice else {})}
 
-    Returns (cast, {change_id: role_id}, {ledger_id: carried role_id}). A derived
-    voice starts from the base voice's profile plus the change; casting designs it
-    from that description.
+
+def add_voice_variants(cast, ledger, *, registry=None, source=None, profiles=None):
+    """Voices for a character whose own voice changes during the book.
+
+    The character's main voice is how they sound at the END of the book, which a
+    later series book inherits (a child who grows up keeps the grown voice). Every
+    other state, such as the young child before an age change, gets a dialogue
+    role whose voice is ``derived_from`` that main voice; the renderer clones it
+    from the main voice's reference with the change as its instruction. An
+    inherited main voice cannot change, so a new book's later states become
+    derived voices instead, and the last one carries into the next book
+    (``through_end``).
+
+    Returns (cast, {change_id: role_id}, {ledger_id: role_id for lines outside
+    any change}). A change whose state is the main voice maps to no role.
     """
     cast = deepcopy(cast)
     roles = {role["id"]: role for role in cast["roles"]}
     voices = {voice["id"]: voice for voice in cast["voices"]}
     character_ids = {character["id"] for character in cast["characters"]}
-    variant_roles, carried_roles = {}, {}
+    variant_roles, default_roles = {}, {}
+
+    def add(row, base_role, base_voice, key, profile, change, instruction, label, *, through_end):
+        voice_id, role_id = f"{base_voice['id']}_{key}", f"role_{row['id']}_{key}"
+        # The instruction is the short direction the renderer clones with.
+        voice = {"id": voice_id, "description": profile["description"], "traits": deepcopy(profile["traits"]),
+                 "derived_from": {"voice_id": base_voice["id"], "kind": change["kind"],
+                                  "instruction": " ".join(instruction.split())[:240],
+                                  "evidence": deepcopy(change["evidence"]), "through_end": through_end}}
+        if "speechTraits" in profile:
+            voice["speechTraits"] = profile["speechTraits"]
+        cast["voices"].append(voice)
+        cast["roles"].append({"id": role_id, "kind": "dialogue", "character_id": base_role["character_id"],
+                              "voice_id": voice_id, "description": f"{base_role['description']} {label}"})
+        return role_id
+
     for row in ledger["characters"]:
         base_role = roles.get(f"role_{row['id']}")
         if base_role is None:
             continue
         base_voice = voices[base_role["voice_id"]]
+        changes = sorted((change for change in row.get("changes", []) if change["kind"] in IDENTITY_CHANGES),
+                         key=lambda change: change["number"] or 0)
         carried = row.get("carried_voice")
         if (carried and registry is not None and row["series"] in character_ids
                 and base_role["character_id"] == row["series"]):
+            # The changed voice this character still had when the earlier book ended.
             if carried not in voices:
                 from .series import carried_voice
                 voices[carried] = carried_voice(registry, source, carried)
@@ -1494,42 +1564,53 @@ def add_voice_variants(cast, ledger, *, registry=None, source=None):
             cast["roles"].append({"id": role_id, "kind": "dialogue", "character_id": base_role["character_id"],
                                   "voice_id": carried,
                                   "description": f"{base_role['description']} Their changed voice from the earlier book."})
-            carried_roles[row["id"]] = role_id
-        for change in row.get("changes", []):
-            if change["kind"] not in IDENTITY_CHANGES:
+            default_roles[row["id"]] = role_id
+        if not changes:
+            continue
+        if "series_origin" in base_voice:
+            # Inherited main voice: each later state is derived from it; the last
+            # state still in effect at the end carries into the next book.
+            for change in changes:
+                profile = _state_profile(profiles, change["id"], base_voice,
+                                         f"Later ({change['kind']}): {change['instruction']}.")
+                variant_roles[change["id"]] = add(
+                    row, base_role, base_voice, change["id"], profile, change, change["instruction"],
+                    f"Later in the book ({change['kind']}): {change['instruction']}.",
+                    through_end=change["end"] is None and change is changes[-1])
+            continue
+        # A new character: the state at the end of the book is the main voice.
+        final = changes[-1] if changes[-1]["end"] is None else None
+        start_profile = _state_profile(profiles, f"start:{row['id']}", base_voice, "")
+        if final is not None:
+            base_voice.update(_state_profile(profiles, final["id"], base_voice,
+                                             f"Later ({final['kind']}): {final['instruction']}."))
+            first = changes[0]
+            default_roles[row["id"]] = add(
+                row, base_role, base_voice, "start", start_profile, first,
+                start_profile["description"] or f"before: {first['instruction']}",
+                f"Earlier in the book, before the {first['kind']} change.", through_end=False)
+        else:
+            base_voice.update(start_profile)
+        for change in changes:
+            if change is final:
                 continue
-            voice_id, role_id = f"{base_voice['id']}_{change['id']}", f"role_{row['id']}_{change['id']}"
-            traits = [{"name": trait["name"], "value": trait["value"], "basis": "casting", "evidence": []}
-                      for trait in base_voice.get("traits", [])]
-            voice = {"id": voice_id,
-                     "description": (f"{base_voice['description']} The same person later in the story "
-                                     f"({change['kind']}): {change['instruction'].rstrip('.')}. Keep the same accent, "
-                                     "manner and recognizable identity; change only what this describes."),
-                     "traits": traits,
-                     "derived_from": {"voice_id": base_voice["id"], "kind": change["kind"],
-                                      "instruction": change["instruction"], "evidence": deepcopy(change["evidence"]),
-                                      # Still in effect when the book ends: the next book starts here.
-                                      "through_end": change["end"] is None}}
-            if "speechTraits" in base_voice:
-                voice["speechTraits"] = base_voice["speechTraits"]
-            cast["voices"].append(voice)
-            cast["roles"].append({"id": role_id, "kind": "dialogue", "character_id": base_role["character_id"],
-                                  "voice_id": voice_id,
-                                  "description": f"{base_role['description']} After a voice change ({change['kind']}): "
-                                                 f"{change['instruction']}."})
-            variant_roles[change["id"]] = role_id
-    return cast, variant_roles, carried_roles
+            profile = _state_profile(profiles, change["id"], base_voice,
+                                     f"Later ({change['kind']}): {change['instruction']}.")
+            variant_roles[change["id"]] = add(
+                row, base_role, base_voice, change["id"], profile, change, change["instruction"],
+                f"At another point in the book ({change['kind']}): {change['instruction']}.", through_end=False)
+    return cast, variant_roles, default_roles
 
 
 def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=None, variant_roles=None,
-                   carried_roles=None):
+                   default_roles=None):
     """Exact-coverage segments; returns rows and fills ``stats`` with note/delivery counts."""
     stats = stats if stats is not None else {}
     stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_dropped": 0,
                   "simultaneous": 0, "simultaneous_unproven": 0, "variant_lines": 0, "effect_lines": 0,
                   "voice_exceptions": 0})
     roles = {role["id"]: role for role in cast["roles"]}
-    variant_roles, carried_roles = variant_roles or {}, carried_roles or {}
+    variant_roles, default_roles = variant_roles or {}, default_roles or {}
     ranges = change_spans(source, ledger)
     block_position = {block["id"]: index for index, block in enumerate(source["blocks"])}
     voice_as = {note["target"][1]: note["raw"]["as"] for note in notes if note["kind"] == "voice_as"}
@@ -1542,9 +1623,13 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
         identity = [change for change in active if change["kind"] in IDENTITY_CHANGES]
         effects = [change for change in active if change["kind"] in EFFECT_PRESETS]
         exception = voice_as.get(qid)
+        # Outside any change: the start-of-book voice (or the voice carried from
+        # the earlier book); inside one: that change's voice, or None when it is
+        # the main voice.
+        baseline = default_roles.get(identifier)
         if exception == "normal":
-            return None, None, None
-        variant = variant_roles.get(identity[-1]["id"]) if identity else carried_roles.get(identifier)
+            return baseline, None, None
+        variant = variant_roles.get(identity[-1]["id"]) if identity else baseline
         if exception in EFFECT_PRESETS:
             return variant, None, exception
         return variant, (effects[-1] if effects else None), (effects[-1]["kind"] if effects else None)
@@ -1727,7 +1812,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                                                                        checked_matches=confirmed)
             add_series_issues(issues, additions, series_provenance)
         partners = _partners(source, labels, extras, spans)
-        cast, designed = stage("voices", 0.85, lambda: design_voices(
+        cast, designed, change_profiles = stage("voices", 0.85, lambda: design_voices(
             source, requests, meter, ledger, cast, partners, workers=workers, progress=progress))
         check_cast(source, cast)
         for question in ledger["questions"]:
@@ -1758,7 +1843,8 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         for warning in warnings:
             issues.append({"id": f"narrator_cast_{warning['kind']}_{warning['character_id']}", "kind": "cast_audit",
                            "target": warning["character_id"], "reason": warning["reason"], "resolved": False})
-        cast, variant_roles, carried_roles = add_voice_variants(cast, ledger, registry=series_registry, source=source)
+        cast, variant_roles, default_roles = add_voice_variants(cast, ledger, registry=series_registry, source=source,
+                                                                profiles=change_profiles)
         check_cast(source, cast)
         for row in ledger["characters"]:
             for change in row.get("changes", []):
@@ -1770,7 +1856,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                                    "resolved": False})
         segment_stats = {}
         segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats,
-                                  variant_roles=variant_roles, carried_roles=carried_roles)
+                                  variant_roles=variant_roles, default_roles=default_roles)
         metrics = meter.summary()
         metrics["wall_seconds"] = round(time.monotonic() - started_all, 3)
         metrics["cache_hits"] = requests.cache_hits

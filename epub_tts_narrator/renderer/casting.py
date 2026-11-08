@@ -21,7 +21,7 @@ from .quality import validate_audio, validation_key, text_confirmation_unavailab
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
                            default_voice_prompt as _default_voice_prompt, derived_voice_prompt,
-                           voice_prompt_description)
+                           designer_prompt, voice_prompt_description)
 from .workflow import RenderBlocked, SpeechVerificationFailed, VerificationUnavailable, _seed, verified_take
 
 
@@ -385,7 +385,9 @@ class CastingSession:
             elif derived:
                 base_names = [character["name"] for character in cast["characters"]
                               if character.get("voice_id") == derived.get("voice_id")]
-                label = f"{', '.join(base_names) or derived.get('voice_id')} ({derived['kind']}: {derived['instruction']})"
+                base_label = ", ".join(base_names) or derived.get("voice_id")
+                label = (f"{base_label} ({derived['kind']} variant, cloned from {base_label}'s voice: "
+                         f"{derived['instruction'][:60]})")
             else:
                 narrators = list(dict.fromkeys(
                     character_names[role["character_id"]] for role in roles
@@ -998,13 +1000,48 @@ class CastingSession:
         _, _, directory, previous = max(matches, key=lambda item: item[:2])
         return directory, previous
 
+    def _clone_locked(self, voice_id, profile):
+        """A changed voice: cloned from its base voice's selected reference."""
+        from .workflow import derive_voice_take
+        base_id = profile["derived_from"]["voice_id"]
+        base = self.store.load(base_id)
+        if base is None:
+            raise RenderBlocked(f"Voice {voice_id} is cloned from {base_id}; cast {base_id} first.")
+        from .samples import MissingSampleScript
+        try:
+            draft = self._draft(voice_id, self.store.load(voice_id))
+        except MissingSampleScript:
+            # The same person: their main voice's audition script serves the clone.
+            base_draft = self._draft(base_id, base)
+            draft = {"prompt": base_draft["prompt"], "reference_text": base_draft["reference_text"],
+                     "sample_source": deepcopy(base_draft["sample_source"])}
+        text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
+        engine, verifier = self._get_engine(), self._get_verifier()
+        binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
+        self._save_draft(voice_id, draft)
+        voice_id = self.store.canonical_id(voice_id)
+        nonce = uuid.uuid4().hex
+        wav, accepted, _request, metadata = derive_voice_take(
+            engine, verifier, self.config, base, profile, text,
+            Path(self.config["render"]["work_dir"]) / "casting-candidates",
+            series_id=self.store.series_id, voice_id=voice_id, notify=self.notify, nonce=nonce)
+        metadata.update(candidate_id=nonce, created_at=datetime.now(timezone.utc).isoformat(),
+                        sample_source=deepcopy(draft["sample_source"]))
+        return self.store.publish_candidate(voice_id, deepcopy(profile), wav, metadata["reference_text"],
+                                            binding_identity, accepted["report"], metadata, candidate_id=nonce)
+
     def _generate_locked(self, voice_id, *, fresh=False):
         self.prepare_models(generation=True)
         profile = self._profile(voice_id)
+        if isinstance(profile.get("derived_from"), dict):
+            return self._clone_locked(voice_id, profile)
         draft = self._draft(voice_id, self.store.load(voice_id))
         prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
         text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         engine, designer = self._get_engine(), self._get_designer()
+        # Hosted design receives a description it can accept for any character;
+        # the draft keeps the user's own words.
+        prompt = designer_prompt(prompt, designer_identity(designer))
         binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
         verifier = self._get_verifier()
         self._save_draft(voice_id, draft)
@@ -1192,6 +1229,15 @@ class CastingSession:
 
     def _many(self, voice_ids, *, regenerate):
         voice_ids = list(voice_ids)
+        derived = [voice_id for voice_id in voice_ids
+                   if isinstance(self._profile(voice_id).get("derived_from"), dict)]
+        if derived:
+            # Changed voices are cloned from their base voices, so bases go first.
+            bases = [voice_id for voice_id in voice_ids if voice_id not in derived]
+            results = self._many(bases, regenerate=regenerate) if bases else []
+            results += self._serial_many(self._batch_representatives(derived), regenerate=regenerate)
+            order = {voice_id: index for index, voice_id in enumerate(voice_ids)}
+            return sorted(results, key=lambda row: order.get(row["voice_id"], len(order)))
         parallel = (len(voice_ids) > 1
                     and self.config.get("voice_design", {}).get("type") == "gemini"
                     and self.config["casting"]["gemini_concurrency"] > 1)
@@ -1316,7 +1362,9 @@ class CastingSession:
                 draft = self._draft(voice_id, self.store.load(voice_id))
                 script_matches = (draft["reference_text"] == text or
                                   draft["sample_source"].get("replaces_reference_text") == text)
-                if voice_prompt_description(draft["prompt"]) != voice_prompt_description(prompt) or not script_matches:
+                # The attempt holds the prompt its designer received (see designer_prompt).
+                sent = designer_prompt(draft["prompt"], request.get("designer"))
+                if voice_prompt_description(sent) != voice_prompt_description(prompt) or not script_matches:
                     raise RenderBlocked("Casting attempt does not match the current prompt and sample text")
             engine, verifier = self._get_engine(), self._get_verifier()
             binding_identity = getattr(engine, "voice_binding_identity", engine.identity)

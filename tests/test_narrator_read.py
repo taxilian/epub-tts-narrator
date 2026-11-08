@@ -712,16 +712,28 @@ class NarratedAnalyzeTests(unittest.TestCase):
                     result["p"] = [[visor, "as", "normal"]]
                 return result
 
-        document = self.analyze(Changing())
+        client = Changing()
+        document = self.analyze(client)
         self.assertEqual(readiness(document)["errors"], [])
+        # Both versions are designed side by side: before the change, and after it.
+        names = [row[1] for call in client.calls if call["mode"] == "narrator_voices" for row in call["voices"]]
+        self.assertIn("Jon (at the start of the book, before any change)", names)
+        self.assertIn("Jon (later: a grown man now, deeper)", names)
         rows = self.by_text(document)
         roles = {role["id"]: role for role in document["cast"]["roles"]}
         voices = {voice["id"]: voice for voice in document["cast"]["voices"]}
         hi, again = roles[rows['"Hi,"']["role_id"]], roles[rows['"Hello again,"']["role_id"]]
         self.assertEqual(hi["character_id"], again["character_id"])
-        self.assertNotEqual(hi["voice_id"], again["voice_id"])
-        self.assertEqual(voices[again["voice_id"]]["derived_from"]["voice_id"], hi["voice_id"])
-        self.assertEqual(voices[again["voice_id"]]["derived_from"]["instruction"], "a grown man now, deeper")
+        jon = next(person for person in document["cast"]["characters"] if person["name"] == "Jon")
+        # The grown voice at the end of the book is Jon's main voice; the young
+        # voice before the change is derived (cloned) from it.
+        self.assertEqual(again["voice_id"], jon["voice_id"])
+        self.assertEqual(voices[jon["voice_id"]]["description"], "A clear voice for Jon (later: a grown man now, deeper).")
+        young = voices[hi["voice_id"]]
+        self.assertEqual(young["derived_from"]["voice_id"], jon["voice_id"])
+        self.assertFalse(young["derived_from"]["through_end"])
+        self.assertEqual(young["description"], "A clear voice for Jon (at the start of the book, before any change).")
+        self.assertEqual(young["derived_from"]["instruction"], young["description"])
         self.assertEqual(rows['"Can you hear me?"']["voice_effect"]["preset"], "helmet")
         self.assertNotIn("voice_effect", rows['"Visor up,"'])     # the line's own exception
         self.assertNotIn("voice_effect", rows['"Better,"'])       # after the helmet came off
@@ -994,11 +1006,14 @@ class NarratorCliTests(unittest.TestCase):
         jon_two = next(c for c in two["cast"]["characters"] if c["name"] == "Jon")
         return jon_one, jon_two, two
 
-    def test_a_changed_voice_in_effect_at_the_end_of_a_book_carries_into_the_next(self):
+    def test_the_voice_a_character_grows_into_is_the_one_later_books_use(self):
         first = make_serial_epub(self.root / "one.epub", "One", "book-one", [
             ("One", ['"Hi," Jon said.', "Years later Jon's voice had deepened into a man's.", '"Hello again," Jon said.'])])
         second = make_serial_epub(self.root / "two.epub", "Two", "book-two", [
-            ("One", ['Jon returned to the lighthouse he once kept. "Back again," Jon said.'])])
+            ("One", ['Jon returned to the lighthouse he once kept. "Back again," Jon said.',
+                     "Old age came; Jon's voice had deepened into a man's rumble.", '"Still here," Jon said.'])])
+        third = make_serial_epub(self.root / "three.epub", "Three", "book-three", [
+            ("One", ['Jon returned to the lighthouse he once kept. "Once more," Jon said.'])])
 
         def factory(*args, **kwargs):
             client = self.client(*args, **kwargs)
@@ -1022,14 +1037,28 @@ class NarratorCliTests(unittest.TestCase):
             self.assertEqual(status, 0, stderr)
             status, _, stderr = self.run_cli("analyze", second, "-o", self.root / "two", "--strategy", "narrator",
                                              "--continue-from", self.root / "one")
+            self.assertEqual(status, 0, stderr)
+            status, _, stderr = self.run_cli("analyze", third, "-o", self.root / "three", "--strategy", "narrator",
+                                             "--continue-from", self.root / "two")
         self.assertEqual(status, 0, stderr)
-        one = json.loads((self.root / "one" / "analysis.json").read_text(encoding="utf-8"))
-        two = json.loads((self.root / "two" / "analysis.json").read_text(encoding="utf-8"))
-        older = next(voice for voice in one["cast"]["voices"] if "derived_from" in voice)
-        self.assertTrue(older["derived_from"]["through_end"])
-        line = next(row for row in two["segments"] if row["text"] == '"Back again,"')
-        self.assertEqual(line["voice_id"], older["id"])
-        carried = next(voice for voice in two["cast"]["voices"] if voice["id"] == older["id"])
+        books = [json.loads((self.root / name / "analysis.json").read_text(encoding="utf-8"))
+                 for name in ("one", "two", "three")]
+
+        def voice_of(document, text):
+            return next(row for row in document["segments"] if row["text"] == text)["voice_id"]
+
+        grown = next(person for person in books[0]["cast"]["characters"] if person["name"] == "Jon")["voice_id"]
+        self.assertEqual(voice_of(books[0], '"Hello again,"'), grown)
+        # Book two inherits the grown voice as Jon's main voice; its own later
+        # change is derived from it and is still in effect when the book ends.
+        self.assertEqual(voice_of(books[1], '"Back again,"'), grown)
+        older = voice_of(books[1], '"Still here,"')
+        later = next(voice for voice in books[1]["cast"]["voices"] if voice["id"] == older)
+        self.assertEqual(later["derived_from"]["voice_id"], grown)
+        self.assertTrue(later["derived_from"]["through_end"])
+        # Book three starts where book two ended.
+        self.assertEqual(voice_of(books[2], '"Once more,"'), older)
+        carried = next(voice for voice in books[2]["cast"]["voices"] if voice["id"] == older)
         self.assertEqual(carried["derived_from"]["evidence"], [])
         self.assertIn("series_origin", carried)
 

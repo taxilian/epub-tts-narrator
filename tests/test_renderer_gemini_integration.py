@@ -420,7 +420,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         calls = []
         designer = self.remote_designer([{"id": "voice_context_fixture"}], calls)
         session = self.session(designer_factory=lambda _: designer)
-        prompt = "An adult actor portraying a creature with a thin, high rasp and clipped diction."
+        prompt = "A character actor portraying a creature with a thin, high rasp and clipped diction."
         script = "I will meet you at the gate."
         session.update_prompt("voice_mara", prompt, script)
         selected = session.regenerate("voice_mara")
@@ -429,6 +429,19 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["input"][0]["content"][0]["text"], script)
         self.assertEqual(selected["creation"]["requested_description"], prompt)
         self.assertEqual(selected["reference_text"], script)
+        self.assertEqual(session.rows()[0]["prompt"], prompt)
+
+    def test_gemini_receives_a_young_character_described_by_sound_while_the_edit_keeps_its_words(self):
+        calls = []
+        designer = self.remote_designer([{"id": "voice_young_fixture"}], calls)
+        session = self.session(designer_factory=lambda _: designer)
+        prompt = "An adult actor voicing a nine-year-old boy: boyish, high and quick, about 9, curious."
+        session.update_prompt("voice_mara", prompt, "I will meet you at the gate.")
+        selected = session.regenerate("voice_mara")
+        sent = calls[0][1]["voice"]["prompted"]["input"]
+        self.assertEqual(sent, "A voice actor voicing a character: light, bright, high and quick, curious.")
+        # The exact prompt sent is recorded; the user's own casting edit is unchanged.
+        self.assertEqual(selected["creation"]["requested_description"], sent)
         self.assertEqual(session.rows()[0]["prompt"], prompt)
 
     def test_restart_missing_voice_preparation_confirms_absence_and_creates_fresh(self):

@@ -1,5 +1,7 @@
 """Validate authored voice descriptions without adding performance context."""
 
+import re
+
 
 MAX_PROMPT_CHARACTERS = 4000
 # Historical application text, retained only to recognize saved prompts.
@@ -46,6 +48,83 @@ def audiobook_voice_prompt(prompt):
             f"Voice prompt must be at most {MAX_PROMPT_CHARACTERS} characters; "
             f"shorten the description by {len(description) - MAX_PROMPT_CHARACTERS} characters")
     return description
+
+
+# Hosted voice designers refuse to design a minor's voice, and read some words
+# as sexual. A voice description says how a character sounds; youth is a sound
+# (light, bright, high), never an age or a word for a child. Rewrites are
+# general vocabulary, applied without adding any prefix.
+_YOUNG_VOICE = re.compile(
+    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+(?:boy|girl)|boy|girl|child|kid)"
+    r"(?:'s|s'|s)?\s+voice\b", re.I)
+_YOUNG_ADJECTIVE = re.compile(r"\b(?:boyish|girlish|childlike|childish|kiddish)\b", re.I)
+_YOUNG_NOUN = re.compile(
+    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+(?:boys?|girls?)|teen(?:ager)?s?|boys?|girls?"
+    r"|child(?:ren)?|kids?|kiddos?|adolescents?|toddlers?|infants?|bab(?:y|ies)|pre-?teens?|tweens?"
+    r"|schoolboys?|schoolgirls?|youngsters?|lads?|lasses?|minors?|juveniles?)\b", re.I)
+_YOUNG_STATE = re.compile(r"\b(?:pre-?pubescent|pubescent|teenaged?|underage|(?:early|mid|late)[- ]teens)\b", re.I)
+_UNDER_EIGHTEEN = ("one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen"
+                   "|sixteen|seventeen")
+_AGE_PHRASES = (
+    re.compile(r"\b(?:about|around|roughly|approximately|aged?|nearly|almost|maybe|perhaps|some)\s+(\d{1,2})"
+               r"(?:\s*(?:years?|yrs?)(?:\s+old)?)?(?![\w%])", re.I),
+    re.compile(r"\b(\d{1,2})[- ]?(?:years?|yrs?)[- ]?old\b", re.I),
+)
+_AGE_WORDS = re.compile(rf"\b(?:{_UNDER_EIGHTEEN})[- ](?:years?[- ]old|year)\b", re.I)
+# "adult" on its own describes a grown voice and is kept; beside a word for an
+# entertainer it reads as sexual.
+_PERFORMER = re.compile(
+    r"\badult\s+(?:voice\s+)?(?:performers?|actors?|actress(?:es)?|entertainers?|stars?|models?)\b"
+    r"|\bperformers?\b", re.I)
+_SEXUAL_READING = re.compile(
+    r"\b(?:sexy|seductive|sultry|sensual|erotic|intimate|explicit|lustful|provocative)\b", re.I)
+
+
+def safe_voice_description(text):
+    """A voice description a hosted designer can accept for any character.
+
+    Minor-age wording becomes sound ("a young boy's voice" -> "a light, bright
+    voice"; "boyish" -> "light, bright"; "teen boy" -> "character"), ages
+    under 18 and words with a sexual reading are removed ("adult performer"
+    becomes "voice actor"), and the punctuation left behind is tidied. Adult
+    ages and every acoustic quality are kept.
+    """
+    result = _YOUNG_VOICE.sub("light, bright voice", text)
+    result = _YOUNG_ADJECTIVE.sub("light, bright", result)
+
+    def under_age(match):
+        return "" if int(match.group(1)) < 18 else match.group(0)
+
+    for pattern in _AGE_PHRASES:
+        result = pattern.sub(under_age, result)
+    result = _AGE_WORDS.sub("", result)
+    result = _YOUNG_STATE.sub("", result)
+    result = _YOUNG_NOUN.sub("character", result)
+    result = _PERFORMER.sub("voice actor", result)
+    result = _SEXUAL_READING.sub("", result)
+    # Tidy what removal leaves behind: empty brackets, doubled or leading punctuation.
+    result = re.sub(r"\(\s*[,;:]?\s*\)", "", result)
+    result = re.sub(r"\s+([,.;:])", r"\1", result)
+    result = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", result)
+    result = re.sub(r"(^|[.!?]\s+)[,;:]\s*", r"\1", result)
+    result = re.sub(r"\b(a|an)\s+(?=[,.;:]|$)", "", result, flags=re.I)
+    # "a"/"an" before the words inserted above.
+    result = re.sub(r"\b([Aa])n(\s+(?:light|character|voice)\b)", r"\1\2", result)
+    result = re.sub(r"\s{2,}", " ", result).strip(" ,;:")
+    return result[:1].upper() + result[1:] if result else "A clear, natural speaking voice."
+
+
+def designer_prompt(prompt, designer):
+    """The prompt a designer receives: hosted Gemini design gets ``safe_voice_description``.
+
+    A retired application prefix on a saved prompt is kept verbatim (so older
+    requests still resume as they were made); only the description is rewritten.
+    """
+    if (designer or {}).get("engine") != "gemini_voice_design":
+        return prompt
+    description = voice_prompt_description(prompt)
+    prefix = prompt[:len(prompt) - len(description)] if prompt.endswith(description) else ""
+    return prefix + safe_voice_description(description)
 
 
 def derived_voice_prompt(base_description, derived_from):
