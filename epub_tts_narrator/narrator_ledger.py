@@ -44,6 +44,92 @@ def exact_quote(quote, text, limit=MAX_QUOTE):
     return max(exact, key=len) if exact else None
 
 
+_ARTICLES = frozenset({"the", "a", "an"})
+
+
+def _number(value):
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\s*\d+\s*", value):
+        return int(value)
+    return None
+
+
+def _unpack_new(row):
+    """A "new" row as [name, aliases, sex, note, N], tolerating shapes models
+    copy from the cast lines: a leading proposed id ([3, "Jon", ...]), a
+    pipe-joined row ("Trag||m|quiet trainer", N), a sex code out of place, and
+    a paragraph number given as text or in another position."""
+    fields = list(row)
+    if len(fields) > 1 and _number(fields[0]) is not None and isinstance(fields[1], str):
+        fields = fields[1:]
+    if isinstance(fields[0], str) and "|" in fields[0]:
+        parts = fields[0].split("|")
+        if len(parts) > 1 and _number(parts[0]) is not None:
+            parts = parts[1:]
+        fields = [*parts, *fields[1:]]
+    number = _number(fields[4]) if len(fields) > 4 else None
+    if number is None:
+        number = next((value for value in map(_number, fields[1:]) if value is not None), None)
+    texts = [value if isinstance(value, str) and _number(value) is None else "" for value in fields[1:4]]
+    texts += [""] * (3 - len(texts))
+    if isinstance(fields[0], str) and ";" in fields[0]:
+        # Aliases written into the name ("cargo officer Malaine;Malaine").
+        name, *aliases = [part.strip() for part in fields[0].split(";")]
+        fields[0], texts[0] = name, ";".join([*aliases, texts[0]])
+    if texts[1].strip().casefold() not in SEXES:
+        code = next((index for index in (0, 2) if texts[index].strip().casefold() in SEXES - {"?"}), None)
+        if code is not None:
+            texts[1], texts[code] = texts[code], (texts[1] if code == 2 else "")
+    return [fields[0], *texts, number]
+
+
+def _name_tokens(name):
+    return [word for word in re.findall(r"\w+", name.casefold()) if word not in _ARTICLES]
+
+
+def alias_problem(alias, record, ledger):
+    """Why ``alias`` cannot be ``record``'s alias, or None.
+
+    An alias is a short name or title: not a sex code, a description or a
+    sentence, and not another entry's name: containing it, being part of it, or
+    containing its last name word or a one-word alias ("Lanzecki here" for
+    someone other than Guild Master Lanzecki).
+    """
+    if not alias or alias.casefold() in SEXES or len(alias.split()) > 6 or re.search(r"[,;:.!?]", alias):
+        return "alias_not_a_name"
+    tokens = set(_name_tokens(alias))
+    if not tokens:
+        return "alias_not_a_name"
+    own = set(_name_tokens(record["name"]))
+    for other in ledger["characters"]:
+        names = _name_tokens(other["name"])
+        other_tokens = set(names)
+        if other is record or not other_tokens or other_tokens == own:
+            continue
+        one_word_aliases = {tokens_[0] for tokens_ in map(_name_tokens, other["aliases"]) if len(tokens_) == 1}
+        distinctive = ({names[-1]} | one_word_aliases) - own
+        if other_tokens <= tokens or tokens <= other_tokens or tokens & distinctive:
+            return "alias_names_other"
+    return None
+
+
+def recheck_aliases(ledger):
+    """Drop aliases that, against the finished ledger, are not names or name
+    another entry (an alias can arrive before the entry it names)."""
+    ledger = deepcopy(ledger)
+    for record in ledger["characters"]:
+        kept = []
+        for alias in record["aliases"]:
+            problem = alias_problem(alias, record, ledger)
+            if problem:
+                _drop(ledger, problem)
+            else:
+                kept.append(alias)
+        record["aliases"] = kept
+    return ledger
+
+
 def _norm(name):
     return " ".join(re.findall(r"\w+", name.casefold()))
 
@@ -145,7 +231,12 @@ def apply_delta(ledger, delta, blocks, window_numbers):
             row = by_name.get(_norm(token))
         return row
 
-    for row in _rows(delta.get("new"), "new", 1, ledger):
+    new_rows = delta.get("new")
+    if isinstance(new_rows, list) and new_rows and not any(isinstance(item, list) for item in new_rows):
+        # One row flattened into the list itself.
+        new_rows = [new_rows]
+    for row in _rows(new_rows, "new", 1, ledger):
+        row = _unpack_new(row)
         name = _clean(row[0], 80)
         if not name:
             _drop(ledger, "new")
@@ -175,14 +266,21 @@ def apply_delta(ledger, delta, blocks, window_numbers):
             by_name[_norm(name)] = matches[0]
             _drop(ledger, "new_matched_prior_name")
             continue
-        aliases = [_clean(alias, 80) for alias in (row[1] if len(row) > 1 and isinstance(row[1], str) else "").split(";")]
-        sex = row[2] if len(row) > 2 and isinstance(row[2], str) and row[2] in SEXES else "?"
-        number = row[4] if len(row) > 4 else None
-        record = {"id": str(ledger["next"]), "name": name,
-                  "aliases": [alias for alias in dict.fromkeys(aliases) if alias and alias != name][:MAX_ALIASES],
-                  "sex": sex, "note": _clean(row[3], MAX_NOTE) if len(row) > 3 else "",
+        aliases = [_clean(alias, 80) for alias in re.split(r"[;|]", row[1])]
+        sex = row[2].strip().casefold() if row[2].strip().casefold() in SEXES else "?"
+        number = row[4]
+        record = {"id": str(ledger["next"]), "name": name, "aliases": [],
+                  "sex": sex, "note": _clean(row[3], MAX_NOTE),
                   "first": window_numbers.get(number) if type(number) is int else None,
                   "voice": [], "series": None, "series_evidence": [], "seen": True, "merged": []}
+        for alias in dict.fromkeys(aliases):
+            if not alias or alias == name:
+                continue
+            problem = alias_problem(alias, record, ledger)
+            if problem:
+                _drop(ledger, problem)
+            elif len(record["aliases"]) < MAX_ALIASES:
+                record["aliases"].append(alias)
         ledger["next"] += 1
         ledger["characters"].append(record)
         by_name[_norm(name)] = record
@@ -201,6 +299,10 @@ def apply_delta(ledger, delta, blocks, window_numbers):
         record, alias = resolve(row[0]), _clean(row[1], 80)
         if record is None or not alias:
             _drop(ledger, "alias")
+            continue
+        problem = alias_problem(alias, record, ledger) if alias != record["name"] else None
+        if problem:
+            _drop(ledger, problem)
             continue
         if alias != record["name"] and alias not in record["aliases"] and len(record["aliases"]) < MAX_ALIASES:
             record["aliases"].append(alias)
@@ -294,7 +396,7 @@ def contextual_series_evidence(row):
 
 
 def name_index(ledger, *, include_unseen=False):
-    """Normalized name/alias (and unique first word) -> character id; ambiguous keys omitted.
+    """Normalized name/alias (and unique first or last word) -> character id; ambiguous keys omitted.
 
     A main name outranks other entries' aliases, so a wrongly attached alias never
     hides the character who actually bears that name.
@@ -315,6 +417,8 @@ def name_index(ledger, *, include_unseen=False):
             words = key.split()
             if len(words) > 1:
                 owners.setdefault("first:" + words[0], set()).add(row["id"])
+                # Characters are often tagged by surname ("Francu said" for Captain Francu).
+                owners.setdefault("last:" + words[-1], set()).add(row["id"])
     for key, ids in primary.items():
         owners[key] = ids
     return {key: next(iter(ids)) for key, ids in owners.items() if len(ids) == 1}
@@ -323,4 +427,4 @@ def name_index(ledger, *, include_unseen=False):
 def tag_character(index, name):
     """Map an explicit tag name to one ledger id, if unambiguous."""
     key = _norm(name)
-    return index.get(key) or index.get("first:" + key)
+    return index.get(key) or index.get("first:" + key) or index.get("last:" + key)

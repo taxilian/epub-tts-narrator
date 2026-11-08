@@ -26,12 +26,12 @@ import threading
 import time
 
 from .narrator_ledger import (apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
-                              name_index, new_ledger, render, tag_character, undo_merge, _clean, _norm)
+                              name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
 from .narrator_prompts import (HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
 from .provider import OutputTruncatedError
-from .quote_spans import quote_spans, spans_by_block
+from .quote_spans import _NOT_NAMES, quote_spans, spans_by_block
 from .speech_traits import validate_speech_traits
 
 VERSION = 1
@@ -261,7 +261,7 @@ def prep_read(source, requests, meter, ledger, *, window_chars=PREP_WINDOW_CHARS
         ledger = meter.run(requests, "prep", PREP, payload, validate)
         seen = sum(1 for row in ledger["characters"] if row["series"] is None or row["seen"])
         progress(f"Narrator read: prep window {index}/{len(windows)} complete; {seen} character(s) in the ledger")
-    return ledger, len(windows)
+    return recheck_aliases(ledger), len(windows)
 
 
 def check_merges(source, requests, meter, ledger, *, workers=1, progress=lambda message: None):
@@ -412,7 +412,8 @@ def check_aliases(source, requests, meter, ledger, *, workers=1, progress=lambda
 
 
 def duplicate_candidates(ledger):
-    """Pairs of active entries whose names overlap: a name only nominates a check.
+    """Pairs of active entries whose names overlap (shared name, shared first
+    name, or one name contained in the other): a name only nominates a check.
 
     Returns (from_id, into_id) with ``into`` preferring the prior-book entry, then
     the earlier entry. Two different prior-book characters are never paired.
@@ -427,7 +428,10 @@ def duplicate_candidates(ledger):
             right_names = {_norm(name) for name in [right["name"], *right["aliases"]]} - {""}
             first_word = ({name.split()[0] for name in left_names if " " in name} & right_names
                           or {name.split()[0] for name in right_names if " " in name} & left_names)
-            if not (left_names & right_names or first_word):
+            # One name's words all inside the other's ("Andurs" / "Captain Andurs").
+            contained = any(set(a.split()) < set(b.split()) or set(b.split()) < set(a.split())
+                            for a in left_names for b in right_names)
+            if not (left_names & right_names or first_word or contained):
                 continue
             into, source = ((left, right) if left["series"] or not right["series"] and int(left["id"]) < int(right["id"])
                             else (right, left))
@@ -692,7 +696,8 @@ def _parse_who(who, ledger, index):
         return ("unresolved", candidates)
     if who.startswith("+"):
         name = _clean(who[1:], 80)
-        if not name:
+        if not re.search(r"[^\W\d_]", name) or name.casefold() == "name":
+            # "+?", "+" alone, or the prompt's own placeholder: no name to give a new speaker.
             return ("unresolved", [])
         # Same resolution as an explicit speech tag: exact name, or a first name
         # unique in the cast ("+Barry" with one "Barry Francis").
@@ -929,10 +934,103 @@ def add_new_speakers(ledger, labels, extras):
 # ---------------------------------------------------------------------------
 # Pass 3: targeted verification
 
+SCENE_RADIUS = 30
+SELF_CHECK_REASONS = frozenset({"absent_speaker", "self_address"})
+
+
+def _proper_tokens(names):
+    """Capitalized name words (3+ letters) that identify a character in running text."""
+    return {word for name in names for word in re.findall(r"\b[A-Z][\w'-]{2,}", name)
+            if word.split("'")[0] not in _NOT_NAMES}
+
+
+def scene_checks(source, ledger, spans, labels, *, radius=SCENE_RADIUS):
+    """Self-checks for errors that leave no local tag disagreement.
+
+    * absent_speaker: a character is credited with a line although no name of
+      theirs appears within ``radius`` paragraphs of the same chapter, while the
+      text there names other speaking characters (the likely alternatives). For a
+      generic speaker ("spaceport official") its name words count as its names.
+    * self_address: a line calls out its own speaker's one-word name ("Killa,
+      wait"; "..., Killashandra?"). Full-name introductions are not flagged.
+    Returns {span_id: (reason, alternative character ids)}.
+    """
+    blocks = source["blocks"]
+    position = {block["id"]: index for index, block in enumerate(blocks)}
+    words = [set(re.findall(r"[\w'-]+", block["text"])) for block in blocks]
+    words = [found | {word.casefold() for word in found} for found in words]
+    speaking = {who[1] for who in (item["who"] for item in labels.values()) if who[0] == "char"}
+    tokens, generic = {}, set()
+    for row in ledger["characters"]:
+        if row["id"] in speaking:
+            tokens[row["id"]] = _proper_tokens([row["name"], *row["aliases"]])
+            if not tokens[row["id"]]:
+                # A generic speaker: its own descriptive words, matched in any case.
+                tokens[row["id"]] = {word.casefold() for word in re.findall(r"[^\W\d_]{4,}", row["name"])}
+                generic.add(row["id"])
+    flagged = {}
+    for span in spans:
+        who = labels[span["id"]]["who"]
+        if who[0] != "char" or not tokens.get(who[1]):
+            continue
+        label, own = who[1], tokens[who[1]]
+        inner = span["text"].strip("\"“” ")
+        one_word = {word for word in own if " " not in word} if label not in generic else set()
+        vocative = any(re.match(rf"{re.escape(word)},\s+\S+\s+\S+", inner)
+                       or re.search(rf",\s+{re.escape(word)}[.!?…]*$", inner) for word in one_word)
+        index = position[span["block_id"]]
+        chapter = blocks[index]["chapter_id"]
+        nearby = set()
+        for other in range(max(0, index - radius), min(len(blocks), index + radius + 1)):
+            if blocks[other]["chapter_id"] == chapter:
+                nearby |= words[other]
+        named = [identifier for identifier, values in tokens.items()
+                 if identifier != label and identifier not in generic and values & nearby]
+        if vocative:
+            flagged[span["id"]] = ("self_address", named[:4])
+        elif not own & nearby and named:
+            flagged[span["id"]] = ("absent_speaker", named[:4])
+    return flagged
+
+
+def cast_audit(cast):
+    """Local cast warnings: a name that reads like a description or a copied
+    field, and a name or alias shared by two characters. Advisory only."""
+    warnings = []
+    owners = {}
+    for person in cast["characters"]:
+        name = person["name"]
+        if len(name.split()) > 6 or re.search(r"[|;/,]|\d", name) or name.casefold() in {"m", "f", "n", "?"}:
+            warnings.append({"character_id": person["id"], "kind": "name_shape",
+                             "reason": f"The character name {name[:80]!r} looks like a description or a copied field."})
+        for value in {_norm(item) for item in [name, *person.get("aliases", [])]} - {""}:
+            owners.setdefault(value, []).append(person)
+    for value, people in owners.items():
+        if len({person["id"] for person in people}) > 1:
+            names = ", ".join(sorted({person["name"] for person in people}))
+            warnings.append({"character_id": people[0]["id"], "kind": "shared_name",
+                             "reason": f"{names} share the name or alias {value!r}; check that they are different people."})
+    return warnings
+
+
+def self_check_report(verify_stats, duplicate_outcomes, warnings, unresolved):
+    """Numbers summarising what the narrator read checked and changed."""
+    reasons, changed = Counter(verify_stats.get("reasons", {})), Counter(verify_stats.get("changed_by_reason", {}))
+    followup = verify_stats.get("scene_followup") or {}
+    reasons.update(followup.get("reasons", {}))
+    changed.update(followup.get("changed_by_reason", {}))
+    return {"lines_rechecked": dict(reasons), "lines_changed": dict(changed),
+            "duplicate_checks": dict(Counter(outcome["verdict"] for outcome in duplicate_outcomes)),
+            "cast_warnings": dict(Counter(warning["kind"] for warning in warnings)),
+            "unresolved_lines": unresolved}
+
+
 def verification_items(source, ledger, spans, labels):
     """Lines worth a second look: unresolved; disagreeing with an explicit tag or an
-    adjacent action beat; or in a paragraph whose quotations got different speakers."""
+    adjacent action beat; in a paragraph whose quotations got different speakers;
+    or flagged by the scene self-checks (``scene_checks``)."""
     index = name_index(ledger)
+    scene = scene_checks(source, ledger, spans, labels)
     by_block = {}
     for span in spans:
         by_block.setdefault(span["block_id"], []).append(span)
@@ -961,6 +1059,9 @@ def verification_items(source, ledger, spans, labels):
         elif span["id"] in mixed and label:
             options = list(dict.fromkeys([label, *mixed[span["id"]], *([beat] if beat else [])]))
             items.append({"span": span, "reason": "mixed_paragraph", "options": options})
+        elif span["id"] in scene and label:
+            reason, alternatives = scene[span["id"]]
+            items.append({"span": span, "reason": reason, "options": list(dict.fromkeys([label, *alternatives]))})
     return items
 
 
@@ -989,7 +1090,9 @@ def verify(source, requests, meter, ledger, spans, labels, *, workers=1, progres
     labels, stats = _verify_items(source, requests, meter, ledger, spans, labels, items,
                                   workers=workers, progress=progress)
     corrections = stats.pop("corrections")
-    followups = scene_followups(source, spans, labels, corrections, {item["span"]["id"] for item in items})
+    # Lines the verifier was unsure about stay eligible for the scene follow-up.
+    decided = {item["span"]["id"] for item in items if labels[item["span"]["id"]].get("decided")}
+    followups = scene_followups(source, spans, labels, corrections, decided)
     if followups:
         labels, second = _verify_items(source, requests, meter, ledger, spans, labels, followups,
                                        workers=workers, progress=progress)
@@ -1029,6 +1132,13 @@ def _verify_items(source, requests, meter, ledger, spans, labels, items, *, work
                  "options": options,
                  "cast": "\n".join(_cast_line(character(ledger, identifier)) for identifier in options)}
         named = [value for value in ((span["tag"] or {}).get("name"), span.get("beat")) if value]
+        if not named:
+            # One paragraph, one speaker: an untagged quotation in a paragraph whose
+            # other quotations name a single speaker is shown that name.
+            beside = {value for other in block_spans.get(span["block_id"], []) if other is not span
+                      for value in ((other["tag"] or {}).get("name"), other.get("beat")) if value}
+            if len(beside) == 1:
+                named = list(beside)
         if named:
             # The name the text itself places beside the line (speech tag or action beat).
             entry["named_beside"] = list(dict.fromkeys(named))
@@ -1064,7 +1174,8 @@ def _verify_items(source, requests, meter, ledger, spans, labels, items, *, work
         verdicts.update(result)
     labels = deepcopy(labels)
     stats = {"items": len(items), "resolved": 0, "changed": 0, "unresolved": 0, "kept": 0,
-             "reasons": dict(Counter(item["reason"] for item in items)), "corrections": []}
+             "reasons": dict(Counter(item["reason"] for item in items)), "changed_by_reason": {},
+             "corrections": []}
     for item in items:
         span, verdict = item["span"], verdicts[item["item_id"]]
         label = labels[span["id"]]
@@ -1073,10 +1184,18 @@ def _verify_items(source, requests, meter, ledger, spans, labels, items, *, work
             after = ("narrator",)
         elif verdict in item["options"]:
             after = ("char", verdict)
+        elif item["reason"] in SELF_CHECK_REASONS and before[0] == "char":
+            # A self-check only nominates a doubt; an unsure answer keeps the
+            # markup label, which was made with the whole chapter in view.
+            after = before
         else:
             after = ("unresolved", item["options"])
+        if after != before:
+            stats["changed_by_reason"][item["reason"]] = stats["changed_by_reason"].get(item["reason"], 0) + 1
         label["who"] = after
         label["verified"] = item["reason"]
+        # Explicitly decided by the verifier (not left unsure).
+        label["decided"] = verdict == "-" or verdict in item["options"]
         if after[0] == "unresolved":
             stats["unresolved"] += 1
         elif before[0] == "unresolved":
@@ -1511,6 +1630,10 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                                "reason": "The series check judged a same-named character in this book to be a different "
                                          "person; it received a new voice. Review if this is the returning character.",
                                "resolved": False})
+        warnings = cast_audit(cast)
+        for warning in warnings:
+            issues.append({"id": f"narrator_cast_{warning['kind']}_{warning['character_id']}", "kind": "cast_audit",
+                           "target": warning["character_id"], "reason": warning["reason"], "resolved": False})
         segment_stats = {}
         segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats)
         metrics = meter.summary()
@@ -1530,6 +1653,8 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                 "series_checks": series_outcomes, "duplicate_checks": duplicate_outcomes,
                 "alias_checks": alias_outcomes,
                 "verification": verify_stats, "voices_designed": designed,
+                "self_check": self_check_report(verify_stats, duplicate_outcomes, warnings,
+                                                sum(1 for row in segments if row["role_id"] is None)),
                 "dropped_ledger_claims": dict(ledger["dropped"]),
                 "ledger": {key: deepcopy(ledger[key]) for key in ("characters", "narration", "questions")},
                 "hints": {kind: notes.strip() for kind, notes in (("cast", cast_notes), ("attribution", attribution_notes))
@@ -1565,6 +1690,11 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         document["readiness"] = state
         meter_callback(1.0, "Narrator read complete")
         total = metrics["total"]
+        report = document["provenance"]["narrator_read"]["self_check"]
+        progress("Narrator read self-check: rechecked "
+                 + (", ".join(f"{count} {reason.replace('_', ' ')}" for reason, count in sorted(report["lines_rechecked"].items())) or "nothing")
+                 + f"; changed {sum(report['lines_changed'].values())}; "
+                 + f"{sum(report['cast_warnings'].values())} cast warning(s); {report['unresolved_lines']} line(s) left for speaker choice")
         progress(f"Narrator read: {total['provider_calls']} provider call(s), {total['logical_requests']} request(s); "
                  f"prompt {total['prompt_tokens']} / completion {total['completion_tokens']} tokens "
                  f"({total['reasoning_tokens']} reasoning); {metrics['wall_seconds']:.0f}s")

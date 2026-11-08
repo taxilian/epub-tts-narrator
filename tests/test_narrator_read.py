@@ -208,6 +208,48 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in ledger["characters"]], ["Anderson Royce", "Proof"])
         self.assertEqual(name_index(ledger)["proof"], "2")
 
+    def test_a_new_row_copied_in_cast_line_shape_is_unpacked_into_its_fields(self):
+        ledger = apply_delta(new_ledger(), {"new": [["Trag||m|quiet trainer of new singers", 2],
+                                                    ["Pendel||m", "homesick supercargo", 1]]},
+                             self.blocks, self.numbers)
+        rows = {row["name"]: row for row in ledger["characters"]}
+        self.assertEqual(sorted(rows), ["Pendel", "Trag"])
+        self.assertEqual((rows["Trag"]["sex"], rows["Trag"]["note"], rows["Trag"]["first"]),
+                         ("m", "quiet trainer of new singers", "b000002"))
+        self.assertEqual((rows["Pendel"]["aliases"], rows["Pendel"]["note"], rows["Pendel"]["first"]),
+                         ([], "homesick supercargo", "b000001"))
+
+    def test_new_rows_with_a_leading_id_text_number_or_flattened_shape_are_read(self):
+        def rows(new):
+            ledger = apply_delta(new_ledger(), {"new": new}, self.blocks, self.numbers)
+            return [(row["name"], row["aliases"], row["sex"], row["note"], row["first"]) for row in ledger["characters"]]
+
+        self.assertEqual(rows([[3, "Captain Andurs||m", "ship captain", 2], [5, "Ford", None, "m", "apprentice", "1"]]),
+                         [("Captain Andurs", [], "m", "ship captain", "b000002"), ("Ford", [], "m", "apprentice", "b000001")])
+        self.assertEqual(rows([["cargo officer Malaine;Malaine", "", "f", "", 1]]),
+                         [("cargo officer Malaine", ["Malaine"], "f", "", "b000001")])
+        self.assertEqual(rows(["Senior Lieutenant Tallaf", "Tallaf", "engineer, humorous", "m"]),
+                         [("Senior Lieutenant Tallaf", ["Tallaf"], "m", "engineer, humorous", None)])
+
+    def test_aliases_must_be_short_names_that_do_not_name_another_entry(self):
+        ledger = apply_delta(new_ledger(), {"new": [["Guild Master Lanzecki", "", "m", "", 1],
+                                                    ["Carrik", "m;the crystal singer, tall and dark", "m", "", 2]]},
+                             self.blocks, self.numbers)
+        ledger = apply_delta(ledger, {"alias": [[2, "Lanzecki here"], [2, "the Guild Master"], [2, "Carr"],
+                                                [1, "Lanzecki"]]}, self.blocks, self.numbers)
+        rows = {row["name"]: row for row in ledger["characters"]}
+        self.assertEqual(rows["Carrik"]["aliases"], ["Carr"])
+        self.assertEqual(rows["Guild Master Lanzecki"]["aliases"], ["Lanzecki"])
+        self.assertEqual(ledger["dropped"], {"alias_not_a_name": 2, "alias_names_other": 2})
+
+    def test_an_alias_naming_an_entry_added_later_is_dropped_after_the_prep_read(self):
+        from epub_tts_narrator.narrator_ledger import recheck_aliases
+        ledger = apply_delta(new_ledger(), {"new": [["Carrik", "Mok|m;Lanzecki's shadow", "m", "", 1]]},
+                             self.blocks, self.numbers)
+        self.assertEqual(ledger["characters"][0]["aliases"], ["Mok", "Lanzecki's shadow"])
+        ledger = apply_delta(ledger, {"new": [["Guild Master Lanzecki", "", "m", "", 2]]}, self.blocks, self.numbers)
+        self.assertEqual(recheck_aliases(ledger)["characters"][0]["aliases"], ["Mok"])
+
     def test_series_characters_start_unseen_and_match_only_through_seen(self):
         ledger = new_ledger([{"id": "series_char_x", "name": "Mara Voss", "aliases": ["Mara"], "description": "keeper"}])
         updated = apply_delta(ledger, {"seen": [[1, 1, "Mara met Jon."]], "new": [["Jon", "", "m", "", 1]]},
@@ -284,6 +326,107 @@ class NarratedAnalyzeTests(unittest.TestCase):
         reasons = {item["span"]["id"]: item["reason"] for item in verification_items(source, ledger, spans, labels)}
         self.assertEqual(reasons, {spans[0]["id"]: "beat_disagreement", spans[1]["id"]: "mixed_paragraph"})
 
+    def test_self_checks_flag_an_absent_speaker_and_a_line_calling_its_own_name(self):
+        from epub_tts_narrator.narrator_read import scene_checks
+        source = make_source([[('Carrik steered the ship. "Good view," he told her.', "p"),
+                               ('"Wait, Carrik."', "p"), ('Killa laughed. "Maybe."', "p")],
+                              [('Lanzecki spoke. "Welcome."', "p")]])
+        spans = quote_spans(source)
+        ledger = apply_delta(new_ledger(), {"new": [["Carrik", "", "m", "", 1], ["Guild Master Lanzecki", "Lanzecki", "m", "", 4],
+                                                    ["Killashandra", "Killa", "f", "", 3]]},
+                             {block["id"]: block["text"] for block in source["blocks"]},
+                             {1: "b000001", 3: "b000003", 4: "b000004"})
+        labels = {spans[0]["id"]: {"who": ("char", "2")}, spans[1]["id"]: {"who": ("char", "1")},
+                  spans[2]["id"]: {"who": ("char", "3")}, spans[3]["id"]: {"who": ("char", "2")}}
+        flagged = scene_checks(source, ledger, spans, labels)
+        # Lanzecki is never named in chapter one; Carrik calls out his own name.
+        self.assertEqual(flagged[spans[0]["id"]], ("absent_speaker", ["1", "3"]))
+        self.assertEqual(flagged[spans[1]["id"]][0], "self_address")
+        self.assertNotIn(spans[2]["id"], flagged)
+        self.assertNotIn(spans[3]["id"], flagged)
+
+    def test_a_generic_speaker_far_from_its_description_is_flagged(self):
+        from epub_tts_narrator.narrator_read import scene_checks
+        source = make_source([[('The spaceport official bowed. "Welcome."', "p")],
+                              [('Francu glared. "Hurry!"', "p"), ('"Sleep?" The indignation in Francu\'s voice was plain.', "p")]])
+        spans = quote_spans(source)
+        ledger = apply_delta(new_ledger(), {"new": [["spaceport official", "", "m", "", 1], ["Captain Francu", "", "m", "", 2]]},
+                             {block["id"]: block["text"] for block in source["blocks"]}, {1: "b000001", 2: "b000002"})
+        labels = {spans[0]["id"]: {"who": ("char", "1")}, spans[1]["id"]: {"who": ("char", "2")},
+                  spans[2]["id"]: {"who": ("char", "1")}}
+        flagged = scene_checks(source, ledger, spans, labels)
+        self.assertEqual(flagged, {spans[2]["id"]: ("absent_speaker", ["2"])})
+
+    def test_an_unsure_self_check_keeps_the_markup_label_but_an_unsure_tag_check_does_not(self):
+        from epub_tts_narrator.narrator_read import Meter, _verify_items
+        from epub_tts_narrator.pipeline import CachedRequests
+
+        class Unsure:
+            identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
+
+            def complete(self, system, payload):
+                return {"r": [[item["id"], "?"] for item in payload["items"]]}
+
+        source = make_source([[('"Good view," he told her.', "p"), ('"Later," Jon said.', "p")]])
+        spans = quote_spans(source)
+        ledger = apply_delta(new_ledger(), {"new": [["Carrik", "", "m", "", 1], ["Jon", "", "m", "", 2]]},
+                             {block["id"]: block["text"] for block in source["blocks"]}, {1: "b000001", 2: "b000002"})
+        labels = {spans[0]["id"]: {"who": ("char", "1")}, spans[1]["id"]: {"who": ("char", "1")}}
+        items = [{"span": spans[0], "reason": "absent_speaker", "options": ["1", "2"]},
+                 {"span": spans[1], "reason": "tag_disagreement", "options": ["2", "1"]}]
+        client = Unsure()
+        labels, stats = _verify_items(source, CachedRequests(client, self.cache, repair_attempts=0), Meter(client),
+                                      ledger, spans, labels, items)
+        self.assertEqual(labels[spans[0]["id"]]["who"], ("char", "1"))
+        self.assertEqual(labels[spans[1]["id"]]["who"][0], "unresolved")
+        self.assertEqual(stats["changed_by_reason"], {"tag_disagreement": 1})
+
+    def test_a_line_left_unsure_by_a_self_check_is_still_rechecked_after_a_nearby_correction(self):
+        from epub_tts_narrator.narrator_read import verify, Meter
+        from epub_tts_narrator.pipeline import CachedRequests
+
+        class Client:
+            identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
+
+            def complete(self, system, payload):
+                rows = []
+                for item in payload["items"]:
+                    # The beat-tagged line is Divinity's; the untagged absent-speaker line is
+                    # left unsure among three options, but settled when asked Erika-or-Divinity.
+                    if item["target"] == "q1" or item["options"] == ["1", "2"]:
+                        rows.append([item["id"], "2"])
+                    else:
+                        rows.append([item["id"], "?"])
+                return {"r": rows}
+
+        source = make_source([[('Sal sat. "His loss." Divinity grinned. "Come in."', "p"),
+                               ('"Thanks," Sal said.', "p"), ('"Sit," Divinity said.', "p")]])
+        spans = quote_spans(source)
+        ledger = apply_delta(new_ledger(), {"new": [["Erika Clifton", "", "f", "", 1], ["Divinity", "", "f", "", 1],
+                                                    ["Sal", "", "m", "", 1]]},
+                             {block["id"]: block["text"] for block in source["blocks"]}, {1: "b000001"})
+        labels = {spans[0]["id"]: {"who": ("char", "1")}, spans[1]["id"]: {"who": ("char", "1")},
+                  spans[2]["id"]: {"who": ("char", "3")}, spans[3]["id"]: {"who": ("char", "2")}}
+        client = Client()
+        labels, stats = verify(source, CachedRequests(client, self.cache, repair_attempts=0), Meter(client),
+                               ledger, spans, labels)
+        self.assertEqual(stats["reasons"]["absent_speaker"], 1)
+        self.assertEqual([labels[span["id"]]["who"] for span in spans[:2]], [("char", "2"), ("char", "2")])
+
+    def test_every_run_reports_its_self_check(self):
+        document = self.analyze(NarratorClient())
+        report = document["provenance"]["narrator_read"]["self_check"]
+        self.assertEqual(set(report), {"lines_rechecked", "lines_changed", "duplicate_checks", "cast_warnings",
+                                       "unresolved_lines"})
+
+    def test_cast_audit_warns_about_description_names_and_shared_aliases(self):
+        from epub_tts_narrator.narrator_read import cast_audit
+        warnings = cast_audit({"characters": [
+            {"id": "c1", "name": "Trag//m/unsmiling, reticent", "aliases": []},
+            {"id": "c2", "name": "Carrik", "aliases": ["the Singer"]},
+            {"id": "c3", "name": "Olin", "aliases": ["the Singer"]}]})
+        self.assertEqual(sorted(warning["kind"] for warning in warnings), ["name_shape", "shared_name"])
+
     def test_a_verified_correction_rechecks_the_same_confusion_nearby_in_the_scene(self):
         from epub_tts_narrator.narrator_read import scene_followups
         source = make_source([[('"One," Jon said.', "p"), ('"Two."', "p"), ('"Three."', "p")],
@@ -307,6 +450,45 @@ class NarratedAnalyzeTests(unittest.TestCase):
 
         document = self.analyze(OddShapes(), repair_attempts=0)
         self.assertEqual(readiness(document)["errors"], [])
+
+    def test_a_surname_tag_names_its_character_and_the_placeholder_name_is_not_a_speaker(self):
+        from epub_tts_narrator.narrator_ledger import name_index, tag_character
+        from epub_tts_narrator.narrator_read import _parse_who
+        ledger = apply_delta(new_ledger(), {"new": [["Captain Francu", "", "m", "", 1], ["spaceport official", "", "m", "", 1]]},
+                             {"b000001": "x"}, {1: "b000001"})
+        index = name_index(ledger)
+        self.assertEqual(tag_character(index, "Francu"), "1")
+        self.assertEqual(_parse_who("+Name", ledger, index), ("unresolved", []))
+
+    def test_an_untagged_quotation_is_shown_its_paragraphs_single_named_speaker(self):
+        from epub_tts_narrator.narrator_read import Meter, _verify_items
+        from epub_tts_narrator.pipeline import CachedRequests
+
+        class Recording:
+            identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
+            items = []
+
+            def complete(self, system, payload):
+                self.items.extend(payload["items"])
+                return {"r": [[item["id"], "?"] for item in payload["items"]]}
+
+        source = make_source([[('"His loss." Divinity grinned. "Come in."', "p")]])
+        spans = quote_spans(source)
+        ledger = apply_delta(new_ledger(), {"new": [["Erika Clifton", "", "f", "", 1], ["Divinity", "", "f", "", 1]]},
+                             {"b000001": source["blocks"][0]["text"]}, {1: "b000001"})
+        labels = {span["id"]: {"who": ("char", "1")} for span in spans}
+        client = Recording()
+        _verify_items(source, CachedRequests(client, self.cache, repair_attempts=0),
+                      Meter(client), ledger, spans, labels,
+                      [{"span": spans[1], "reason": "absent_speaker", "options": ["1", "2"]}])
+        self.assertEqual(client.items[0]["named_beside"], ["Divinity"])
+
+    def test_a_name_contained_in_another_nominates_a_duplicate_check(self):
+        from epub_tts_narrator.narrator_read import duplicate_candidates
+        ledger = apply_delta(new_ledger(), {"new": [["Captain Andurs", "", "m", "", 1], ["Andurs", "", "m", "", 2],
+                                                    ["Mara", "", "f", "", 1]]},
+                             {"b000001": "x", "b000002": "y"}, {1: "b000001", 2: "b000002"})
+        self.assertEqual(duplicate_candidates(ledger), [("2", "1")])
 
     def test_name_overlapping_entries_merge_only_after_a_same_person_check(self):
         self.source = make_source([[('"Ready," Barry said.', "p"), ('Much later, Barry Francis waved. "Go," Barry Francis said.', "p")]])
