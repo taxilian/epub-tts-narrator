@@ -22,6 +22,7 @@ import ipaddress
 import json
 import math
 from pathlib import Path
+import re
 import secrets
 import select
 import socket
@@ -40,6 +41,52 @@ from .recognition_workers import (
     recognition_identity,
 )
 from .reference_cache import UNKNOWN_REFERENCE_MESSAGE, ReferenceCache
+
+
+_FINISH_REASONS = {
+    "silence": "the take went silent and the silence watch stopped it",
+    "length": "the take hit its frame budget without ending",
+}
+_KNOWN_FAILURES = (
+    ("prompt is too long", "the prompt is too long even without chapter history"),
+    ("no audio frames", "the take produced no audio frames"),
+    ("exactly one audio segment", "the take produced no audio frames"),
+    ("implausibly short", "the take's audio is empty or too short"),
+    ("non-finite", "the model produced non-finite values"),
+    ("Could not encode reference audio", "a reference recording could not be encoded"),
+    ("Could not read reference audio", "a reference recording could not be read"),
+    ("checksum does not match", "a reference recording does not match its checksum"),
+    ("generation failed", "generation failed inside the model"),
+    ("invalid generated codec tokens", "the model returned invalid codec tokens"),
+    ("metadata for different text", "the model returned a take for different text"),
+    ("Could not save generated audio", "the generated audio could not be saved"),
+    ("Audio output already exists", "the output file already exists"),
+    ("Could not load", "the model could not be loaded"),
+)
+
+
+def failure_summary(exc):
+    """``Type: reason`` for a failed request's log line, never quoting its text.
+
+    Logs never contain book passages, and error messages may quote the text
+    being spoken (or anything else), so known failures get a fixed
+    explanation and anything else only its type and its cause's type. The
+    full message still goes to the client, which records it.
+    """
+    message = str(exc)
+    name = type(exc).__name__
+    if name == "RequestCancelled":
+        return f"{name}: the client went away, so its batched decode was stopped"
+    finished = re.search(r"did not finish the text: '([a-z_]+)'", message)
+    if finished:
+        reason = finished.group(1)
+        return f"{name}: {_FINISH_REASONS.get(reason, 'the take did not finish (' + reason + ')')}"
+    cause = exc.__cause__ or exc.__context__
+    suffix = f" (caused by {type(cause).__name__})" if cause is not None else ""
+    for marker, reason in _KNOWN_FAILURES:
+        if marker in message:
+            return f"{name}: {reason}{suffix}"
+    return f"{name}{suffix}: details were returned to the client"
 
 
 def batch_summary(batch):
@@ -563,7 +610,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             raise
         except Exception as exc:
-            self.server.activity(self.request_id, f"failed ({type(exc).__name__}); returning HTTP 500")
+            self.server.activity(self.request_id, f"failed ({failure_summary(exc)}); returning HTTP 500")
             self._json(500, {"error": {"message": redact(f"{type(exc).__name__}: {exc}", self.server.settings.get("api_key", ""))}})
 
 
@@ -634,7 +681,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise
         except Exception as exc:
             # Recognizer errors may quote audio-derived text; log only the type.
-            self.server.activity(self.request_id, f"recognition failed ({type(exc).__name__}); returning HTTP 500")
+            self.server.activity(self.request_id, f"recognition failed ({failure_summary(exc)}); returning HTTP 500")
             self._json(500, {"error": {"message": redact(f"{type(exc).__name__}: {exc}", self.server.settings.get("api_key", ""))}})
 
 

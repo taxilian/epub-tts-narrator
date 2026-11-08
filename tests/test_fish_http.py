@@ -701,7 +701,7 @@ class FishHTTPTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertTrue(raised.exception.transport_error)
         self.assertFalse((self.root / "failed.wav").exists())
-        self.wait_activity("failed (EngineError)")
+        self.wait_activity("failed (EngineError: details were returned to the client)")
         self.assertFalse(any("completed" in event for event in self.activity))
         self.assertNotIn("Detailed GPU failure", "\n".join(self.activity))
         self.assertNotIn("private-test-key", "\n".join(self.activity))

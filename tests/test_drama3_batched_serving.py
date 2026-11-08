@@ -154,6 +154,33 @@ class BatchedServingTests(unittest.TestCase):
         # The client timed out and closed; serve noticed and stopped the decode.
         self.assertTrue(cancelled.wait(5))
 
+    def test_failed_requests_log_why_without_quoting_their_text(self):
+        from epub_tts_narrator.renderer.drama3_batch_scheduler import RequestCancelled
+        from epub_tts_narrator.renderer.server import failure_summary
+
+        def caused(error, cause):
+            try:
+                raise error from cause
+            except type(error) as raised:
+                return raised
+
+        cases = (
+            (EngineError("Drama 3 did not finish the text: 'silence'"),
+             "EngineError: the take went silent and the silence watch stopped it"),
+            (EngineError("Drama 3 did not finish the text: 'length'"),
+             "EngineError: the take hit its frame budget without ending"),
+            (EngineError("Drama 3 prompt is too long even without chapter history: Secret passage words"),
+             "EngineError: the prompt is too long even without chapter history"),
+            (RequestCancelled("x"), "RequestCancelled: the client went away, so its batched decode was stopped"),
+            (caused(EngineError("Drama 3 generation failed: Secret passage words"), MemoryError()),
+             "EngineError: generation failed inside the model (caused by MemoryError)"),
+            (ValueError("Secret passage words: something odd"), "ValueError: details were returned to the client"),
+        )
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(failure_summary(error), expected)
+                self.assertNotIn("Secret", failure_summary(error))
+
     def test_single_request_engines_keep_the_serialized_path(self):
         engine = FakeEngine()
         url = self.serve(engine)
