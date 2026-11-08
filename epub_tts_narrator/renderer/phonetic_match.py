@@ -57,11 +57,29 @@ either every few many more most much other same some several enough another
 # out the words. These are exact, bounded expansions, not permission to drop
 # function words or invent implied auxiliaries (e.g. "what are you"). Keep
 # them inside the alignment so surrounding names and coverage are checked too.
-_COLLOQUIAL_EXPANSIONS = {
+# Only the original forms have established direct phonetic confirmation. New
+# near-miss expansions are review nominations in speech_coverage, never local
+# acceptance. Tokenization retains d'you but exposes leading-apostrophe 'cause
+# as "cause"; speech_coverage checks that spelling against the source span.
+_DIRECT_COLLOQUIAL_EXPANSIONS = {
     "ya": ("you",),
     "what'cha": ("what", "you"),
     "whatcha": ("what", "you"),
     "whatchu": ("what", "you"),
+}
+_REVIEW_COLLOQUIAL_EXPANSIONS = {
+    "kinda": ("kind", "of"),
+    "gonna": ("going", "to"),
+    "wanna": ("want", "to"),
+    "d'you": ("do", "you"),
+    "cause": ("because",),
+    "lemme": ("let", "me"),
+    "gimme": ("give", "me"),
+    "gotcha": ("got", "you"),
+}
+_COLLOQUIAL_EXPANSIONS = {
+    **_DIRECT_COLLOQUIAL_EXPANSIONS,
+    **_REVIEW_COLLOQUIAL_EXPANSIONS,
 }
 
 
@@ -174,7 +192,7 @@ def phonetic_equivalence(expected_text: str, actual_text: str) -> dict | None:
             }
         for reverse in (False, True):
             form = actual[j] if reverse else expected[i]
-            expansion = _COLLOQUIAL_EXPANSIONS.get(form)
+            expansion = _DIRECT_COLLOQUIAL_EXPANSIONS.get(form)
             if expansion is None:
                 continue
             source, words, spans, start = ((expected_source, expected, expected_spans, i)

@@ -264,15 +264,57 @@ def word_spacing_equivalence(expected_text: str, actual_text: str) -> dict | Non
 
     Lexical normalization removes punctuation except apostrophes and meaningful
     numeric syntax. Remove apostrophes too, but retain numeric values and signs.
-    Every remaining character must match in order across the whole transcript;
+    At the same raw-token position, unsigned digit-only tokens may differ only
+    by leading zeros when their stripped digit strings are identical. Signed,
+    decimal, reordered, missing and changed numeric content remains protected.
+    Every other remaining character must match in order across the transcript;
     the alignment describes boundaries, never guesses missing speech.
     """
+    def leading_zero_alignment():
+        def raw_tokens(text):
+            return [(match.group(), normalize_words(match.group()))
+                    for match in _lexeme_matches(text)]
+
+        left, right = raw_tokens(expected_text), raw_tokens(actual_text)
+        if not left or len(left) != len(right):
+            return None
+        changes = []
+        expected_position = actual_position = 0
+        for (left_token, left_words), (right_token, right_words) in zip(left, right):
+            end_i = expected_position + len(left_words)
+            end_j = actual_position + len(right_words)
+            if left_words != right_words:
+                left_digits = unicodedata.normalize("NFKC", left_token)
+                right_digits = unicodedata.normalize("NFKC", right_token)
+                if (not re.fullmatch(r"[0-9]+", left_digits)
+                        or not re.fullmatch(r"[0-9]+", right_digits)):
+                    return None
+                if (left_digits.lstrip("0") or "0") != (right_digits.lstrip("0") or "0"):
+                    return None
+                changes.append({"operation": "leading_zero",
+                    "expected_start": expected_position, "expected_end": end_i,
+                    "actual_start": actual_position, "actual_end": end_j,
+                    "expected": left_words, "actual": right_words})
+            expected_position, actual_position = end_i, end_j
+        if not changes:
+            return None
+        left_raw = [token for token, _ in left]
+        right_raw = [token for token, _ in right]
+        if left_raw != right_raw and sorted(left_raw) == sorted(right_raw):
+            return None
+        return {"method": "written_content_v1", "boundary_changes": 0, "alignment": changes}
+
     expected, actual = normalize_words(expected_text), normalize_words(actual_text)
     if len(expected) > 2000 or len(actual) > 4000:
         raise ValueError("text exceeds per-chunk verification token limit")
+    if not expected or expected == actual:
+        return None
+    leading_zero = leading_zero_alignment()
+    if leading_zero is not None:
+        return leading_zero
     left = [word.replace("'", "") for word in expected]
     right = [word.replace("'", "") for word in actual]
-    if not expected or expected == actual or "".join(left) != "".join(right):
+    if "".join(left) != "".join(right):
         return None
     i = j = 0
     changes = []

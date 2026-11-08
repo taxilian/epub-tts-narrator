@@ -16,15 +16,23 @@ import unicodedata
 from .letter_names import letter_name_spellings, make_letter_name_matcher
 from .phonetic_match import (
     _ALPHABETIC_WORD, _COLLOQUIAL_EXPANSIONS, _FUNCTION_WORDS, _PROTECTED, _PROTECTED_NUMERIC,
-    _load_double_metaphone, phonetic_equivalence,
+    _REVIEW_COLLOQUIAL_EXPANSIONS, _load_double_metaphone, phonetic_equivalence,
 )
 
 
-SPEECH_COVERAGE_VERSION = 13
+SPEECH_COVERAGE_VERSION = 14
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS: dict[frozenset[str], str] = {
     frozenset(("qi", "chi")): "standard_transliteration",
 }
+_TITLE_ABBREVIATIONS = frozenset({
+    frozenset(("mister", "mr")),
+    frozenset(("doctor", "dr")),
+    frozenset(("professor", "prof")),
+    frozenset(("saint", "st")),
+    frozenset(("captain", "capt")),
+    frozenset(("sergeant", "sgt")),
+})
 _CONTRACTIONS = {
     "i'm": (("i", "am"),), "let's": (("let", "us"),),
     "can't": (("can", "not"),), "cannot": (("can", "not"),),
@@ -304,6 +312,18 @@ def speech_coverage(expected_text, transcript):
             yield from letter_matches(i, j)
             return
         yield from letter_matches(i, j)
+        pair = (expected[i], actual[j])
+        review_rule = None
+        if all(_ALPHABETIC_WORD.fullmatch(word) for word in pair):
+            if frozenset(pair) in _TITLE_ABBREVIATIONS:
+                review_rule = "title_abbreviation"
+            elif frozenset(pair) == {"i", "l"} and all(len(word) == 1 for word in pair):
+                review_rule = "single_letter_homoglyph"
+        if review_rule is not None:
+            yield i + 1, j + 1, {"operation": "pronunciation_candidate", "rule": review_rule,
+                "expected_start": i, "expected_end": i + 1, "actual_start": j,
+                "actual_end": j + 1, "expected": [pair[0]], "actual": [pair[1]]}
+            return
         boundary = exact_compound(i, j)
         if boundary is not None:
             end_i, end_j = boundary
@@ -343,15 +363,24 @@ def speech_coverage(expected_text, transcript):
             source, words, spans, start = ((expected_source, expected, expected_spans, i)
                                           if reverse else
                                           (actual_source, actual, actual_spans, j))
+            colloquial_source, colloquial_span = ((actual_source, actual_spans[j]) if reverse
+                                                 else (expected_source, expected_spans[i]))
+            if (form == "cause" and (colloquial_span[0] == 0
+                                     or colloquial_source[colloquial_span[0] - 1] != "'")):
+                continue
             size = len(expansion)
             if (tuple(words[start:start + size]) != expansion
                     or any(not source[spans[index - 1][1]:spans[index][0]].isspace()
                            for index in range(start + 1, start + size))):
                 continue
             end_i, end_j = (i + size, j + 1) if reverse else (i + 1, j + size)
-            yield end_i, end_j, {"operation": "colloquial", "expected_start": i,
-                "expected_end": end_i, "actual_start": j, "actual_end": end_j,
+            review_only = form in _REVIEW_COLLOQUIAL_EXPANSIONS
+            change = {"operation": "pronunciation_candidate" if review_only else "colloquial",
+                "expected_start": i, "expected_end": end_i, "actual_start": j, "actual_end": end_j,
                 "expected": expected[i:end_i], "actual": actual[j:end_j]}
+            if review_only:
+                change.update(rule="colloquial_expansion", expansion=list(expansion))
+            yield end_i, end_j, change
         for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
             if letter_matches.blocks_fuzzy(i, j, left_size, right_size):
                 continue
