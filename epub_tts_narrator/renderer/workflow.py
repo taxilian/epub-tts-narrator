@@ -63,8 +63,21 @@ class SpeechVerificationFailed(RenderBlocked):
         self.report = report
 
 
+# Six of nine investigated narrator-read dead ends repeated Drama 3 truncation on 700+ character chunks.
+_TRUNCATION_SPLIT_THRESHOLD = 2
+
+
 def _seed(base, key, attempt):
     return (base + int(digest(key)[:8], 16) + attempt) % 2**32
+
+
+def _drama3_truncation(report):
+    if report.get("passed") is not False:
+        return False
+    if report.get("reasons") == ["generation_incomplete"]:
+        return True
+    return (report.get("error_type") in {"EngineError", "FishHTTPError"}
+            and "did not finish the text" in str(report.get("error", "")))
 
 
 def _diagnostic_text(value, limit=60):
@@ -378,6 +391,18 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             raise SpeechVerificationFailed(
                 f"Reviewed direction repair failed its bounded trial. Inspect {directory}",
                 request=request, report=dict(record["report"], resolution_action="stop"))
+        resolution_session.records[record["attempt"]] = record
+        if resolution_session.can_split and _drama3_truncation(record["report"]):
+            truncation_failures = sum(
+                _drama3_truncation(saved["report"])
+                and not (saved["report"].get("retry_on_resume") is True
+                         and saved["report"].get("reasons") == ["generation_incomplete"])
+                for saved in resolution_session.records.values())
+            if truncation_failures >= _TRUNCATION_SPLIT_THRESHOLD:
+                notify("  Speech recovery: split — repeated Drama 3 truncation.")
+                raise SpeechVerificationFailed(
+                    f"Speech recovery selected split. Inspect {directory}",
+                    request=request, report=dict(record["report"], resolution_action="split"))
         if broad_recovery and direction_session is None:
             observed = {**resolution_session.records, record['attempt']: record}
             failed = sum(row.get('audio_file') is not None and row.get('report', {}).get('passed') is False
