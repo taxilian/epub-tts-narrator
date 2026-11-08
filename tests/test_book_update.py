@@ -454,6 +454,29 @@ class BookUpdateTests(unittest.TestCase):
         self.assertIn("continues from this one", stderr)
         self.assertEqual(snapshot(earlier), before)
 
+    def test_source_typo_updates_parent_and_rebinds_descendant_without_reanalysis(self):
+        earlier = self.root / "book-one"
+        status, _, stderr = self.run_cli("analyze", self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"),
+                                         "-o", earlier)
+        self.assertEqual(status, 0, stderr)
+        status, _, stderr = self.run_cli(
+            "analyze", self.epub("serial-typo-source", [("Four", ["Mara said, “Morning.”"])], "serial-typo-1"),
+            "-o", self.book, "--continue-from", earlier)
+        self.assertEqual(status, 0, stderr)
+        script_names = [f"scripts/{path.name}" for path in (self.book / "scripts").glob("*.jsonl")]
+        before = {name: (self.book / name).read_bytes() for name in ["analysis.json", *script_names]}
+        fixed = self.epub("book-one-fixed", [
+            ("One", [CHAPTER_ONE[1][0], "They leIt."]), CHAPTER_THREE], "book-one-2")
+        status, stdout, stderr = self.run_cli("analyze", fixed, "-o", earlier)
+        self.assertEqual(status, 0, stderr)
+        self.assertIn("Original analysis files and revision journal", stdout)
+        for name, data in before.items():
+            self.assertEqual((self.book / name).read_bytes(), data)
+        from epub_tts_narrator.analysis_directory import _completed_directory, continuation_directories
+        _completed_directory(earlier)
+        _completed_directory(self.book)
+        self.assertEqual(continuation_directories(self.book), [earlier.resolve()])
+
     def test_plan_estimates_only_the_appended_chapters(self):
         self.seed()
         calls = len(self.model_payloads())

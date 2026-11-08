@@ -144,8 +144,8 @@ def _install(source, destination):
 def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
                        scope="attribution", sidecars=None, speaker_decision_inputs=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
-    if scope not in {"attribution", "voice-profiles", "speaker-decisions"}:
-        raise ValueError("Revision scope must be attribution, voice-profiles, or speaker-decisions")
+    if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions"}:
+        raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, or speaker-decisions")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if scope != "speaker-decisions":
@@ -232,6 +232,14 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             if (candidate["source"] != document["source"] or candidate["cast"] != document["cast"]
                     or candidate["provenance"].get("series") != document["provenance"].get("series")):
                 raise ValueError("Speaker revisions must preserve source, cast, and series identities")
+        elif scope == "source-edit":
+            if path in revisions:
+                if (candidate["source"].get("book") != document["source"].get("book")
+                        or candidate["cast"] != document["cast"]
+                        or candidate["provenance"].get("series") != document["provenance"].get("series")):
+                    raise ValueError("Source-only updates must preserve book identity, cast, and series context")
+            elif candidate != document:
+                raise ValueError("Source-only updates may change only the selected book")
         elif scope == "voice-profiles":
             differences = profile_revision_differences(document, candidate)
             if differences:
@@ -288,6 +296,9 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             snapshot = _snapshot(document)
             registry["books"][-1] = snapshot
             snapshots[(registry["series_id"], snapshot["source_fingerprint"])] = snapshot
+            original_fingerprint = fingerprint(original["source"])
+            if original_fingerprint != snapshot["source_fingerprint"]:
+                snapshots[(registry["series_id"], original_fingerprint)] = snapshot
             validate_registry(registry)
             base = transaction / f"book-{number:04d}"
             before, after = base / "before", base / "after"
@@ -316,7 +327,8 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 parent_document, parent_registry, _ = _completed_directory(parent_folder)
                 if registry["books"][:-1] != parent_registry["books"]:
                     raise ValueError("Revised continuation histories disagree")
-                link.update(analysis_sha256=parent_manifest["analysis_directory"]["sha256"]["analysis.json"],
+                link.update(source_fingerprint=fingerprint(parent_document["source"]),
+                            analysis_sha256=parent_manifest["analysis_directory"]["sha256"]["analysis.json"],
                             series_cast_sha256=parent_manifest["analysis_directory"]["sha256"]["series-cast.json"])
             manifest["continuation"] = link
             write_json(after / "manifest.json", manifest, overwrite=True)

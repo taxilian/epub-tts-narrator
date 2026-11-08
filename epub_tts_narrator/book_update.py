@@ -715,16 +715,18 @@ def describe_update(document):
     return lines
 
 
-def ensure_updatable(directory):
-    """Refuse an update the book's dependents or a live render could not survive."""
+def ensure_updatable(directory, comparison=None):
+    """Refuse only updates the book's dependents could not survive."""
     directory = Path(directory).resolve()
     if _render_active(directory):
         raise ValueError(f"Rendering is active; finish it before updating the book: {directory}")
     related = related_directories([directory])
-    if related != [directory]:
+    if (related != [directory] and comparison is not None
+            and comparison.get("appended_chapters")):
         descendants = ", ".join(str(path) for path in related if path != directory)
         raise ValueError("A later book continues from this one, so its chapters cannot be extended in place "
                          f"(continued by {descendants}). Analyze the new EPUB into a separate output directory")
+    return related
 
 
 def saved_strategy(document):
@@ -759,7 +761,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
         log("No new or edited chapters: the EPUB's chapters match the saved book. "
             "The saved analysis is unchanged.")
         return None
-    ensure_updatable(directory)
+    related = ensure_updatable(directory, comparison)
     manifest_hash = _hash(directory / "manifest.json")
     settings = config["analysis"]
     merged = comparison["source"]
@@ -852,7 +854,15 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
             document = keep_existing_auditions(prepare_document_samples(
                 document, None, workers=workers, allow_incomplete=True, progress=progress), original)
             pending.complete_stage("samples-prepared-2", document)
-        publish_update(directory, document, expected_manifest_sha256=manifest_hash, progress=log)
+        if related == [directory]:
+            publish_update(directory, document, expected_manifest_sha256=manifest_hash, progress=log)
+        else:
+            from .analysis_revision import revise_directories
+            result = revise_directories(
+                {directory: document}, directories=related,
+                expected_manifest_hashes={str(path): _hash(path / "manifest.json") for path in related},
+                scope="source-edit", progress=log)
+            log(f"Original analysis files and revision journal: {result['backup_directory']}")
         if epub is not None:
             from .source_epub import remember_source_epub
             remember_source_epub(directory, epub, document["source"]["book"]["id"], epub_sha256=digest)
