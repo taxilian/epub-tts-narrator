@@ -554,7 +554,42 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 Initial analysis can carry reviewed, source-linked spoken-spelling edits and inline `performance_controls`. These are consumed during default rendering without `prepare-performance`; a whisper, emotion, or laughing delivery may cover only part of a segment. Point vocalizations and pauses remain separate from lexical text. Optional external records merge only when compatible; conflicting overlaps fail rather than silently replacing an instruction. Actual adherence to a cue still depends on the selected model.
 
-Pronunciation work is optional and manual. The renderer never discovers candidates, creates CMU suggestions or estimates, converts readable hints with a model, or generates name annotations. These commands need no analysis-provider configuration or network access. Existing confirmed and keep-default choices remain valid, including inherited choices and saved literal respellings.
+Pronunciation work is optional and manual. Nothing runs automatically: the renderer never discovers candidates, creates CMU suggestions or estimates, or generates name annotations on its own. The `pronunciations` commands need no analysis-provider configuration or network access. The one model-assisted tool is `pronounce-name`, which you invoke for one name at a time (below). Existing confirmed and keep-default choices remain valid, including inherited choices and saved literal respellings.
+
+### Character names (`pronounce-name`)
+
+Use this when the engine reads a name inconsistently or wrongly (for example "Salvatore" coming out sometimes as "sal-vuh-tore" and sometimes as "sal-vuh-torie"):
+
+```sh
+just pronounce-name runs/quest-academy-08 Salvatore
+# or: audiobook-render pronounce-name BOOK Salvatore [--phonemes "S AE2 L V AH0 T AO1 R IY0"] [--voice-id VOICE]
+```
+
+1. The analysis model proposes CMUdict-style ARPAbet with stress digits (the Fish/Drama 3 phoneme-tag convention). It sees the name, the bundled CMUdict readings, the matching cast entries, and a few book excerpts as untrusted data. `--phonemes` starts from your own reading instead. A confirmed choice from this book or a series ancestor is offered first.
+2. The tool renders and plays a short test sentence that uses the name several times, including its possessive, with the voice that says the name most often (normally the narrator). For example: "The name is Salvatore. It is Salvatore's name. Give it to Salvatore." When the book uses the plural, the sentence adds that too. The audio file path is printed. These are lossless listening previews under `render-work/pronunciations/`, not book audio.
+3. Choose one:
+   - `A` accepts.
+   - `I more like sal-vuh-TORE-ee` asks the model to revise from your description.
+   - `N` asks for a different guess.
+   - `E S AE2 L V AH0 T AO1 R` sets the phonemes yourself. Input is case-insensitive; every vowel needs a 0/1/2 stress digit.
+   - `B` plays the engine's default reading for comparison.
+   - `P` replays.
+   - `Q` quits.
+
+   Every listened step is checkpointed as a draft in `name-pronunciations.json`. Drafts never affect rendering, and rerunning resumes the draft.
+4. After acceptance, the model reads each occurrence in context, in checkpointed batches, and tags only real uses of the name. Homonyms stay untagged, such as "a rose" next to a character called Rose, or "hope" beside Hope. The tool asks you about anything the model was unsure of and lists the uses it excluded. `--review-tags` lets you check or flip every model decision.
+
+Possessive and plural readings are derived from the base by the final sound: S, Z, or IH0 Z, so `Salvatore's` → `… R IY0 Z`. Other continuations (`Salvatore'll`, `Salvatore-like`) tag only the name part. Matching ignores case, so shouted names are included.
+
+At render, every tagged use becomes a structured CMU pronunciation control, compiled into Drama 3 `<|phoneme_start|>…<|phoneme_end|>` tags only by the performance compiler. Untagged uses keep the default reading, and tagged spans take precedence over `pronunciations.json` choices for the same word. Only affected speech regenerates on the next `render`.
+
+Confirmed choices inherit through `--continue-from` continuation links, nearest book first. Each book tags its own uses. Decisions are bound to each paragraph's exact text, so after a book update only changed paragraphs need tagging. Rendering, and `plan`, fail closed while any defined or inherited name has untagged or unsure uses in the book. To tag every pending name, run:
+
+```sh
+just pronounce-name BOOK
+```
+
+Use `--list` to show status, and `--tag-only NAME` to tag without listening again.
 
 ### Manual commands
 

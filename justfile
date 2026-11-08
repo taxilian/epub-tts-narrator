@@ -25,3 +25,6 @@ runpod-cleanup *args:
 
 test *args:
     @"{{ python }}" -m unittest discover -s tests -q "$@"
+
+pronounce-name *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer pronounce-name "$@"

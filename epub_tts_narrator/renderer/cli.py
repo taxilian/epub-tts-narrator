@@ -22,7 +22,7 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce-name"):
         command = commands.add_parser(name)
         command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -84,6 +84,17 @@ def parser():
             correction = command.add_mutually_exclusive_group()
             correction.add_argument("--say-as", help="Literal readable respelling (e.g. Quarm); set saves it and play auditions it")
             correction.add_argument("--phonemes", help="Advanced: CMU Arpabet phonemes, with stress digits if needed")
+        if name == "pronounce-name":
+            command.description = ("Choose how a character name is pronounced by listening to a test sentence "
+                                   "(model guess, then accept, revise with instructions, or edit phonemes), then tag "
+                                   "every real use of the name in the book for rendering. Without NAME, tag every "
+                                   "defined or inherited name still untagged in this book.")
+            command.add_argument("name", nargs="?", help="The name as written, e.g. Salvatore")
+            command.add_argument("--phonemes", help="Start from these CMU Arpabet phonemes, e.g. 'S AE2 L V AH0 T AO1 R IY0'")
+            command.add_argument("--voice-id", help="Saved voice for the test sentence (default: the voice that says the name most)")
+            command.add_argument("--tag-only", action="store_true", help="Skip listening; tag uses of an already confirmed name")
+            command.add_argument("--review-tags", action="store_true", help="Also check each model tagging decision yourself")
+            command.add_argument("--list", action="store_true", help="Show defined names and their tagging status")
         if name == "import-voice":
             command.add_argument("--voice-id", required=True)
             command.add_argument("--audio", type=Path, required=True)
@@ -268,7 +279,8 @@ def main(argv=None):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "history-echoes"}:
+        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce-name",
+                            "history-echoes"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -315,6 +327,15 @@ def main(argv=None):
         bundle = load_bundle(args.bundle)
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command == "pronounce-name":
+            from epub_tts_narrator.config import load_config as load_analysis_config
+            from .name_pronunciation_tool import run_pronounce_name
+            loaded = []
+            def analysis_config():
+                if not loaded:
+                    loaded.append(load_analysis_config(config_path))
+                return loaded[0]
+            return run_pronounce_name(bundle, config, args, analysis_config=analysis_config)
         if args.command == "pronunciations":
             from .pronunciation_scope_cli import command_scope
             scope = command_scope(bundle, args)

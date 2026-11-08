@@ -607,7 +607,58 @@ class PronunciationReviewSession:
                                    purpose="unverified_pronunciation_isolated_preview", context=context,
                                    cached_only=cached_only)
 
-    def _preview_cache(self, word, pronunciation, text, options, request, engine, voice, *, purpose, context, cached_only):
+    def audition_sentence(self, word, text, controls, *, pronunciation=None, voice_id=None):
+        """Return a resumable preview of a short test sentence with exact controls.
+
+        Used by ``pronounce-name``: ``controls`` are pronunciation controls on
+        the sentence (empty for the engine's default reading). The voice is the
+        saved voice that speaks this word most often in the book (normally the
+        narrator), or ``voice_id`` when given. Never a book clip or reference.
+        """
+        from collections import Counter
+        from ..performance_plan import PERFORMANCE_VERSION, text_sha256, validate_performance
+        from ..pronunciations import validate_word
+        from .engines import create_engine
+        from .speech_identity import voice_conditioning_identity
+        validate_word(word)
+        candidates = self._occurrences(word)
+        if voice_id is not None:
+            candidates = [item for item in candidates if item["voice_id"] == voice_id]
+        if not candidates:
+            raise ValueError("No spoken line with a saved voice contains this name" +
+                             (" for that --voice-id" if voice_id is not None else "; cast its speakers first"))
+        counts = Counter(item["voice_id"] for item in candidates)
+        sample = next(item for item in candidates if item["voice_id"] == counts.most_common(1)[0][0])
+        if self._engine is None:
+            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+        engine, voice = self._engine, sample["voice"]
+        binding = getattr(engine, "voice_binding_identity", engine.identity)
+        if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):
+            raise ValueError("Selected character voice is not bound to this synthesis engine")
+        if controls and engine.capabilities.get("structured_performance") is not True:
+            raise ValueError("This synthesis engine does not support structured pronunciation previews")
+        record = validate_performance({"version": PERFORMANCE_VERSION, "text_sha256": text_sha256(text),
+                                       "controls": deepcopy(list(controls))}, text)
+        options = {"performance": record} if controls else {"direction": ""}
+        from ..speech_traits import speech_traits
+        from .speech_traits import speech_trait_overrides
+        overrides = speech_trait_overrides(self.bundle, self.settings)
+        profile = next(item for item in self.bundle["cast"]["voices"] if item["id"] == sample["voice_id"])
+        traits = overrides[sample["voice_id"]] if sample["voice_id"] in overrides else speech_traits(profile)
+        if traits:
+            options["traits" if controls else "direction"] = traits
+        request = {"version": 1, "engine_sha256": digest(engine.identity), "voice": voice_conditioning_identity(voice),
+                   "text": text, "word": word, "pronunciation": pronunciation, "options": options,
+                   "name_test_sentence": True,
+                   "seed": self.settings["render"]["seed"], "sample_rate": self.settings["render"]["sample_rate"]}
+        context = {"segment_id": sample["row"]["id"], "voice_id": sample["voice_id"],
+                   "chapter_title": sample["chapter_title"], "name_test_sentence": True}
+        return self._preview_cache(word, pronunciation, text, options, request, engine, voice,
+                                   purpose="unverified_name_pronunciation_test", context=context,
+                                   cached_only=False, prefix="name-pronunciation-test")
+
+    def _preview_cache(self, word, pronunciation, text, options, request, engine, voice, *, purpose, context, cached_only,
+                       prefix="listening-preview"):
         if self.scope is not None:
             request = dict(request, scope=self.scope)
         key = digest(request)
@@ -643,7 +694,7 @@ class PronunciationReviewSession:
             state.setdefault("take_seed", request["seed"])
             owner = (word, context["voice_id"], f"take-{state['take']:03d}")
             state.setdefault("audio_file", descriptive_audio_filename(
-                "listening-preview", *owner, suffix=".flac"))
+                prefix, *owner, suffix=".flac"))
             raw_name = "raw.wav" if state.get("raw_sha256") is not None else descriptive_audio_filename(
                 "raw-preview", *owner, suffix=".wav")
             state.setdefault("raw_file", raw_name)

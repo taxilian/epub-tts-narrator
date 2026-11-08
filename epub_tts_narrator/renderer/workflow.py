@@ -1305,6 +1305,11 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
     config["_pronunciation_snapshot"] = confirmed_pronunciations(bundle["directory"])
     from .name_pronunciation_runtime import name_pronunciation_snapshot
     config["_name_pronunciation_snapshot"] = name_pronunciation_snapshot(bundle, config["_pronunciation_snapshot"])
+    from .name_pronunciation_tags import named_pronunciation_snapshot
+    try:
+        config["_tagged_name_snapshot"] = named_pronunciation_snapshot(bundle)
+    except ValueError as exc:
+        raise RenderBlocked(str(exc)) from exc
     from .speech_traits import speech_trait_overrides
     config["_speech_traits_snapshot"] = speech_trait_overrides(bundle, config)
     plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
