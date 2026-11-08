@@ -317,12 +317,16 @@ def _scanned_uncertain_candidates(cast, consensus, prior):
     return result
 
 
-def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=None):
+def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=None, checked_matches=None):
     """Canonicalize identities; only a bound audit may override name candidates.
 
     ``confirmed_identity_matches`` is the full provenance returned by
     ``audit_identities``, supplied by the pipeline after its independent jury.
-    Ordinary imports omit it and retain the conservative exact-alias guard.
+    ``checked_matches`` maps current character IDs to prior IDs confirmed by the
+    experimental narrator read's source-quoted series check; like the audit it
+    may settle a name shared by several prior characters, and it still requires
+    the character's own context evidence. Ordinary imports omit both and retain
+    the conservative exact-alias guard.
     """
     from .pipeline import base_document, segment
     validate_series_proposals(source, cast, registry)
@@ -363,10 +367,12 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
             evidence_words = [tuple(re.findall(r"\w+", item["quote"].casefold())) for item in proposal["evidence"]]
             evidence_has_context = any(words and words not in name_words for words in evidence_words)
             verified = confirmed is not None and confirmed.get(character["id"]) == identity
+            checked = (checked_matches or {}).get(character["id"]) == identity
             if (proposal["basis"] == "context" and not proposal["review_required"] and evidence_has_context
-                    and (verified or (confirmed is None and candidates == [identity]))):
+                    and (verified or checked or (confirmed is None and candidates == [identity]))):
                 proposals.setdefault(identity, []).append(character["id"])
                 match_basis[character["id"]] = ("unanimous_identity_consensus_with_current_source_evidence" if verified
+                                                 else "narrator_read_series_check_with_current_source_evidence" if checked
                                                  else "model_context_with_current_source_evidence")
                 continue
             candidates = list(dict.fromkeys([*candidates, identity]))

@@ -268,6 +268,10 @@ def parser():
     run.add_argument("--force", action="store_true",
                      help="Replace legacy .json output only; completed directories are never overwritten")
     run.add_argument("--edits", type=Path, help="Reapply source-bound human corrections after analysis")
+    run.add_argument("--strategy", choices=("consensus", "narrator"), default=None,
+                     help="Analysis strategy: consensus (default for a new book) or the experimental "
+                          "narrator read (one sequential prep read, then terse chapter markup). "
+                          "Updating a saved book from a new EPUB defaults to the strategy it was analyzed with")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
@@ -371,7 +375,7 @@ def main(argv=None):
                     raise ValueError("--edits cannot be combined with updating the book from a new EPUB; "
                                      "update the book first")
                 updated = update_book(
-                    directory, source, config=config, input_path=args.input,
+                    directory, source, config=config, input_path=args.input, strategy=args.strategy,
                     client_factory=provider_client, speaker_judge=_speaker_judge(config),
                     announce_cache=announce_cache, progress=progress)
                 return _speaker_completion_status(updated if updated is not None else original)
@@ -616,9 +620,13 @@ def main(argv=None):
             document = None
             resume_index = 0
             if directory_mode:
-                identity = pending_identity(source, client.identity, analysis_options_fingerprint(
+                options_fingerprint = analysis_options_fingerprint(
                     settings, config["performance_policy"],
-                    fingerprint(edits) if edits is not None else None))
+                    fingerprint(edits) if edits is not None else None)
+                if args.strategy not in (None, "consensus"):
+                    # A different strategy must never resume another's checkpoints.
+                    options_fingerprint = fingerprint([options_fingerprint, args.strategy])
+                identity = pending_identity(source, client.identity, options_fingerprint)
                 resumed = resume_document(args.output, identity)
                 if resumed is not None:
                     document, next_stage = resumed
@@ -636,19 +644,28 @@ def main(argv=None):
             try:
                 if resume_index <= 0:
                     begin("analyzed")
-                    document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
-                        repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
-                        whole_book_discovery=settings["whole_book_discovery"], attribution_workers=settings["attribution_workers"],
-                        identity_consensus=settings["identity_consensus"],
-                        attribution_review=settings["attribution_review"],
-                        attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
-                        attribution_review_notes=settings["attribution_review_notes"],
-                        cast_review_notes=settings["cast_review_notes"],
-                        cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
-                        cast_reconciliation_notes=settings["cast_reconciliation_notes"],
-                        series_registry=registry,
-                        policy=config["performance_policy"], progress=progress,
-                        meter=stream_console.set_progress)
+                    if args.strategy == "narrator":
+                        from .narrator_read import narrated_analyze, settings_notes
+                        document = narrated_analyze(
+                            source, client, model_cache, series_registry=registry,
+                            policy=config["performance_policy"], workers=settings["attribution_workers"],
+                            repair_attempts=settings["repair_attempts"],
+                            max_request_chars=settings["max_request_chars"], progress=progress,
+                            meter_callback=stream_console.set_progress, **settings_notes(settings))
+                    else:
+                        document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
+                            repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
+                            whole_book_discovery=settings["whole_book_discovery"], attribution_workers=settings["attribution_workers"],
+                            identity_consensus=settings["identity_consensus"],
+                            attribution_review=settings["attribution_review"],
+                            attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
+                            attribution_review_notes=settings["attribution_review_notes"],
+                            cast_review_notes=settings["cast_review_notes"],
+                            cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
+                            cast_reconciliation_notes=settings["cast_reconciliation_notes"],
+                            series_registry=registry,
+                            policy=config["performance_policy"], progress=progress,
+                            meter=stream_console.set_progress)
                     if edits is not None:
                         document = apply_edits(document, edits)
                     complete("analyzed")

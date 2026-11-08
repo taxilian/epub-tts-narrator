@@ -208,6 +208,8 @@ class OpenAICompatibleClient:
         stall_timeout: float = 120.0,
         progress_callback=None,
         stream_observer=None,
+        include_usage: bool = False,
+        usage_observer=None,
     ):
         if not isinstance(model, str) or not model.strip():
             raise ProviderError("A nonempty model name is required.")
@@ -250,6 +252,10 @@ class OpenAICompatibleClient:
             raise ProviderError("The stream progress callback must be callable or None.")
         if stream_observer is not None and not callable(stream_observer):
             raise ProviderError("The stream observer must be callable or None.")
+        if not isinstance(include_usage, bool):
+            raise ProviderError("include_usage must be true or false.")
+        if usage_observer is not None and not callable(usage_observer):
+            raise ProviderError("The usage observer must be callable or None.")
         if api_key is not None:
             if not isinstance(api_key, str) or any(
                 ord(char) < 32 or ord(char) > 126 for char in api_key
@@ -268,6 +274,9 @@ class OpenAICompatibleClient:
         self.retry_max_delay = float(retry_max_delay)
         self.stall_timeout = float(stall_timeout)
         self.progress_callback = progress_callback
+        # Transport-only accounting: never part of identity or cache keys.
+        self.include_usage = include_usage
+        self.usage_observer = usage_observer
         self.stream_observer = (
             _DEFAULT_STREAM_OBSERVER if stream_observer is None else stream_observer)
         # Reasoning models may pause minutes before the first stream byte, so
@@ -314,6 +323,8 @@ class OpenAICompatibleClient:
             # Streaming changes only the wire transport; identity and the
             # request-cache inputs never see it.
             body["stream"] = True
+            if self.include_usage:
+                body["stream_options"] = {"include_usage": True}
             encoded = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (ValueError, TypeError, OverflowError, RecursionError):
             raise ProviderError("The completion payload cannot be encoded as JSON.") from None
@@ -321,7 +332,9 @@ class OpenAICompatibleClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        started = time.monotonic()
         raw = self._request(encoded, headers)
+        elapsed = time.monotonic() - started
 
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ResponseCapacityError("The API response exceeds the 16 MiB limit.")
@@ -330,6 +343,7 @@ class OpenAICompatibleClient:
         except UnicodeDecodeError:
             raise ProviderError("The API response is not valid UTF-8 JSON.") from None
         result = _json_object(text, "The API response")
+        self._report_usage(result.get("usage"), elapsed, len(encoded), len(raw))
 
         if result.get("error") is not None:
             details = result["error"] if isinstance(result["error"], dict) else {}
@@ -356,6 +370,27 @@ class OpenAICompatibleClient:
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("The API response has no text content.")
         return _json_object(content, "The model output")
+
+    def _report_usage(self, usage, elapsed, request_bytes, response_bytes) -> None:
+        """Report numeric token counts only; never text, keys, or URLs."""
+        if self.usage_observer is None:
+            return
+        def count(container, key):
+            value = container.get(key) if isinstance(container, dict) else None
+            return value if type(value) is int and value >= 0 else None
+        usage = usage if isinstance(usage, dict) else {}
+        record = {"model": self.model, "reasoning_effort": self.reasoning_effort,
+                  "elapsed_seconds": round(elapsed, 3), "request_bytes": request_bytes,
+                  "response_bytes": response_bytes,
+                  "prompt_tokens": count(usage, "prompt_tokens"),
+                  "completion_tokens": count(usage, "completion_tokens"),
+                  "cached_tokens": count(usage.get("prompt_tokens_details"), "cached_tokens"),
+                  "reasoning_tokens": count(usage.get("completion_tokens_details"), "reasoning_tokens")}
+        try:
+            self.usage_observer(record)
+        except Exception:
+            # Accounting must never change request success or caching.
+            return
 
     def _request(self, encoded: bytes, headers: dict) -> bytes:
         # Retry synchronously inside the caller's worker. Never create additional
@@ -445,6 +480,7 @@ class OpenAICompatibleClient:
         role = None
         refusal = None
         finish_reason = None
+        usage = None
         data_lines: list[str] = []
         received = 0
         event_count = reasoning_chars = content_chars = 0
@@ -490,6 +526,8 @@ class OpenAICompatibleClient:
                 chunk = _json_object(payload, "The API response stream")
                 if chunk.get("error") is not None:
                     raise self._stream_error(chunk["error"])
+                if isinstance(chunk.get("usage"), dict):
+                    usage = chunk["usage"]
                 choices = chunk.get("choices")
                 if isinstance(choices, list) and choices and isinstance(choices[0], dict):
                     event_count += 1
@@ -527,6 +565,8 @@ class OpenAICompatibleClient:
         if refusal is not None:
             message["refusal"] = refusal
         envelope = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+        if usage is not None:
+            envelope["usage"] = usage
         return json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
     def _guarded_readline(self, response) -> bytes:

@@ -449,6 +449,7 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         "context_reviews": disagreements,
         "dropped_citations": len(dropped),
         "rebased_traits": rebased_traits,
+        "strategy": (saved_strategy(delta) if delta is not None else None),
         "analysis": deepcopy(delta["provenance"]) if delta is not None else None,
     }
     provenance.setdefault("book_updates", []).append(update)
@@ -726,9 +727,17 @@ def ensure_updatable(directory):
                          f"(continued by {descendants}). Analyze the new EPUB into a separate output directory")
 
 
+def saved_strategy(document):
+    """The analysis strategy a saved book was made with: "narrator" or "consensus"."""
+    return "narrator" if document["provenance"].get("strategy") == "narrator_read" else "consensus"
+
+
 def update_book(directory, source, *, config, input_path=None, client_factory, speaker_judge=None,
-                announce_cache=lambda path: Path(path).resolve(), progress=print, log=print):
+                announce_cache=lambda path: Path(path).resolve(), progress=print, log=print, strategy=None):
     """Analyze and publish the new and edited chapters of ``directory``'s book.
+
+    ``strategy`` ("consensus" or "narrator") selects the analysis for the new
+    paragraphs; by default the one the book was analyzed with.
 
     Returns the published document, or ``None`` when the source has no new or
     edited chapters. ``client_factory`` builds the analysis client from
@@ -742,6 +751,9 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     from .speaker_decisions import prompt_speaker_decisions
     directory = Path(directory).resolve()
     original, registry, _ = _completed_directory(directory)
+    if strategy not in (None, "consensus", "narrator"):
+        raise ValueError("strategy must be consensus or narrator")
+    strategy = strategy or saved_strategy(original)
     comparison = compare_sources(original["source"], source)
     if not has_changes(comparison):
         log("No new or edited chapters: the EPUB's chapters match the saved book. "
@@ -766,7 +778,8 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
                f"{len(comparison['edited_chapters'])} edited chapter(s)")
     client = client_factory(**config["provider"]) if delta is not None else None
     if client is not None:
-        log(f"Updating {directory} with {changes} using {client.model} at {client.base_url}; only the new "
+        log(f"Updating {directory} with {changes} using {client.model} at {client.base_url}"
+            f"{' (narrator read)' if strategy == 'narrator' else ''}; only the new "
             "chapters and the edited paragraphs with their neighbours will be sent to this endpoint.")
     else:
         log(f"Updating {directory} with {changes}; only paragraphs were removed, so no model is needed.")
@@ -774,7 +787,9 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     identity = pending_identity(merged, client.identity if client is not None else {"model": None},
                                 analysis_options_fingerprint(
         settings, config["performance_policy"],
-        fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash})))
+        # A narrator-read update never resumes a consensus update's checkpoints.
+        fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash,
+                     **({"strategy": strategy} if strategy != "consensus" else {})})))
     workspace = update_workspace(directory)
     resumed = resume_document(workspace, identity)
     document, resume_index = None, 0
@@ -791,21 +806,31 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     try:
         if resume_index <= 0:
             pending.begin_stage("analyzed")
-            analyzed = None if delta is None else analyze(
-                delta, client, model_cache, chunk_chars=settings["chunk_chars"],
-                repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
-                whole_book_discovery=settings["whole_book_discovery"],
-                attribution_workers=settings["attribution_workers"],
-                identity_consensus=settings["identity_consensus"],
-                attribution_review=settings["attribution_review"],
-                attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
-                attribution_review_notes=settings["attribution_review_notes"],
-                cast_review_notes=settings["cast_review_notes"],
-                cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
-                cast_reconciliation_notes=settings["cast_reconciliation_notes"],
-                # The book's own history: returning characters keep their voices.
-                series_registry=deepcopy(registry),
-                policy=config["performance_policy"], progress=progress)
+            if delta is None:
+                analyzed = None
+            elif strategy == "narrator":
+                from .narrator_read import narrated_analyze, settings_notes
+                analyzed = narrated_analyze(
+                    delta, client, model_cache, series_registry=deepcopy(registry),
+                    policy=config["performance_policy"], workers=settings["attribution_workers"],
+                    repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
+                    progress=progress, **settings_notes(settings))
+            else:
+                analyzed = analyze(
+                    delta, client, model_cache, chunk_chars=settings["chunk_chars"],
+                    repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
+                    whole_book_discovery=settings["whole_book_discovery"],
+                    attribution_workers=settings["attribution_workers"],
+                    identity_consensus=settings["identity_consensus"],
+                    attribution_review=settings["attribution_review"],
+                    attribution_review_chunk_chars=settings["attribution_review_chunk_chars"],
+                    attribution_review_notes=settings["attribution_review_notes"],
+                    cast_review_notes=settings["cast_review_notes"],
+                    cast_reconciliation_rounds=settings["cast_reconciliation_rounds"],
+                    cast_reconciliation_notes=settings["cast_reconciliation_notes"],
+                    # The book's own history: returning characters keep their voices.
+                    series_registry=deepcopy(registry),
+                    policy=config["performance_policy"], progress=progress)
             document = merge_update(original, analyzed, comparison, epub_sha256=digest)
             pending.complete_stage("analyzed", document)
         if resume_index <= 1:
