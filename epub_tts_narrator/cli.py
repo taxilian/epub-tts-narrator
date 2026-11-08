@@ -291,6 +291,19 @@ def parser():
                           "Updating a saved book from a new EPUB defaults to the strategy it was analyzed with")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
+    verification = commands.add_parser(
+        "verify-attribution", help="Re-read risky speaker assignments in a published book and optionally apply confirmed corrections")
+    verification.add_argument("directory", type=Path, help="Completed analysis directory to verify")
+    verification.add_argument("--config", type=Path,
+                              help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    selection = verification.add_mutually_exclusive_group()
+    selection.add_argument("--chapters", help="Comma-separated source chapter numbers, such as 3,5")
+    selection.add_argument("--chapter", type=int, help="One source chapter number")
+    selection.add_argument("--sample", type=int, help="Deterministically sample N blocks from the risk set")
+    verification.add_argument("--instructions", help="Review guidance passed to the attribution engine (1-2000 characters)")
+    verification.add_argument("--apply", action="store_true", help="Apply the complete audited document after printing findings")
+    verification.add_argument("--interactive", action="store_true", help="Choose each correction interactively; takes precedence over --apply")
+    verification.add_argument("--workers", type=int, default=3, help="Concurrent model requests, 1-5 (default 3)")
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
     speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
     speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -526,6 +539,125 @@ def main(argv=None):
             remaining = sum(len(unassigned_segments(document)) for document in revised.values())
             print(f"Speaker completion finished: {remaining} unassigned spoken passage(s) remain.")
             return 2 if remaining else 0
+        if args.command == "verify-attribution":
+            from .analysis_directory import _completed_directory
+            from .analysis_revision import related_directories, revise_directories
+            from .attribution_verification import (
+                chapter_block_ids, findings, restrict_findings, risk_blocks, sample_blocks,
+            )
+            config = load_config(args.config)
+            settings = config["analysis"]
+            if not config["provider"]["model"]:
+                raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
+            if type(args.workers) is not int or not 1 <= args.workers <= 5:
+                raise ValueError("workers must be an integer from 1 to 5")
+            instructions = args.instructions or ""
+            if args.instructions is not None and not 1 <= len(instructions) <= 2000:
+                raise ValueError("--instructions must contain from 1 to 2000 characters")
+            directory = args.directory.resolve()
+            document, registry, bundle_names = _completed_directory(directory)
+            risk = risk_blocks(document)
+            if not risk:
+                print("No context-basis or flagged dialogue lines to verify.")
+                return 0
+            selected = risk
+            if args.chapter is not None or args.chapters is not None:
+                try:
+                    numbers = ([args.chapter] if args.chapter is not None else
+                               [int(part.strip()) for part in args.chapters.split(",")])
+                except ValueError:
+                    raise ValueError("--chapters must be a comma-separated list of positive chapter numbers") from None
+                if not numbers or any(type(number) is not int or number < 1 for number in numbers):
+                    raise ValueError("--chapter/--chapters must contain positive chapter numbers")
+                chapters = document["source"]["chapters"]
+                unknown = [number for number in numbers if number > len(chapters)]
+                if unknown:
+                    raise ValueError("Unknown chapter number(s): " + ", ".join(str(number) for number in unknown))
+                chapter_ids = [chapters[number - 1]["id"] for number in dict.fromkeys(numbers)]
+                scoped = chapter_block_ids(document, chapter_ids)
+                in_chapters = {block_id for block_ids in scoped.values() for block_id in block_ids}
+                selected = [block_id for block_id in risk if block_id in in_chapters]
+                print(f"Chapter selection: {sum(len(block_ids) for block_ids in scoped.values())} block(s); "
+                      f"{len(selected)} risk-set block(s).")
+                if not selected:
+                    print("No risk-set lines in the selected chapter(s).")
+                    return 0
+            elif args.sample is not None:
+                selected = sample_blocks(risk, args.sample)
+            block_chapters = {block["id"]: block["chapter_id"] for block in document["source"]["blocks"]}
+            covered = list(dict.fromkeys(block_chapters[block_id] for block_id in selected))
+            strategy = document["provenance"].get("strategy", "consensus")
+            print(f"Verification selection: strategy={strategy}; {len(selected)}/{len(document['source']['blocks'])} "
+                  f"blocks across {len(covered)} chapter(s); instructions={'yes' if instructions else 'no'}.")
+            directories = hashes = None
+            if args.apply or args.interactive:
+                directories = related_directories([directory])
+                hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                          for path in directories}
+            client = provider_client(config["provider"])
+            print(f"Verifying attribution with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.",
+                  file=sys.stderr)
+            model_cache = announce_cache(analysis_cache_directory(directory, settings["cache_dir"]))
+            requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
+                                      max_request_chars=settings["max_request_chars"], progress=progress)
+            audited = audit_attribution(document, requests, workers=args.workers, review_notes=instructions,
+                                        target_block_ids=selected, progress=print)
+            found = findings(document, audited)
+
+            def show_finding(finding, index):
+                print(f"{index}. chapter {finding['chapter_id']} segment {finding['segment_id']} "
+                      f"(block {finding['block_id']})")
+                if finding["review_only"]:
+                    print("   needs review")
+                else:
+                    print(f"   from {finding['from_label']} to {finding['to_label']}")
+                print(f"   {finding['text']}")
+                for item in finding["evidence"]:
+                    print(f"   evidence {item['block_id']}: {item['quote']}")
+
+            def publish(candidate):
+                result = revise_directories({directory: candidate}, directories=directories,
+                                            expected_manifest_hashes=hashes, scope="attribution", progress=print)
+                print(f"Original analysis files and revision journal: {result['backup_directory']}")
+
+            if not args.interactive:
+                for index, finding in enumerate(found, 1):
+                    show_finding(finding, index)
+                print(f"{len(found)} attribution finding(s).")
+                if args.apply:
+                    publish(audited)
+                return 0
+            print(f"{len(found)} attribution finding(s).")
+            if not found:
+                print("No attribution corrections or new review flags.")
+                return 0
+            accepted = []
+            for index, finding in enumerate(found, 1):
+                show_finding(finding, index)
+                while True:
+                    print("[y] keep correction / [n] skip / [Q] stop: ", end="", flush=True)
+                    try:
+                        answer = sys.stdin.readline()
+                    except (EOFError, KeyboardInterrupt, OSError):
+                        answer = ""
+                    if answer == "":
+                        print("\nInput ended; corrections accepted so far will be retained.")
+                        answer = "q"
+                    answer = answer.strip().casefold()
+                    if answer in {"y", "n", "q"}:
+                        break
+                    print("Please enter y, n, or Q.")
+                if answer == "y":
+                    accepted.append(finding["segment_id"])
+                if answer == "q":
+                    break
+            if not accepted:
+                print("No corrections selected.")
+                return 0
+            revised, applied = restrict_findings(document, audited, accepted)
+            print(f"Applying {len(applied)} accepted correction(s).")
+            publish(revised)
+            return 0
         if args.command == "refresh-voice-profiles":
             from .voice_profile_refresh import refresh_book_voice_profiles
             refresh_book_voice_profiles(args.directory, args.config, workers=args.workers)
