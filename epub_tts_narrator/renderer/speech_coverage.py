@@ -20,7 +20,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 12
+SPEECH_COVERAGE_VERSION = 13
 _MAX_ALIGNMENT_STATES = 20_000
 _SPELLING_VARIANTS: dict[frozenset[str], str] = {
     frozenset(("qi", "chi")): "standard_transliteration",
@@ -398,6 +398,20 @@ def speech_coverage(expected_text, transcript):
                 candidate = (spelling_variant("".join(left), "".join(right)) if multi else
                              terminal_s_variation(left[0], right[0], i, j)
                              or bounded_pronunciation(left[0], right[0], left_keys, right_keys, i, j))
+            if not common and candidate is None and not multi:
+                pair = (left[0], right[0])
+                if (all(_ALPHABETIC_WORD.fullmatch(word)
+                        and len(word.replace("'", "")) >= 2
+                        and word not in _PROTECTED_NUMERIC and "n't" not in word
+                        and word not in _COLLOQUIAL_EXPANSIONS for word in pair)
+                        and not any(source[span[0]:span[1]].isupper()
+                                    for source, span in ((expected_source, expected_spans[i]),
+                                                         (actual_source, actual_spans[j])))):
+                    full_left = tuple(key for key in metaphone(pair[0].replace("'", "")) if key)
+                    full_right = tuple(key for key in metaphone(pair[1].replace("'", "")) if key)
+                    if set(full_left).intersection(full_right):
+                        candidate = "single_word_homophone"
+                        left_keys, right_keys = full_left, full_right
             if not common and candidate is None:
                 continue
             end_i, end_j = i + left_size, j + right_size

@@ -33,6 +33,22 @@ class ProtectedHomophoneCoverageTests(unittest.TestCase):
                     self.assertEqual([(p["expected_word"], p["recognized_word"]) for p in pairs],
                                      [(expected, actual)])
 
+    def test_short_nonprotected_homophone_reaches_review_in_both_directions(self):
+        for expected, actual in (("we", "wee"), ("wee", "we")):
+            with self.subTest(expected=expected, actual=actual):
+                self.assertIsNone(phonetic_equivalence(expected, actual))
+                coverage = speech_coverage(expected, actual)
+                self.assertTrue(coverage["passed"], coverage)
+                change = coverage["alignment"][0]
+                self.assertEqual(change["operation"], "pronunciation_candidate")
+                self.assertEqual(change["rule"], "single_word_homophone")
+                self.assertEqual(change["expected"], [expected])
+                self.assertEqual(change["actual"], [actual])
+                pairs = substitution_pairs(expected, actual)
+                self.assertEqual([(p["expected_word"], p["recognized_word"]) for p in pairs],
+                                 [(expected, actual)])
+        self.assertFalse(speech_coverage("wee", "bee")["passed"])
+
     def test_candidate_never_consumes_missing_extra_reordered_or_numeric_content(self):
         for expected, actual in (
             (EXPECTED, "No! Get help!"),
@@ -84,6 +100,17 @@ class ProtectedHomophoneVerificationTests(unittest.TestCase):
                     self.assertEqual(len(client.calls), 3)
                     if approved:
                         self.assertEqual(report["text_confirmation_method"], "phonetic_primary")
+
+    def test_short_nonprotected_homophone_can_pass_jev_in_both_directions(self):
+        for expected, heard in (("we", "wee"), ("wee", "we")):
+            for decision, approved in (("equivalent", True), ("different", False)):
+                with self.subTest(expected=expected, heard=heard, decision=decision):
+                    report = self.check(
+                        ReferenceTextJudgingVerifier(fixtures.PrimaryVerifier(heard), Judge(decision)),
+                        expected=expected, purpose="speech")
+                    self.assertEqual(report["passed"], approved, report)
+                    if approved:
+                        self.assertEqual(report["text_confirmation_method"], "jev_primary")
 
     def test_no_judge_and_failed_acoustics_cannot_use_review_eligibility_as_approval(self):
         report = self.check(fixtures.PrimaryVerifier(HEARD), expected=EXPECTED, purpose="speech")
