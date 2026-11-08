@@ -379,12 +379,14 @@ class AnalyzeResumeTests(unittest.TestCase):
 
     def test_timeout_preserves_bundle_and_reuses_completed_jury_requests_on_next_run(self):
         _, path, _ = self.seed()
-        before = snapshot(path)
+        before = {name: data for name, data in snapshot(path).items()
+                  if not name.startswith(".analysis-cache")}
         first = CompletionClient(fail_after=1)
         status, _, error, _ = self.run_cli(path, client=first)
         self.assertEqual(status, 1)
         self.assertIn("Resume cache", error)
-        self.assertEqual(snapshot(path), before)
+        self.assertEqual({name: data for name, data in snapshot(path).items()
+                          if not name.startswith(".analysis-cache")}, before)
         retry = CompletionClient()
         status, _, error, _ = self.run_cli(path, client=retry)
         self.assertEqual(status, 0, error)
@@ -491,12 +493,14 @@ class AnalyzeResumeTests(unittest.TestCase):
         status, _, error, _ = self.run_cli(path, answers="q\n", client=first)
         self.assertEqual(status, 2, error)
         self.assertEqual(len(first.calls), 9)
-        before_interruption = snapshot(path)
+        before_interruption = {name: data for name, data in snapshot(path).items()
+                               if not name.startswith(".analysis-cache")}
         interrupted = CompletionClient(fail_after=1)
         status, _, error, _ = self.run_cli(path, client=interrupted)
         self.assertEqual(status, 1, error)
         self.assertEqual(len(interrupted.calls), 1)
-        self.assertEqual(snapshot(path), before_interruption)
+        self.assertEqual({name: data for name, data in snapshot(path).items()
+                          if not name.startswith(".analysis-cache")}, before_interruption)
         self.assertNotEqual(interrupted.calls[0]["completion_retry_token"],
                             first.calls[0]["completion_retry_token"])
         retry = CompletionClient()

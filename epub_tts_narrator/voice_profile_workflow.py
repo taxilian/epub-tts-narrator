@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shlex
 
+from .analysis_progress import analysis_cache_directory
 from .audition_scripts import FILENAME as AUDITION_SIDECAR
 from .pipeline import CachedRequests, fingerprint
 from .voice_profile_refresh import (apply_profile_updates, audition_sidecar_rebind,
@@ -36,7 +37,6 @@ def _refresh_locked(directory, config_path=None, *, workers=1, progress=print):
         raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
     original, registry, _ = _completed_directory(directory)
     directories = related_directories([directory])
-    ancestors = continuation_directories(directory)
     hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
               for path in directories}
     previous = read_state(directory)
@@ -58,9 +58,7 @@ def _refresh_locked(directory, config_path=None, *, workers=1, progress=print):
                     "directories": [str(path) for path in directories], "resumed": True}
         if cast_hash != previous["binding"]["cast_fingerprint"]:
             raise ValueError("Cast changed during pending voice profile refresh; refusing stale proposals")
-    cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
-    if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
-        raise ValueError("The cache directory must be outside the existing book and its series directories")
+    cache = analysis_cache_directory(directory, settings["cache_dir"])
     client = OpenAICompatibleClient(**config["provider"])
     progress(f"Refreshing voice profiles with {client.model} at {client.base_url}; character profiles, "
              "casting context, and source evidence are sent to this endpoint.")

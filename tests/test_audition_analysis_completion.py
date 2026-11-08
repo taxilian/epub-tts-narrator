@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.analysis_directory import _completed_directory
+from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.audition_scripts import audition_preparation_pending
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.contracts import validate_document
@@ -86,7 +87,7 @@ class AuditionAnalysisCompletionTests(unittest.TestCase):
         self.assertIn("Mara", prepared["pending"][failed_voice]["name"])
         self.assertIn("Yesss", prepared["pending"][failed_voice]["error"])
         self.assertEqual(len(first.audition_calls), 3)  # one success + two rejected responses
-        cached = self.root / ".epub-audiobook-cache"
+        cached = self.output / CACHE_DIRNAME
         self.assertTrue(any("Yesss" in path.read_text() for path in (cached / "failed").glob("*.json")))
         self.assertFalse(any(json.loads(path.read_text()).get("text", "").startswith("Yesss")
                              for path in cached.glob("*.json")))

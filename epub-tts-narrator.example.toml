@@ -76,10 +76,9 @@ attribution_review_chunk_chars = 60000
 # Shared concurrency ceiling for attribution, identity, and passage-review requests.
 # Identity reviewers run at most three concurrently; analysis phases do not overlap.
 attribution_workers = 1
-# Optional global cache location. Relative paths use this file's directory.
-# Otherwise the cache is .epub-audiobook-cache beside each output directory.
-# It cannot be inside the current or previous output directory.
-# cache_dir = ".epub-audiobook-cache"
+# Optional cache location. It must be inside each analysis output directory.
+# The default is <output>/.analysis-cache.
+# cache_dir = "runs/my-book/.analysis-cache"
 # The legacy series_registry setting is deprecated and rejected in directory mode.
 # Use --continue-from PREVIOUS_OUTPUT_DIRECTORY on the command instead.
 

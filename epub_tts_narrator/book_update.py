@@ -744,8 +744,8 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     ``config["provider"]`` only after every local check has passed, and only
     when some paragraph needs the model (removing paragraphs needs none).
     """
-    from .analysis_progress import (STAGES, analysis_options_fingerprint, create_pending,
-                                    pending_identity, resume_document)
+    from .analysis_progress import (STAGES, analysis_cache_directory, analysis_options_fingerprint,
+                                    create_pending, pending_identity, resume_document)
     from .audition_scripts import prepare_document_samples
     from .pipeline import CachedRequests, analyze
     from .speaker_decisions import prompt_speaker_decisions
@@ -766,9 +766,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     delta = delta_source(comparison)
     if delta is not None and not config["provider"]["model"]:
         raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
-    cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
-    if cache == directory or directory in cache.parents:
-        raise ValueError("The cache directory must be outside the book directory")
+    cache = analysis_cache_directory(directory, settings["cache_dir"])
     if (directory / "name-script.json").exists():
         log("Note: this book has a legacy name-script.json. It covers only the earlier chapters; "
             "name-scoped pronunciation choices that depend on it are blocked until it is prepared again.")

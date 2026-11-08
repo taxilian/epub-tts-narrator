@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from epub_tts_narrator.analysis_progress import (
-    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, analysis_options_fingerprint,
+    CACHE_DIRNAME, PENDING_DIRNAME, PROGRESS_VERSION, STAGES, analysis_options_fingerprint,
     create_pending, discard_pending, inspect_pending, is_pending_directory,
     pending_identity, resume_document)
 from epub_tts_narrator.contracts import validate_document
@@ -175,6 +175,12 @@ class AnalysisProgressTests(unittest.TestCase):
                         path.write_text(content, encoding="utf-8")
                 self.assertFalse(is_pending_directory(output))
                 self.assertIsNone(inspect_pending(output))
+
+    def test_in_output_cache_does_not_make_pending_analysis_look_published(self):
+        with create_pending(self.output, run_identity()):
+            (self.output / CACHE_DIRNAME).mkdir()
+            self.assertTrue(is_pending_directory(self.output))
+            self.assertIsNotNone(inspect_pending(self.output))
 
     @unittest.skipUnless(os.name == "posix", "POSIX fcntl required")
     def test_concurrent_analysis_is_refused_until_the_lease_is_released(self):

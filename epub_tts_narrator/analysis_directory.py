@@ -9,9 +9,8 @@ import os
 from pathlib import Path
 import shutil
 import stat
-import tempfile
 
-from .analysis_progress import PENDING_DIRNAME, is_pending_directory
+from .analysis_progress import CACHE_DIRNAME, PENDING_DIRNAME, is_pending_directory
 from .contracts import readiness, review_items, validate_document
 from .pipeline import fingerprint, write_json
 from .series import load_registry, save_registry, validate_registry
@@ -25,8 +24,8 @@ def validate_output(output, *, allow_pending=False):
     """Check a new destination without creating it or changing existing files.
 
     With ``allow_pending`` an existing directory is accepted only when it is a
-    pending analysis directory (solely ``.analysis-pending/`` state); any other
-    existing path is still refused.
+    pending analysis directory (``.analysis-pending/`` plus its in-output
+    ``.analysis-cache/``); any other existing path is still refused.
     """
     output = Path(output)
     if output.exists() or output.is_symlink():
@@ -298,9 +297,13 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
                         "source_fingerprint": fingerprint(prior_document["source"]),
                         "analysis_sha256": metadata["analysis.json"],
                         "series_cast_sha256": metadata["series-cast.json"]}
-    output.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".audiobook-analysis-", dir=output.parent))
+    pending = is_pending_directory(output)
     owned_directories, expected_files = {}, {}
+    if not pending:
+        output.mkdir()
+        owned_directories[output] = _identity(output)
+    staging = output / ".analysis-publish"
+    staging.mkdir()
     try:
         bundle = staging / "bundle"
         state = exporter(document, bundle, allow_review=True)
@@ -323,12 +326,10 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
             hint_names.append(SOURCE_EPUB_HINT)
         names = ["analysis.json", "series-cast.json", *bundle_names, *hint_names, "manifest.json"]
         expected_files = {output / name: _identity(bundle / name) for name in names}
-        # Re-checked at link time: content added after validation (even new
-        # pending state) makes the destination foreign again, and mkdir then
-        # fails closed instead of publishing alongside it.
-        pending = is_pending_directory(output)
-        if not pending:
-            output.mkdir()
+        allowed = ({PENDING_DIRNAME, CACHE_DIRNAME, staging.name} if pending
+                   else {staging.name})
+        if {path.name for path in output.iterdir()} - allowed:
+            raise FileExistsError(f"Output directory changed during publication: {output}")
         owned_directories[output] = _identity(output)
         scripts = output / "scripts"
         scripts.mkdir()
@@ -346,7 +347,8 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
         os.link(bundle / "manifest.json", output / "manifest.json")
         return state
     except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
         _rollback(output, owned_directories, expected_files)
         raise
     finally:
-        shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)

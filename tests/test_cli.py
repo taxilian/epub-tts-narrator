@@ -474,7 +474,6 @@ class CLITests(unittest.TestCase):
         with patch("epub_tts_narrator.cli.os.link", side_effect=fail_chapter_link):
             with self.assertRaisesRegex(OSError, "simulated"):
                 export_bundle(valid_document(), target)
-        self.assertTrue(target.is_dir())
         self.assertFalse((target / "manifest.json").exists())
         self.assertEqual(list(self.root.glob(".audiobook-export-*")), [])
 
@@ -488,22 +487,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(marker.read_text(), "keep")
         self.assertEqual(len(list(target.iterdir())), 1)
 
-    def test_export_does_not_replace_concurrently_created_directory(self):
+    def test_export_does_not_remove_concurrently_created_content(self):
         target = self.root / "concurrent"
         original_writer = write_json
-        inode = []
 
         def writer(path, value, **kwargs):
             original_writer(path, value, **kwargs)
             if Path(path).name == "manifest.json":
-                target.mkdir()
-                inode.append(target.stat().st_ino)
+                (target / "keep").write_text("another process", encoding="utf-8")
 
         with patch("epub_tts_narrator.cli.write_json", writer):
             with self.assertRaises(FileExistsError):
                 export_bundle(valid_document(), target)
-        self.assertEqual(target.stat().st_ino, inode[0])
-        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual({path.name for path in target.iterdir()}, {"keep"})
+        self.assertEqual((target / "keep").read_text(encoding="utf-8"), "another process")
 
     def test_validation_and_review_status(self):
         doc = valid_document()

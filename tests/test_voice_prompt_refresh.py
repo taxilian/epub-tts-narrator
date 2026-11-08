@@ -8,6 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
 from epub_tts_narrator.prompts import COMMON, VOICE_PROFILE_GUIDANCE
 from epub_tts_narrator.provider import ProviderError
@@ -233,8 +234,9 @@ class VoicePromptRefreshTests(unittest.TestCase):
             self.assertEqual(refresh.call_args.kwargs["workers"], 5)
             self.assertEqual(result["provider"], client.identity)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "original")
-            self.assertEqual(list(Path(data["directory"]).iterdir()), [sentinel])
-            self.assertEqual(len(list((root / ".epub-audiobook-cache").glob("*.json"))), 2)
+            self.assertEqual({path.name for path in Path(data["directory"]).iterdir()},
+                             {"cast.json", CACHE_DIRNAME})
+            self.assertEqual(len(list((Path(data["directory"]) / CACHE_DIRNAME).glob("*.json"))), 2)
             self.assertNotIn("do-not-persist", str(result))
 
 

@@ -6,14 +6,15 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.analysis_directory import _completed_directory
 from epub_tts_narrator.analysis_progress import (
-    PENDING_DIRNAME, PROGRESS_VERSION, STAGES, PendingAnalysis, create_pending, inspect_pending,
-    is_pending_directory,
+    CACHE_DIRNAME, PENDING_DIRNAME, PROGRESS_VERSION, STAGES, PendingAnalysis, create_pending,
+    inspect_pending, is_pending_directory,
 )
 from epub_tts_narrator.audition_scripts import prepare_document_samples
 from epub_tts_narrator.cli import main
@@ -156,6 +157,26 @@ class AnalyzeCheckpointTests(unittest.TestCase):
                          "A successful publish must remove the pending state")
         _completed_directory(output)
 
+    def test_deleting_output_removes_the_cache_and_forces_fresh_model_work(self):
+        output = self.root / "book"
+        factory, first = self.clients()
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
+            status, _, stderr = self.run_cli(*self.analyze_command(output))
+        self.assertEqual(status, 0, stderr)
+        cache = output / CACHE_DIRNAME
+        self.assertTrue(cache.is_dir())
+        self.assertFalse((self.root / ".epub-audiobook-cache").exists())
+        first_calls = len(first[0].calls)
+        self.assertGreater(first_calls, 0)
+        shutil.rmtree(output)
+        self.assertFalse(cache.exists())
+        factory, second = self.clients()
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
+            status, _, stderr = self.run_cli(*self.analyze_command(output))
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(second[0].calls), first_calls)
+        self.assertFalse((self.root / ".epub-audiobook-cache").exists())
+
     def test_interrupt_during_each_stage_resumes_there_without_redoing_completed_stages(self):
         for index, stage in enumerate(STAGES):
             with self.subTest(stage=stage):
@@ -224,7 +245,7 @@ class AnalyzeCheckpointTests(unittest.TestCase):
 
     def test_resume_into_speakers_decided_replays_the_speaker_decision_journal(self):
         output = self.root / "book"
-        cache = self.root / ".epub-audiobook-cache"
+        cache = output / CACHE_DIRNAME
         pre_prompt = []
 
         def capture_and_interrupt(document, **kwargs):

@@ -263,7 +263,10 @@ class AnalysisDirectoryTests(unittest.TestCase):
         def observe(source, destination):
             destination = Path(destination)
             if destination.is_relative_to(output):
-                published.append(str(destination.relative_to(output)))
+                relative = destination.relative_to(output)
+                if relative.parts[:1] == (".analysis-publish",):
+                    return original_link(source, destination)
+                published.append(str(relative))
                 if destination.name == "manifest.json":
                     self.assertTrue((output / "analysis.json").is_file())
                     self.assertTrue((output / "series-cast.json").is_file())
@@ -303,7 +306,6 @@ class AnalysisDirectoryTests(unittest.TestCase):
 
         def race_exporter(*args, **kwargs):
             state = export_bundle(*args, **kwargs)
-            output.mkdir()
             (output / "keep").write_text("another process")
             return state
 
@@ -385,7 +387,10 @@ class AnalysisDirectoryTests(unittest.TestCase):
         def observe(source, destination):
             destination = Path(destination)
             if destination.is_relative_to(output):
-                published.append(str(destination.relative_to(output)))
+                relative = destination.relative_to(output)
+                if relative.parts[:1] == (".analysis-publish",):
+                    return original_link(source, destination)
+                published.append(str(relative))
                 if destination.name == "manifest.json":
                     self.assertTrue((output / "analysis.json").is_file())
                     self.assertTrue((output / "scripts/chapter-0001.jsonl").is_file())

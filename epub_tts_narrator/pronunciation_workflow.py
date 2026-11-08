@@ -2,16 +2,15 @@
 
 from pathlib import Path
 
-from .analysis_directory import _completed_directory, continuation_directories
+from .analysis_directory import _completed_directory
+from .analysis_progress import analysis_cache_directory
 from .pipeline import CachedRequests
 from .provider import OpenAICompatibleClient
 
 
 def _requests(directory, config, progress, client_factory=None):
     settings = config["analysis"]
-    cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
-    if any(cache == book or book in cache.parents for book in [directory, *continuation_directories(directory)]):
-        raise ValueError("The request cache must be outside this book and its continuation ancestors")
+    cache = analysis_cache_directory(directory, settings["cache_dir"])
     if not config["provider"]["model"]:
         raise ValueError("Set provider.model in the global TOML file before preparing pronunciations")
     client = (client_factory or OpenAICompatibleClient)(**config["provider"])

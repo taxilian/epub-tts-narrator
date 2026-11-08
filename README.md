@@ -151,5 +151,5 @@ For an existing environment, rerun only the install command to update missing de
 
 ## Notes
 
-- Run directories (`runs/`, `dist-runs/`, `*.audiobook/`) and the request cache can contain full book text; keep them out of version control.
+- Run directories (`runs/`, `dist-runs/`, `*.audiobook/`) and their in-output `.analysis-cache/` can contain full book text; keep them out of version control.
 - Exit codes: `0` success; `1` invalid input, contract, I/O, or API failure; `2` saved analysis with unassigned spoken passages (after `analyze`, `resolve-speakers`, or `export`, or when `validate --ready` finds missing speakers); `130` interrupted.

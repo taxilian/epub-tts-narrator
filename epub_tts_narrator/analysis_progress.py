@@ -27,6 +27,7 @@ from .prompts import PROMPT_VERSION
 
 PROGRESS_VERSION = 1
 PENDING_DIRNAME = ".analysis-pending"
+CACHE_DIRNAME = ".analysis-cache"
 ANALYZER_VERSION = "0.1.0"
 STAGES = ("analyzed", "speech-normalized-1", "samples-prepared-1",
           "speakers-decided", "speech-normalized-2", "samples-prepared-2")
@@ -68,6 +69,21 @@ def _is_hex_digest(value):
 
 def _pending_directory(output):
     return Path(output) / PENDING_DIRNAME
+
+
+def analysis_cache_directory(output, configured=None):
+    """Return the request cache inside an analysis output directory.
+
+    Durable analysis state never lives beside the output. Deleting the output
+    deletes its cache, pending checkpoints, and speaker-decision journal.
+    """
+    output = Path(output).resolve()
+    if configured is not None:
+        cache = Path(configured).resolve()
+        if cache != output and output not in cache.parents:
+            raise ValueError("analysis.cache_dir must be inside the analysis output directory")
+        return cache
+    return output / CACHE_DIRNAME
 
 
 def _snapshot_relative(stage):
@@ -127,16 +143,19 @@ def _validate_identity(identity):
 
 
 def is_pending_directory(output):
-    """True when output is a real directory whose only entry is pending analysis state."""
+    """True when output holds pending analysis state and no published bundle."""
     output = Path(output)
     try:
         if output.is_symlink() or not output.is_dir():
             return False
-        entries = list(output.iterdir())
-        if len(entries) != 1 or entries[0].name != PENDING_DIRNAME:
+        entries = {entry.name: entry for entry in output.iterdir()}
+        if PENDING_DIRNAME not in entries or set(entries) - {PENDING_DIRNAME, CACHE_DIRNAME}:
             return False
-        pending = entries[0]
-        return not pending.is_symlink() and pending.is_dir()
+        pending = entries[PENDING_DIRNAME]
+        if pending.is_symlink() or not pending.is_dir():
+            return False
+        cache = entries.get(CACHE_DIRNAME)
+        return cache is None or (not cache.is_symlink() and cache.is_dir())
     except OSError:
         return False
 

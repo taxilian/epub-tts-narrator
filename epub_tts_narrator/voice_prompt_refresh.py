@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import unicodedata
 
+from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
 from .pipeline import CachedRequests, fingerprint
 from .voice_contrast import contrast_findings
@@ -141,7 +142,7 @@ def refresh_bundle_prompts(bundle, config_path=None, *, canonical_id=lambda valu
     config = load_config(config_path)
     settings = config["analysis"]
     client = OpenAICompatibleClient(**config["provider"])
-    cache = settings["cache_dir"] or Path(bundle["directory"]).parent / ".epub-audiobook-cache"
+    cache = analysis_cache_directory(bundle["directory"], settings["cache_dir"])
     progress(f"Refreshing voice prompts with {client.model} at {client.base_url}; "
              "character descriptions, casting directions, and source evidence are sent to this endpoint.")
     requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],

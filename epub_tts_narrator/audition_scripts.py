@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import unicodedata
 
+from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
 from .audition_prompts import PROMPT_VERSION, SYSTEM
 from .pipeline import CachedRequests, fingerprint, write_json
@@ -275,7 +276,7 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
             config = load_config(config_path)
             settings = config["analysis"]
             client = OpenAICompatibleClient(**config["provider"])
-            cache = settings["cache_dir"] or directory.parent / ".epub-audiobook-cache"
+            cache = analysis_cache_directory(directory, settings["cache_dir"])
             progress(f"Preparing audition scripts with {client.model} at {client.base_url}; character descriptions and excerpts are sent to this endpoint.")
             requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
                                       max_request_chars=settings["max_request_chars"], progress=progress)

@@ -366,7 +366,7 @@ class DirectoryCLITests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(snapshot(self.root), before)
 
-    def test_third_book_cache_cannot_be_inside_a_grandparent_analysis(self):
+    def test_cache_must_be_inside_the_output_directory(self):
         _, first = self.seed_book()
         second = self.seed_second_book(first)
         epub, output, cache = self.make_epub(3), self.root / "book-three", first / "nested-cache"
@@ -378,7 +378,7 @@ class DirectoryCLITests(unittest.TestCase):
                 status, _, stderr = self.run_cli(command, epub, "-o", output,
                                                "--continue-from", second)
                 self.assertNotEqual(status, 0, stderr)
-                self.assertIn("every ancestor book", stderr)
+                self.assertIn("inside the analysis output directory", stderr)
                 provider.assert_not_called()
                 self.assertFalse(cache.exists())
                 self.assertFalse(output.exists())

@@ -346,7 +346,9 @@ class BookUpdateTests(unittest.TestCase):
 
     def test_interrupted_publication_resumes_without_repeating_model_work(self):
         self.seed()
-        before = snapshot(self.book)
+        before = {name: data for name, data in snapshot(self.book).items()
+                  if not name.startswith((".analysis-update", ".analysis-revisions", ".analysis-cache"))
+                  and not name.endswith(".lease")}
         updated = self.epub("serial-v2", [CHAPTER_ONE, CHAPTER_TWO, CHAPTER_THREE], "download-2")
         with patch("epub_tts_narrator.book_update._install", side_effect=OSError("disk interrupted")):
             status, _, stderr = self.analyze(updated)
@@ -354,7 +356,7 @@ class BookUpdateTests(unittest.TestCase):
         self.assertIn("disk interrupted", stderr)
         # Lease files are coordination artifacts that are kept, never deleted.
         self.assertEqual({name: data for name, data in snapshot(self.book).items()
-                          if not name.startswith((".analysis-update", ".analysis-revisions"))
+                          if not name.startswith((".analysis-update", ".analysis-revisions", ".analysis-cache"))
                           and not name.endswith(".lease")}, before)
         self.assertTrue((self.book / ".analysis-update").is_dir())
         calls = len(self.model_payloads())

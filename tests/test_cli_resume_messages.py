@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.analysis_progress import inspect_pending, is_pending_directory
+from epub_tts_narrator.analysis_progress import CACHE_DIRNAME, inspect_pending, is_pending_directory
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.provider import ProviderError
@@ -67,7 +67,7 @@ class CLIResumeMessageTests(unittest.TestCase):
             status, stdout, stderr = self.run_cli(*command)
             self.assertEqual(status, 1)
             self.assertIn("Fixture API timeout", stderr)
-            cache = self.root / ".epub-audiobook-cache"
+            cache = output / CACHE_DIRNAME
             self.assertIn(f"Request cache: {cache}", stderr)
             self.assertIn(f"Resume cache: {cache}", stderr)
             self.assertIn("same input, output, and configuration", stderr)
@@ -112,7 +112,7 @@ class CLIResumeMessageTests(unittest.TestCase):
         self.assertEqual(status, 130)
         self.assertIn("Interrupted. Completed model requests remain cached; checkpointed analysis "
                       "progress is kept in the output directory; rerun the same command to resume.", stderr)
-        self.assertIn(f"Resume cache: {self.root / '.epub-audiobook-cache'}", stderr)
+        self.assertIn(f"Resume cache: {output / CACHE_DIRNAME}", stderr)
         self.assertTrue(is_pending_directory(output))
         record = inspect_pending(output)
         self.assertEqual(record["status"], "interrupted")

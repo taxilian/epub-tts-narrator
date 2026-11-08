@@ -86,7 +86,7 @@ The approach is deliberately cheaper: about one input pass over the book for pre
 
 ```sh
 python3.11 scripts/compare_analyses.py runs/book runs/book-narrator --samples runs/book-narrator/disagreements.md
-python3.11 scripts/measure_cached_analysis.py --config epub-tts-narrator.toml --epub BOOK.epub --cache runs/.epub-audiobook-cache -o runs/baseline-measure.json
+python3.11 scripts/measure_cached_analysis.py --config epub-tts-narrator.toml --epub BOOK.epub --cache runs/my-book/.analysis-cache -o runs/baseline-measure.json
 python3.11 scripts/sweep_narrator_reasoning.py --config epub-tts-narrator.toml --epub BOOK.epub --chapters 3-7 --cell deepseek-v4.1-flash:low --cell glm-5.3-flash:high -o runs/sweep
 ```
 
@@ -220,7 +220,7 @@ Request retries are disabled by default. `provider.max_retries` enables bounded 
 
 On an interactive terminal, model streaming reserves two transient lines: the latest received reasoning excerpt and aggregate progress across active requests (overall step number and step-local percentage, current milestone/count, elapsed time, stream events, reasoning and answer character counts, bytes received, and quiet time). This is presentation only. Reasoning text is never written to logs, reports, request caches, or analysis files, and redirected output keeps the existing plain status lines.
 
-Validated responses are cached under `.epub-audiobook-cache` beside the output, or under `analysis.cache_dir`. Cache keys include the exact prompt version, system prompt, and request payload; model, endpoint, and reasoning effort are execution provenance, not key material. Validated responses can therefore be reused when switching models or falling back. Changing request inputs invalidates affected work. Cache entries contain book text and derived annotations, never API keys. Keep the cache and rerun the same command after interruption. A failed analysis does not publish a completed directory. Failed responses remain in `failed/` for bounded repair and are never accepted as successful results.
+Validated responses are cached inside the output directory at `.analysis-cache/` (or at `analysis.cache_dir`, which must also be inside that output). Cache keys include the exact prompt version, system prompt, and request payload; model, endpoint, and reasoning effort are execution provenance, not key material. Validated responses can therefore be reused when switching models or falling back. Changing request inputs invalidates affected work. Cache entries contain book text and derived annotations, never API keys. Keep the output directory and rerun the same command after interruption. Deleting the output directory deletes its cache and forces a fresh run; a failed analysis does not publish a completed directory. Failed responses remain in `failed/` for bounded repair and are never accepted as successful results.
 
 Resuming the same book needs no flag. `--continue-from` selects prior series context and must remain the same when resuming. Changing timeout, key, retry, model, reasoning, or fallback provider settings does not invalidate completed stage snapshots or validated cached responses; switching models can deliberately mix completed and new work. Changing prompts, cast, policy, or other request inputs can invalidate affected work. Advisory notes do not make a bundle a draft, but missing speakers prevent rendering.
 

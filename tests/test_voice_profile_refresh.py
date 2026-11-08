@@ -399,7 +399,7 @@ class VoiceProfileRefreshTests(unittest.TestCase):
     def invoke_refresh(self, client, *, argv_extra=()):
         config = deepcopy(DEFAULTS)
         config["provider"].update(model="test-model", api_key="test-key")
-        config["analysis"]["cache_dir"] = str(self.root / "cache")
+        config["analysis"]["cache_dir"] = None
         output, errors = io.StringIO(), io.StringIO()
         with (patch("epub_tts_narrator.config.load_config", return_value=config),
               patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=client),
@@ -422,7 +422,7 @@ class VoiceProfileRefreshTests(unittest.TestCase):
         sidecar = json.loads((self.paths[0] / FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(sidecar["cast_fingerprint"], fingerprint(document["cast"]))
         self.assertEqual(sidecar["scripts"][self.sidecar_voice]["text"], AUDITION_TEXT)
-        self.assertEqual(len(list((self.root / "cache").glob("*.json"))), 2)
+        self.assertEqual(len(list((self.paths[0] / ".analysis-cache").glob("*.json"))), 2)
         self.assertEqual((self.paths[0] / "voices/reference.wav").read_bytes(), b"untouched voice")
         loaded = load_bundle(self.paths[0])
         self.assertEqual([voice["speechTraits"] for voice in loaded["cast"]["voices"]],

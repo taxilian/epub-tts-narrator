@@ -208,7 +208,7 @@ class AuditionScriptTests(unittest.TestCase):
             record = {"version": 1, "source_fingerprint": data["manifest"]["source_fingerprint"],
                       "cast_fingerprint": fingerprint(data["cast"]), "scripts": {"v1": old, "vn": old}}
             (root / FILENAME).write_text(json.dumps(record))
-            config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
+            config = {"provider": {}, "analysis": {"cache_dir": None, "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
             client = Client()
             with patch("epub_tts_narrator.config.load_config", return_value=config), \
@@ -233,7 +233,7 @@ class AuditionScriptTests(unittest.TestCase):
             path = root / FILENAME
             path.write_text(json.dumps(record))
             before = path.read_bytes()
-            config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
+            config = {"provider": {}, "analysis": {"cache_dir": None, "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
             with patch("epub_tts_narrator.config.load_config", return_value=config), \
                     patch("epub_tts_narrator.provider.OpenAICompatibleClient", return_value=Client(fail_once="v1")), \
@@ -330,7 +330,7 @@ class AuditionScriptTests(unittest.TestCase):
             for name, path in sentinels.items():
                 path.write_text("Original " + name, encoding="utf-8")
             before = {name: path.read_bytes() for name, path in sentinels.items()}
-            config = {"provider": {}, "analysis": {"cache_dir": root / "cache", "repair_attempts": 0,
+            config = {"provider": {}, "analysis": {"cache_dir": None, "repair_attempts": 0,
                       "max_request_chars": 200000, "attribution_workers": 5}}
             client = Client()
             with patch("epub_tts_narrator.config.load_config", return_value=config), \

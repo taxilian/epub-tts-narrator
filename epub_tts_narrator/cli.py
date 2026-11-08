@@ -11,7 +11,6 @@ from pathlib import Path
 import re
 import shutil
 import sys
-import tempfile
 
 from . import __version__
 from .config import load_config, resolve_config_path
@@ -31,8 +30,8 @@ from .analysis_directory import (
     publish_directory, continuation_directories,
 )
 from .analysis_progress import (
-    STAGES, analysis_options_fingerprint, create_pending, is_pending_directory,
-    pending_identity, resume_document,
+    STAGES, analysis_cache_directory, analysis_options_fingerprint, create_pending,
+    is_pending_directory, pending_identity, resume_document,
 )
 
 
@@ -175,8 +174,10 @@ def export_bundle(document, output, *, allow_review=False, source_epub=None, sou
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".audiobook-export-", dir=output.parent))
+    output.mkdir()
+    staging = output / ".export-staging"
+    staging.mkdir()
+    published = []
     try:
         write_json(staging / "source.json", document["source"])
         write_json(staging / "cast.json", document["cast"])
@@ -221,6 +222,8 @@ def export_bundle(document, output, *, allow_review=False, source_epub=None, sou
             "provenance": document["provenance"],
         }
         write_json(staging / "manifest.json", manifest)
+        if {path.name for path in output.iterdir()} - {staging.name}:
+            raise FileExistsError(f"Output directory changed during export: {output}")
         hint_names = []
         if source_epub is not None:
             remember_source_epub(staging, source_epub, document["source"]["book"]["id"])
@@ -231,13 +234,27 @@ def export_bundle(document, output, *, allow_review=False, source_epub=None, sou
         # Reserve the destination exclusively. POSIX rename() can replace a
         # concurrently created empty directory, so it is not a no-clobber commit.
         # Publish the manifest last: consumers must require it before reading.
-        output.mkdir()
         (output / "scripts").mkdir()
         for name in (*names, *hint_names, "manifest.json"):
             os.link(staging / name, output / name)
+            published.append(output / name)
+    except BaseException:
+        for path in reversed(published):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            (output / "scripts").rmdir()
+        except OSError:
+            pass
+        raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            output.rmdir()
+        except OSError:
+            pass
     return state
 
 
@@ -408,16 +425,14 @@ def main(argv=None):
         if hashes[str(directory)] != original_manifest_hash:
             raise ValueError("Analysis changed while loading the saved book; rerun to use its latest assignments")
         settings = config["analysis"]
-        decisions_cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
+        decisions_cache = analysis_cache_directory(directory, settings["cache_dir"])
         targets = automatic_completion_targets(revised, retry_exhausted=True) if remaining else []
         requests = None
         if targets:
             print(f"Checking remaining speakers in {len(targets)} source block(s); "
                   "saved assignments will be retained.", file=sys.stderr, flush=True)
         if targets or audition_preparation_pending(revised):
-            cache = Path(settings["cache_dir"] or directory.parent / ".epub-audiobook-cache").resolve()
-            if any(cache == book or book in cache.parents for book in [directory, *ancestors, *directories]):
-                raise ValueError("The cache directory must be outside the existing book and its series directories")
+            cache = analysis_cache_directory(directory, settings["cache_dir"])
             if not config["provider"]["model"]:
                 raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
             model_cache = announce_cache(cache)
@@ -474,7 +489,7 @@ def main(argv=None):
                 if requests is None:
                     if not config["provider"]["model"]:
                         raise ValueError("Set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
-                    model_cache = announce_cache(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache")
+                    model_cache = announce_cache(analysis_cache_directory(directories[0], settings["cache_dir"]))
                     client = provider_client(config["provider"])
                     print(f"Resolving speakers with {client.model} at {client.base_url}; selected book passages will be sent to this endpoint.", file=sys.stderr)
                     requests = CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
@@ -488,7 +503,7 @@ def main(argv=None):
                     progress=progress)
                 revised[directory] = repair_narration_boundaries(revised[directory], progress=print)
             judge = _speaker_judge(config)
-            decisions_cache = Path(settings["cache_dir"] or directories[0].parent / ".epub-audiobook-cache").resolve()
+            decisions_cache = analysis_cache_directory(directories[0], settings["cache_dir"])
             speaker_inputs = {}
             for directory in revised:
                 speaker_inputs[directory] = deepcopy(revised[directory])
@@ -571,11 +586,8 @@ def main(argv=None):
             if directory_mode:
                 if series_path is not None:
                     raise ValueError("Directory output uses --continue-from for series context; remove --series or analysis.series_registry")
-                cache = config["analysis"]["cache_dir"] or args.output.parent / ".epub-audiobook-cache"
-                cache = Path(cache).resolve()
+                cache = analysis_cache_directory(args.output, config["analysis"]["cache_dir"])
                 output = args.output.resolve()
-                if cache == output or output in cache.parents:
-                    raise ValueError("The cache directory must be outside the output directory")
                 if args.continue_from is not None:
                     previous = args.continue_from.resolve()
                     ancestors = [previous, *continuation_directories(previous)]
@@ -613,7 +625,8 @@ def main(argv=None):
             client = provider_client(config["provider"])
             print(f"Analyzing with {client.model} at {client.base_url}; book text will be sent to this endpoint.", file=sys.stderr)
             settings = config["analysis"]
-            cache = settings["cache_dir"] or args.output.parent / ".epub-audiobook-cache"
+            cache = (analysis_cache_directory(args.output, settings["cache_dir"])
+                     if directory_mode else Path(settings["cache_dir"] or args.output.parent / ".analysis-cache"))
             model_cache = announce_cache(cache)
             edits = read_json(args.edits) if args.edits else None
             pending = None
