@@ -8,6 +8,9 @@ default:
 analyze *args:
     @"{{ python }}" -m epub_tts_narrator analyze "$@"
 
+verify-attribution *args:
+    @"{{ python }}" -m epub_tts_narrator verify-attribution "$@"
+
 plan *args:
     @"{{ python }}" -m epub_tts_narrator plan "$@"
 
