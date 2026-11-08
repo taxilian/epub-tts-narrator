@@ -29,17 +29,24 @@ An `Evidence` record is `{block_id, quote}`. The quote must be a nonempty exact 
 | --- | --- |
 | Character | `id`, `name`, `aliases` (strings), `description`, `evidence` (Evidence[]), `voice_id` |
 | Role | `id`, `kind` (`narration` or `dialogue`), `character_id` (string or null), `voice_id`, `description` |
-| Voice | `id`, `description`, `traits` (Trait[]); optional `speechTraits` (string) |
+| Voice | `id`, `description`, `traits` (Trait[]); optional `speechTraits` (string), optional `derived_from` (DerivedFrom) |
+| DerivedFrom | `voice_id` (the base voice, itself not derived), `kind` (`age` or `condition`), `instruction` (≤240 characters), `evidence` (Evidence[], nonempty unless the voice has `series_origin`); optional `through_end` (boolean) |
 | Trait | `name`, `value`, `basis` (`text` or `casting`), `evidence` (Evidence[]) |
 | Issue | `id`, `kind`, `target`, `reason`, `resolved` (boolean) |
 
-Text-supported traits need at least one evidence quotation. Casting traits are proposals. `Voice.description` is a proposed synthesis/casting direction, not an independent claim that all its qualities appear verbatim in the book. Distinct characters must have distinct voice IDs. A dialogue role attached to a character uses that character's voice; a narrator role attached to a character may share it or select a separate profile. An external narrator has `character_id: null`.
+Text-supported traits need at least one evidence quotation. Casting traits are proposals. `Voice.description` is a proposed synthesis/casting direction, not an independent claim that all its qualities appear verbatim in the book. Distinct characters must have distinct voice IDs. A dialogue role attached to a character uses that character's voice, or a voice `derived_from` it; a narrator role attached to a character may share it or select a separate profile. An external narrator has `character_id: null`.
 
 `Voice.speechTraits` is a persistent passage-performance instruction, separate from the description used to create a reference voice. New analysis requests one or two short phrases describing only mood-independent audible behavior: a specifically named accent or dialect, speech impediments, habitual pace and rhythm, or verbal habits. Always name the accent explicitly, using source evidence or a labeled casting choice; neutral General American is one production choice, not a universal default. Casting choices are not claims of source evidence. Avoid personality, emotions, and scene-dependent delivery. For example: `"Light Glaswegian Scottish accent; clipped consonants and brisk, even phrasing."`
 
 When present, `speechTraits` must be nonempty single-line plain text of at most 400 characters, without square/angle control markup or control characters. Older profiles may omit it and retain their previous behavior. The renderer combines these stable traits with each passage's delivery instruction as nonspoken engine conditioning, never as spoken source text or as an addition to the reference-voice creation prompt. Changing traits changes the required performance, not the saved reference recording. Traits follow the logical cast voice ID: aliases select shared reference audio without substituting another character's speech traits.
 
 When continuing a series, introducing `speechTraits` for an inherited voice whose originating definition omits it is an error. The error identifies the voice and defining book; update that definition first rather than making a descendant-only backfill. Once the origin defines the field, later books may refine it for that book and future continuations. The latest defined traits are supplied in series context; earlier book snapshots, voice IDs, and reference recordings remain unchanged. Reusing legacy profiles without requesting a new field remains compatible.
+
+### Changing voices
+
+A character whose own voice changes during the book (grows up, a lasting injury or transformation) gets a second dialogue role whose voice is `derived_from` the character's voice. `kind` and `instruction` describe the change ("about 16 now, deeper, steadier"), and `evidence` quotes the text that says so. Segments after the change use that role. `through_end: true` means the change was still in effect when the book ended; a continuing series book then starts the returning character on that same voice (inherited with `series_origin` and empty evidence). The renderer casts a derived voice as its own voice, designed from the base voice's current description plus the change; it is never aliased to the base voice.
+
+Equipment heard over an unchanged voice is not a new voice. A dialogue segment may carry `voice_effect: {preset, evidence}` with `preset` one of `helmet`, `radio`, `vocoder`, `pa`, `phone`, `underwater`. The renderer applies the preset to that line's accepted audio during chapter composition; verification, censorship and chapter continuity use the dry take, and the effected copy keeps the same length.
 
 ## Identity consensus provenance
 

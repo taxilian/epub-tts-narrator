@@ -64,6 +64,35 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(any(text in error for error in errors), errors)
         self.assertFalse(readiness(self.doc)["ready"])
 
+    def test_a_dialogue_role_may_use_a_voice_derived_from_its_characters_voice(self):
+        self.doc["cast"]["voices"].append({"id": "v1_older", "description": "Mara, older.", "traits": [],
+                                           "derived_from": {"voice_id": "v1", "kind": "age", "instruction": "older, lower",
+                                                            "evidence": [{"block_id": "b1", "quote": "Mara"}]}})
+        self.doc["cast"]["roles"].append({"id": "mara_older", "kind": "dialogue", "character_id": "c1",
+                                          "voice_id": "v1_older", "description": "Mara, later."})
+        self.doc["segments"][1].update(role_id="mara_older", voice_id="v1_older")
+        self.assertEqual(validate_document(self.doc), [])
+        self.doc["cast"]["voices"][-1]["derived_from"]["voice_id"] = "vn"
+        self.assert_error("dialogue role voice must match its character voice or a voice derived from it")
+
+    def test_derived_voice_needs_a_base_kind_instruction_and_exact_evidence(self):
+        self.doc["cast"]["voices"].append({"id": "vx", "description": "x", "traits": [],
+                                           "derived_from": {"voice_id": "vx", "kind": "mood", "instruction": "",
+                                                            "evidence": []}})
+        errors = "\n".join(validate_document(self.doc))
+        for text in ("must name a base voice that is not itself derived", "derived_from.kind",
+                     "derived_from.instruction", "derived_from.evidence"):
+            self.assertIn(text, errors)
+
+    def test_a_voice_effect_is_a_known_preset_with_evidence_on_dialogue_only(self):
+        self.doc["segments"][1]["voice_effect"] = {"preset": "helmet", "evidence": [{"block_id": "b1", "quote": "softly"}]}
+        self.assertEqual(validate_document(self.doc), [])
+        self.doc["segments"][1]["voice_effect"]["preset"] = "chorus"
+        self.assert_error("voice_effect.preset")
+        self.doc["segments"][1]["voice_effect"]["preset"] = "radio"
+        self.doc["segments"][0]["voice_effect"] = {"preset": "radio", "evidence": [{"block_id": "b1", "quote": "softly"}]}
+        self.assert_error("applies only to dialogue segments")
+
     def test_valid_document_is_ready_and_is_not_mutated(self):
         before = deepcopy(self.doc)
         self.assertEqual(validate_document(self.doc), [])

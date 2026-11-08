@@ -387,6 +387,11 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                     for lane in clip["censorship_lanes"]]
         item["audio_sha256"] = (file_hash(regular_file(clip["wav_path"]))
                                 if clip.get("wav_path") is not None else None)
+        preset = (clip.get("segment", {}).get("voice_effect") or {}).get("preset")
+        if preset and clip.get("wav_path") is not None:
+            # Only effected clips carry the recipe, so other chapters keep their identity.
+            from .voice_effects import recipe
+            item["voice_effect_recipe"] = recipe(preset)
         clip_identity.append(item)
     ordinal = chapter.get("_ordinal", chapter.get("number", 1))
     total = chapter.get("_total_chapters", context.get("total_chapters", ordinal))
@@ -412,7 +417,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
             normalize_pauses=settings["normalize_pauses"],
             sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"],
-            censorship_policy=censorship_policy)
+            censorship_policy=censorship_policy, ffmpeg=settings["ffmpeg"])
         composed.update(metadata)
         normalization = _normalize(Path(composed["wav_path"]), settings)
         encoded = None

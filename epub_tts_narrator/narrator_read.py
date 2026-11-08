@@ -25,7 +25,7 @@ import re
 import threading
 import time
 
-from .narrator_ledger import (apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
+from .narrator_ledger import (EFFECT_PRESETS, IDENTITY_CHANGES, apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
                               name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
 from .narrator_prompts import (HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VOICE,
                                VERSION as PROMPT_VERSION)
@@ -406,7 +406,7 @@ def check_aliases(source, requests, meter, ledger, *, workers=1, progress=lambda
             ledger["characters"].append({"id": str(ledger["next"]), "name": alias, "aliases": [], "sex": "?",
                                          "note": f"Distinct from {row['name']}.", "first": None,
                                          "voice": [], "series": None, "series_evidence": [], "seen": True,
-                                         "merged": []})
+                                         "merged": [], "changes": []})
             ledger["next"] += 1
     return ledger, outcomes
 
@@ -806,6 +806,12 @@ def _parse_note(row, qids, blocks_by_number):
         target = ("n", blocks_by_number[number]["id"])
     if not original:
         return None
+    if op == "as":
+        # A per-line exception to the voice changes in effect: "normal", or one effect preset.
+        value = original.strip().casefold()
+        if target[0] != "q" or value not in {"normal", *EFFECT_PRESETS}:
+            return None
+        return {"target": target, "kind": "voice_as", "raw": {"as": value}}
     if op == "sp":
         if len(row) < 4 or not isinstance(row[3], str) or not row[3] or row[3] == original:
             return None
@@ -925,7 +931,7 @@ def add_new_speakers(ledger, labels, extras):
             ledger["characters"].append({"id": identifier, "name": item["who"][1], "aliases": [], "sex": "?",
                                          "note": "Minor speaker added during markup.", "first": None,
                                          "voice": [], "series": None, "series_evidence": [], "seen": True,
-                                         "merged": []})
+                                         "merged": [], "changes": []})
             created[key] = identifier
         item["who"] = ("char", created[key])
     return ledger, len(created)
@@ -1430,12 +1436,118 @@ def _joint_delivery_evidence(block_id, text, pieces):
     return []
 
 
-def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=None):
+def change_spans(source, ledger):
+    """Ledger voice changes as block-position ranges: {ledger_id: [(start, end, change)]}.
+
+    An identity change ("age", "condition") lasts until its end, else to the end of
+    the book; an equipment effect lasts until its end, else to the end of the chapter
+    it starts in, so a forgotten "end" never runs past one chapter.
+    """
+    position = {block["id"]: index for index, block in enumerate(source["blocks"])}
+    chapter_end = {}
+    for index, block in enumerate(source["blocks"]):
+        chapter_end[block["chapter_id"]] = index
+    result = {}
+    for row in ledger["characters"]:
+        for change in row.get("changes", []):
+            if change["start"] not in position:
+                continue
+            start = position[change["start"]]
+            if change["kind"] in IDENTITY_CHANGES:
+                limit = len(source["blocks"]) - 1
+            else:
+                limit = chapter_end[source["blocks"][start]["chapter_id"]]
+            end = limit
+            if change["end"] in position and position[change["end"]] > start:
+                # The paragraph that ends the change is already back to normal.
+                end = min(limit, position[change["end"]] - 1)
+            result.setdefault(row["id"], []).append((start, end, change))
+    return result
+
+
+def add_voice_variants(cast, ledger, *, registry=None, source=None):
+    """A derived voice and dialogue role for each identity change in the ledger,
+    and for a returning character's changed voice carried from the earlier book.
+
+    Returns (cast, {change_id: role_id}, {ledger_id: carried role_id}). A derived
+    voice starts from the base voice's profile plus the change; casting designs it
+    from that description.
+    """
+    cast = deepcopy(cast)
+    roles = {role["id"]: role for role in cast["roles"]}
+    voices = {voice["id"]: voice for voice in cast["voices"]}
+    character_ids = {character["id"] for character in cast["characters"]}
+    variant_roles, carried_roles = {}, {}
+    for row in ledger["characters"]:
+        base_role = roles.get(f"role_{row['id']}")
+        if base_role is None:
+            continue
+        base_voice = voices[base_role["voice_id"]]
+        carried = row.get("carried_voice")
+        if (carried and registry is not None and row["series"] in character_ids
+                and base_role["character_id"] == row["series"]):
+            if carried not in voices:
+                from .series import carried_voice
+                voices[carried] = carried_voice(registry, source, carried)
+                cast["voices"].append(voices[carried])
+            role_id = f"role_{row['id']}_carried"
+            cast["roles"].append({"id": role_id, "kind": "dialogue", "character_id": base_role["character_id"],
+                                  "voice_id": carried,
+                                  "description": f"{base_role['description']} Their changed voice from the earlier book."})
+            carried_roles[row["id"]] = role_id
+        for change in row.get("changes", []):
+            if change["kind"] not in IDENTITY_CHANGES:
+                continue
+            voice_id, role_id = f"{base_voice['id']}_{change['id']}", f"role_{row['id']}_{change['id']}"
+            traits = [{"name": trait["name"], "value": trait["value"], "basis": "casting", "evidence": []}
+                      for trait in base_voice.get("traits", [])]
+            voice = {"id": voice_id,
+                     "description": (f"{base_voice['description']} The same person later in the story "
+                                     f"({change['kind']}): {change['instruction'].rstrip('.')}. Keep the same accent, "
+                                     "manner and recognizable identity; change only what this describes."),
+                     "traits": traits,
+                     "derived_from": {"voice_id": base_voice["id"], "kind": change["kind"],
+                                      "instruction": change["instruction"], "evidence": deepcopy(change["evidence"]),
+                                      # Still in effect when the book ends: the next book starts here.
+                                      "through_end": change["end"] is None}}
+            if "speechTraits" in base_voice:
+                voice["speechTraits"] = base_voice["speechTraits"]
+            cast["voices"].append(voice)
+            cast["roles"].append({"id": role_id, "kind": "dialogue", "character_id": base_role["character_id"],
+                                  "voice_id": voice_id,
+                                  "description": f"{base_role['description']} After a voice change ({change['kind']}): "
+                                                 f"{change['instruction']}."})
+            variant_roles[change["id"]] = role_id
+    return cast, variant_roles, carried_roles
+
+
+def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=None, variant_roles=None,
+                   carried_roles=None):
     """Exact-coverage segments; returns rows and fills ``stats`` with note/delivery counts."""
     stats = stats if stats is not None else {}
     stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_dropped": 0,
-                  "simultaneous": 0, "simultaneous_unproven": 0})
+                  "simultaneous": 0, "simultaneous_unproven": 0, "variant_lines": 0, "effect_lines": 0,
+                  "voice_exceptions": 0})
     roles = {role["id"]: role for role in cast["roles"]}
+    variant_roles, carried_roles = variant_roles or {}, carried_roles or {}
+    ranges = change_spans(source, ledger)
+    block_position = {block["id"]: index for index, block in enumerate(source["blocks"])}
+    voice_as = {note["target"][1]: note["raw"]["as"] for note in notes if note["kind"] == "voice_as"}
+    notes = [note for note in notes if note["kind"] != "voice_as"]
+
+    def voice_state(identifier, block_id, qid):
+        """(variant role id or None, effect change or None, effect preset or None) for one line."""
+        at = block_position[block_id]
+        active = [change for start, end, change in ranges.get(identifier, []) if start <= at <= end]
+        identity = [change for change in active if change["kind"] in IDENTITY_CHANGES]
+        effects = [change for change in active if change["kind"] in EFFECT_PRESETS]
+        exception = voice_as.get(qid)
+        if exception == "normal":
+            return None, None, None
+        variant = variant_roles.get(identity[-1]["id"]) if identity else carried_roles.get(identifier)
+        if exception in EFFECT_PRESETS:
+            return variant, None, exception
+        return variant, (effects[-1] if effects else None), (effects[-1]["kind"] if effects else None)
     narrator = roles["narrator_main"]
     index = name_index(ledger)
     by_block = {}
@@ -1512,6 +1624,12 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                     stats["simultaneous"] += 1
                 else:
                     role = roles[f"role_{who[1]}"]
+                    variant, effect_change, preset = voice_state(who[1], block["id"], piece.get("qid"))
+                    if piece.get("qid") in voice_as:
+                        stats["voice_exceptions"] += 1
+                    if variant is not None:
+                        role = roles[variant]
+                        stats["variant_lines"] += 1
                     explicit = bool(tag and tag["name"] and tag_character(index, tag["name"]) == who[1])
                     row = _segment(block["id"], piece["start"], piece_text, role=role, kind=kind,
                                    basis="explicit" if explicit else "context",
@@ -1519,6 +1637,12 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                                            "Verified against wider context." if piece.get("verified") else
                                            "Labeled by the narrator read from context."),
                                    evidence=tag_evidence if explicit else [], delivery=delivery)
+                    if preset and kind == "dialogue":
+                        # The change's own quotation, or this paragraph for a one-line exception.
+                        evidence = deepcopy(effect_change["evidence"]) if effect_change else [
+                            {"block_id": block["id"], "quote": piece_text}]
+                        row["voice_effect"] = {"preset": preset, "evidence": evidence}
+                        stats["effect_lines"] += 1
             previous = rows[-1] if rows else None
             if (previous is not None and previous["role_id"] == row["role_id"] and previous["kind"] == row["kind"]
                     and previous["attribution"]["basis"] == row["attribution"]["basis"] == "explicit"
@@ -1634,8 +1758,19 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         for warning in warnings:
             issues.append({"id": f"narrator_cast_{warning['kind']}_{warning['character_id']}", "kind": "cast_audit",
                            "target": warning["character_id"], "reason": warning["reason"], "resolved": False})
+        cast, variant_roles, carried_roles = add_voice_variants(cast, ledger, registry=series_registry, source=source)
+        check_cast(source, cast)
+        for row in ledger["characters"]:
+            for change in row.get("changes", []):
+                if change["kind"] in EFFECT_PRESETS and change["end"] is None:
+                    issues.append({"id": f"narrator_effect_{change['id']}", "kind": "voice_change",
+                                   "target": change["start"],
+                                   "reason": f"The {change['kind']} effect on {row['name']} has no end in the text; "
+                                             "it was ended at the end of its chapter. Check where it stops.",
+                                   "resolved": False})
         segment_stats = {}
-        segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats)
+        segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats,
+                                  variant_roles=variant_roles, carried_roles=carried_roles)
         metrics = meter.summary()
         metrics["wall_seconds"] = round(time.monotonic() - started_all, 3)
         metrics["cache_hits"] = requests.cache_hits
@@ -1657,6 +1792,9 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                                                 sum(1 for row in segments if row["role_id"] is None)),
                 "dropped_ledger_claims": dict(ledger["dropped"]),
                 "ledger": {key: deepcopy(ledger[key]) for key in ("characters", "narration", "questions")},
+                "voice_changes": [{"character": row["id"], **{key: change[key] for key in ("id", "kind", "instruction", "start", "end")},
+                                   "role_id": variant_roles.get(change["id"])}
+                                  for row in ledger["characters"] for change in row.get("changes", [])],
                 "hints": {kind: notes.strip() for kind, notes in (("cast", cast_notes), ("attribution", attribution_notes))
                           if notes.strip()},
                 "metrics": metrics,

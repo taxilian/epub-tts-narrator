@@ -262,12 +262,16 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     sample_rate: int = 44100, paragraph_pause_ms: float = 400,
                     blank_pause_ms: float = 600, bracket_pause_ms: float = 120,
                     normalize_pauses: bool = True, sentence_pause_ms: float = 260,
-                    clause_pause_ms: float = 120, censorship_policy=None) -> dict:
+                    clause_pause_ms: float = 120, censorship_policy=None,
+                    ffmpeg: str | None = None) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for
     example punctuation only). It is never a synthesis-error fallback.
     Adjacent paragraph/blank-line pauses use the larger cue, not their sum.
+    A segment's ``voice_effect`` is applied to a same-length copy of its clip
+    (``voice_effects.apply_effect``, which needs ``ffmpeg``); trims and
+    censorship masks are still computed from the untouched take.
     """
     _rate(sample_rate)
     paragraph_frames = _pause_frames(paragraph_pause_ms, sample_rate)
@@ -350,19 +354,36 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 first_frame = cursor
                 if clip.get("wav_path") is not None:
                     count = 0
-                    if masked_lanes is not None:
-                        for data in _masked_pcm(masked_lanes, edges["start"], edges["end"]):
+                    write_masks, read_path = masked_lanes, source
+                    preset = (row.get("voice_effect") or {}).get("preset")
+                    if preset:
+                        if not ffmpeg:
+                            raise ValueError("FFmpeg is required to apply voice effects")
+                        from .voice_effects import apply_effect
+                        effect_input = source
+                        if masked_lanes is not None:
+                            # Mask the dry take first, then hear the masked words through the effect.
+                            effect_input = Path(temporary) / f"masked-{len(timings)}.wav"
+                            with wave.open(str(effect_input), "wb") as masked:
+                                masked.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
+                                for data in _masked_pcm(masked_lanes, 0, info["frames"]):
+                                    masked.writeframesraw(data)
+                        read_path = apply_effect(effect_input, Path(temporary) / f"effect-{len(timings)}.wav",
+                                                 preset, ffmpeg=ffmpeg, sample_rate=sample_rate)
+                        write_masks = None
+                    if write_masks is not None:
+                        for data in _masked_pcm(write_masks, edges["start"], edges["end"]):
                             destination.writeframesraw(data)
                             count += len(data) // 2
                     else:
-                        with wave.open(str(source), "rb") as audio:
+                        with wave.open(str(read_path), "rb") as audio:
                             audio.setpos(edges["start"])
                             remaining = edges["end"] - edges["start"]
                             while remaining:
                                 requested = min(65536, remaining)
                                 chunk = audio.readframes(requested)
                                 if len(chunk) != requested * 2:
-                                    raise ValueError(f"Truncated PCM frame: {source}")
+                                    raise ValueError(f"Truncated PCM frame: {read_path}")
                                 destination.writeframesraw(chunk)
                                 count += len(chunk) // 2
                                 remaining -= requested

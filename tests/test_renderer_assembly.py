@@ -73,6 +73,20 @@ class ChapterCompositionTests(unittest.TestCase):
         self.assertEqual(result["segments"][1]["chapter_start_frame"], 4410 + 26460)
         self.assertEqual(result["frames"], 4410 * 2 + 26460 + 17640)
 
+    def test_a_voice_effect_changes_the_audio_but_not_the_timeline_or_the_take(self):
+        ffmpeg = shutil.which("ffmpeg")
+        before = hashlib.sha256(self.wav.read_bytes()).hexdigest()
+        dry = compose_chapter([clip(self.wav)], self.root / "dry.wav")
+        effected = clip(self.wav, voice_effect={"preset": "radio", "evidence": []})
+        with self.assertRaisesRegex(ValueError, "FFmpeg is required"):
+            compose_chapter([effected], self.root / "missing.wav")
+        wet = compose_chapter([effected], self.root / "wet.wav", ffmpeg=ffmpeg)
+        self.assertEqual(wet["frames"], dry["frames"])
+        self.assertEqual([(row["chapter_start_frame"], row["chapter_end_frame"]) for row in wet["segments"]],
+                         [(row["chapter_start_frame"], row["chapter_end_frame"]) for row in dry["segments"]])
+        self.assertNotEqual((self.root / "wet.wav").read_bytes(), (self.root / "dry.wav").read_bytes())
+        self.assertEqual(hashlib.sha256(self.wav.read_bytes()).hexdigest(), before)
+
     def test_empty_and_no_speech_controls_do_not_manufacture_audio(self):
         empty = compose_chapter([], self.root / "empty.wav")
         control = compose_chapter([clip(None, text="[]", break_before="blank_paragraph")],

@@ -61,6 +61,7 @@ def _group(chunks):
     # Inline attribution controls are hash-bound to one member's exact spoken
     # text, never to the joined passage; only member chunks keep them.
     row.pop("performance_controls", None)
+    row.pop("voice_effect", None)
     row.update(id=f"paragraph:{identifier}", start=pieces[0][0], end=pieces[-1][1],
                text=text, spoken_text=text, role_id=None, voice_id=None,
                delivery={"direction": "", "evidence": []})
@@ -96,7 +97,9 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
 
     for chunk in chunks:
         voice = chunk["segment"].get("voice_id")
-        if (chunk.get("silent_control") or not voice
+        # An equipment effect is applied to one line's audio, so it never joins a
+        # continuous paragraph performance with dry lines.
+        if (chunk.get("silent_control") or not voice or chunk["segment"].get("voice_effect")
                 or not chunk["segment"].get("role_id") or _source_piece(chunk) is None):
             flush()
             result.append(chunk)
@@ -141,6 +144,7 @@ def _paragraph(chunks, *, max_chars, preserved, multi_speaker, saved_groups):
             if voice_count > _MAX_SPEAKERS or (not multi_speaker and performer_count > 1):
                 continue
             if any(chunk.get("silent_control") or chunk.get("paragraph_turns")
+                   or chunk["segment"].get("voice_effect")
                    or not chunk["segment"].get("voice_id")
                    or not chunk["segment"].get("role_id")
                    or chunk["segment"].get("performance", {}).get("kind") == "bracketed"

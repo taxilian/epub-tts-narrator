@@ -20,7 +20,8 @@ from .diagnostics import configured_secrets, safe_error_text
 from .quality import validate_audio, validation_key, text_confirmation_unavailable
 from .voice_bindings import design_voice, designer_identity, require_designer
 from .voice_prompts import (MAX_PROMPT_CHARACTERS, audiobook_voice_prompt,
-                           default_voice_prompt as _default_voice_prompt, voice_prompt_description)
+                           default_voice_prompt as _default_voice_prompt, derived_voice_prompt,
+                           voice_prompt_description)
 from .workflow import RenderBlocked, SpeechVerificationFailed, VerificationUnavailable, _seed, verified_take
 
 
@@ -207,6 +208,10 @@ class CastingSession:
             text = (creation.get("requested_reference_text", selected["reference_text"])
                     if selected else self.config["voices"]["reference_text"])
             prompt = creation.get("requested_description")
+            if prompt is None and isinstance(profile.get("derived_from"), dict):
+                # Follow the base voice's current design, including the user's edits.
+                base = self._draft(profile["derived_from"]["voice_id"], self.store.load(profile["derived_from"]["voice_id"]))
+                prompt = derived_voice_prompt(voice_prompt_description(base["prompt"]), profile["derived_from"])
             if prompt is None:
                 prompt = _default_voice_prompt(profile)
             return self._sample_draft(
@@ -374,8 +379,13 @@ class CastingSession:
             characters = [character["name"] for character in cast["characters"]
                           if character.get("voice_id") == voice_id]
             roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
+            derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
             if characters:
                 label = ", ".join(characters)
+            elif derived:
+                base_names = [character["name"] for character in cast["characters"]
+                              if character.get("voice_id") == derived.get("voice_id")]
+                label = f"{', '.join(base_names) or derived.get('voice_id')} ({derived['kind']}: {derived['instruction']})"
             else:
                 narrators = list(dict.fromkeys(
                     character_names[role["character_id"]] for role in roles

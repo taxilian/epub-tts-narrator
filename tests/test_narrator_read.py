@@ -231,6 +231,15 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(rows(["Senior Lieutenant Tallaf", "Tallaf", "engineer, humorous", "m"]),
                          [("Senior Lieutenant Tallaf", ["Tallaf"], "m", "engineer, humorous", None)])
 
+    def test_a_voice_change_needs_a_quote_about_that_change(self):
+        from epub_tts_narrator.narrator_ledger import change_supported
+        self.assertTrue(change_supported("condition", "her voice came out as a rasp"))
+        self.assertFalse(change_supported("condition", "she had aged a decade, her soft features gone"))
+        self.assertTrue(change_supported("age", "Ten years later, Tom was a man"))
+        self.assertTrue(change_supported("phone", "he answered the call"))
+        self.assertFalse(change_supported("phone", "Protocol, process the following requisition."))
+        self.assertTrue(change_supported("helmet", "She sealed her visor."))
+
     def test_aliases_must_be_short_names_that_do_not_name_another_entry(self):
         ledger = apply_delta(new_ledger(), {"new": [["Guild Master Lanzecki", "", "m", "", 1],
                                                     ["Carrik", "m;the crystal singer, tall and dark", "m", "", 2]]},
@@ -676,6 +685,51 @@ class NarratedAnalyzeTests(unittest.TestCase):
                                          "attribution_review_notes": "C"}),
                          {"cast_notes": "", "attribution_notes": "C"})
 
+    def test_voice_changes_become_a_derived_voice_and_equipment_effects_with_line_exceptions(self):
+        self.source = make_source([
+            [("Chapter One", "h1"), ('"Hi," Jon said.', "p"),
+             ("Years later Jon's voice had deepened into a man's.", "p"), ('"Hello again," Jon said.', "p"),
+             ("Mara pulled on the helmet.", "p"), ('"Can you hear me?" Mara said.', "p"),
+             ('"Visor up," Mara said, lifting it.', "p"), ("Mara took off the helmet.", "p"),
+             ('"Better," Mara said.', "p")],
+            [("Chapter Two", "h1"), ("Mara pulled on the helmet again.", "p"), ('"Ready," Mara said.', "p")]])
+
+        class Changing(NarratorClient):
+            def complete(self, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_prep":
+                    numbers = {line.partition("|")[2]: int(line.partition("|")[0]) for line in payload["text"].splitlines()}
+                    deep = next(number for text, number in numbers.items() if "deepened" in text)
+                    on = [number for text, number in numbers.items() if "pulled on the helmet" in text]
+                    off = next(number for text, number in numbers.items() if "took off" in text)
+                    result["change"] = [["Jon", deep, "voice had deepened into a man's", "age", "a grown man now, deeper"],
+                                        *[["Mara", number, "pulled on the helmet", "helmet", ""] for number in on],
+                                        ["Jon", deep, "not in the text", "age", "x"]]
+                    result["end"] = [["Mara", off, "took off the helmet", "helmet"]]
+                if payload.get("mode") == "narrator_markup":
+                    visor = next(match.group(1) for line in payload["text"].splitlines() if "Visor up" in line
+                                 for match in [re.search(r"‹(q\d+)›", line)] if match)
+                    result["p"] = [[visor, "as", "normal"]]
+                return result
+
+        document = self.analyze(Changing())
+        self.assertEqual(readiness(document)["errors"], [])
+        rows = self.by_text(document)
+        roles = {role["id"]: role for role in document["cast"]["roles"]}
+        voices = {voice["id"]: voice for voice in document["cast"]["voices"]}
+        hi, again = roles[rows['"Hi,"']["role_id"]], roles[rows['"Hello again,"']["role_id"]]
+        self.assertEqual(hi["character_id"], again["character_id"])
+        self.assertNotEqual(hi["voice_id"], again["voice_id"])
+        self.assertEqual(voices[again["voice_id"]]["derived_from"]["voice_id"], hi["voice_id"])
+        self.assertEqual(voices[again["voice_id"]]["derived_from"]["instruction"], "a grown man now, deeper")
+        self.assertEqual(rows['"Can you hear me?"']["voice_effect"]["preset"], "helmet")
+        self.assertNotIn("voice_effect", rows['"Visor up,"'])     # the line's own exception
+        self.assertNotIn("voice_effect", rows['"Better,"'])       # after the helmet came off
+        self.assertEqual(rows['"Ready,"']["voice_effect"]["preset"], "helmet")
+        # Chapter two's helmet never comes off in the text: it ends with its chapter, flagged for review.
+        self.assertTrue(any(issue["kind"] == "voice_change" for issue in document["issues"]))
+        self.assertEqual(document["provenance"]["narrator_read"]["dropped_ledger_claims"].get("change"), 1)
+
     def test_unsettled_speaker_stays_unresolved_for_human_choice_not_the_narrator(self):
         document = self.analyze(NarratorClient(verify_answer="?"))
         row = self.by_text(document)['"Nobody asked."']
@@ -939,6 +993,45 @@ class NarratorCliTests(unittest.TestCase):
         jon_one = next(c for c in one["cast"]["characters"] if c["name"] == "Jon")
         jon_two = next(c for c in two["cast"]["characters"] if c["name"] == "Jon")
         return jon_one, jon_two, two
+
+    def test_a_changed_voice_in_effect_at_the_end_of_a_book_carries_into_the_next(self):
+        first = make_serial_epub(self.root / "one.epub", "One", "book-one", [
+            ("One", ['"Hi," Jon said.', "Years later Jon's voice had deepened into a man's.", '"Hello again," Jon said.'])])
+        second = make_serial_epub(self.root / "two.epub", "Two", "book-two", [
+            ("One", ['Jon returned to the lighthouse he once kept. "Back again," Jon said.'])])
+
+        def factory(*args, **kwargs):
+            client = self.client(*args, **kwargs)
+            complete = client.complete
+
+            def changing(system, payload):
+                result = complete(system, payload)
+                if payload.get("mode") == "narrator_prep":
+                    for line in payload["text"].splitlines():
+                        number, _, text = line.partition("|")
+                        if "deepened" in text:
+                            result["change"] = [["Jon", int(number), "voice had deepened into a man's", "age",
+                                                 "a grown man now, deeper"]]
+                return result
+
+            client.complete = changing
+            return client
+
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
+            status, _, stderr = self.run_cli("analyze", first, "-o", self.root / "one", "--strategy", "narrator")
+            self.assertEqual(status, 0, stderr)
+            status, _, stderr = self.run_cli("analyze", second, "-o", self.root / "two", "--strategy", "narrator",
+                                             "--continue-from", self.root / "one")
+        self.assertEqual(status, 0, stderr)
+        one = json.loads((self.root / "one" / "analysis.json").read_text(encoding="utf-8"))
+        two = json.loads((self.root / "two" / "analysis.json").read_text(encoding="utf-8"))
+        older = next(voice for voice in one["cast"]["voices"] if "derived_from" in voice)
+        self.assertTrue(older["derived_from"]["through_end"])
+        line = next(row for row in two["segments"] if row["text"] == '"Back again,"')
+        self.assertEqual(line["voice_id"], older["id"])
+        carried = next(voice for voice in two["cast"]["voices"] if voice["id"] == older["id"])
+        self.assertEqual(carried["derived_from"]["evidence"], [])
+        self.assertIn("series_origin", carried)
 
     def test_confirmed_returning_character_keeps_the_series_identity_and_voice(self):
         jon_one, jon_two, _ = self.continue_series("y")

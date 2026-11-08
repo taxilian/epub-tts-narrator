@@ -131,7 +131,38 @@ def _history(registry, source):
         for role in book["cast"]["roles"]:
             if role["kind"] == "narration" and role.get("character_id"):
                 narrators.setdefault(role["character_id"], set()).add(role["voice_id"])
+        # A changed voice still in effect at the end of a book (a child who grew
+        # up) is where that character's voice stands for the next book.
+        book_voices = {voice["id"]: voice for voice in book["cast"]["voices"]}
+        current = {}
+        for role in book["cast"]["roles"]:
+            derived = book_voices.get(role["voice_id"], {}).get("derived_from")
+            if (role["kind"] == "dialogue" and role.get("character_id") in characters
+                    and isinstance(derived, dict) and derived.get("through_end") is True):
+                current[role["character_id"]] = role["voice_id"]
+        for character in book["cast"]["characters"]:
+            record = characters[character["id"]]
+            if character["id"] in current:
+                record["current_voice_id"] = current[character["id"]]
+            else:
+                record.pop("current_voice_id", None)
     return books, characters, voices, narrators
+
+
+def carried_voice(registry, source, voice_id):
+    """An earlier book's changed voice, inherited unchanged for a returning character."""
+    _, _, voices, _ = _history(registry, source)
+    record = voices[voice_id]
+    voice = deepcopy(record["voice"])
+    origin = {"kind": "series_casting_reuse", "series_id": registry["series_id"],
+              "source_fingerprint": record["source_fingerprint"], "voice_id": voice_id}
+    voice["series_origin"] = origin
+    for index, trait in enumerate(voice["traits"]):
+        trait["series_origin"] = dict(origin, trait_index=index, original_basis=trait["basis"])
+        trait["basis"], trait["evidence"] = "casting", []
+    # Its evidence quoted the earlier book, which this book's text cannot cite.
+    voice["derived_from"]["evidence"] = []
+    return voice
 
 
 def _author_narration_history(books, *, exclude_source=None):
@@ -177,7 +208,8 @@ def series_context(registry, source):
                              "unresolved_issues": [issue for issue in book.get("issues", [])
                                                    if not issue["resolved"] and _review_key(_review_origin(registry, book, issue)) not in resolved]}
                             for book in books],
-            "characters": [{key: character[key] for key in ("id", "name", "aliases", "description", "voice_id")}
+            "characters": [{key: character[key] for key in ("id", "name", "aliases", "description", "voice_id",
+                                                             "current_voice_id") if key in character}
                            for character in characters.values()],
             "voices": voice_context,
             "narrator_voices": [{"character_id": identity, "voice_ids": sorted(values)} for identity, values in narrators.items()],
@@ -444,6 +476,8 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
     for voice in updated["voices"]:
         new_id = voice_ids[voice["id"]]
         voice["id"] = new_id
+        if isinstance(voice.get("derived_from"), dict) and voice["derived_from"].get("voice_id") in voice_ids:
+            voice["derived_from"]["voice_id"] = voice_ids[voice["derived_from"]["voice_id"]]
         voices[new_id] = (inherited_voice(new_id, voice) if new_id in prior_voices
                           and prior_voices[new_id]["source_fingerprint"] != source_hash else voice)
     for character in updated["characters"]:

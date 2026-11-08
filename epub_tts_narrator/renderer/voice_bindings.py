@@ -22,7 +22,12 @@ def validate_aliases(aliases):
 
 
 def canonical_aliases(cast, explicit=None):
+    """Alternate role voices share their character's reference voice, except a
+    voice ``derived_from`` that character's voice (an older or changed voice of
+    the same person), which is cast as its own voice."""
     characters = {item["id"]: item for item in cast["characters"]}
+    derived = {voice["id"]: voice["derived_from"].get("voice_id") for voice in cast.get("voices", [])
+               if isinstance(voice.get("derived_from"), dict)}
     owners = {}
     aliases = {}
     for character in characters.values():
@@ -36,7 +41,7 @@ def canonical_aliases(cast, explicit=None):
             raise ValueError("Voice role refers to an unknown character")
         voice_id, canonical = role["voice_id"], character["voice_id"]
         owners.setdefault(voice_id, set()).add(character_id)
-        if voice_id != canonical:
+        if voice_id != canonical and derived.get(voice_id) != canonical:
             if voice_id in aliases and aliases[voice_id] != canonical:
                 raise ValueError("Voice role has conflicting character identities")
             aliases[voice_id] = canonical

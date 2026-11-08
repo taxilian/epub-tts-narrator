@@ -46,6 +46,16 @@ class ParagraphGroupingTests(unittest.TestCase):
         self.assertTrue(paragraph_supported({"multi_speaker": True}, mixed))
         self.assertFalse(paragraph_supported({"single_speaker_paragraph": "true"}, uniform))
 
+    def test_a_line_with_a_voice_effect_never_joins_a_paragraph_performance(self):
+        members = passages(["Hello. ", "Over. ", "Goodbye."])
+        members[1]["segment"]["voice_effect"] = {"preset": "radio", "evidence": []}
+        grouped = chunks_of(group_paragraphs(plan(members)))
+        self.assertIn(members[1], grouped)
+        self.assertFalse(any("voice_effect" in chunk["segment"] for chunk in grouped if "paragraph_turns" in chunk))
+        saved = [[chunk["chunk_id"] for chunk in members]]
+        regrouped = chunks_of(group_paragraphs(plan(members), preserved_groups=saved))
+        self.assertIn(members[1], regrouped)
+
     def test_explicit_legacy_groups_preserve_original_speakers_and_directions(self):
         members = passages(['“Hello,” ', 'she said. ', '“Come inside.”'], offset=12,
                            voices=["v1", "v2", "v1"])

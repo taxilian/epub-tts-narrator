@@ -17,6 +17,10 @@ FORMAT = "epub-audiobook-analysis"
 VERSION = 1
 SEGMENT_KINDS = {"narration", "dialogue", "thought", "letter", "heading", "other"}
 ATTRIBUTION_BASES = {"explicit", "context", "unresolved", "user"}
+# A lasting change to a character's own voice is a derived voice; equipment heard
+# over an unchanged voice is an audio preset applied to accepted speech.
+VOICE_CHANGE_KINDS = ("age", "condition")
+VOICE_EFFECT_PRESETS = ("helmet", "radio", "vocoder", "pa", "phone", "underwater")
 
 
 class _Validator:
@@ -190,8 +194,12 @@ class _Validator:
                 self.error(f"{path}.character_id", "is required (string or null)")
             character_id = role.get("character_id")
             if character_id is not None and self.reference(character_id, character_index, f"{path}.character_id"):
-                if role.get("kind") == "dialogue" and role.get("voice_id") != character_index[character_id].get("voice_id"):
-                    self.error(f"{path}.voice_id", "dialogue role voice must match its character voice")
+                own = character_index[character_id].get("voice_id")
+                role_voice = role.get("voice_id")
+                derived = voice_index.get(role_voice, {}).get("derived_from") if isinstance(role_voice, str) else None
+                if (role.get("kind") == "dialogue" and role.get("voice_id") != own
+                        and not (isinstance(derived, dict) and derived.get("voice_id") == own)):
+                    self.error(f"{path}.voice_id", "dialogue role voice must match its character voice or a voice derived from it")
 
         for i, voice in enumerate(voices):
             path = f"cast.voices[{i}]"
@@ -209,6 +217,22 @@ class _Validator:
                 self.string(trait.get("value"), f"{trait_path}.value")
                 self.choice(trait.get("basis"), {"text", "casting"}, f"{trait_path}.basis")
                 self.evidence(trait.get("evidence"), f"{trait_path}.evidence", required=trait.get("basis") == "text")
+        for i, voice in enumerate(voices):
+            if "derived_from" not in voice:
+                continue
+            path = f"cast.voices[{i}].derived_from"
+            derived = self.object(voice["derived_from"], path)
+            base = derived.get("voice_id")
+            if self.reference(base, voice_index, f"{path}.voice_id"):
+                if base == voice.get("id") or "derived_from" in voice_index[base]:
+                    self.error(f"{path}.voice_id", "must name a base voice that is not itself derived")
+            self.choice(derived.get("kind"), set(VOICE_CHANGE_KINDS), f"{path}.kind")
+            if self.string(derived.get("instruction"), f"{path}.instruction") and len(derived["instruction"]) > 240:
+                self.error(f"{path}.instruction", "must be at most 240 characters")
+            # A changed voice inherited from an earlier book cannot cite this book.
+            self.evidence(derived.get("evidence"), f"{path}.evidence", required="series_origin" not in voice)
+            if "through_end" in derived and type(derived["through_end"]) is not bool:
+                self.error(f"{path}.through_end", "must be a boolean")
         self.voice_index = voice_index
         return role_index
 
@@ -248,6 +272,12 @@ class _Validator:
                         if valid_text and segment["text"] != source_text[start:end]:
                             self.error(f"{path}.text", "must exactly match source block text at [start:end]")
 
+            if "voice_effect" in segment:
+                effect = self.object(segment["voice_effect"], f"{path}.voice_effect")
+                self.choice(effect.get("preset"), set(VOICE_EFFECT_PRESETS), f"{path}.voice_effect.preset")
+                self.evidence(effect.get("evidence"), f"{path}.voice_effect.evidence", required=True)
+                if segment.get("kind") != "dialogue":
+                    self.error(f"{path}.voice_effect", "applies only to dialogue segments")
             delivery = self.object(segment.get("delivery"), f"{path}.delivery")
             self.string(delivery.get("direction"), f"{path}.delivery.direction", nonempty=False)
             self.evidence(delivery.get("evidence"), f"{path}.delivery.evidence")

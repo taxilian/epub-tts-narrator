@@ -12,6 +12,39 @@ longest verbatim piece (`exact_quote`).
 from copy import deepcopy
 import re
 
+from .contracts import VOICE_CHANGE_KINDS as IDENTITY_CHANGES, VOICE_EFFECT_PRESETS as EFFECT_PRESETS
+
+# Lasting changes to a character's own voice (a derived voice) and equipment
+# effects heard over the unchanged voice (an audio preset).
+# A change must be backed by a quote that is actually about it: a condition by
+# the voice or speech, an age change by the voice or an age/time statement, and
+# an equipment effect by a word for that kind of equipment.
+_VOICE_WORDS = re.compile(r"\b(?:voice|vocal|tone|speak|spoke|speech|sound|rasp|hoarse|husk|deep|pitch|squeak|throat"
+                          r"|lisp|stutter|stammer|growl|croak|accent|timbre|baritone|tenor|soprano|alto)\w*", re.I)
+_AGE_WORDS = re.compile(r"\b(?:years?|months?|decades?|aged|older|younger|grown|grew|age|teen\w*|adult|childhood"
+                        r"|birthday|puberty)\b", re.I)
+_EFFECT_WORDS = {
+    "helmet": r"helmet|visor|mask|faceplate|suit|armou?r",
+    "radio": r"radio|comm|comms|intercom|transmi\w*|earpiece|headset|channel|walkie|static",
+    "vocoder": r"vocoder|modulat\w*|synthesi\w*|mechanical|robotic|metallic|filtered|distorted",
+    "pa": r"speakers?|loudspeaker|public address|tannoy|PA|intercom|announce\w*|broadcast\w*",
+    "phone": r"phone|call\w*|line|receiver|handset|dial\w*|rang",
+    "underwater": r"water|underwater|submerged|bubbl\w*|drown\w*",
+}
+
+
+def change_supported(kind, quote):
+    """Whether ``quote`` is about a ``kind`` change (see the vocabularies above)."""
+    if kind == "condition":
+        return bool(_VOICE_WORDS.search(quote))
+    if kind == "age":
+        return bool(_VOICE_WORDS.search(quote) or _AGE_WORDS.search(quote))
+    pattern = _EFFECT_WORDS.get(kind)
+    return bool(pattern and re.search(rf"\b(?:{pattern})\b", quote, re.I))
+
+
+MAX_IDENTITY_CHANGES = 3
+MAX_EFFECT_SPANS = 40
 MAX_NOTE = 120
 MAX_ALIASES = 10
 MAX_QUOTE = 240
@@ -161,7 +194,9 @@ def new_ledger(prior_characters=()):
             # The earlier book's description, kept for the series check when the
             # prep read rewrites the note from this book's text.
             "prior_note": _clean(prior.get("description", ""), MAX_NOTE), "first": None,
-            "voice": [], "series": prior["id"], "series_evidence": [], "seen": False, "merged": []})
+            # A changed voice the character still had when the earlier book ended.
+            "carried_voice": prior.get("current_voice_id"),
+            "voice": [], "series": prior["id"], "series_evidence": [], "seen": False, "merged": [], "changes": []})
     return ledger
 
 
@@ -173,7 +208,12 @@ def character(ledger, identifier):
 def render(ledger, *, include_unseen=True, include_questions=True):
     """Return (cast_text, prior_text) prompt lines."""
     def line(row):
-        return "|".join([row["id"], row["name"], ";".join(row["aliases"]), row["sex"], row["note"]])
+        note = row["note"]
+        changes = [f"{item['kind']}{' (' + item['instruction'] + ')' if item['instruction'] else ''} from "
+                   f"{item['number']}{'' if item['end'] is None else ' until it ends'}" for item in row.get("changes", [])]
+        if changes:
+            note = f"{note}; voice changes: {', '.join(changes)}"
+        return "|".join([row["id"], row["name"], ";".join(row["aliases"]), row["sex"], note])
     seen = [line(row) for row in ledger["characters"] if row["series"] is None or row["seen"]]
     prior = [line(row) for row in ledger["characters"] if row["series"] is not None and not row["seen"]]
     narration = ledger["narration"]
@@ -213,7 +253,7 @@ def apply_delta(ledger, delta, blocks, window_numbers):
     """
     if not isinstance(delta, dict):
         raise ValueError("response must be an object")
-    allowed = {"new", "seen", "alias", "note", "voice", "same", "nar", "ask", "done"}
+    allowed = {"new", "seen", "alias", "note", "voice", "same", "nar", "ask", "done", "change", "end"}
     ledger = deepcopy(ledger)
     for key in set(delta) - allowed:
         # Unknown optional keys are ignored and counted, not repaired.
@@ -272,7 +312,7 @@ def apply_delta(ledger, delta, blocks, window_numbers):
         record = {"id": str(ledger["next"]), "name": name, "aliases": [],
                   "sex": sex, "note": _clean(row[3], MAX_NOTE),
                   "first": window_numbers.get(number) if type(number) is int else None,
-                  "voice": [], "series": None, "series_evidence": [], "seen": True, "merged": []}
+                  "voice": [], "series": None, "series_evidence": [], "seen": True, "merged": [], "changes": []}
         for alias in dict.fromkeys(aliases):
             if not alias or alias == name:
                 continue
@@ -319,6 +359,42 @@ def apply_delta(ledger, delta, blocks, window_numbers):
             continue
         if evidence not in record["voice"] and len(record["voice"]) < 6:
             record["voice"].append(evidence)
+    for row in _rows(delta.get("change"), "change", 4, ledger):
+        record, evidence = resolve(row[0]), quote_ok(_number(row[1]), row[2])
+        kind = row[3].strip().casefold() if isinstance(row[3], str) else ""
+        instruction = _clean(row[4], MAX_NOTE) if len(row) > 4 else ""
+        if record is None or evidence is None or kind not in (*IDENTITY_CHANGES, *EFFECT_PRESETS) or (
+                kind in IDENTITY_CHANGES and not instruction):
+            _drop(ledger, "change")
+            continue
+        if not change_supported(kind, evidence["quote"]):
+            _drop(ledger, "change_unsupported")
+            continue
+        changes = record.setdefault("changes", [])
+        limit = MAX_IDENTITY_CHANGES if kind in IDENTITY_CHANGES else MAX_EFFECT_SPANS
+        if sum(1 for item in changes if (item["kind"] in IDENTITY_CHANGES) == (kind in IDENTITY_CHANGES)) >= limit:
+            _drop(ledger, "change_limit")
+            continue
+        if any(item["kind"] == kind and item["start"] == evidence["block_id"] for item in changes):
+            continue
+        ledger["next_change"] = ledger.get("next_change", 1) + 1
+        changes.append({"id": f"x{ledger['next_change'] - 1}",
+                        "kind": kind, "instruction": instruction if kind in IDENTITY_CHANGES else "",
+                        "start": evidence["block_id"], "number": _number(row[1]), "end": None,
+                        "evidence": [evidence], "end_evidence": []})
+    for row in _rows(delta.get("end"), "end", 4, ledger):
+        record, evidence = resolve(row[0]), quote_ok(_number(row[1]), row[2])
+        kind = row[3].strip().casefold() if isinstance(row[3], str) else ""
+        number = _number(row[1])
+        # The most recent open change of that kind that started before this paragraph.
+        open_changes = sorted((item for item in (record or {}).get("changes", [])
+                               if item["kind"] == kind and item["end"] is None
+                               and item["number"] is not None and number is not None and item["number"] < number),
+                              key=lambda item: item["number"])
+        if evidence is None or not open_changes:
+            _drop(ledger, "end")
+            continue
+        open_changes[-1]["end"], open_changes[-1]["end_evidence"] = evidence["block_id"], [evidence]
     for row in _rows(delta.get("same"), "same", 4, ledger):
         source, target = resolve(row[0]), resolve(row[1])
         evidence = quote_ok(row[2], row[3])
@@ -360,6 +436,7 @@ def merge(ledger, source_id, target_id, evidence):
             target["aliases"].append(alias)
     target["aliases"] = target["aliases"][:MAX_ALIASES * 2]
     target["voice"].extend(item for item in source["voice"] if item not in target["voice"])
+    target.setdefault("changes", []).extend(item for item in source.get("changes", []) if item not in target["changes"])
     if target["series"] is None and source["series"] is not None:
         target["series"], target["series_evidence"] = source["series"], source["series_evidence"]
     target["seen"] = target["seen"] or source["seen"]
@@ -379,6 +456,7 @@ def undo_merge(ledger, source_id, target_id):
     removed = {snapshot["name"], *snapshot["aliases"]}
     target["aliases"] = [alias for alias in target["aliases"] if alias not in removed]
     target["voice"] = [item for item in target["voice"] if item not in snapshot["voice"]]
+    target["changes"] = [item for item in target.get("changes", []) if item not in snapshot.get("changes", [])]
     if snapshot["series"] is not None and target["series"] == snapshot["series"]:
         target["series"], target["series_evidence"] = None, []
     ledger["characters"].append(snapshot)
