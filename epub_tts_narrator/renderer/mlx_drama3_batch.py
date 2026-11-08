@@ -157,6 +157,11 @@ def _copy_cache(cache):
     raise TypeError(f"Unsupported Drama 3 cache {type(cache).__name__}")
 
 
+def _states(caches):
+    """The arrays of every filled cache, to evaluate (an empty mlx-lm KV cache has no state)."""
+    return [cache.state for cache in caches if getattr(cache, "keys", True) is not None]
+
+
 def _cache_bytes(caches):
     from mlx_lm.models.cache import ArraysCache
     total = 0
@@ -305,14 +310,15 @@ class BatchedMLXBackend:
             start = first - chunk
             tower.forced(entry["hidden"], rows[start:first], rows[start + 1: first + 1], tower_caches)
             hidden = entry["hidden"]
-            mx.eval([c.state for c in tower_caches])
+            mx.eval(_states(tower_caches))
         for start in range(first, prompt_rows, chunk):
             end = min(start + chunk, prompt_rows)
             hidden = run_backbone(model, rows[start:end], caches)
             if end in keep:
                 key = self.prefixes.key(prompt, end)
                 if key not in self.prefixes:
-                    mx.eval(hidden, [c.state for c in caches], [c.state for c in tower_caches])
+                    # At the first chunk boundary the tower has cached nothing yet.
+                    mx.eval(hidden, _states(caches), _states(tower_caches))
                     self.prefixes.store(key, {"caches": [_copy_cache(c) for c in caches],
                                               "tower_caches": [_copy_cache(c) for c in tower_caches],
                                               "hidden": hidden + 0})
@@ -415,7 +421,7 @@ class BatchedMLXBackend:
         state["hidden"] = backbone.model(None, cache=state["caches"], input_embeddings=embeddings[:, None, :])[:, -1]
         state["frame"], state["step"] = new_frame, step + _u64(1)
         mx.async_eval(state["hidden"], state["history"], state["step"],
-                      [c.state for c in state["caches"]], [c.state for c in caches])
+                      _states(state["caches"]), _states(caches))
         if forced is not None:
             stacked = mx.stack(head_logits, axis=1)
             mx.eval(logits, stacked)

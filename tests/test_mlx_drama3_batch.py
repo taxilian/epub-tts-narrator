@@ -351,6 +351,26 @@ class PrefixCacheTests(unittest.TestCase):
         stats = cached.prefixes.stats()
         self.assertEqual((stats["hits"], stats["rows_reused"], stats["stored"]), (2, 512, 1))
 
+    def test_a_start_cached_at_the_first_chunk_boundary_works_and_is_exact(self):
+        # A short reference ends before row 256, so the snapshot is taken at
+        # row 128, before the codebook tower has cached anything.
+        rng = np.random.default_rng(9)
+        shared = random_prompt(self.model, 150, rng)
+        first = np.concatenate([shared, random_prompt(self.model, 30, rng)])
+        second = np.concatenate([shared, random_prompt(self.model, 45, rng)])
+        fresh = BatchedMLXBackend(self.model, rows=1)
+        fresh.prefill(0, self.request(second))
+        want = [fresh.forced_step([0], {0: frame.tolist()})[0] for frame in self.frames[:6]]
+        cached = BatchedMLXBackend(self.model, rows=1)
+        cached.prefill(0, self.request(first, hints=(150,)))
+        cached.release(0)
+        cached.prefill(0, self.request(second, hints=(150,)))
+        got = [cached.forced_step([0], {0: frame.tolist()})[0] for frame in self.frames[:6]]
+        self.assertEqual((cached.prefixes.stats()["hits"], cached.prefixes.stats()["rows_reused"]), (1, 128))
+        for (want_main, want_heads), (got_main, got_heads) in zip(want, got):
+            np.testing.assert_array_equal(np.array(want_main), np.array(got_main))
+            np.testing.assert_array_equal(np.array(want_heads), np.array(got_heads))
+
     def test_prompts_with_a_different_start_never_hit(self):
         backend = BatchedMLXBackend(self.model, rows=1)
         backend.prefill(0, self.request(self.first, hints=(300,)))
