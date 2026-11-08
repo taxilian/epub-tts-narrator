@@ -1929,7 +1929,9 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             # Direct callers outside a chapter (tools, previews) have no history.
             return execute_take(text, generate, request, **options)
         from .continuity import is_pinnable
-        with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
+        # The chunk's source position: history never includes a later line
+        # that another voice's queue accepted first.
+        with continuity.transaction(request, pinnable=is_pinnable(chunk), position=number) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             result = execute_take(text, generate, bound, **options)
             continuity.accept(*result, tolerate_history=tolerant_history)
@@ -2079,8 +2081,9 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     if speech_cache is None:
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
-    # Each take is conditioned on the accepted takes before it, so a chapter
-    # is strictly sequential; throughput comes from overlapping chapters.
+    # Each take hears earlier accepted takes of its own voices only, so a
+    # chapter's takes form per-voice queues (history_dependencies): lines of
+    # unrelated voices render at the same time, and chapters overlap too.
     scheduler = getattr(engine, "logical", None)
     resources = getattr(engine, "resources", None)
     owner = scheduler_owner or (None, chapter.get("number", 1))
@@ -2112,9 +2115,11 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             # next transaction; other chapters' transactions overlap with it.
             # Results return in source order, and the first terminal failure
             # closes the chapter's admission before new work starts.
+            from .continuity import history_dependencies
             from .render_chapter_flow import collect_chapter, retire_owner
             try:
-                results = collect_chapter(scheduler, owner, len(chunks), run, sequential=True)
+                results = collect_chapter(scheduler, owner, len(chunks), run,
+                                          dependencies=history_dependencies(chunks))
             finally:
                 retire_owner(scheduler, owner)
         else:

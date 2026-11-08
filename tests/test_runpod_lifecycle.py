@@ -20,6 +20,10 @@ from epub_tts_narrator.renderer.runpod_config import DEPLOYMENT_DEFAULTS
 from epub_tts_narrator.renderer.config import DEFAULTS
 
 
+
+# The measured GPU (runpod_gpu.MEASURED_REALTIME); any eligible GPU may be chosen.
+FIXTURE_GPU = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+
 class RunpodLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -42,7 +46,7 @@ class RunpodLifecycleTests(unittest.TestCase):
             {"id": "US-FIXTURE-1", "networkVolumeTypes": ["STANDARD"]},
             {"id": "US-CO-1", "networkVolumeTypes": ["STANDARD"]}]}
         self.api.catalog_gpus.return_value = {"gpus": [{
-            "id": self.settings["deployment"]["gpu_type_id"], "name": "Fixture GPU",
+            "id": FIXTURE_GPU, "name": "Fixture GPU", "manufacturer": "NVIDIA", "memory": 96,
             "availability": "HIGH", "price": {"secure": 2.0},
             "dataCenters": [{"id": "US-FIXTURE-1", "availability": "HIGH"}],
         }]}
@@ -450,7 +454,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(spec["ports"], ["22/tcp", "8082/http"])
         self.assertNotIn("interruptible", spec)
         self.assertNotIn("supportPublicIp", spec)
-        self.assertEqual(spec["gpu"], {"id": self.settings["deployment"]["gpu_type_id"],
+        self.assertEqual(spec["gpu"], {"id": FIXTURE_GPU,
                                        "count": 1, "minCudaVersion": "12.9"})
         self.assertEqual(spec["cmd"][:2], ["bash", "-lc"])
         self.assertIn("exec /start.sh", spec["cmd"][2])
@@ -461,14 +465,15 @@ class RunpodLifecycleTests(unittest.TestCase):
     def capacity_deployment(self, *, legacy_volume=False):
         """Fake provider with a stopped old host and a separately schedulable Pod."""
         deployment = self.deployment()
-        deployment.state.update(pod_id="old_pod", bootstrapped=True, revision="fixture-revision")
+        deployment.state.update(pod_id="old_pod", bootstrapped=True, revision="fixture-revision",
+                                gpu_type_id=FIXTURE_GPU)
         if legacy_volume:
             deployment.state["volume_id"] = "volume_fixture"
         deployment.save()
         mounts = ({"network": [{"volumeId": "volume_fixture", "path": "/workspace"}]} if legacy_volume
                   else {"persistent": {"size": 150, "path": "/workspace"}})
         old = {"id": "old_pod", "name": "original-worker", "image": deployment.cfg["image"],
-               "gpu": {"id": deployment.cfg["gpu_type_id"], "count": 1}, "cloud": "SECURE",
+               "gpu": {"id": FIXTURE_GPU, "count": 1}, "cloud": "SECURE",
                "dataCenterId": "US-FIXTURE-1", "status": "EXITED", "cost": 2.0, "mounts": mounts}
         pods = {"old_pod": old}
         self.api.get_volume.return_value = {"id": "volume_fixture", "dataCenterId": "US-FIXTURE-1"}
@@ -511,7 +516,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.create_volume.assert_not_called()
         spec = self.api.create_pod.call_args.args[0]
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
-        self.assertEqual(spec["gpu"]["id"], deployment.cfg["gpu_type_id"])
+        self.assertEqual(spec["gpu"]["id"], FIXTURE_GPU)
         self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
         self.assertNotEqual(spec["name"], deployment.cfg["name"] + "-" + deployment.state["deployment_id"])
         self.api.start_pod.assert_called_once_with("old_pod")
@@ -1216,14 +1221,14 @@ class RunpodLifecycleTests(unittest.TestCase):
             with self.subTest(pod=pod):
                 self.assertIsNone(ssh_endpoint(pod))
 
-    H100 = "NVIDIA H100 80GB HBM3"
+    UNMEASURED = "NVIDIA H100 80GB HBM3"
 
     def isolated_state(self, label):
         self.settings["deployment"]["state_dir"] = str(self.directory / f"state-{label}")
 
-    def h100_row(self, **overrides):
-        row = {"id": self.H100, "name": "H100 SXM", "availability": "HIGH",
-               "price": {"secure": 2.59},
+    def unmeasured_row(self, **overrides):
+        row = {"id": self.UNMEASURED, "name": "H100 SXM", "manufacturer": "NVIDIA", "memory": 80,
+               "availability": "HIGH", "price": {"secure": 1.50},
                "dataCenters": [{"id": self.settings["deployment"]["data_center_id"], "availability": "HIGH"}]}
         row.update(overrides)
         return row
@@ -1231,40 +1236,47 @@ class RunpodLifecycleTests(unittest.TestCase):
     def fallback_row(self):
         return deepcopy(self.rtx_row)
 
-    def test_available_affordable_h100_is_preferred_for_new_creations(self):
+    def test_measured_gpu_wins_and_any_eligible_gpu_is_used_without_it(self):
         deployment = self.deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
+        small = {**self.unmeasured_row(), "id": "NVIDIA L40S", "memory": 48, "price": {"secure": 0.5}}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row(), small, self.fallback_row()]}
+        deployment.provision()
+        self.assertEqual(self.api.create_pod.call_args.args[0]["gpu"]["id"], FIXTURE_GPU)
+        self.isolated_state("unmeasured")
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row(), small]}
+        self.api.create_pod.return_value = {"id": "pod_unmeasured", "cost": 1.5, "status": "PROVISIONING"}
+        deployment = self.deployment()
         deployment.provision()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["gpu"]["id"], self.H100)
-        self.assertEqual(deployment.state["gpu_type_id"], self.H100)
+        self.assertEqual(spec["gpu"]["id"], self.UNMEASURED)
+        self.assertEqual(deployment.state["gpu_type_id"], self.UNMEASURED)
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
         self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
 
     def test_chosen_gpu_is_persisted_before_the_creation_post(self):
         deployment = self.deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.h100_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
         saved_at_post = []
         def create(spec):
             saved_at_post.append(json.loads(deployment.state_path.read_text()).get("gpu_type_id"))
-            return {"id": "pod_fixture", "cost": 2.59, "status": "PROVISIONING"}
+            return {"id": "pod_fixture", "cost": 1.50, "status": "PROVISIONING"}
         self.api.create_pod.side_effect = create
         deployment.provision()
-        self.assertEqual(saved_at_post, [self.H100])
+        self.assertEqual(saved_at_post, [self.UNMEASURED])
 
-    def test_pending_h100_creation_checks_placement_and_rate_before_adoption(self):
-        for index, change in enumerate(({"gpu": {"id": "wrong-gpu", "count": 1}}, {"cost": 2.60})):
+    def test_pending_creation_checks_placement_and_rate_before_adoption(self):
+        for index, change in enumerate(({"gpu": {"id": "wrong-gpu", "count": 1}}, {"cost": 2.61})):
             with self.subTest(change=change):
                 self.isolated_state(f"reconcile-{index}")
                 deployment = self.deployment()
-                self.api.catalog_gpus.return_value = {"gpus": [self.h100_row()]}
+                self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
                 self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
                 self.api.list_pods.return_value = []
                 with self.assertRaises(RunpodAmbiguousOutcome):
                     deployment.provision()
                 spec = self.api.create_pod.call_args.args[0]
                 candidate = {**deepcopy(spec), "id": "recovered_pod", "dataCenterId": "US-FIXTURE-1",
-                             "cost": 2.59, **change}
+                             "cost": 1.50, **change}
                 self.api.get_pod_details.return_value = candidate
                 self.api.get_pod_details.side_effect = None
                 self.api.list_pods.return_value = [{"id": "recovered_pod", "name": spec["name"]}]
@@ -1275,18 +1287,19 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.assertTrue(restored.state["pod_creation_pending"])
                 self.api.create_pod.reset_mock()
 
-    def test_ambiguous_h100_create_keeps_the_same_gpu_on_restart(self):
+    def test_ambiguous_create_keeps_the_same_gpu_on_restart(self):
         deployment = self.deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.h100_row(), self.fallback_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
         self.api.create_pod.side_effect = RunpodAmbiguousOutcome("uncertain")
         name = deployment.cfg["name"] + "-" + deployment.state["deployment_id"]
-        self.api.list_pods.return_value = [{"name": name, "id": "recovered_pod", "costPerHr": "2.59"}]
+        self.api.list_pods.return_value = [{"name": name, "id": "recovered_pod", "costPerHr": "1.50"}]
         deployment.provision()
-        self.assertEqual(deployment.state["gpu_type_id"], self.H100)
-        self.api.catalog_gpus.return_value = {"gpus": []}
+        self.assertEqual(deployment.state["gpu_type_id"], self.UNMEASURED)
+        # Today's catalog would choose the measured GPU; the saved one is kept.
+        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row()]}
         restored = self.deployment()
-        self.assertEqual(restored.gpu_type_id, self.H100)
-        self.api.get_pod.return_value = {"desiredStatus": "RUNNING", "costPerHr": 2.59,
+        self.assertEqual(restored.gpu_type_id, self.UNMEASURED)
+        self.api.get_pod.return_value = {"desiredStatus": "RUNNING", "costPerHr": 1.50,
                                          "publicIp": "203.0.113.7", "portMappings": {"22": 10341}}
         restored.configure_runtime = Mock(side_effect=lambda pod: pod)
         restored.ssh = Mock(return_value=b"")
@@ -1294,28 +1307,33 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.api.create_pod.assert_called_once()
         self.assertEqual(self.api.catalog_gpus.call_count, 1)
 
-    def test_explicit_pinned_h100_can_use_a_higher_configured_cap(self):
-        self.settings["deployment"].update(prefer_h100=False, gpu_type_id=self.H100, max_hourly_price=4.10)
-        self.api.catalog_gpus.return_value = {"gpus": [self.h100_row(price={"secure": 3.0})]}
-        self.api.create_pod.return_value = {"id": "pinned_h100", "cost": 3.0}
+    def test_a_pinned_gpu_is_the_only_choice_and_uses_the_configured_cap(self):
+        self.settings["deployment"].update(gpu_type_id=self.UNMEASURED, max_hourly_price=4.10)
+        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(),
+                                                       self.unmeasured_row(price={"secure": 3.0})]}
+        self.api.create_pod.return_value = {"id": "pinned_gpu", "cost": 3.0}
         deployment = self.deployment()
         deployment.provision()
-        self.assertEqual(deployment.pod_id, "pinned_h100")
+        self.assertEqual(deployment.pod_id, "pinned_gpu")
+        self.assertEqual(self.api.create_pod.call_args.args[0]["gpu"]["id"], self.UNMEASURED)
 
     def test_legacy_source_gpu_is_read_before_a_cross_gpu_replacement(self):
         deployment, pods, _ = self.capacity_deployment()
-        pods["old_pod"]["gpu"]["id"] = self.H100
+        # Workers saved before GPU selection have no saved GPU; the old Pod's own is read.
+        deployment.state.pop("gpu_type_id")
+        deployment.save()
+        pods["old_pod"]["gpu"]["id"] = self.UNMEASURED
         self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row()]}
         deployment.start()
         self.assertEqual(deployment.state["gpu_type_id"], self.fallback_row()["id"])
         self.assertEqual(pods["old_pod"]["status"], "EXITED")
 
-    def test_actual_h100_rate_must_be_strictly_under_the_preference_limit(self):
-        for index, (cost, created) in enumerate(((2.59, True), (2.60, False), (2.65, False))):
+    def test_actual_rate_must_be_within_the_configured_cap(self):
+        for index, (cost, created) in enumerate(((2.60, True), (2.61, False), (2.65, False))):
             with self.subTest(cost=cost):
                 self.isolated_state(f"actual-{index}")
                 deployment = self.deployment()
-                self.api.catalog_gpus.return_value = {"gpus": [self.h100_row()]}
+                self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
                 self.api.create_pod.return_value = {"id": "pod_fixture", "cost": cost, "status": "PROVISIONING"}
                 if created:
                     deployment.provision()
@@ -1327,44 +1345,50 @@ class RunpodLifecycleTests(unittest.TestCase):
                     self.assertEqual(deployment.pod_id, "pod_fixture")
         self.assertNotIn("pod_creation_pending", deployment.state)
 
-    def test_capacity_replacement_prefers_h100_target_and_keeps_old_pod_stopped(self):
+    def test_capacity_replacement_may_move_to_another_eligible_gpu_and_keeps_old_pod_stopped(self):
         deployment, pods, _ = self.capacity_deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
         deployment.start()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["gpu"]["id"], self.H100)
+        self.assertEqual(spec["gpu"]["id"], self.UNMEASURED)
         self.assertEqual(spec["mounts"], {"persistent": {"size": 150, "path": "/workspace"}})
         self.assertEqual(spec["dataCenterIds"], ["US-FIXTURE-1"])
         self.assertEqual(pods["old_pod"]["status"], "EXITED")
-        self.assertEqual(deployment.state["gpu_type_id"], self.H100)
+        self.assertEqual(deployment.state["gpu_type_id"], self.UNMEASURED)
         self.api.create_pod.assert_called_once()
         self.api.create_volume.assert_not_called()
 
     def test_capacity_replacement_validates_the_old_pod_against_its_source_gpu(self):
         deployment, pods, _ = self.capacity_deployment()
-        deployment.state["gpu_type_id"] = self.H100
+        deployment.state["gpu_type_id"] = self.UNMEASURED
         deployment.save()
-        pods["old_pod"]["gpu"] = {"id": self.H100, "count": 1}
-        # No affordable H100 in today's catalog: the target falls back to RTX.
+        pods["old_pod"]["gpu"] = {"id": self.UNMEASURED, "count": 1}
         self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row()]}
         deployment.start()
         spec = self.api.create_pod.call_args.args[0]
-        self.assertEqual(spec["gpu"]["id"], deployment.cfg["gpu_type_id"])
+        self.assertEqual(spec["gpu"]["id"], FIXTURE_GPU)
         self.assertEqual(pods["old_pod"]["status"], "EXITED")
-        self.assertEqual(deployment.state["gpu_type_id"], deployment.cfg["gpu_type_id"])
+        self.assertEqual(deployment.state["gpu_type_id"], FIXTURE_GPU)
         self.api.create_pod.assert_called_once()
+
+    def test_a_pinned_deployment_refuses_to_replace_a_worker_on_another_gpu(self):
+        deployment, pods, _ = self.capacity_deployment()
+        self.settings["deployment"]["gpu_type_id"] = self.UNMEASURED
+        restored = self.deployment()
+        with self.assertRaisesRegex(RuntimeError, "does not match the configured deployment"):
+            restored._replace_capacity_blocked_pod()
+        self.api.create_pod.assert_not_called()
 
     def test_pending_replacement_uses_recorded_target_without_todays_catalog(self):
         deployment, pods, create = self.capacity_deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
         self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
         with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
             deployment.start()
         pending = deepcopy(deployment.state["pod_replacement"])
-        self.assertEqual(pending["spec"]["gpu"]["id"], self.H100)
-        self.assertEqual(pending["source_gpu_id"], deployment.cfg["gpu_type_id"])
-        self.assertEqual(pending["fallback_gpu_id"], deployment.cfg["gpu_type_id"])
-        self.assertTrue(pending["prefer_h100"])
+        self.assertEqual(pending["spec"]["gpu"]["id"], self.UNMEASURED)
+        self.assertEqual(pending["source_gpu_id"], FIXTURE_GPU)
+        self.assertEqual(pending["gpu_policy"], {"gpu_type_id": "", "min_gpu_memory_gb": 56})
         create(pending["spec"])
         self.api.catalog_gpus.return_value = {"gpus": []}
         restored = self.deployment()
@@ -1372,14 +1396,13 @@ class RunpodLifecycleTests(unittest.TestCase):
         restored.ssh = Mock(return_value=b"")
         restored.start()
         self.assertEqual(restored.pod_id, "new_pod")
-        self.assertEqual(restored.state["gpu_type_id"], self.H100)
-        self.assertEqual(restored.gpu_type_id, self.H100)
+        self.assertEqual(restored.state["gpu_type_id"], self.UNMEASURED)
+        self.assertEqual(restored.gpu_type_id, self.UNMEASURED)
         self.assertNotIn("pod_replacement", restored.state)
         self.api.create_pod.assert_called_once()
 
     def test_pending_replacement_rejects_changed_gpu_configuration_without_another_post(self):
-        for field, value, default in (("gpu_type_id", "NVIDIA H100 NVL", self.fallback_row()["id"]),
-                                      ("prefer_h100", False, True)):
+        for field, value, default in (("gpu_type_id", "NVIDIA H100 NVL", ""), ("min_gpu_memory_gb", 80, 56)):
             with self.subTest(field=field):
                 deployment, _, _ = self.capacity_deployment()
                 self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
@@ -1393,25 +1416,31 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.settings["deployment"][field] = default
         self.api.create_pod.assert_called_once()
 
-    def test_legacy_pending_replacement_without_gpu_fields_keeps_old_same_gpu_semantics(self):
-        deployment, pods, create = self.capacity_deployment()
-        self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
-        with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
-            deployment.start()
-        intent = deployment.state["pod_replacement"]
-        for key in ("source_gpu_id", "fallback_gpu_id", "prefer_h100"):
-            intent.pop(key, None)
-        deployment.save()
-        create(intent["spec"])
-        restored = self.deployment()
-        restored.configure_runtime = Mock(side_effect=lambda pod: pod)
-        restored.ssh = Mock(return_value=b"")
-        restored.start()
-        self.assertEqual(restored.pod_id, "new_pod")
+    def test_legacy_pending_replacement_without_gpu_policy_stays_resumable_for_its_recorded_gpu(self):
+        for label, legacy in (("no gpu fields", {}),
+                              ("H100 preference", {"fallback_gpu_id": FIXTURE_GPU, "prefer_h100": True})):
+            with self.subTest(case=label):
+                self.isolated_state(label.replace(" ", "-"))
+                deployment, pods, create = self.capacity_deployment()
+                self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
+                with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
+                    deployment.start()
+                intent = deployment.state["pod_replacement"]
+                for key in ("source_gpu_id", "gpu_policy"):
+                    intent.pop(key, None)
+                intent.update(legacy)
+                deployment.save()
+                create(intent["spec"])
+                restored = self.deployment()
+                restored.configure_runtime = Mock(side_effect=lambda pod: pod)
+                restored.ssh = Mock(return_value=b"")
+                restored.start()
+                self.assertEqual(restored.pod_id, "new_pod")
+                self.api.create_pod.reset_mock()
 
-    def test_pending_replacement_adoption_enforces_actual_h100_rate(self):
+    def test_pending_replacement_adoption_enforces_the_actual_rate(self):
         deployment, pods, create = self.capacity_deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.unmeasured_row()]}
         self.api.create_pod.side_effect = RunpodAmbiguousOutcome("lost response")
         with self.assertRaisesRegex(RuntimeError, "UNCONFIRMED"):
             deployment.start()
@@ -1424,15 +1453,14 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(restored.state["pod_replacement"]["candidate_id"], "new_pod")
         self.api.create_pod.assert_called_once()
 
-    def test_existing_healthy_pod_is_not_replaced_for_h100_preference(self):
+    def test_existing_healthy_pod_is_not_replaced_for_a_cheaper_gpu(self):
         deployment, _, _ = self.capacity_deployment()
-        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.h100_row()]}
+        self.api.catalog_gpus.return_value = {"gpus": [self.fallback_row(), self.unmeasured_row()]}
         self.api.start_pod.side_effect = None
         deployment.start()
         self.api.create_pod.assert_not_called()
         self.api.create_volume.assert_not_called()
         self.assertEqual(deployment.pod_id, "old_pod")
-
 
 if __name__ == "__main__":
     unittest.main()

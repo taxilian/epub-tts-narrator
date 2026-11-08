@@ -15,8 +15,9 @@ import numpy as np
 from epub_tts_narrator.spoken_text import MAX_DELIVERY_CHARACTERS
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError, create_engine
 from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.renderer.silence_stop import SilenceWatch, stop_seconds
 from epub_tts_narrator.renderer.voices import VoiceStore
-from shared_fixtures import FakeEntryPoints, PARENTHESIS_TRIM_CASES
+from shared_fixtures import FakeEntryPoints, PARENTHESIS_TRIM_CASES, route_mlx_takes_to_fake_generate
 
 
 @dataclass
@@ -35,6 +36,7 @@ class RendererEngineTests(unittest.TestCase):
         self.model.model.config.audio_decoder.num_codebooks = 10
         self.model.model.config.audio_decoder.vocab_size = 1024
         self.engine._model = self.model
+        route_mlx_takes_to_fake_generate(self)
         self.sf = self.engine._soundfile = Mock()
         self.sf.write.side_effect = lambda path, *args, **kwargs: Path(path).write_bytes(b"wave")
         self.output = self.root / "output.wav"
@@ -133,8 +135,10 @@ class RendererEngineTests(unittest.TestCase):
         self.assertEqual((result["history_turns"], result["history_available"]), (0, 0))
         self.assertNotIn("generated_codes", result)
         self.assertEqual(result["synthesis_text"], "Hello.")
-        self.assertEqual(kwargs["attempts"], 1)
-        self.assertTrue(kwargs["single_chunk"])
+        # Every take is watched so a take that goes silent ends early.
+        [watch] = self.mlx_watches
+        self.assertIsInstance(watch, SilenceWatch)
+        self.assertEqual(watch.limit, stop_seconds(args[0]))
         self.assertNotIn("accept", kwargs)
 
     def test_short_line_is_given_a_frame_budget_not_the_whole_limit(self):
@@ -255,8 +259,10 @@ class RendererEngineTests(unittest.TestCase):
         args, kwargs = self.model.generate.call_args
         self.assertEqual(args, (engine_text,))
         self.assertEqual(kwargs["seed"], 31)
-        self.assertEqual(kwargs["attempts"], 1)
-        self.assertTrue(kwargs["single_chunk"])
+        # Every take is watched so a take that goes silent ends early.
+        [watch] = self.mlx_watches
+        self.assertIsInstance(watch, SilenceWatch)
+        self.assertEqual(watch.limit, stop_seconds(args[0]))
         for i, name in enumerate(("narrator", "character")):
             tagged = kwargs["references"][i]
             self.assertIsNot(tagged, cached[name])
@@ -328,8 +334,7 @@ class RendererEngineTests(unittest.TestCase):
         turns = [{"text": "Hello.", "voice": voice}]
         cached = FakeReference(voice["reference_text"], object())
         for segments in ([], [self.segment(text="<|speaker:0|> Hello.", finish="length")],
-                         [self.segment(text="Wrong text")],
-                         [self.segment(text="<|speaker:0|> Hello.")] * 2):
+                         [self.segment(text="Wrong text")]):
             self.generate(*segments)
             with patch.object(self.engine, "_reference", return_value=cached), self.assertRaises(EngineError):
                 self.engine.synthesize_dialogue(turns, self.output, seed=1)
@@ -344,10 +349,10 @@ class RendererEngineTests(unittest.TestCase):
         reference.assert_not_called()
         self.assertEqual(self.output.read_bytes(), b"accepted recording")
 
-    def test_never_publishes_truncated_empty_multi_or_changed_text(self):
+    def test_never_publishes_truncated_silent_empty_or_changed_text(self):
         cases = [
             [], [self.segment(finish="length")],
-            [self.segment(), self.segment()],
+            [self.segment(finish="silence")],
             [self.segment(text="Wrong text")],
             [self.segment(audio=array("f"))],
             [self.segment(audio=array("f", [0.1] * 9))],

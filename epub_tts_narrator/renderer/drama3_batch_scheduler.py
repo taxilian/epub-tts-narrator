@@ -15,10 +15,11 @@ concurrent with itself.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 import threading
+import time
 from typing import Any
 
 
@@ -37,6 +38,9 @@ class BatchRequest:
     # Optional per-request stop check: ``observe(codes) -> bool`` per frame
     # (see silence_stop.SilenceWatch); True ends the request as "silence".
     watch: Any = None
+    # Optional prompt rows where a shared start ends (references, pinned history),
+    # which a backend may cache for later requests with the same start.
+    prefix_hints: tuple = ()
     future: Future = field(default_factory=Future)
 
 
@@ -71,15 +75,24 @@ class Drama3BatchScheduler:
         self.steps = 0
         self.row_steps = 0
         self.peak_active = 0
+        # Payload-free efficiency counters (seconds on the decode thread).
+        self.occupancy = Counter()   # active rows per step -> steps
+        self.prefills = 0
+        self.prefill_seconds = 0.0
+        self.step_seconds = 0.0
+        self.observe_seconds = 0.0
+        self.idle_seconds = 0.0
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
-    def submit(self, prompt, max_new_tokens, *, temperature, top_k, top_p, seed, watch=None) -> Future:
+    def submit(self, prompt, max_new_tokens, *, temperature, top_k, top_p, seed, watch=None,
+               prefix_hints=()) -> Future:
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("max_new_tokens must be a positive integer")
         if watch is not None and not callable(getattr(watch, "observe", None)):
             raise ValueError("watch must provide observe(codes)")
-        request = BatchRequest(prompt, max_new_tokens, temperature, top_k, top_p, seed, watch)
+        request = BatchRequest(prompt, max_new_tokens, temperature, top_k, top_p, seed, watch,
+                               tuple(prefix_hints))
         with self._condition:
             if self._failure is not None:
                 raise SchedulerClosed("The Drama 3 batch scheduler stopped after an internal error") from self._failure
@@ -88,6 +101,19 @@ class Drama3BatchScheduler:
             self._queue.append(request)
             self._condition.notify_all()
         return request.future
+
+    def stats(self):
+        """A snapshot of the counters: rows per step, and where the decode thread's time went."""
+        with self._condition:
+            queued = len(self._queue)
+        busy = self.prefill_seconds + self.step_seconds + self.observe_seconds
+        return {"rows": self.backend.rows, "steps": self.steps, "row_steps": self.row_steps,
+                "mean_rows": self.row_steps / self.steps if self.steps else 0.0,
+                "occupancy": dict(sorted(self.occupancy.items())), "peak_active": self.peak_active,
+                "prefills": self.prefills, "prefill_seconds": self.prefill_seconds,
+                "step_seconds": self.step_seconds, "observe_seconds": self.observe_seconds,
+                "idle_seconds": self.idle_seconds, "busy_seconds": busy, "queued": queued,
+                **({"prefix_cache": self.backend.prefixes.stats()} if hasattr(self.backend, "prefixes") else {})}
 
     def close(self, timeout=60):
         with self._condition:
@@ -136,8 +162,10 @@ class Drama3BatchScheduler:
     def _loop(self):
         while True:
             with self._condition:
+                waited = time.perf_counter()
                 while not self._closed and not self._queue and not self._active:
                     self._condition.wait()
+                self.idle_seconds += time.perf_counter() - waited
                 if self._closed:
                     break
                 admissions = []
@@ -151,14 +179,19 @@ class Drama3BatchScheduler:
                 if not request.future.set_running_or_notify_cancel():
                     continue
                 self._active[slot] = _Row(request)
+                began = time.perf_counter()
                 try:
                     self.backend.prefill(slot, request)
                 except BaseException as exc:  # one bad prompt must not stop the others
                     self._finish(slot, error=exc)
+                finally:
+                    self.prefills += 1
+                    self.prefill_seconds += time.perf_counter() - began
             if not self._active:
                 continue
             slots = sorted(self._active)
             self.peak_active = max(self.peak_active, len(slots))
+            began = time.perf_counter()
             try:
                 results = self.backend.step(slots)
                 if len(results) != len(slots):
@@ -169,8 +202,10 @@ class Drama3BatchScheduler:
                 for slot in slots:
                     self._finish(slot, error=exc)
                 continue
+            self.step_seconds += time.perf_counter() - began
             self.steps += 1
             self.row_steps += len(slots)
+            self.occupancy[len(slots)] += 1
             for slot, (frame, finite) in zip(slots, results):
                 row = self._active[slot]
                 if not finite:
@@ -181,11 +216,14 @@ class Drama3BatchScheduler:
                 else:
                     row.frames.append(list(frame))
                     watch = row.request.watch
+                    began = time.perf_counter()
                     try:
                         silent = watch is not None and watch.observe(frame[1:])
                     except BaseException as exc:  # a failed check fails only its own request
                         self._finish(slot, error=exc)
                         continue
+                    finally:
+                        self.observe_seconds += time.perf_counter() - began
                     if silent:
                         self._finish(slot, result=(row.frames, "silence"))
                     elif len(row.frames) >= row.request.max_new_tokens:

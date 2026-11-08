@@ -60,7 +60,7 @@ class ReplicaConfigTests(unittest.TestCase):
                          [("drama3-cuda", "http://127.0.0.1:8080/v1/tts", 1)])
 
     def test_each_copy_is_a_single_request_worker_on_its_own_loopback_port(self):
-        settings = self.settings(inference_replicas=3, prefer_h100=False, inference_mps=True)
+        settings = self.settings(inference_replicas=3, min_gpu_memory_gb=144, inference_mps=True)
         workers = self.remote(settings)["render_pool"]["workers"]
         self.assertEqual([w["url"] for w in workers], ["http://127.0.0.1:8080/v1/tts",
                                                        "http://127.0.0.1:8090/v1/tts", "http://127.0.0.1:8091/v1/tts"])
@@ -83,7 +83,8 @@ class ReplicaConfigTests(unittest.TestCase):
                                 ({"inference_replicas": 5}, "inference_replicas"),
                                 ({"inference_replicas": True}, "inference_replicas"),
                                 ({"inference_mps": "yes"}, "inference_mps"),
-                                ({"inference_replicas": 2}, "prefer_h100 = false"),
+                                ({"inference_replicas": 2}, "min_gpu_memory_gb of at least 96"),
+                                ({"inference_replicas": 3, "min_gpu_memory_gb": 120}, "at least 144"),
                                 ({"service_port": 8090}, "private speech ports"),
                                 ({"service_port": 8092}, "private speech ports")):
             with self.subTest(values=values), self.assertRaisesRegex(ValueError, message):

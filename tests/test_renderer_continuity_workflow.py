@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 import tempfile
 import unittest
 
@@ -12,7 +13,7 @@ from epub_tts_narrator.renderer.common import read_json, file_hash
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.workflow import render, assemble, make_render_plan, _render_chapter_chunks
-from shared_fixtures import renderer_config
+from shared_fixtures import renderer_config, route_mlx_takes_to_fake_generate
 import test_renderer_continuity as fixtures
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier, write_tone
 from test_renderer_paragraphs import passages
@@ -33,6 +34,7 @@ class ContinuityWorkflowTests(unittest.TestCase):
         self.local = LocalAdapter(self.root)
         self.local._identity = {"engine": "drama3_mlx", "model": "fishaudio/drama-3", "fixture": True}
         self.model = self.local._model = fixtures.Model()
+        route_mlx_takes_to_fake_generate(self)
         self.local._soundfile = soundfile
         self.verifier = fixtures.Verifier(self.model)
 
@@ -107,6 +109,52 @@ class ContinuityWorkflowTests(unittest.TestCase):
         self.assertEqual(histories[tagged("Other chapter.")], [])
         self.assertEqual(histories[tagged("First chapter.")], [])
         self.assertEqual(len(self.model.calls), 4)
+
+    def test_a_chapters_voices_render_concurrently_with_source_order_history(self):
+        self.config["render_pool"].update(workers=[{"name": "local", "type": "local", "concurrency": 1}],
+            scheduler="pipeline", chapter_concurrency=1, max_inflight=8)
+        pool = RenderPool(self.config)
+        self.addCleanup(pool.close)
+        self.local._identity.update(model_revision=pool.identity["model_revision"], **pool.identity["sampling"])
+        pool._workers[0]._engine = self.local
+        reference = self.root / "reference.wav"
+        write_tone(reference)
+        voices = {voice: {"kind": "reference", "voice_id": voice, "asset_hash": letter * 64,
+                          "reference_audio": str(reference), "reference_sha256": file_hash(reference),
+                          "reference_text": "Fixed reference."} for voice, letter in (("n", "a"), ("c", "b"))}
+        tagged = fixtures.tagged
+        quote_generated = Event()
+        transcribe = self.verifier.transcribe
+        calls = self.model.calls
+
+        def gated_asr(path):
+            result = transcribe(path)
+            if result["text"] == "Narration one.":
+                # The narrator's first take stays unaccepted until the
+                # character's independent first line has been generated.
+                deadline = monotonic() + 10
+                while not any(text == tagged("Quote one.") for text, _ in calls):
+                    if monotonic() > deadline:
+                        raise AssertionError("The other voice's line waited for the narrator")
+                    sleep(0.01)
+                quote_generated.set()
+            return result
+
+        self.verifier.transcribe = gated_asr
+        chunks = passages(["Narration one.", "Quote one.", "Narration two.", "Quote two."],
+                          block="x", voices=["n", "c", "n", "c"])
+        for chunk in chunks:
+            chunk["segment"]["delivery"]["direction"] = ""
+        _render_chapter_chunks({"number": 1, "chunks": chunks}, voices, pool, pool.identity, self.verifier,
+                               self.config, self.root / "work", notify=lambda message: None,
+                               scheduler_owner=("run", 1))
+        self.assertTrue(quote_generated.is_set())
+        histories = {text: [old for old, codes in options["previous_takes"]] for text, options in calls}
+        # Exactly what a source-order render gives: each voice hears only its own earlier lines.
+        self.assertEqual(histories, {
+            tagged("Narration one."): [], tagged("Quote one."): [],
+            tagged("Narration two."): [tagged("Narration one.")],
+            tagged("Quote two."): [tagged("Quote one.")]})
 
     def test_retired_continuity_setting_cannot_switch_history_off(self):
         from contextlib import redirect_stderr, redirect_stdout

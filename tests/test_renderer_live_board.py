@@ -139,12 +139,12 @@ class ChapterBoardRowTests(unittest.TestCase):
 
 
 class SchedulingDefaultsTests(unittest.TestCase):
-    def test_automatic_chapter_concurrency_is_at_least_two_per_slot(self):
+    def test_automatic_chapter_concurrency_is_one_per_slot_from_four_to_sixteen(self):
         from epub_tts_narrator.renderer.render_pipeline_config import effective_scheduling
         def chapters(slots):
             workers = [{"name": f"w{index}", "type": "fish_http", "concurrency": 1} for index in range(slots)]
             return effective_scheduling({"render_pool": {"workers": workers}})["chapter_concurrency"]
-        self.assertEqual([chapters(count) for count in (0, 1, 2, 3, 5, 12)], [4, 4, 4, 6, 10, 16])
+        self.assertEqual([chapters(count) for count in (0, 1, 2, 3, 5, 12, 20)], [4, 4, 4, 4, 5, 12, 16])
         explicit = effective_scheduling({"render_pool": {"workers": [], "chapter_concurrency": 1}})
         self.assertEqual(explicit["chapter_concurrency"], 1)
 

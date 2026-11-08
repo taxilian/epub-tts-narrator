@@ -15,12 +15,16 @@ audio competes with the reference for identity and accent. Chapter headings
 never become the pinned take. When a prompt overflows, candidates drop the
 latest turn, then the pinned one, exactly as Fish does.
 
-Only the sequential chapter coordinator advances history. Inference receives
+Only the chapter coordinator advances history: a take starts once every earlier
+take of a subset of its voices is accepted (``history_dependencies``), and
+history is chosen by source position, so independent voices render
+concurrently with exactly source-order history. Inference receives
 an immutable snapshot through a context variable, so recovery callbacks,
 pool lanes and HTTP workers see the same context without extra plumbing.
 """
 
 from contextlib import contextmanager
+import threading
 from contextvars import ContextVar
 from copy import deepcopy
 from pathlib import Path
@@ -81,6 +85,26 @@ def is_pinnable(chunk):
     return not all(segment.get("kind") == "heading" for segment in _segments(chunk))
 
 
+def chunk_voices(chunk):
+    """Script voice ids of every speaker in a chunk (all paragraph turns and simultaneous lanes)."""
+    from .bundle import chunk_speakers
+    return frozenset(speaker["voice_id"] for speaker in chunk_speakers(chunk))
+
+
+def history_dependencies(chunks):
+    """For each chunk, the earlier chunks it must wait for under per-voice history.
+
+    A take hears only earlier takes whose voices are all among its own
+    (``ChapterContinuity.takes``), and whether a take joins history is known
+    only once it is accepted, so chunk i waits for every earlier chunk whose
+    voices are a subset of its own. Chunks of unrelated voices (the narrator
+    and a character's quoted line) can then render at the same time and
+    still hear exactly the history a source-order render gives them.
+    """
+    voices = [chunk_voices(chunk) for chunk in chunks]
+    return [frozenset(j for j in range(i) if voices[j] <= voices[i]) for i in range(len(chunks))]
+
+
 def without_history(identity):
     """A speech identity with its continuity's exact earlier takes removed.
 
@@ -112,17 +136,32 @@ class ChapterContinuity:
         # identity; history identity names only the exact accepted takes.
         self.voices_by_asset = {voice["asset_hash"]: voice for voice in voices.values()}
         self.entries = []
+        # Takes of independent voices may be accepted concurrently (see
+        # history_dependencies); entries record their source position.
+        self._lock = threading.Lock()
         # Takes reused under tolerant history reuse although an earlier take
         # they heard has since changed.
         self.drifted = 0
 
     def accepted_audio(self):
         """Audio checksums of the takes this chapter's history already holds."""
-        return {entry["identity"]["audio_sha256"] for entry in self.entries}
+        with self._lock:
+            return {entry["identity"]["audio_sha256"] for entry in self.entries}
 
-    def takes(self, speakers):
-        """Fish's first + latest, from this chapter's takes by these voice ids only."""
-        eligible = [entry for entry in self.entries if set(entry["voices"]) <= speakers]
+    def takes(self, speakers, *, before=None):
+        """Fish's first + latest, from this chapter's takes by these voice ids only.
+
+        With ``before`` (a source position) only takes from earlier in the
+        chapter count, in source order, so a take accepted early by another
+        voice's queue never enters an earlier line's history.
+        """
+        with self._lock:
+            entries = list(self.entries)
+        if before is not None:
+            entries = sorted((entry for entry in entries
+                              if entry.get("position") is not None and entry["position"] < before),
+                             key=lambda entry: entry["position"])
+        eligible = [entry for entry in entries if set(entry["voices"]) <= speakers]
         if not eligible:
             return []
         pinned = next((entry for entry in eligible if entry["pinnable"]), None)
@@ -130,9 +169,9 @@ class ChapterContinuity:
         return [latest] if pinned is None or pinned is latest else [pinned, latest]
 
     @contextmanager
-    def transaction(self, request, *, pinnable=True):
+    def transaction(self, request, *, pinnable=True, position=None):
         voices = request_speakers(request)
-        takes = deepcopy(self.takes(voices))
+        takes = deepcopy(self.takes(voices, before=position))
         identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
         segments = _segments(request["chunk"]) if isinstance(request.get("chunk"), dict) else []
@@ -140,6 +179,7 @@ class ChapterContinuity:
                  "request_binding": digest(bound), "pinnable": pinnable,
                  # The line's role, for a history-echo retry's role tag.
                  "kind": segments[0].get("kind") if segments else None,
+                 "position": position,
                  # Simultaneous lanes overlap in time; none of them is the
                  # next turn of the chapter.
                  "history": "performer" not in request}
@@ -190,11 +230,13 @@ class ChapterContinuity:
         load_codes(codes_path, marker)
         # Selection uses the script voices; the take identity (and so every
         # request's cache identity) still names only the exact accepted take.
-        self.entries.append({"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
-                             "voices": list(scope["voices"]), "identity": {
+        entry = {"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
+                 "voices": list(scope["voices"]), "position": scope.get("position"), "identity": {
             "codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
             "speakers": list(marker["speakers"]), "request_hash": accepted["request_hash"],
-            "audio_sha256": accepted["audio_sha256"]}})
+            "audio_sha256": accepted["audio_sha256"]}}
+        with self._lock:
+            self.entries.append(entry)
 
 
 def _retag(text, mapping):

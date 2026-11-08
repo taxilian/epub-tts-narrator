@@ -251,10 +251,10 @@ class GpuSampler:
 def selected_workers(config, worker_name, concurrency):
     workers = config.get("render_pool", {}).get("workers", [])
     if worker_name == "local" or not workers:
-        if concurrency != 1:
-            raise ValueError("Local MLX comparison requires concurrency 1")
-        # Keep all lazy model operations on the existing persistent MLX thread.
-        workers = [{"name": "benchmark-local", "type": "local", "concurrency": 1}]
+        # Concurrency 1 keeps all lazy model operations on the persistent MLX
+        # thread; above 1 a drama3_mlx local worker decodes that many
+        # passages together (batched decoding on its own MLX thread).
+        workers = [{"name": "benchmark-local", "type": "local", "concurrency": concurrency}]
     elif worker_name == "all":
         # Every configured remote worker as configured, e.g. one per Drama 3
         # copy on a multi-copy Runpod GPU; --concurrency applies per worker.
@@ -270,12 +270,14 @@ def selected_workers(config, worker_name, concurrency):
     return workers
 
 
-def synthesize_case(engine, case, voices, output, secrets, *, warmup=False):
+def synthesize_case(engine, case, voices, output, secrets, *, warmup=False, seed_offset=0):
     from epub_tts_narrator.renderer.fish_http import inspect_wav
 
     target = output / (case["id"] + ("-warmup" if warmup else "") + ".wav")
     row = {"case_id": case["id"], "warmup": warmup, "length_class": case["length_class"],
-           "expected_text": case["expected_text"], "seed_requested": 0 if warmup else case["seed_requested"]}
+           "expected_text": case["expected_text"],
+           # A seed offset gives another sample of the same corpus (seed variants).
+           "seed_requested": 0 if warmup else (case["seed_requested"] + seed_offset) % (1 << 32)}
     started = time.perf_counter()
     try:
         voice = voices[case["voice_asset"]]
@@ -318,7 +320,8 @@ def generate(args):
     write_json(path, report)
 
     def run(case, warmup=False):
-        return synthesize_case(engine, case, voices, args.output, secrets, warmup=warmup)
+        return synthesize_case(engine, case, voices, args.output, secrets, warmup=warmup,
+                               seed_offset=getattr(args, "seed_offset", 0))
 
     try:
         warm = {}
@@ -363,6 +366,7 @@ def pipeline(args):
     path = args.output / "manifest.json"
     secrets = configured_secrets(config)
     report = {"format": "epub-tts-render-benchmark-results", "version": 1, "mode": "pipeline",
+              "seed_offset": getattr(args, "seed_offset", 0),
               "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
               "started_utc": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
               "concurrency": args.concurrency, "workers": [w["name"] for w in workers],
@@ -439,7 +443,7 @@ def pipeline(args):
         def run(case):
             began = time.perf_counter()
             with engine.admit_chunk():
-                row = synthesize_case(engine, case, voices, args.output, secrets)
+                row = synthesize_case(engine, case, voices, args.output, secrets, seed_offset=getattr(args, "seed_offset", 0))
                 row["generation_seconds"] = row["latency_seconds"]
                 if "error" not in row:
                     check(row)
@@ -559,8 +563,10 @@ def main():
     for p in (generate_parser, pipeline_parser):
         p.add_argument("corpus", type=Path)
         p.add_argument("--worker")
-        p.add_argument("--concurrency", type=int, choices=(1, 4, 8), default=1)
+        p.add_argument("--concurrency", type=int, choices=(1, 2, 4, 8, 12, 16), default=1)
         p.add_argument("--output", type=Path, required=True)
+        p.add_argument("--seed-offset", type=int, default=0,
+                       help="add this to every case seed to sample a seed variant of the same corpus")
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("manifest", type=Path)
     for p in (prepare_parser, generate_parser, pipeline_parser, verify_parser):

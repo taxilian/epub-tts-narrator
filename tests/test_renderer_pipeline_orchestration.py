@@ -437,6 +437,42 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(future.result(30), list(range(6)))
         self.assertEqual(inflight["peak"], scheduler.share)
 
+    def test_collect_chapter_runs_independent_transactions_together_and_waits_for_dependencies(self):
+        pool = self.pool(chapter_concurrency=1, max_inflight=4, workers_concurrency=4)
+        scheduler = pool.logical
+        started, finished = [], []
+        lock = threading.Lock()
+        gate = {index: threading.Event() for index in range(4)}
+
+        def run_one(index):
+            with lock:
+                started.append(index)
+            if not gate[index].wait(30):
+                raise AssertionError("transaction was never released")
+            with lock:
+                finished.append(index)
+            return index
+
+        # 0 and 1 are independent; 2 waits for 0; 3 waits for 1 and 2.
+        dependencies = [frozenset(), frozenset(), frozenset({0}), frozenset({1, 2})]
+        with ThreadPoolExecutor(max_workers=1) as coordinator:
+            future = coordinator.submit(collect_chapter, scheduler, ("run", 9), 4, run_one,
+                                        dependencies=dependencies)
+            self.assertTrue(wait_until(lambda: sorted(started) == [0, 1]))
+            gate[1].set()
+            self.assertTrue(wait_until(lambda: finished == [1]))
+            time.sleep(0.2)
+            self.assertEqual(sorted(started), [0, 1])  # 2 still waits for 0, 3 for 2
+            gate[0].set()
+            self.assertTrue(wait_until(lambda: 2 in started))
+            self.assertNotIn(3, started)
+            gate[2].set()
+            self.assertTrue(wait_until(lambda: 3 in started))
+            gate[3].set()
+        self.assertEqual(future.result(30), [0, 1, 2, 3])
+        with self.assertRaisesRegex(ValueError, "one dependency set"):
+            collect_chapter(scheduler, ("run", 10), 2, run_one, dependencies=[frozenset()])
+
 
 def wait_until(predicate, timeout=15.0):
     deadline = time.monotonic() + timeout

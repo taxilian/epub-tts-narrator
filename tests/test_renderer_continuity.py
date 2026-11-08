@@ -11,7 +11,7 @@ import unittest
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine
 from epub_tts_narrator.renderer.workflow import _render_chapter_chunks
-from shared_fixtures import renderer_config, timed_transcript
+from shared_fixtures import renderer_config, route_mlx_takes_to_fake_generate, timed_transcript
 from test_renderer_paragraphs import passages, plan, chunks_of
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 from epub_tts_narrator.renderer.paragraphs import group_paragraphs
@@ -88,6 +88,7 @@ class ContinuityTests(unittest.TestCase):
         self.engine = Drama3MLXEngine(self.root)
         self.engine._identity = {"engine": "drama3_mlx", "model": "fixture", "revision": "one"}
         self.model = self.engine._model = Model()
+        route_mlx_takes_to_fake_generate(self)
         self.engine._soundfile = soundfile
         self.verifier = Verifier(self.model)
         reference = self.root / "voice.wav"
@@ -365,6 +366,30 @@ class ContinuityTests(unittest.TestCase):
 
 
 class ContinuityPolicyTests(unittest.TestCase):
+    def test_each_chunk_waits_only_for_earlier_chunks_of_its_own_voices(self):
+        from epub_tts_narrator.renderer.continuity import history_dependencies
+        chunks = passages(["Narration.", "Said.", "More narration.", "Said again.", "Both."],
+                          voices=["n", "c", "n", "c", "n"])
+        both = chunks[4]
+        both["paragraph_turns"] = [deepcopy(chunks[0]), deepcopy(chunks[1])]
+        self.assertEqual(history_dependencies(chunks), [
+            frozenset(), frozenset(), frozenset({0}), frozenset({1}),
+            # A paragraph with both voices waits for every earlier take of either.
+            frozenset({0, 1, 2, 3})])
+
+    def test_history_comes_from_earlier_lines_even_when_a_later_one_finished_first(self):
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+        state = ChapterContinuity({"engine": "fixture"}, {})
+        def entry(position, name):
+            return {"voices": ["n"], "pinnable": True, "position": position,
+                    "identity": {"request_hash": name, "audio_sha256": name}}
+        # The take at position 5 was accepted before the one at position 2.
+        state.entries = [entry(1, "first"), entry(5, "later"), entry(2, "second")]
+        names = lambda takes: [take["identity"]["request_hash"] for take in takes]
+        self.assertEqual(names(state.takes(frozenset({"n"}), before=3)), ["first", "second"])
+        self.assertEqual(names(state.takes(frozenset({"n"}), before=2)), ["first"])
+        self.assertEqual(names(state.takes(frozenset({"n"}), before=6)), ["first", "later"])
+
     def test_only_heading_only_takes_cannot_be_pinned(self):
         from epub_tts_narrator.renderer.continuity import is_pinnable
         chunks = passages(["Chapter 4", "Narration.", "Said."])

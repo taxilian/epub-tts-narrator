@@ -35,6 +35,12 @@ class WorkerSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "remote workers only"):
             selected_workers({"render_pool": {"workers": [{"name": "m", "type": "local", "concurrency": 1}]}}, "all", 1)
 
+    def test_local_concurrency_selects_one_batching_local_worker(self):
+        for concurrency in (1, 8):
+            with self.subTest(concurrency=concurrency):
+                workers = selected_workers(self.config(), "local", concurrency)
+                self.assertEqual(workers, [{"name": "benchmark-local", "type": "local", "concurrency": concurrency}])
+
     def test_single_worker_selection_is_unchanged(self):
         self.assertEqual([w["name"] for w in selected_workers(self.config(), "drama3-cuda-2", 4)], ["drama3-cuda-2"])
         with self.assertRaisesRegex(ValueError, "Select one remote worker"):

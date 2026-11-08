@@ -96,12 +96,12 @@ class HTTPWorkflowTests(unittest.TestCase):
                     first = render(bundle, config, pool, verifier, chapters_only=True,
                                    notify=client_messages.append)
                     self.assertEqual(first["status"], "chapters_complete")
-                    # The fixture book has one chapter. Its takes run in order on the
-                    # worker of its first take, so history and audio share one backend.
+                    # The fixture book has one chapter. Its voices' takes queue
+                    # independently, so both serve workers can take a chapter's
+                    # lines; each request carries its own history over HTTP.
                     used = [index for index, engine in enumerate(engines) if engine.speech_calls]
-                    self.assertEqual(len(used), 1)
+                    self.assertGreaterEqual(len(used), 1)
                     name = f"mac-{used[0]}"
-                    other = f"mac-{1 - used[0]}"
                     # Chapter history crosses HTTP: later takes carry earlier accepted codes.
                     calls = [call for engine in engines for call in engine.speech_calls]
                     self.assertTrue(any(call["history"] for call in calls))
@@ -113,7 +113,6 @@ class HTTPWorkflowTests(unittest.TestCase):
                                         for line in client_messages), client_messages)
                     self.assertTrue(any(f"{name}: speech generation completed" in line
                                         for line in client_messages), client_messages)
-                    self.assertFalse(any(f"Generating speech on {other}" in line for line in client_messages))
                     self.assertTrue(any("inference started" in line for line in server_messages))
                     self.assertTrue(any("completed in" in line for line in server_messages))
                     self.assertNotIn("test-server-key", "\n".join(client_messages + server_messages))

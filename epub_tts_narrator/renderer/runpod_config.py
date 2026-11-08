@@ -20,15 +20,17 @@ from .common import write_private
 from .config import DEFAULTS, load_config
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .render_pipeline_config import SCHEDULERS, project_pipeline_controls
-from .runpod_gpu import DEFAULT_GPU_TYPE_ID
+from .runpod_gpu import MIN_GPU_MEMORY_GB
 
 
 DEPLOYMENT_DEFAULTS = {
     "name": "epub-tts-narrator",
     "image": "",
-    # Fallback GPU; when prefer_h100 is set, an affordable available H100 wins.
-    "gpu_type_id": DEFAULT_GPU_TYPE_ID,
-    "prefer_h100": True,
+    # Any NVIDIA GPU with at least this much catalog memory is eligible;
+    # measured GPUs rank by cost per generated audio hour, then others by price.
+    "min_gpu_memory_gb": MIN_GPU_MEMORY_GB,
+    # Optional exact catalog ID that pins one GPU; empty allows any eligible GPU.
+    "gpu_type_id": "",
     # Runpod clouds in preference order; the first with an eligible placement
     # wins and a confirmed refusal falls back once to the next.
     "cloud_types": ["secure"],
@@ -183,6 +185,11 @@ def _deployment_settings(values, directory):
                              "host-local Pod disk instead of a network volume. Remove volume_id; existing "
                              "network volumes are left untouched in Runpod and keep billing until deleted.")
         values = {key: value for key, value in values.items() if key != "volume_id"}
+    if isinstance(values, dict) and "prefer_h100" in values:
+        raise ValueError("runpod.prefer_h100 is no longer supported: any NVIDIA GPU with at least "
+                         "runpod.min_gpu_memory_gb of memory is eligible, measured GPUs ranked by cost per "
+                         "generated audio hour and others by price. Remove prefer_h100; set gpu_type_id "
+                         "only to pin one exact GPU.")
     if not isinstance(values, dict) or set(values) - DEPLOYMENT_DEFAULTS.keys():
         raise ValueError("Unknown key or invalid table in runpod configuration")
     settings = _merge(DEPLOYMENT_DEFAULTS, values)
@@ -195,7 +202,7 @@ def _deployment_settings(values, directory):
         value = settings[key]
         if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError(f"runpod.{key} must be a string without control characters")
-        if key in {"name", "gpu_type_id", "state_dir"} and not value.strip():
+        if key in {"name", "state_dir"} and not value.strip():
             raise ValueError(f"runpod.{key} must not be empty")
     for key in ("name", "data_center_id", "pod_id"):
         value = settings[key]
@@ -231,12 +238,15 @@ def _deployment_settings(values, directory):
     price = settings["max_hourly_price"]
     if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price <= 100:
         raise ValueError("runpod.max_hourly_price must be a positive hourly limit at most 100")
-    if type(settings["prefer_h100"]) is not bool:
-        raise ValueError("runpod.prefer_h100 must be true or false")
-    if settings["inference_replicas"] > 1 and settings["prefer_h100"]:
-        # Each Drama 3 copy needs about 42 GB; an 80 GB H100 holds only one.
-        raise ValueError("runpod.inference_replicas above 1 needs a GPU that holds several Drama 3 copies; "
-                         "set prefer_h100 = false and choose a large-memory gpu_type_id")
+    if settings["gpu_type_id"] != settings["gpu_type_id"].strip():
+        raise ValueError("runpod.gpu_type_id must be an exact catalog ID without surrounding spaces")
+    memory = settings["min_gpu_memory_gb"]
+    if type(memory) is not int or not 16 <= memory <= 2000:
+        raise ValueError("runpod.min_gpu_memory_gb must be an integer from 16 through 2000")
+    if memory < 48 * replicas:
+        # Each Drama 3 copy uses about 48 GB while generating.
+        raise ValueError(f"runpod.inference_replicas = {replicas} needs runpod.min_gpu_memory_gb of at least "
+                         f"{48 * replicas} (about 48 GB per Drama 3 copy)")
     for key in ("app_dir", "fish_source", "remote_config", "model_dir", "whisper_dir", "data_dir"):
         value = settings[key]
         if (not isinstance(value, str) or not value.startswith("/workspace/")

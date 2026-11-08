@@ -15,7 +15,7 @@ from epub_tts_narrator.renderer.engines import Drama3MLXEngine, EngineError
 from epub_tts_narrator.renderer.history_echo import (
     LADDER, apply_recovery, archive, candidate_echo, detect, next_mode, plain_text, rejected_pick, role_tagged)
 from epub_tts_narrator.renderer.workflow import _render_chapter_chunks
-from shared_fixtures import renderer_config
+from shared_fixtures import renderer_config, route_mlx_takes_to_fake_generate
 import test_renderer_continuity as fixtures
 from test_renderer_paragraphs import passages
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
@@ -247,6 +247,7 @@ class LadderWorkflowTests(unittest.TestCase):
         self.config = renderer_config(self.root)
         self.engine = EchoEngine(self.root)
         self.engine.streaming_calls = []
+        route_mlx_takes_to_fake_generate(self)
         self.engine._identity = {"engine": "drama3_mlx", "model": "fixture", "revision": "one"}
         self.engine._soundfile = soundfile
         reference = self.root / "voice.wav"

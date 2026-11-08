@@ -97,18 +97,25 @@ so a placement rejection is visible instead of a blind retry message.
 
 ### GPU selection
 
-By default (`prefer_h100 = true`) a new Pod prefers any available NVIDIA H100
-variant (80GB HBM3/SXM, PCIe, or NVL) whose catalog rate is **strictly under
-$2.60/hour** and within `max_hourly_price`, choosing the cheapest eligible one
-across all eligible US datacenters of the cloud being quoted. If no such H100 exists — too expensive,
-out of stock, or absent from the US catalog — the Pod uses the configured
-`gpu_type_id` fallback (the RTX PRO 6000 in the example), which must be
-available at or under `max_hourly_price` in some eligible US datacenter, or
-that cloud is skipped (and nothing is created when no cloud qualifies). Set
-`prefer_h100 = false` to pin the configured GPU exactly. GPU class, price, and
-stock decide first; your configured `data_center_id` hint only breaks ties.
-After creation the provider's actual rate is checked against the same rules
-and the worker is stopped if it exceeds them. Catalog and hourly prices cover
+A new Pod may use any NVIDIA GPU whose catalog memory is at least
+`min_gpu_memory_gb` (default 56: one Drama 3 copy needs about 48 GB while
+generating, plus 2.5–4.5 GB for CUDA Whisper, so 48 GB cards and 48 GB MIG
+slices are excluded) and whose rate in the cloud being quoted is within
+`max_hourly_price`, in any US datacenter where it is in stock. The catalog
+reports memory and price but nothing about speed, so GPUs with a measured
+Drama 3 throughput (`runpod_gpu.MEASURED_REALTIME`; today only the RTX PRO 6000
+Server Edition, 2.10× realtime, about $1.19 of Secure GPU time per generated
+audio hour) rank first by measured cost per generated audio hour, and every
+other eligible GPU follows by hourly price. Add a GPU to that table only from a
+benchmark of the same corpus. Stock, then your `data_center_id` hint, break
+ties. If nothing qualifies the cloud is skipped, and nothing is created when no
+cloud qualifies. Set `gpu_type_id` to an exact catalog ID to pin one GPU (the
+memory floor still applies). AMD GPUs, rows with unknown memory or vendor, and
+unreadable prices or stock are never chosen. An unmeasured GPU is proven only by
+the full bootstrap and smoke check on its first Pod. After creation the
+provider's actual rate is checked against `max_hourly_price` and the worker is
+stopped if it exceeds it. `prefer_h100` was removed; a config that still sets it
+is refused with this explanation. Catalog and hourly prices cover
 compute only; the Pod disk is billed separately. The chosen cloud, GPU and
 region are saved before the Pod is created, so a retried or restarted
 deployment keeps the same hardware, and a healthy existing Pod is never
@@ -350,16 +357,17 @@ share a batch without reimplementing parts of the model.
 Drama 3 copies on the Pod's one GPU. Each copy is its own inference process on a
 private loopback port (8080, then 8090, 8091, 8092) and serves one request at a
 time; the chapter service sees one single-request worker per copy, so up to that
-many passages from different chapters generate at once. Passages inside one
-chapter stay sequential because each one's history is the previous accepted take.
+many passages from different chapters generate at once. Inside one chapter,
+passages wait only for earlier passages of their own voices (each hears only
+those), so a chapter's narrator and characters can generate at the same time.
 
 Each copy needs 41.5 GB for weights and codec and grows to about 48 GB
 (48,110 MiB measured) with its caches and graphs while generating. Before
 loading anything the worker checks that GPU 0 has at least 47 GiB per copy and
 stops with the shortfall otherwise; CUDA Whisper needs another 2.5–4.5 GB when
-`verification.device = "cuda"`. An 80 GB H100 holds one copy,
-so more than one replica requires `prefer_h100 = false` and a large-memory
-`gpu_type_id` such as the 96 GB RTX PRO 6000. All copies load together at
+`verification.device = "cuda"`. An 80 GB card holds one copy, so more than
+one replica requires `min_gpu_memory_gb` of at least 48 per copy (96 for two,
+which admits the 96 GB RTX PRO 6000). All copies load together at
 startup, and the smoke check generates and verifies a sample from every copy.
 
 Without MPS the copies time-slice the GPU. `runpod.inference_mps = true` starts a
@@ -423,8 +431,8 @@ wrong; its per-step state comparison is the useful signal.
 `runpod.inference_batch_rows` (default 1, at most 16) makes the single Drama 3
 copy decode that many passages together, one frame per step. The chapter
 service sees one worker with that many concurrent slots, and passages from
-different chapters share each step; passages inside one chapter stay
-sequential because each one's history is the previous accepted take. It cannot
+different chapters share each step, as do a chapter's independent voices
+(each passage waits only for earlier passages of its own voices). It cannot
 be combined with `inference_replicas` above 1.
 
 Each request is still its own: its prompt (reference voices, up to two

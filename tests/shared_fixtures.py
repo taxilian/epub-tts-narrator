@@ -134,3 +134,32 @@ def fixture_codes(text, voices, *, frames=4):
 
 
 HISTORY_CAPABILITY = {"chapter_continuity": True}
+
+
+def route_mlx_takes_to_fake_generate(testcase):
+    """Serve the MLX engine's watched decode loop from a fake model's ``generate``.
+
+    Fake Drama 3 models implement only the vendored ``Drama3.generate``
+    interface. The engine now runs its own copy of that loop
+    (``mlx_drama3_decode.generate_segment``, checked against the vendored
+    runtime by ``scripts/check_drama3_silence_stop.py --mlx``), so this routes
+    each take to ``model.generate(..., single_chunk=True, attempts=1)`` with the
+    engine's arguments and records the take's silence watch in
+    ``testcase.mlx_watches``. A fake that yields nothing is a take without frames.
+    """
+    from unittest.mock import patch
+    from epub_tts_narrator.renderer.silence_stop import SilenceWatch
+
+    testcase.mlx_watches = []
+
+    def generate_segment(model, text, *, watch=None, **options):
+        testcase.mlx_watches.append(watch)
+        return next(iter(model.generate(text, single_chunk=True, attempts=1, **options)), None)
+
+    def silence_watch(model, text):
+        return SilenceWatch(text, lambda frames: None, sample_rate=44100)
+
+    for name, fake in (("generate_segment", generate_segment), ("silence_watch", silence_watch)):
+        patcher = patch(f"epub_tts_narrator.renderer.mlx_drama3_decode.{name}", fake)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)

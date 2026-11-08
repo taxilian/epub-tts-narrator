@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
+import time
 import unicodedata
 from typing import Any, Protocol
 
@@ -359,6 +361,37 @@ class Drama3MLXEngine(HistorySynthesis):
         self._soundfile: Any = None
         self._reference_cache: dict[tuple[str, str], Any] = {}
         self._identity: dict[str, Any] | None = None
+        # Batched decoding (set_batch_rows): every MLX operation runs on one
+        # private runtime thread, because MLX streams belong to their thread.
+        self.batch_rows = 1
+        self._scheduler: Any = None
+        self._mlx_runtime: Any = None
+        self.batch_audio_decode_seconds = 0.0
+        self._load_lock = threading.RLock()
+
+    def set_batch_rows(self, rows: int) -> None:
+        """Decode up to ``rows`` concurrent requests per step; set before loading."""
+        from .mlx_drama3_batch import MAX_BATCH_ROWS
+        if type(rows) is not int or not 1 <= rows <= MAX_BATCH_ROWS:
+            raise EngineError(f"batch_rows must be an integer from 1 through {MAX_BATCH_ROWS}")
+        if self._model is not None:
+            raise EngineError("Set batch_rows before the model loads")
+        self.batch_rows = rows
+        self._identity = None
+
+    @property
+    def concurrent_requests(self) -> int:
+        return self.batch_rows
+
+    def _mlx(self, function, *args, **kwargs):
+        """Run MLX work on the batched engine's own thread (directly when unbatched)."""
+        if self.batch_rows == 1:
+            return function(*args, **kwargs)
+        with self._load_lock:
+            if self._mlx_runtime is None:
+                from .local_runtime import LocalRuntime
+                self._mlx_runtime = LocalRuntime(name="drama3-mlx-batch")
+        return self._mlx_runtime.run(function, *args, initialize_mlx=True, **kwargs)
 
     @property
     def capabilities(self) -> dict[str, bool]:
@@ -422,6 +455,12 @@ class Drama3MLXEngine(HistorySynthesis):
             "single_chunk": True,
             "output_encoding": "wav-float32-mono",
         }
+        if self.batch_rows > 1:
+            # Per-row counter-hash noise samples differently from the vendored
+            # global random stream, so batched takes are never cache hits for it.
+            from .mlx_drama3_batch import DECODER_VERSION, SAMPLER
+            self._identity.update(decoder="batched", decoder_version=DECODER_VERSION,
+                                  batch_rows=self.batch_rows, sampler=SAMPLER)
         return deepcopy(self._identity)
 
     @property
@@ -437,6 +476,9 @@ class Drama3MLXEngine(HistorySynthesis):
     def close(self) -> None:
         """Release this adapter's model and reference cache between stages."""
         loaded = self._model is not None
+        if self._scheduler is not None:
+            self._scheduler.close()
+            self._scheduler = None
         self._reference_cache.clear()
         self._model = None
         self._soundfile = None
@@ -446,33 +488,49 @@ class Drama3MLXEngine(HistorySynthesis):
                 import mlx.core as mx
             except ImportError:
                 return
-            mx.clear_cache()
+            self._mlx(mx.clear_cache)
+        if self._mlx_runtime is not None:
+            self._mlx_runtime.close()
+            self._mlx_runtime = None
 
     def warmup(self) -> None:
         """Load the model before a server begins accepting rendering jobs."""
         self._load()
 
     def _load(self) -> Any:
-        if self._model is None:
-            details = _runtime_details()
-            if details["installed_version"] != DRAMA3_RUNTIME_VERSION:
-                raise EngineError(
-                    "The pinned Drama 3 MLX runtime is required. From the project "
-                    f"directory, run {DRAMA3_INSTALL}"
-                )
-            revision = details["installed_revision"]
-            if revision is not None and revision != DRAMA3_RUNTIME_REVISION:
-                raise EngineError(
-                    f"Drama 3 runtime revision differs from the pinned revision: {revision}"
-                )
-            try:
-                import soundfile
-                from drama3_mlx import Drama3
-                self._soundfile = soundfile
-                self._model = Drama3.load(self.checkpoint, experts=self.experts)
-            except Exception as exc:
-                raise EngineError(f"Could not load local Drama 3: {exc}") from exc
+        if self._model is not None:
+            return self._model
+        with self._load_lock:
+            if self._model is None:
+                model = self._mlx(self._load_model)
+                if self.batch_rows > 1:
+                    from .drama3_batch_scheduler import Drama3BatchScheduler
+                    from .mlx_drama3_batch import BatchedMLXBackend
+                    backend = BatchedMLXBackend(model.model, rows=self.batch_rows, run=self._mlx)
+                    self._scheduler = Drama3BatchScheduler(backend)
+                self._model = model
         return self._model
+
+    def _load_model(self) -> Any:
+        """Load the pinned runtime's model (on the MLX thread when batched)."""
+        details = _runtime_details()
+        if details["installed_version"] != DRAMA3_RUNTIME_VERSION:
+            raise EngineError(
+                "The pinned Drama 3 MLX runtime is required. From the project "
+                f"directory, run {DRAMA3_INSTALL}"
+            )
+        revision = details["installed_revision"]
+        if revision is not None and revision != DRAMA3_RUNTIME_REVISION:
+            raise EngineError(
+                f"Drama 3 runtime revision differs from the pinned revision: {revision}"
+            )
+        try:
+            import soundfile
+            from drama3_mlx import Drama3
+            self._soundfile = soundfile
+            return Drama3.load(self.checkpoint, experts=self.experts)
+        except Exception as exc:
+            raise EngineError(f"Could not load local Drama 3: {exc}") from exc
 
     def _reference(self, voice: dict[str, Any]) -> Any:
         if voice.get("kind") != "reference":
@@ -503,8 +561,8 @@ class Drama3MLXEngine(HistorySynthesis):
                 )
                 if audio.shape[0] == 0:
                     raise EngineError("Reference audio is empty")
-                self._reference_cache[key] = model.reference(
-                    audio.mean(axis=1), rate, transcript,
+                self._reference_cache[key] = self._mlx(
+                    model.reference, audio.mean(axis=1), rate, transcript,
                 )
             except EngineError:
                 raise
@@ -517,19 +575,73 @@ class Drama3MLXEngine(HistorySynthesis):
     def _streaming_segment(self, model: Any, text: str, voice: dict[str, Any], kept: list, seed: int) -> Any:
         """One take in the streaming-continuation layout (see ``drama3_layouts``)."""
         import mlx.core as mx
-        from drama3_mlx.generate import generate_frames
         from drama3_mlx.model import Segment
         from .drama3_layouts import streaming_rows
+        from .mlx_drama3_decode import generate_frames_watched, silence_watch
         rows = streaming_rows(text, self._reference(voice), kept, model.tokenizer, model.model.config)
+        if self._scheduler is not None:
+            return self._batched_segment(model, text, rows, seed, frame_budget(text, self.max_new_tokens or 2048))
         mx.random.seed(seed)
-        frames, finish_reason = generate_frames(
+        frames, finish_reason = generate_frames_watched(
             model.model, rows, max_new_tokens=frame_budget(text, self.max_new_tokens or 2048),
-            temperature=self.temperature, top_k=self.top_k, top_p=self.top_p)
+            temperature=self.temperature, top_k=self.top_k, top_p=self.top_p,
+            watch=silence_watch(model, text))
         if not len(frames):
             raise EngineError("Drama 3 returned no audio frames")
         codes = frames[:, 1:].T.copy()
         return Segment(text=text, codes=codes, audio=model.codec.decode(codes), finish_reason=finish_reason,
                        prompt_rows=len(rows), seconds=0.0)
+
+    def _directing_segment(self, model: Any, text: str, references: list, previous: list, seed: int) -> Any:
+        """One take in Fish's history layout: the vendored ``Drama3.generate(single_chunk=True)``
+        on our watched copy of its loop (``mlx_drama3_decode``), ended early once silent."""
+        from .mlx_drama3_decode import generate_segment, silence_watch
+        if self._scheduler is not None:
+            from drama3_mlx.prompt import build_prompt
+            from .mlx_drama3_batch import prefix_ends
+            texts, codes = [reference.text for reference in references], [reference.codes for reference in references]
+            prompt = build_prompt(text, model.tokenizer, model.model.config, texts, codes, list(previous))
+            # The references, then the pinned turn, repeat for this voice's later takes.
+            hints = prefix_ends(model.tokenizer, model.model.config, text, texts, codes, list(previous))
+            return self._batched_segment(model, text, prompt, seed, frame_budget(text, self.max_new_tokens),
+                                         prefix_hints=hints)
+        return generate_segment(
+            model, text, references=references, previous_takes=previous,
+            temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
+            max_new_tokens=frame_budget(text, self.max_new_tokens), seed=seed,
+            watch=silence_watch(model, text))
+
+    def _batched_segment(self, model: Any, text: str, prompt: Any, seed: int, max_new_tokens: int,
+                         prefix_hints=()) -> Any:
+        """One take decoded beside other requests (``mlx_drama3_batch``); None without frames.
+
+        This request keeps its own prompt, seed and sampling (per-request
+        sampling from ``serve`` wins over the engine's), and is watched for
+        silence like an unbatched take.
+        """
+        import numpy as np
+        from drama3_mlx.model import Segment
+        from .request_sampling import current_sampling
+        from .silence_stop import SilenceWatch
+        sampling = current_sampling() or {}
+
+        def decode(frames):
+            return self._mlx(model.codec.decode, np.array(frames, dtype=np.int64).T)
+
+        watch = SilenceWatch(text, decode, sample_rate=model.sample_rate)
+        frames, finish_reason = self._scheduler.submit(
+            prompt, max_new_tokens, temperature=sampling.get("temperature", self.temperature),
+            top_k=sampling.get("top_k", self.top_k), top_p=sampling.get("top_p", self.top_p),
+            seed=seed, watch=watch, prefix_hints=prefix_hints).result()
+        if not frames:
+            return None
+        codes = np.array(frames, dtype=np.int64)[:, 1:].T.copy()
+        began = time.perf_counter()
+        audio = self._mlx(model.codec.decode, codes)
+        # Shares the MLX thread with decode steps, so it delays every row.
+        self.batch_audio_decode_seconds += time.perf_counter() - began
+        return Segment(text=text, codes=codes, audio=audio,
+                       finish_reason=finish_reason, prompt_rows=len(prompt), seconds=0.0)
 
     def _generate_wire(
         self, text: str, references: list[dict[str, Any]], history: list, output_path: Path,
@@ -574,21 +686,15 @@ class Drama3MLXEngine(HistorySynthesis):
                             encoded[key] = replace(reference, text=f"<|speaker:{key}|> {reference.text}")
                         prompt_references.append(encoded[key])
                     previous = [(turn_text, np.array(codes, dtype=np.int64)) for turn_text, codes in kept]
-                    iterator = iter(model.generate(
-                        text, references=prompt_references, previous_takes=previous,
-                        temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
-                        max_new_tokens=frame_budget(text, self.max_new_tokens), single_chunk=True,
-                        seed=seed, attempts=1,
-                    ))
                     try:
-                        segment = next(iterator, None)
+                        segment = self._directing_segment(model, text, prompt_references, previous, seed)
                     except Exception as exc:
                         # The pinned runtime validates the full prompt before sampling.
                         if type(exc).__name__ != "PromptTooLongError":
                             raise
                         overflow = exc
                         continue
-                    if segment is None or next(iterator, None) is not None:
+                    if segment is None:
                         raise EngineError("Drama 3 must return exactly one audio segment")
                 codes = segment.codes
                 if (getattr(codes, "ndim", None) != 2 or getattr(codes.dtype, "kind", None) not in ("i", "u")
@@ -661,8 +767,8 @@ class Drama3MLXEngine(HistorySynthesis):
             raise EngineError(f"Audio output already exists: {output_path}")
         model = self._load()
         try:
-            segment, prompt_audit = generate_scene_voice(
-                model, description, text, seed=seed,
+            segment, prompt_audit = self._mlx(
+                generate_scene_voice, model, description, text, seed=seed,
                 temperature=self.temperature, top_p=self.top_p,
                 top_k=self.top_k, max_new_tokens=self.max_new_tokens,
             )

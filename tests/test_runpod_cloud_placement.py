@@ -27,7 +27,7 @@ POD_DISK = {"persistent": {"size": 150, "path": "/workspace"}}
 
 
 def gpu_row(secure=2.0, community=1.2, centers=(CO,), gpu_id=RTX):
-    return {"id": gpu_id, "name": gpu_id, "availability": "HIGH",
+    return {"id": gpu_id, "name": gpu_id, "manufacturer": "NVIDIA", "memory": 96, "availability": "HIGH",
             "price": {"secure": secure, "community": community},
             "dataCenters": [{"id": center, "availability": "HIGH"} for center in centers]}
 

@@ -23,7 +23,7 @@ import uuid
 
 from .runpod_api import RunpodAPI, RunpodAmbiguousOutcome, RunpodAPIError
 from .diagnostics import configured_secrets, safe_error_text
-from .runpod_gpu import CLOUD_LABELS, H100_CANDIDATE_IDS, PREFERRED_H100_HOURLY_LIMIT, select_placement
+from .runpod_gpu import CLOUD_LABELS, MEASURED_REALTIME, select_placement
 
 
 WORKSPACE = "/workspace"
@@ -146,9 +146,10 @@ class Deployment:
         self.state_path = self.directory / "state.json"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         # The saved identity is the cloud, GPU, and region of the current
-        # worker; cfg holds only the selection fallback, the cloud preference
-        # order, and an optional location hint. A chosen placement never
-        # rewrites them. Workers saved before cloud selection are Secure.
+        # worker; cfg holds only the GPU policy (memory floor, optional pin),
+        # the cloud preference order, and an optional location hint. A chosen
+        # placement never rewrites them. Workers saved before cloud selection
+        # are Secure.
         self.gpu_type_id = self.state.get("gpu_type_id") or self.cfg["gpu_type_id"]
         self.data_center_id = self.state.get("data_center_id")
         self.cloud_types = tuple(cloud.upper() for cloud in self.cfg["cloud_types"])
@@ -269,8 +270,8 @@ class Deployment:
             rows = self.api.catalog_gpus(include="AVAILABILITY", product="POD", cloud=cloud, count=1,
                                          minCudaVersion="12.9").get("gpus", [])
             try:
-                placement = select_placement(rows, cloud=cloud, fallback_id=self.cfg["gpu_type_id"],
-                                             prefer_h100=self.cfg["prefer_h100"],
+                placement = select_placement(rows, cloud=cloud, gpu_type_id=self.cfg["gpu_type_id"],
+                                             min_memory_gb=self.cfg["min_gpu_memory_gb"],
                                              max_hourly_price=self.cfg["max_hourly_price"],
                                              preferred_data_center=self.cfg["data_center_id"])
             except ValueError as exc:
@@ -284,10 +285,12 @@ class Deployment:
                 self.notify(f"runpod.data_center_id {hint} is only a hint; selected {placement.data_center_id} "
                             "by GPU availability, price, and stock.")
             gpu = next((row for row in rows if isinstance(row, dict) and row.get("id") == placement.gpu_type_id), {})
-            preferred = "preferred H100 " if placement.gpu_type_id in H100_CANDIDATE_IDS else ""
-            self.notify(f"Runpod {CLOUD_LABELS[self.cloud]}: {gpu.get('name', placement.gpu_type_id)} in "
-                        f"{placement.data_center_id}, catalog {preferred}rate ${placement.hourly_price:.2f}/hour; "
-                        "the Pod disk is billed separately.")
+            realtime = MEASURED_REALTIME.get(placement.gpu_type_id)
+            speed = (f"measured {realtime:.2f}x realtime, ${placement.hourly_price / realtime:.2f} per generated "
+                     "audio hour" if realtime else "speed not yet measured")
+            self.notify(f"Runpod {CLOUD_LABELS[self.cloud]}: {gpu.get('name', placement.gpu_type_id)} "
+                        f"({placement.memory_gb:g} GB) in {placement.data_center_id}, catalog rate "
+                        f"${placement.hourly_price:.2f}/hour ({speed}); the Pod disk is billed separately.")
             return placement.hourly_price
         if len(failures) == 1:
             raise failures[0]
@@ -475,14 +478,29 @@ class Deployment:
                                     "data_center_id": self.data_center_id, "cloud": self.cloud,
                                     "catalog_hourly_price": price,
                                     "max_hourly_price": self.cfg["max_hourly_price"], "image": self.cfg["image"],
-                                    "fallback_gpu_id": self.cfg["gpu_type_id"], "prefer_h100": self.cfg["prefer_h100"]}
+                                    "gpu_policy": self._gpu_policy()}
         self.save()
+
+    def _gpu_policy(self):
+        """The configured GPU selection policy a saved allocation or replacement is bound to."""
+        return {"gpu_type_id": self.cfg["gpu_type_id"], "min_gpu_memory_gb": self.cfg["min_gpu_memory_gb"]}
+
+    def _gpu_policy_matches(self, record, gpu_id):
+        """True when a saved allocation or replacement was made under the configured GPU policy.
+
+        Records saved before memory-based selection carry no policy; they stay
+        resumable when their recorded GPU is allowed by the current pin, so a
+        pending request is never re-resolved to a different GPU.
+        """
+        if "gpu_policy" in record:
+            return record["gpu_policy"] == self._gpu_policy()
+        pinned = self.cfg["gpu_type_id"]
+        return isinstance(gpu_id, str) and bool(gpu_id) and (not pinned or gpu_id == pinned)
 
     def _restore_allocation(self, allocation):
         cloud = allocation.get("cloud", "SECURE")
         if (allocation.get("image") != self.cfg["image"]
-                or allocation.get("fallback_gpu_id") != self.cfg["gpu_type_id"]
-                or allocation.get("prefer_h100") != self.cfg["prefer_h100"]
+                or not self._gpu_policy_matches(allocation, allocation.get("gpu_type_id"))
                 or cloud not in self.cloud_types):
             raise RuntimeError("Saved allocation policy differs from the configured deployment; inspect saved state")
         self.data_center_id = allocation["data_center_id"]
@@ -534,12 +552,11 @@ class Deployment:
                 "disk": self.cfg["container_disk_gb"], "ports": self.service_ports(),
                 "env": {"PUBLIC_KEY": self._public_key()}, "cmd": self.startup_command()}
 
-    def _actual_rate_over_limit(self, actual, *, cap, gpu_id, required=False, prefer_h100=None):
+    def _actual_rate_over_limit(self, actual, *, cap, gpu_id, required=False):
         """True when the provider's authoritative rate is unusable for this GPU.
 
-        A preferred H100 must be strictly under the shared hourly preference
-        limit, not merely under the configured cap. Missing data is tolerated
-        only when required=False; malformed or non-finite data always fails.
+        Missing data is tolerated only when required=False; malformed or
+        non-finite data always fails.
         """
         if actual is None:
             return required
@@ -551,9 +568,6 @@ class Deployment:
             return True
         if not math.isfinite(rate):
             return True
-        preference = self.cfg["prefer_h100"] if prefer_h100 is None else prefer_h100
-        if preference and gpu_id in H100_CANDIDATE_IDS:
-            return not 0 < rate < PREFERRED_H100_HOURLY_LIMIT or rate > cap
         return not 0 < rate <= cap
 
     @staticmethod
@@ -591,8 +605,7 @@ class Deployment:
         source = intent.get("source_spec")
         spec = intent["spec"] if isinstance(intent.get("spec"), dict) else source
         if (self.cfg.get("pod_id") or self.pod_id != intent["previous_pod_id"]
-                or self.cfg["gpu_type_id"] != intent.get("fallback_gpu_id", spec["gpu"]["id"])
-                or ("prefer_h100" in intent and self.cfg["prefer_h100"] != intent["prefer_h100"])
+                or not self._gpu_policy_matches(intent, intent.get("target_gpu_type_id", spec["gpu"]["id"]))
                 or self.cfg["image"] != spec["image"]):
             raise RuntimeError("Saved Pod replacement differs from the configured deployment; inspect saved state before continuing")
         if previous is None:
@@ -645,8 +658,7 @@ class Deployment:
                                "inspect saved state before continuing")
         cap = min(intent["max_hourly_price"], self.cfg["max_hourly_price"])
         if self._actual_rate_over_limit(intent["catalog_hourly_price"], cap=cap,
-                                        gpu_id=self.gpu_type_id, required=True,
-                                        prefer_h100=intent.get("prefer_h100", False)):
+                                        gpu_id=self.gpu_type_id, required=True):
             raise ValueError("Saved replacement price exceeds the current spending policy")
         intent["spec"] = self._pod_spec(intent["pod_name"])
         self.save()
@@ -676,8 +688,7 @@ class Deployment:
         self._check_replacement_placement(pod, intent["spec"], candidate=True)
         cap = min(intent["max_hourly_price"], self.cfg["max_hourly_price"])
         if self._actual_rate_over_limit(pod.get("cost"), cap=cap,
-                                        gpu_id=intent["spec"]["gpu"]["id"], required=True,
-                                        prefer_h100=intent.get("prefer_h100", False)):
+                                        gpu_id=intent["spec"]["gpu"]["id"], required=True):
             raise RuntimeError("Replacement worker's rate is unavailable or exceeds the configured cap; stopping it")
         previous = intent["previous_pod_id"]
         retired = self.state.setdefault("previous_pod_ids", [])
@@ -720,14 +731,13 @@ class Deployment:
         self._replacement_attempted = True
         previous = self.api.get_pod_details(self.pod_id)
         source_gpu_id = self.state.get("gpu_type_id") or previous.get("gpu", {}).get("id")
-        allowed = H100_CANDIDATE_IDS | {self.cfg["gpu_type_id"]} if self.cfg["prefer_h100"] else {self.cfg["gpu_type_id"]}
-        if not isinstance(source_gpu_id, str) or source_gpu_id not in allowed:
+        pinned = self.cfg["gpu_type_id"]
+        if not isinstance(source_gpu_id, str) or not source_gpu_id or (pinned and source_gpu_id != pinned):
             raise RuntimeError("Previous worker's GPU does not match the configured deployment")
         source = self._source_spec(previous, source_gpu_id)
         intent = {"previous_pod_id": self.pod_id,
                   "source_gpu_id": source_gpu_id,
-                  "fallback_gpu_id": self.cfg["gpu_type_id"],
-                  "prefer_h100": bool(self.cfg["prefer_h100"]),
+                  "gpu_policy": self._gpu_policy(),
                   "source_spec": source,
                   "max_hourly_price": self.cfg["max_hourly_price"]}
         self._check_replacement_source(intent, previous)
@@ -806,8 +816,7 @@ class Deployment:
             pod = self._require_pod()
             if self._actual_rate_over_limit(pod.get("costPerHr"), cap=self.cfg["max_hourly_price"],
                                             gpu_id=self.gpu_type_id):
-                preferred = " or the preferred H100 hourly limit" if self.gpu_type_id in H100_CANDIDATE_IDS else ""
-                raise ValueError("Worker's current rate exceeds runpod.max_hourly_price" + preferred)
+                raise ValueError("Worker's current rate exceeds runpod.max_hourly_price")
             pod = self.configure_runtime(pod)
             if pod.get("desiredStatus") != "RUNNING":
                 self.notify(f"Starting worker {self.pod_id}…")

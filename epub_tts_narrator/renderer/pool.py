@@ -280,11 +280,29 @@ class _Worker:
     def local(self):
         return self.settings["type"] == "local"
 
+    @property
+    def batched(self):
+        """A local engine that decodes this worker's concurrent slots together on its own MLX thread.
+
+        Only an engine that reports several ``concurrent_requests`` leaves the
+        shared model thread; any other local engine stays serialized on it.
+        """
+        if not self.local or self.settings.get("concurrency", 1) <= 1:
+            return False
+        return getattr(self.engine(), "concurrent_requests", 1) > 1
+
     def engine(self):
         with self._initialization:
             if self._engine is None:
                 if self.local:
-                    self._engine = create_engine(self.engine_settings)
+                    engine = create_engine(self.engine_settings)
+                    rows = self.settings.get("concurrency", 1)
+                    if rows > 1:
+                        # A local engine serving several slots decodes them together.
+                        if not callable(getattr(engine, "set_batch_rows", None)):
+                            raise EngineError("A local renderer with concurrency above 1 needs an engine that decodes batches (drama3_mlx)")
+                        engine.set_batch_rows(rows)
+                    self._engine = engine
                 else:
                     from .fish_http import FishHTTPEngine
                     self._engine = FishHTTPEngine(self.settings, sampling=self.sampling)
@@ -574,7 +592,7 @@ class RenderPool:
                 with METRICS.active("synthesis"):
                     try:
                         engine = worker.engine()
-                        if worker.local and requires_mlx(engine):
+                        if worker.local and not worker.batched and requires_mlx(engine):
                             self._local_runtime.initialize_mlx()
                         metadata = getattr(engine, method)(*args, **kwargs)
                         if not isinstance(metadata, dict):
@@ -585,9 +603,10 @@ class RenderPool:
                         raise
                     report_worker_activity(notify, "completed", name, monotonic() - started)
                     return result
-            if worker.local:
+            if worker.local and not worker.batched:
                 # All model loading, arrays and default streams belong to one
                 # persistent thread, shared with local speech verification.
+                # A batched local engine has its own MLX thread and decode loop.
                 def local_run():
                     with self.local_lock:
                         return run()
@@ -644,7 +663,7 @@ class RenderPool:
                 report_worker_activity(notify, "started", name)
                 try:
                     engine = worker.engine()
-                    if worker.local and requires_mlx(engine):
+                    if worker.local and not worker.batched and requires_mlx(engine):
                         self._local_runtime.initialize_mlx()
                     metadata = getattr(engine, method)(*args, **kwargs)
                     if not isinstance(metadata, dict):
@@ -655,7 +674,7 @@ class RenderPool:
                     raise
                 report_worker_activity(notify, "completed", name, monotonic() - started)
                 return result
-            if worker.local:
+            if worker.local and not worker.batched:
                 def local_run():
                     with self.local_lock:
                         return run()
@@ -745,7 +764,7 @@ def create_render_engine(config, *, shared_inference=True):
     A drama3_mlx coordinator without configured workers renders through a
     one-slot local pool: several chapter coordinators queue their next take
     for one persistent MLX inference thread while others verify, so the model
-    stays busy although each chapter is sequential. Plugins keep their own
+    stays busy although a chapter's takes of one voice are sequential. Plugins keep their own
     single-engine path.
     """
     workers = config.get("render_pool", {}).get("workers")

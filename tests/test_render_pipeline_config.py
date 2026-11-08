@@ -45,12 +45,13 @@ class PipelineConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(legacy["chapter_concurrency"], 2)
         self.assertEqual(effective_scheduling(configuration())["scheduler"], "pipeline")
         pipeline = effective_scheduling(configuration(scheduler="pipeline"))
-        # Managed 8-slot remote: two chapters per slot (16), logical 128,
-        # backlog 32, per-chapter share 8.
-        self.assertEqual(pipeline["chapter_concurrency"], 16)
+        # Managed 8-slot remote: one chapter per slot (8; each keeps several
+        # takes ready through its per-voice queues), logical 128, backlog 32,
+        # per-chapter share 16.
+        self.assertEqual(pipeline["chapter_concurrency"], 8)
         self.assertEqual(pipeline["max_inflight"], 128)
         self.assertEqual(pipeline["synthesis_backlog"], 32)
-        self.assertEqual(chapter_share_for(pipeline), 8)
+        self.assertEqual(chapter_share_for(pipeline), 16)
         self.assertEqual(pipeline["review_concurrency"], 2)
         self.assertEqual(pipeline["pending_audio_mb"], 256)
 

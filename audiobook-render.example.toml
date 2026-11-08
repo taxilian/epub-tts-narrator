@@ -37,7 +37,7 @@ max_new_tokens = 2048
 # [[render_pool.workers]]
 # name = "local"
 # type = "local"
-# concurrency = 1
+# concurrency = 1 # drama3_mlx above 1: EXPERIMENTAL batched decoding of that many passages per step
 # [[render_pool.workers]]
 # name = "second-mac"
 # type = "fish_http"

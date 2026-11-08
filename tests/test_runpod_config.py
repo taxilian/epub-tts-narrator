@@ -296,24 +296,36 @@ class RunpodConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "engine\\."):
                     self.remote(settings)
 
-    def test_h100_preference_defaults_on_and_only_accepts_booleans(self):
+    def test_any_gpu_with_enough_memory_by_default_and_an_optional_exact_pin(self):
         from epub_tts_narrator.renderer.runpod_config import DEPLOYMENT_DEFAULTS
-        from epub_tts_narrator.renderer.runpod_gpu import DEFAULT_GPU_TYPE_ID
-        self.assertTrue(DEPLOYMENT_DEFAULTS["prefer_h100"])
-        self.assertEqual(DEPLOYMENT_DEFAULTS["gpu_type_id"], DEFAULT_GPU_TYPE_ID)
+        self.assertEqual(DEPLOYMENT_DEFAULTS["gpu_type_id"], "")
+        self.assertEqual(DEPLOYMENT_DEFAULTS["min_gpu_memory_gb"], 56)
         self.assertEqual(DEPLOYMENT_DEFAULTS["max_hourly_price"], 2.60)
         self.assertEqual(DEPLOYMENT_DEFAULTS["idle_timeout_seconds"], 300)
-        settings = load_settings(self.path)
-        self.assertTrue(settings["deployment"]["prefer_h100"])
+        settings = load_settings(self.path)["deployment"]
+        self.assertEqual((settings["gpu_type_id"], settings["min_gpu_memory_gb"]), ("", 56))
+        (self.directory / "runpod.local.toml").write_text(
+            '[runpod]\ngpu_type_id = "NVIDIA H100 PCIe"\nmin_gpu_memory_gb = 80\n')
+        settings = load_settings(self.path)["deployment"]
+        self.assertEqual((settings["gpu_type_id"], settings["min_gpu_memory_gb"]), ("NVIDIA H100 PCIe", 80))
         # TOML has no null and the writer omits None values, so only concrete
         # wrong types can reach validation.
-        for value in ("true", 1, 0, [], 2.60):
+        for values, message in (({"min_gpu_memory_gb": value}, "min_gpu_memory_gb")
+                                for value in ("80", 80.0, True, 15, 2001)):
+            with self.subTest(values=values):
+                write_private_toml(self.directory / "runpod.local.toml", {"runpod": values})
+                with self.assertRaisesRegex(ValueError, message):
+                    load_settings(self.path)
+        write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"gpu_type_id": " NVIDIA H100 PCIe"}})
+        with self.assertRaisesRegex(ValueError, "exact catalog ID"):
+            load_settings(self.path)
+
+    def test_the_removed_h100_preference_is_refused_with_guidance(self):
+        for value in (True, False):
             with self.subTest(value=value):
                 write_private_toml(self.directory / "runpod.local.toml", {"runpod": {"prefer_h100": value}})
-                with self.assertRaisesRegex(ValueError, "runpod.prefer_h100"):
+                with self.assertRaisesRegex(ValueError, "prefer_h100 is no longer supported.*min_gpu_memory_gb"):
                     load_settings(self.path)
-        (self.directory / "runpod.local.toml").write_text("[runpod]\nprefer_h100 = false\n")
-        self.assertFalse(load_settings(self.path)["deployment"]["prefer_h100"])
 
 
     def test_cloud_types_default_to_secure_and_accept_an_ordered_preference(self):

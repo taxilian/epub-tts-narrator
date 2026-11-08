@@ -597,7 +597,7 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
     rows = settings.get("batch_rows", 1)
     if rows > 1:
         if not callable(getattr(engine, "set_batch_rows", None)):
-            raise EngineError("server.batch_rows above 1 requires an engine that decodes batches (fish_speech_cuda)")
+            raise EngineError("server.batch_rows above 1 requires an engine that decodes batches (drama3_mlx or fish_speech_cuda)")
         if settings.get("max_pending_requests", 4) < rows:
             raise EngineError("server.max_pending_requests must be at least server.batch_rows")
         engine.set_batch_rows(rows)

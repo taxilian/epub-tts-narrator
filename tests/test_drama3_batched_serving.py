@@ -188,7 +188,7 @@ class RunpodBatchConfigTests(unittest.TestCase):
         for values, message in (({"inference_batch_rows": 0}, "inference_batch_rows"),
                                 ({"inference_batch_rows": 17}, "inference_batch_rows"),
                                 ({"inference_batch_rows": "8"}, "inference_batch_rows"),
-                                ({"inference_batch_rows": 4, "inference_replicas": 2, "prefer_h100": False},
+                                ({"inference_batch_rows": 4, "inference_replicas": 2, "min_gpu_memory_gb": 96},
                                  "not both")):
             with self.subTest(values=values), self.assertRaisesRegex(ValueError, message):
                 self.settings(**values)

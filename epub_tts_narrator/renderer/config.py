@@ -278,8 +278,12 @@ def validate_distributed_settings(config):
             if "recognition" in roles and worker.get("protocol", "fish_inline") != "fish_inline":
                 raise ValueError(f"{label}: recognition requires an audiobook-render serve worker (protocol fish_inline)")
         if kind == "local":
-            if concurrency != 1 or any(item["type"] == "local" for item in normalized):
-                raise ValueError("Use at most one local renderer, with concurrency = 1")
+            if any(item["type"] == "local" for item in normalized):
+                raise ValueError("Use at most one local renderer")
+            # A local Drama 3 MLX renderer with concurrency above 1 decodes
+            # that many passages together (batched decoding, mlx_drama3_batch).
+            if concurrency != 1 and config["engine"].get("type", "drama3_mlx") != "drama3_mlx":
+                raise ValueError(f"{label}.concurrency above 1 needs engine.type = 'drama3_mlx' (batched decoding)")
         else:
             default_model = "drama-3" if selected_model == DEFAULT_DRAMA3_MODEL else selected_model
             worker = {"api_key": "", "model": default_model, "timeout_seconds": 300.0,

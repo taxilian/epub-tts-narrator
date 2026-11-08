@@ -6,9 +6,10 @@ or accepted. They live in ``render_pool`` only: they never enter
 generation/verification/cache identity. ``0`` means automatic where a
 setting supports it, mirroring ``max_inflight``.
 
-The default is ``scheduler = "pipeline"``: chapter history makes each
-chapter strictly sequential, so throughput comes from several chapter
-coordinators queueing their next take for the shared model. ``legacy``
+The default is ``scheduler = "pipeline"``: chapter history serializes each
+chapter's takes per voice (``continuity.history_dependencies``), so
+throughput comes from several chapter coordinators, each with its
+independent voices' next takes, queueing for the shared model. ``legacy``
 renders one chapter at a time.
 """
 
@@ -20,7 +21,7 @@ SCHEDULERS = ("legacy", "pipeline")
 
 PIPELINE_RENDER_POOL_DEFAULTS = {
     "scheduler": "pipeline",
-    "chapter_concurrency": 0,  # automatic: max(4, 2 per TTS slot) for pipeline, ceiling 16; 2 in legacy
+    "chapter_concurrency": 0,  # automatic: max(4, 1 per TTS slot) for pipeline, ceiling 16; 2 in legacy
     "synthesis_backlog": 0,    # automatic: min(256, 4 * total TTS slots)
     "pending_audio_mb": 256,   # soft high-water for materialized untranscribed audio
     "review_concurrency": 2,   # total active leaf network review calls
@@ -71,10 +72,13 @@ def effective_scheduling(config):
                 if "tts" in worker.get("roles", ["tts"]))
     remote = any(worker.get("type") != "local" for worker in workers)
     scheduler = pool.get("scheduler", "pipeline")
-    # Automatic: at least two chapters per TTS slot, so a slot generates one
-    # chapter's take while another chapter's take verifies (ceiling 16).
+    # Automatic: one chapter per TTS slot (at least four, ceiling 16). Each
+    # chapter keeps several takes ready through its per-voice queues
+    # (continuity.history_dependencies), so one chapter's take can verify
+    # while its other voices' takes generate; fewer chapters at once finish
+    # sooner and keep the prompt-prefix cache's voices warm.
     chapter_concurrency = pool.get("chapter_concurrency") or (
-        min(16, max(4, 2 * slots)) if scheduler == "pipeline" else 2)
+        min(16, max(4, slots)) if scheduler == "pipeline" else 2)
     max_inflight = pool.get("max_inflight", 0) or (min(256, max(64, 16 * slots)) if remote else 16)
     backlog = pool.get("synthesis_backlog") or min(256, 4 * slots)
     return {

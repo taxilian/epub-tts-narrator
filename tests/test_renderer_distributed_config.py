@@ -179,9 +179,8 @@ class DistributedConfigTests(unittest.TestCase):
                     load_config(self.path)
                 self.assertNotIn(secret, str(caught.exception))
 
-    def test_single_local_slot_and_unique_names_are_required(self):
+    def test_one_local_renderer_and_unique_names_are_required(self):
         invalid = (
-            worker_table("mac", "local", concurrency=2),
             worker_table("mac", "local") + worker_table("mac2", "local"),
             worker_table("same", "local") + worker_table("same"),
         )
@@ -190,6 +189,9 @@ class DistributedConfigTests(unittest.TestCase):
                 self.write(value)
                 with self.assertRaisesRegex(ValueError, "local renderer|unique"):
                     load_config(self.path)
+        # A local drama3_mlx renderer may batch: concurrency is its batch rows.
+        self.write(worker_table("mac", "local", concurrency=2))
+        self.assertEqual(load_config(self.path)["render_pool"]["workers"][0]["concurrency"], 2)
 
     def test_total_concurrency_is_bounded_at_32(self):
         at_limit = worker_table("one", concurrency=16) + worker_table("two", concurrency=16)

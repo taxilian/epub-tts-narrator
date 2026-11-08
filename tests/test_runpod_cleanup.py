@@ -27,7 +27,8 @@ BASE = "epub-tts-narrator-" + DEPLOYMENT_ID
 
 class CleanupFakeAPI(FakeRunpodAPI):
     def __init__(self):
-        super().__init__({"id": DEPLOYMENT_DEFAULTS["gpu_type_id"], "availability": "HIGH",
+        super().__init__({"id": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "availability": "HIGH",
+                          "manufacturer": "NVIDIA", "memory": 96,
                           "price": {"secure": 2.0}, "dataCenters": [{"id": "US-CO-1", "availability": "HIGH"}]})
         self.delete_errors = {}
         self.survives_delete = set()

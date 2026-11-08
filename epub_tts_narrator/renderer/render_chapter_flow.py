@@ -55,11 +55,14 @@ class ChapterRunAdmission:
             return self._failure
 
 
-def collect_chapter(scheduler, owner, count, run_one, *, sequential=False):
+def collect_chapter(scheduler, owner, count, run_one, *, sequential=False, dependencies=None):
     """Run one chapter's transactions on the shared logical scheduler.
 
     Returns results in source order. At most ``scheduler.share``
-    transactions are outstanding for this owner. The first terminal
+    transactions are outstanding for this owner. With ``dependencies``
+    (for each index, the earlier indices it must wait for), a transaction is
+    submitted once all of its dependencies have finished, earliest first;
+    independent transactions run concurrently. The first terminal
     failure closes the chapter's admission: no further submissions, queued
     siblings cancelled, already-started transactions drained, and the
     original failure re-raised after the drain.
@@ -71,29 +74,47 @@ def collect_chapter(scheduler, owner, count, run_one, *, sequential=False):
     ``AdmissionClosed`` refusal stops submissions so the drain below can
     retire the owner and surface the original failure.
     """
-    share = 1 if sequential else max(1, scheduler.share)
+    if dependencies is not None and len(dependencies) != count:
+        raise ValueError("collect_chapter needs one dependency set per transaction")
+    share = 1 if sequential and dependencies is None else max(1, scheduler.share)
     futures = {}
     results = [None] * count
     finished = deque()
     finished_now = Condition()
     next_index = 0
     failure = None
+    done = set()
+    waiting = list(range(count))
 
     def on_done(future):
         with finished_now:
             finished.append(future)
             finished_now.notify_all()
 
+    def submit(index):
+        try:
+            future = scheduler.submit(owner, run_one, index)
+        except AdmissionClosed:
+            return False  # a terminal failure closed the chapter; drain below
+        futures[future] = index
+        future.add_done_callback(on_done)
+        return True
+
     def submit_more():
         nonlocal next_index
-        while next_index < count and len(futures) < share:
-            try:
-                future = scheduler.submit(owner, run_one, next_index)
-            except AdmissionClosed:
-                return  # a terminal failure closed the chapter; drain below
-            futures[future] = next_index
-            future.add_done_callback(on_done)
-            next_index += 1
+        if dependencies is None:
+            while next_index < count and len(futures) < share:
+                if not submit(next_index):
+                    return
+                next_index += 1
+            return
+        for index in list(waiting):
+            if len(futures) >= share:
+                return
+            if dependencies[index] <= done:
+                if not submit(index):
+                    return
+                waiting.remove(index)
 
     def collect_finished():
         nonlocal failure
@@ -104,6 +125,7 @@ def collect_chapter(scheduler, owner, count, run_one, *, sequential=False):
             finished.clear()
         for future in batch:
             index = futures.pop(future)
+            done.add(index)
             try:
                 results[index] = future.result()
             except BaseException as error:  # noqa: BLE001 - first failure wins

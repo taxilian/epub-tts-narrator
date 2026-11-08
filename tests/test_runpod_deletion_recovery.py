@@ -123,8 +123,8 @@ class DeletionRecoveryTests(unittest.TestCase):
         self.settings["renderer_config"]["chapter_storage"].update(
             bucket="fixture-bucket", region="us-east-1", endpoint_url="https://fixture-storage.invalid",
             access_key_id="fixture-access-key", secret_access_key="fixture-ceph-secret")
-        gpu_row = {"id": self.settings["deployment"]["gpu_type_id"], "name": "Fixture GPU",
-                   "availability": "HIGH", "price": {"secure": 2.0},
+        gpu_row = {"id": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "name": "Fixture GPU",
+                   "manufacturer": "NVIDIA", "memory": 96, "availability": "HIGH", "price": {"secure": 2.0},
                    "dataCenters": [{"id": "US-FIXTURE-1", "availability": "HIGH"}]}
         self.api = FakeRunpodAPI(gpu_row)
         self.notify = Mock()

@@ -1,220 +1,180 @@
-"""GPU selection policy prefers affordable H100s with fail-closed fallback."""
+"""GPU selection: any NVIDIA GPU with enough memory, measured cost first, fail closed."""
 
-import math
 import unittest
 
-from epub_tts_narrator.renderer.runpod_gpu import (
-    DEFAULT_GPU_TYPE_ID, H100_CANDIDATE_IDS, PREFERRED_H100_HOURLY_LIMIT,
-    available_in, catalog_price, select_gpu,
-)
 from epub_tts_narrator.renderer import runpod_gpu
+from epub_tts_narrator.renderer.runpod_gpu import (
+    MEASURED_REALTIME, MIN_GPU_MEMORY_GB, catalog_memory, catalog_price, eligible, stock_in,
+)
 
-FALLBACK = DEFAULT_GPU_TYPE_ID
-DATACENTER = "US-FIXTURE-1"
+MEASURED = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+DATACENTER = "US-CO-1"
 
 
-def catalog_row(gpu_id, price=2.0, availability="HIGH", datacenters=(DATACENTER,)):
-    return {"id": gpu_id, "name": gpu_id, "availability": availability,
-            "price": {"secure": price},
+def catalog_row(gpu_id, price=2.0, *, memory=96, manufacturer="NVIDIA", availability="HIGH",
+                datacenters=(DATACENTER,), community=None):
+    prices = {"secure": price}
+    if community is not None:
+        prices["community"] = community
+    return {"id": gpu_id, "name": gpu_id, "manufacturer": manufacturer, "memory": memory,
+            "availability": availability, "price": prices,
             "dataCenters": [{"id": center, "availability": "HIGH"} for center in datacenters]}
 
 
-def select(rows, **overrides):
-    options = dict(fallback_id=FALLBACK, prefer_h100=True, data_center_id=DATACENTER,
-                   max_hourly_price=2.60)
+def choose(rows, **overrides):
+    options = dict(max_hourly_price=2.60)
     options.update(overrides)
-    return select_gpu(rows, **options)
+    return runpod_gpu.select_placement(rows, **options)
 
 
-class RunpodGpuPolicyTests(unittest.TestCase):
-    def test_affordable_available_h100_is_preferred_over_cheaper_fallback(self):
-        chosen, price = select([catalog_row(FALLBACK, 1.50), catalog_row("NVIDIA H100 PCIe", 2.19)])
-        self.assertEqual(chosen, "NVIDIA H100 PCIe")
-        self.assertEqual(price, 2.19)
+class EligibilityTests(unittest.TestCase):
+    def test_any_nvidia_gpu_with_enough_memory_is_eligible(self):
+        for gpu_id, memory in (("NVIDIA A100-SXM4-80GB", 80), ("NVIDIA H200", 141), (MEASURED, 96)):
+            with self.subTest(gpu=gpu_id):
+                self.assertTrue(eligible(catalog_row(gpu_id, memory=memory)))
 
-    def test_strict_limit_cuts_h100_selection_to_the_fallback(self):
-        for price, expected in ((2.59, "NVIDIA H100 80GB HBM3"), (2.60, FALLBACK), (2.61, FALLBACK)):
-            with self.subTest(price=price):
-                chosen, _ = select([catalog_row(FALLBACK, 2.00), catalog_row("NVIDIA H100 80GB HBM3", price)])
-                self.assertEqual(chosen, expected)
-
-    def test_configured_cap_bounds_h100_selection_below_the_preference_limit(self):
-        chosen, _ = select([catalog_row(FALLBACK, 2.20), catalog_row("NVIDIA H100 NVL", 2.40)],
-                           max_hourly_price=2.30)
-        self.assertEqual(chosen, FALLBACK)
-        chosen, _ = select([catalog_row(FALLBACK, 2.40), catalog_row("NVIDIA H100 NVL", 2.29)],
-                           max_hourly_price=2.30)
-        self.assertEqual(chosen, "NVIDIA H100 NVL")
-
-    def test_cheapest_eligible_h100_wins_and_ties_break_by_catalog_id(self):
-        rows = [catalog_row("NVIDIA H100 NVL", 2.10), catalog_row("NVIDIA H100 80GB HBM3", 2.10),
-                catalog_row("NVIDIA H100 PCIe", 2.05)]
-        self.assertEqual(select(rows)[0], "NVIDIA H100 PCIe")
-        tie = [catalog_row("NVIDIA H100 NVL", 2.05), catalog_row("NVIDIA H100 80GB HBM3", 2.05)]
-        self.assertEqual(select(tie)[0], "NVIDIA H100 80GB HBM3")
-
-    def test_invalid_h100_pricing_is_skipped_without_failing(self):
-        for price in (None, "2.19", True, float("nan"), float("inf"), 0, -1):
-            with self.subTest(price=price):
-                rows = [catalog_row("NVIDIA H100 PCIe", price), catalog_row("NVIDIA H100 NVL", 2.19)]
-                self.assertEqual(select(rows)[0], "NVIDIA H100 NVL")
-                self.assertEqual(select([rows[0], catalog_row(FALLBACK, 2.00)])[0], FALLBACK)
-
-    def test_h100_without_known_stock_in_the_configured_datacenter_falls_back(self):
+    def test_too_little_memory_other_vendors_and_unknown_data_are_never_eligible(self):
         cases = (
-            ("overall missing", catalog_row("NVIDIA H100 PCIe", 2.19, availability=None)),
-            ("overall NONE", catalog_row("NVIDIA H100 PCIe", 2.19, availability="NONE")),
-            ("overall unknown", catalog_row("NVIDIA H100 PCIe", 2.19, availability="SOLD_OUT")),
-            ("datacenter absent", catalog_row("NVIDIA H100 PCIe", 2.19, datacenters=("US-OTHER-1",))),
+            ("48 GB card", catalog_row("NVIDIA L40S", memory=48)),
+            ("48 GB MIG slice", catalog_row("NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 48GB", memory=48)),
+            ("AMD", catalog_row("AMD Instinct MI300X OAM", memory=192, manufacturer="AMD")),
+            ("unknown vendor", catalog_row("unknown", memory=192, manufacturer="UNKNOWN")),
+            ("no memory", {**catalog_row("NVIDIA H200"), "memory": None}),
+            ("memory text", catalog_row("NVIDIA H200", memory="141")),
+            ("memory bool", catalog_row("NVIDIA H200", memory=True)),
+            ("memory NaN", catalog_row("NVIDIA H200", memory=float("nan"))),
+            ("no id", {**catalog_row("NVIDIA H200"), "id": None}),
+            ("not a row", "NVIDIA H200"),
         )
         for label, row in cases:
             with self.subTest(case=label):
-                self.assertEqual(select([row, catalog_row(FALLBACK, 2.00)])[0], FALLBACK)
-        no_stock_center = catalog_row("NVIDIA H100 PCIe", 2.19)
-        no_stock_center["dataCenters"] = [{"id": DATACENTER, "availability": "NONE"}]
-        self.assertEqual(select([no_stock_center, catalog_row(FALLBACK, 2.00)])[0], FALLBACK)
+                self.assertFalse(eligible(row))
 
-    def test_unknown_gpu_ids_are_never_selected_even_when_cheap(self):
-        impostor = catalog_row("NVIDIA H100", 0.75)
-        rows = [catalog_row("NVIDIA A100 80GB PCIe", 0.50), catalog_row("NVIDIA H200", 1.00),
-                impostor, catalog_row(FALLBACK, 2.00)]
-        self.assertEqual(select(rows)[0], FALLBACK)
+    def test_the_memory_floor_is_configurable_and_inclusive(self):
+        row = catalog_row("NVIDIA A100-SXM4-80GB", memory=80)
+        self.assertTrue(eligible(row, min_memory_gb=80))
+        self.assertFalse(eligible(row, min_memory_gb=81))
+        self.assertEqual(MIN_GPU_MEMORY_GB, 56)
 
-    def test_prefer_h100_false_pins_the_configured_fallback(self):
-        rows = [catalog_row("NVIDIA H100 PCIe", 1.00), catalog_row(FALLBACK, 2.00)]
-        self.assertEqual(select(rows, prefer_h100=False)[0], FALLBACK)
+    def test_a_pinned_gpu_admits_only_that_exact_id(self):
+        self.assertTrue(eligible(catalog_row(MEASURED), gpu_type_id=MEASURED))
+        self.assertFalse(eligible(catalog_row("NVIDIA H200", memory=141), gpu_type_id=MEASURED))
+        # A pin never bypasses the memory floor.
+        self.assertFalse(eligible(catalog_row(MEASURED, memory=48), gpu_type_id=MEASURED))
 
-    def test_h100_fallback_cannot_bypass_the_preference_price_limit(self):
-        with self.assertRaises(ValueError):
-            select([catalog_row("NVIDIA H100 PCIe", 3.0)], fallback_id="NVIDIA H100 PCIe",
-                   max_hourly_price=4.10)
-
-    def test_explicitly_pinned_h100_uses_the_configured_price_cap(self):
-        self.assertEqual(select([catalog_row("NVIDIA H100 PCIe", 3.0)], fallback_id="NVIDIA H100 PCIe",
-                                prefer_h100=False, max_hourly_price=4.10), ("NVIDIA H100 PCIe", 3.0))
-
-    def test_fallback_selection_requires_known_stock_datacenter_and_readable_price(self):
-        cases = (
-            ("absent row", []),
-            ("datacenter missing", [catalog_row(FALLBACK, 2.00, datacenters=("US-OTHER-1",))]),
-            ("overall NONE", [catalog_row(FALLBACK, 2.00, availability="NONE")]),
-            ("unknown availability", [catalog_row(FALLBACK, 2.00, availability="SOLD_OUT")]),
-            ("price missing", [{**catalog_row(FALLBACK), "price": {}}]),
-            ("price bool", [catalog_row(FALLBACK, True)]),
-            ("price NaN", [catalog_row(FALLBACK, float("nan"))]),
-            ("over cap", [catalog_row(FALLBACK, 2.61)]),
-        )
-        for label, rows in cases:
-            with self.subTest(case=label):
-                with self.assertRaises(ValueError):
-                    select(rows)
-
-    def test_over_cap_fallback_failure_mentions_price_and_creates_nothing(self):
-        with self.assertRaisesRegex(ValueError, "price"):
-            select([catalog_row(FALLBACK, 100)])
-
-    def test_missing_datacenter_configuration_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "data_center_id"):
-            select([catalog_row(FALLBACK)], data_center_id="")
-
-    def test_price_and_availability_helpers_reject_malformed_catalog_data(self):
+    def test_catalog_helpers_reject_malformed_data(self):
         self.assertEqual(catalog_price(catalog_row("gpu", 2)), 2)
         for row in ({"price": {"secure": True}}, {"price": {"secure": "2.0"}},
-                    {"price": {"secure": float("inf")}}, {"price": []}, {}):
+                    {"price": {"secure": float("inf")}}, {"price": []}, {}, None):
             self.assertIsNone(catalog_price(row))
-        self.assertTrue(available_in(catalog_row("gpu"), DATACENTER))
+        self.assertEqual(catalog_memory(catalog_row("gpu", memory=80)), 80)
+        for row in ({"memory": 0}, {"memory": -1}, {"memory": float("inf")}, {}, None):
+            self.assertIsNone(catalog_memory(row))
+        self.assertEqual(stock_in(catalog_row("gpu"), DATACENTER), 0)
         for row in ({"availability": "HIGH"}, catalog_row("gpu", datacenters=("US-OTHER-1",)),
-                    {"availability": "HIGH", "dataCenters": ["broken"]}):
-            self.assertFalse(available_in(row, DATACENTER))
+                    {"availability": "HIGH", "dataCenters": ["broken"]},
+                    catalog_row("gpu", availability="NONE"), catalog_row("gpu", availability=None)):
+            self.assertIsNone(stock_in(row, DATACENTER))
 
-    def test_policy_constants_match_the_public_runpod_catalog_and_split_roles(self):
-        self.assertEqual(H100_CANDIDATE_IDS,
-                         {"NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL"})
-        self.assertNotIn(DEFAULT_GPU_TYPE_ID, H100_CANDIDATE_IDS)
-        self.assertNotEqual(DEFAULT_GPU_TYPE_ID, "NVIDIA RTX 6000 Ada Generation")
-        self.assertEqual(PREFERRED_H100_HOURLY_LIMIT, 2.60)
+
+class RankingTests(unittest.TestCase):
+    def test_a_measured_gpu_beats_cheaper_unmeasured_ones(self):
+        # The catalog says nothing about speed, so a measured cost wins over a guess.
+        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80), catalog_row(MEASURED, 2.49)]
+        self.assertEqual(choose(rows).gpu_type_id, MEASURED)
+
+    def test_measured_gpus_rank_by_cost_per_generated_audio_hour(self):
+        faster = "NVIDIA FIXTURE FAST"
+        original = dict(MEASURED_REALTIME)
+        self.addCleanup(lambda: (MEASURED_REALTIME.clear(), MEASURED_REALTIME.update(original)))
+        MEASURED_REALTIME[faster] = 4.2  # twice as fast at under twice the price
+        rows = [catalog_row(MEASURED, 1.20), catalog_row(faster, 2.30)]
+        self.assertEqual(choose(rows).gpu_type_id, faster)
+        rows = [catalog_row(MEASURED, 1.00), catalog_row(faster, 2.30)]
+        self.assertEqual(choose(rows).gpu_type_id, MEASURED)
+
+    def test_without_a_measured_gpu_the_cheapest_eligible_one_wins(self):
+        rows = [catalog_row("NVIDIA H200", 2.40, memory=141), catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80),
+                catalog_row("NVIDIA L40S", 0.79, memory=48)]
+        result = choose(rows)
+        self.assertEqual((result.gpu_type_id, result.hourly_price, result.memory_gb),
+                         ("NVIDIA A100-SXM4-80GB", 1.39, 80.0))
+
+    def test_price_cap_applies_to_every_gpu(self):
+        rows = [catalog_row(MEASURED, 2.61), catalog_row("NVIDIA H200", 2.70, memory=141)]
+        with self.assertRaisesRegex(ValueError, "max_hourly_price"):
+            choose(rows)
+        self.assertEqual(choose(rows, max_hourly_price=2.65).gpu_type_id, MEASURED)
+
+    def test_unusable_rows_are_skipped_without_failing_the_choice(self):
+        bad_price = catalog_row(MEASURED, float("nan"))
+        no_stock = catalog_row("NVIDIA H200", 1.00, memory=141, availability="NONE")
+        elsewhere = catalog_row("NVIDIA H100 PCIe", 1.00, memory=80, datacenters=("CA-MTL-3",))
+        fine = catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80)
+        self.assertEqual(choose([bad_price, no_stock, elsewhere, fine]).gpu_type_id, "NVIDIA A100-SXM4-80GB")
+
+    def test_pinned_gpu_is_the_only_candidate(self):
+        rows = [catalog_row(MEASURED, 2.49), catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80)]
+        self.assertEqual(choose(rows, gpu_type_id="NVIDIA A100-SXM4-80GB").gpu_type_id, "NVIDIA A100-SXM4-80GB")
+        with self.assertRaisesRegex(ValueError, "GPU NVIDIA H200 with at least 56 GB"):
+            choose(rows, gpu_type_id="NVIDIA H200")
 
 
 class USPlacementTests(unittest.TestCase):
-    def choose(self, rows, **overrides):
-        options = dict(fallback_id=FALLBACK, prefer_h100=True, max_hourly_price=2.60,
-                       preferred_data_center="US-NC-2")
-        options.update(overrides)
-        return runpod_gpu.select_placement(rows, **options)
-
     def test_configured_location_is_only_a_hint(self):
-        row = catalog_row(FALLBACK, datacenters=("US-NC-2", "US-CO-1"))
-        self.assertEqual(self.choose([row]).data_center_id, "US-NC-2")
+        row = catalog_row(MEASURED, datacenters=("US-NC-2", "US-CO-1"))
+        self.assertEqual(choose([row], preferred_data_center="US-NC-2").data_center_id, "US-NC-2")
         row["dataCenters"][0]["availability"] = "LOW"
-        self.assertEqual(self.choose([row]).data_center_id, "US-CO-1")
-        self.assertEqual(self.choose([row], preferred_data_center="").data_center_id, "US-CO-1")
+        self.assertEqual(choose([row], preferred_data_center="US-NC-2").data_center_id, "US-CO-1")
+        self.assertEqual(choose([row]).data_center_id, "US-CO-1")
 
-    def test_any_us_location_in_the_catalog_is_eligible_without_storage_constraints(self):
-        # Workers use a host-local Pod disk, so GPU-only locations are fine.
-        result = self.choose([catalog_row(FALLBACK, datacenters=("US-NC-1",))])
-        self.assertEqual((result.gpu_type_id, result.data_center_id, result.cloud), (FALLBACK, "US-NC-1", "SECURE"))
-
-    def test_an_affordable_us_h100_beats_a_cheaper_fallback_in_another_region(self):
-        rows = [catalog_row(FALLBACK, 2.49, datacenters=("US-NC-2",)),
-                catalog_row("NVIDIA H100 PCIe", 2.59, datacenters=("US-CO-1",))]
-        result = self.choose(rows)
-        self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
-        self.assertEqual(result.data_center_id, "US-CO-1")
+    def test_cost_outranks_stock_and_location(self):
+        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80, datacenters=("US-NC-2",)),
+                catalog_row("NVIDIA H100 PCIe", 1.99, memory=80, datacenters=("US-CO-1",))]
+        rows[0]["dataCenters"][0]["availability"] = "LOW"
+        result = choose(rows, preferred_data_center="US-CO-1")
+        self.assertEqual((result.gpu_type_id, result.data_center_id), ("NVIDIA A100-SXM4-80GB", "US-NC-2"))
 
     def test_non_us_locations_are_never_selected(self):
-        rows = [catalog_row("NVIDIA H100 PCIe", 1.00, datacenters=("CA-MTL-3", "EU-RO-1")),
-                catalog_row(FALLBACK, 2.49, datacenters=("US-CO-1",))]
-        result = self.choose(rows, preferred_data_center="CA-MTL-3")
-        self.assertEqual(result.data_center_id, "US-CO-1")
+        rows = [catalog_row("NVIDIA H200", 1.00, memory=141, datacenters=("CA-MTL-3", "EU-RO-1")),
+                catalog_row(MEASURED, 2.49, datacenters=("US-CO-1",))]
+        self.assertEqual(choose(rows, preferred_data_center="CA-MTL-3").data_center_id, "US-CO-1")
 
     def test_no_eligible_us_placement_fails_before_allocation(self):
         with self.assertRaisesRegex(ValueError, "US datacenter on Runpod Secure Cloud"):
-            self.choose([catalog_row(FALLBACK, 2.49, datacenters=("CA-MTL-3",))])
+            choose([catalog_row(MEASURED, 2.49, datacenters=("CA-MTL-3",))])
         with self.assertRaisesRegex(ValueError, "invalid GPU catalog"):
-            self.choose({"gpus": []})
+            choose({"gpus": []})
 
     def test_invalid_stock_entries_do_not_mask_valid_stock_for_the_same_location(self):
-        row = catalog_row("NVIDIA H100 PCIe", 2.19, datacenters=("US-CO-1",))
-        row["dataCenters"].insert(0, {"id": "US-CO-1", "availability": []})
-        result = self.choose([row])
-        self.assertEqual(result.gpu_type_id, "NVIDIA H100 PCIe")
+        row = catalog_row(MEASURED, 2.19)
+        row["dataCenters"].insert(0, {"id": DATACENTER, "availability": []})
+        self.assertEqual(choose([row]).gpu_type_id, MEASURED)
 
 
 class CloudPriceTests(unittest.TestCase):
-    def row(self, secure, community, gpu_id=FALLBACK):
-        row = catalog_row(gpu_id, secure, datacenters=("US-CO-1",))
-        row["price"]["community"] = community
-        return row
-
     def test_each_cloud_is_priced_from_its_own_catalog_key(self):
-        row = self.row(2.0, 1.25)
+        row = catalog_row(MEASURED, 2.0, community=1.25)
         self.assertEqual(catalog_price(row), 2.0)
-        self.assertEqual(catalog_price(row, "SECURE"), 2.0)
         self.assertEqual(catalog_price(row, "COMMUNITY"), 1.25)
-        result = runpod_gpu.select_placement([row], fallback_id=FALLBACK, prefer_h100=True,
-                                             max_hourly_price=2.60, cloud="COMMUNITY")
+        result = choose([row], cloud="COMMUNITY")
         self.assertEqual((result.cloud, result.hourly_price), ("COMMUNITY", 1.25))
 
-    def test_community_price_decides_the_h100_preference_and_cap(self):
-        rows = [self.row(2.0, 1.25), self.row(2.99, 2.10, gpu_id="NVIDIA H100 PCIe")]
-        secure = runpod_gpu.select_placement(rows, fallback_id=FALLBACK, prefer_h100=True, max_hourly_price=2.60)
-        community = runpod_gpu.select_placement(rows, fallback_id=FALLBACK, prefer_h100=True,
-                                                max_hourly_price=2.60, cloud="COMMUNITY")
-        self.assertEqual(secure.gpu_type_id, FALLBACK)
-        self.assertEqual(community.gpu_type_id, "NVIDIA H100 PCIe")
+    def test_community_price_decides_the_ranking_and_cap(self):
+        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80, community=1.39),
+                catalog_row("NVIDIA H100 PCIe", 2.89, memory=80, community=1.19)]
+        self.assertEqual(choose(rows).gpu_type_id, "NVIDIA A100-SXM4-80GB")
+        self.assertEqual(choose(rows, cloud="COMMUNITY").gpu_type_id, "NVIDIA H100 PCIe")
         with self.assertRaisesRegex(ValueError, "Community Cloud"):
-            runpod_gpu.select_placement([self.row(2.0, 3.0)], fallback_id=FALLBACK, prefer_h100=False,
-                                        max_hourly_price=2.60, cloud="COMMUNITY")
+            choose([catalog_row(MEASURED, 2.0, community=3.0)], cloud="COMMUNITY")
 
     def test_missing_community_price_is_never_selected(self):
         with self.assertRaises(ValueError):
-            runpod_gpu.select_placement([catalog_row(FALLBACK, datacenters=("US-CO-1",))], fallback_id=FALLBACK,
-                                        prefer_h100=False, max_hourly_price=2.60, cloud="COMMUNITY")
+            choose([catalog_row(MEASURED)], cloud="COMMUNITY")
 
     def test_unknown_cloud_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown Runpod cloud"):
-            runpod_gpu.select_placement([], fallback_id=FALLBACK, prefer_h100=False,
-                                        max_hourly_price=2.60, cloud="SPOT")
+            choose([], cloud="SPOT")
 
 
 if __name__ == "__main__":

@@ -5,10 +5,12 @@
 name = "epub-tts-narrator"
 # Verified Runpod base 1.0.7, CUDA 12.9, Linux x86_64; SSH enabled by the CLI.
 image = "runpod/base@sha256:c776d549e38023c51a28c25267e029ec2aa53a525c87a934b77694d76572c629"
-# Fallback GPU. With prefer_h100, any available H100 (80GB HBM3, PCIe, NVL)
-# strictly under $2.60/hour wins; otherwise this RTX PRO 6000 is used.
-gpu_type_id = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
-prefer_h100 = true
+# Any NVIDIA GPU with at least this much memory is eligible (one Drama 3
+# copy needs about 48 GB plus Whisper). GPUs with a measured throughput (the
+# RTX PRO 6000) rank first by cost per generated audio hour, then the rest by
+# price. Set gpu_type_id to an exact catalog ID only to pin one GPU.
+min_gpu_memory_gb = 56
+# gpu_type_id = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 # Runpod clouds in preference order. The first cloud with an eligible GPU
 # wins; a confirmed refusal falls back once to the next. ["secure"] (the
 # default) never uses Community Cloud.
@@ -29,9 +31,9 @@ startup_timeout_seconds = 900
 # Ports 8080 and 8090-8092 are reserved for the private Drama 3 copies.
 service_port = 8082
 # Independent Drama 3 copies on the one GPU (about 48 GB each while generating);
-# measured: no gain without MPS, about +25% with it. More than one
-# needs prefer_h100 = false and a large-memory gpu_type_id. inference_mps lets
-# the copies share the GPU through NVIDIA MPS.
+# measured: no gain without MPS, about +25% with it. More than one needs
+# min_gpu_memory_gb of at least 48 per copy. inference_mps lets the copies
+# share the GPU through NVIDIA MPS.
 # inference_replicas = 2
 # inference_mps = true
 # Batched decoding: one copy advances up to this many passages per step
