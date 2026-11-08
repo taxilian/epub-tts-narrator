@@ -250,6 +250,7 @@ class BatchedMLXBackend:
         self.order = []          # scheduler slots, in batch-row order
         self._state = None
         self.prefixes = _PrefixCache()
+        self.last_prefill = None  # {"prompt_rows", "cached_rows"} of the latest prefill
 
     # Scheduler contract -------------------------------------------------
 
@@ -291,6 +292,7 @@ class BatchedMLXBackend:
         keep = {end // chunk * chunk for end in getattr(request, "prefix_hints", ()) or ()
                 if chunk <= end // chunk * chunk <= prompt_rows - 1}
         found = self.prefixes.find(prompt, chunk) if keep or len(self.prefixes._entries) else None
+        self.last_prefill = {"prompt_rows": prompt_rows, "cached_rows": found[0] if found else 0}
         if found is None:
             first = 0
             caches = model.backbone.make_cache()

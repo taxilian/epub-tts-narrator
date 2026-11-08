@@ -40,6 +40,18 @@ from .recognition_workers import (
 from .reference_cache import UNKNOWN_REFERENCE_MESSAGE, ReferenceCache
 
 
+def batch_summary(batch):
+    """``; batch: ...`` for a batched take's log line (numbers only), else empty."""
+    if not isinstance(batch, dict) or "steps" not in batch:
+        return ""
+    cached = batch.get("cached_rows", 0)
+    return (f"; batch: joined {batch.get('joined_active', 0)} running of {batch.get('rows', '?')} rows "
+            f"after {batch.get('waited_seconds', 0):.2f}s, {batch.get('mean_rows', 0):.1f} rows on average "
+            f"(peak {batch.get('peak_rows', 0)}) over {batch['steps']} steps, prompt {batch.get('prompt_rows', '?')} rows"
+            + (f" ({cached} cached)" if cached else "")
+            + f", prefill {batch.get('prefill_seconds', 0):.2f}s")
+
+
 class RequestError(ValueError):
     pass
 
@@ -504,7 +516,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.server.activity(
                     self.request_id,
                     f"completed in {time.monotonic() - self.request_started:.2f}s: "
-                    f"{audio['duration_seconds']:.2f}s audio, {audio['sample_rate']} Hz, {size} bytes",
+                    f"{audio['duration_seconds']:.2f}s audio, {audio['sample_rate']} Hz, {size} bytes"
+                    + batch_summary(generated.get("batch")),
                 )
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             raise

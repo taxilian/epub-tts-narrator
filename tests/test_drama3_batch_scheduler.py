@@ -85,6 +85,26 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.peak_active, 2)
         self.assertEqual(scheduler.row_steps, sum(len(script) for script in scripts))
 
+    def test_each_result_reports_how_it_shared_the_batch(self):
+        backend = ScriptedBackend(2)
+        backend.gate = threading.Event()
+        backend.last_prefill = {"prompt_rows": 3, "cached_rows": 0}
+        scheduler = Drama3BatchScheduler(backend)
+        self.addCleanup(scheduler.close)
+        long = self.submit(scheduler, frames(1, 2, 3, 4) + frames(EOS), seed=1)
+        short = self.submit(scheduler, frames(5) + frames(EOS), seed=2)
+        backend.gate.set()
+        long.result(timeout=5)
+        short.result(timeout=5)
+        # The short request shared both of its steps; the long one decoded alone at the end.
+        self.assertEqual({key: short.batch_stats[key] for key in ("steps", "peak_rows", "mean_rows", "rows")},
+                         {"steps": 2, "peak_rows": 2, "mean_rows": 2.0, "rows": 2})
+        self.assertEqual((long.batch_stats["steps"], long.batch_stats["peak_rows"]), (5, 2))
+        self.assertLess(long.batch_stats["mean_rows"], 2)
+        self.assertEqual({long.batch_stats["joined_active"], short.batch_stats["joined_active"]}, {0, 1})
+        self.assertEqual(short.batch_stats["prompt_rows"], 3)
+        self.assertGreaterEqual(short.batch_stats["waited_seconds"], 0)
+
     def test_end_of_speech_is_never_returned_and_length_limit_reports_length(self):
         _backend, scheduler = self.scheduler(1)
         self.assertEqual(self.submit(scheduler, frames(EOS)).result(timeout=5), ([], "eos"))

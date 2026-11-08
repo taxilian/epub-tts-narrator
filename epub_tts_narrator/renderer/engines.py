@@ -367,6 +367,8 @@ class Drama3MLXEngine(HistorySynthesis):
         self._scheduler: Any = None
         self._mlx_runtime: Any = None
         self.batch_audio_decode_seconds = 0.0
+        # This thread's latest batched take's scheduler facts, for its metadata.
+        self._batch_stats = threading.local()
         self._load_lock = threading.RLock()
 
     def set_batch_rows(self, rows: int) -> None:
@@ -629,10 +631,13 @@ class Drama3MLXEngine(HistorySynthesis):
             return self._mlx(model.codec.decode, np.array(frames, dtype=np.int64).T)
 
         watch = SilenceWatch(text, decode, sample_rate=model.sample_rate)
-        frames, finish_reason = self._scheduler.submit(
+        future = self._scheduler.submit(
             prompt, max_new_tokens, temperature=sampling.get("temperature", self.temperature),
             top_k=sampling.get("top_k", self.top_k), top_p=sampling.get("top_p", self.top_p),
-            seed=seed, watch=watch, prefix_hints=prefix_hints).result()
+            seed=seed, watch=watch, prefix_hints=prefix_hints)
+        frames, finish_reason = future.result()
+        stats = getattr(future, "batch_stats", None)
+        self._batch_stats.value = dict(stats) if isinstance(stats, dict) else None
         if not frames:
             return None
         codes = np.array(frames, dtype=np.int64)[:, 1:].T.copy()
@@ -703,6 +708,11 @@ class Drama3MLXEngine(HistorySynthesis):
                 metadata = self._save_segment(segment, model, text, output_path)
                 metadata.update(seed=seed, synthesis_text=text, history_turns=len(kept),
                                 history_available=len(history), history_sha256=history_digest(kept))
+                batch = getattr(self._batch_stats, "value", None) if self._scheduler is not None else None
+                if batch:
+                    # Payload-free: rows sharing its steps, waits, prompt and cache sizes.
+                    metadata["batch"] = batch
+                    self._batch_stats.value = None
                 if layout != "directing":
                     metadata["history_layout"] = layout
                 return metadata, codes.tolist(), model.model.config.audio_decoder.vocab_size

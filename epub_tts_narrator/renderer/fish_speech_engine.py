@@ -260,9 +260,11 @@ class FishSpeechCudaEngine(HistorySynthesis):
                 if self._scheduler is not None:
                     # Shared decode loop; this request's own prompt, seed and
                     # sampling, and its own frames back.
-                    rows, finish_reason = self._scheduler.submit(
+                    future = self._scheduler.submit(
                         prompt, max_new_tokens, temperature=temperature, top_k=top_k,
-                        top_p=top_p, seed=seed, watch=self._silence_watch(text, codec)).result()
+                        top_p=top_p, seed=seed, watch=self._silence_watch(text, codec))
+                    rows, finish_reason = future.result()
+                    batch = getattr(future, "batch_stats", None)
                     frames = torch.tensor(rows, dtype=torch.long).reshape(len(rows), -1)
                 else:
                     # Fish's set_seed clamps above 2**31; fold uint32 attempt seeds.
@@ -304,4 +306,6 @@ class FishSpeechCudaEngine(HistorySynthesis):
                     "duration_seconds": len(audio) / rate, "seed": seed, "synthesis_text": text,
                     "history_turns": len(kept), "history_available": len(history),
                     "history_sha256": history_digest(kept)}
+        if self._scheduler is not None and isinstance(batch, dict):
+            metadata["batch"] = dict(batch)  # payload-free batching facts for serve's log
         return metadata, generated.cpu().tolist(), model.config.audio_decoder.vocab_size

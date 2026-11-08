@@ -106,6 +106,33 @@ class BatchedServingTests(unittest.TestCase):
             with self.subTest(expected=expected), urlopen(url.replace("/v1/tts", "/health"), timeout=5) as response:
                 self.assertEqual(json.loads(response.read())["concurrent_requests"], expected)
 
+    def test_serve_logs_how_each_batched_request_shared_the_batch(self):
+        from epub_tts_narrator.renderer.server import batch_summary
+        stats = {"rows": 8, "joined_active": 5, "waited_seconds": 0.4, "steps": 120, "mean_rows": 6.5,
+                 "peak_rows": 8, "prompt_rows": 731, "cached_rows": 512, "prefill_seconds": 0.21}
+        self.assertEqual(batch_summary(stats),
+                         "; batch: joined 5 running of 8 rows after 0.40s, 6.5 rows on average (peak 8) "
+                         "over 120 steps, prompt 731 rows (512 cached), prefill 0.21s")
+        self.assertEqual(batch_summary(None), "")
+        engine = BatchingFakeEngine()
+        engine.together = threading.Barrier(1)
+        original = engine.synthesize_fish
+        engine.synthesize_fish = lambda *args, **kwargs: {**original(*args, **kwargs), "batch": stats}
+        messages = []
+        config = {"server": {"host": "127.0.0.1", "port": 0, "api_key": "", "max_request_bytes": 104857600,
+                             "max_pending_requests": 4, "batch_rows": 2}, "engine": {"type": "drama3_mlx"}}
+        try:
+            instance = make_server(config, engine, notify=messages.append)
+        except PermissionError:
+            self.skipTest("localhost sockets are disabled by the sandbox")
+        thread = threading.Thread(target=instance.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        self.addCleanup(lambda: (instance.shutdown(), thread.join(), instance.server_close()))
+        FishHTTPEngine({"url": f"http://127.0.0.1:{instance.server_port}/v1/tts", "name": "c", "api_key": ""},
+                       {"temperature": 0.7}).synthesize("A passage.", self.voice, self.root / "take.wav", seed=3)
+        completed = [line for line in messages if "completed in" in line]
+        self.assertTrue(completed and completed[-1].endswith(batch_summary(stats)), messages)
+
     def test_single_request_engines_keep_the_serialized_path(self):
         engine = FakeEngine()
         url = self.serve(engine)

@@ -434,6 +434,9 @@ class BatchedServeTests(unittest.TestCase):
                 self.together.wait()
                 future = Mock()
                 future.result.return_value = ([[205, *range(1, 11)], [206, *range(2, 12)]], "eos")
+                future.batch_stats = {"rows": 2, "joined_active": 1, "waited_seconds": 0.0, "steps": 2,
+                                      "mean_rows": 2.0, "peak_rows": 2, "prompt_rows": len(prompt),
+                                      "cached_rows": 0, "prefill_seconds": 0.01}
                 return future
 
             def close(self):
@@ -446,7 +449,8 @@ class BatchedServeTests(unittest.TestCase):
         server_config = {"server": {"host": "127.0.0.1", "port": 0, "api_key": "", "max_request_bytes": 104857600,
                                     "max_pending_requests": 4, "batch_rows": 2}, "engine": {"type": "drama3_mlx"}}
         try:
-            instance = make_server(server_config, engine, notify=lambda message: None)
+            messages = []
+            instance = make_server(server_config, engine, notify=messages.append)
         except PermissionError:
             self.skipTest("localhost sockets are disabled by the sandbox")
         self.assertEqual(engine.concurrent_requests, 2)
@@ -487,3 +491,8 @@ class BatchedServeTests(unittest.TestCase):
         # The prompt's reference part is marked for the worker's prefix cache.
         self.assertTrue(all(options["prefix_hints"] for options in by_seed.values()))
         self.assertTrue(all((root / f"take-{seed}.wav").exists() for seed in (11, 22)))
+        # Each completed request's log line says how it shared the batch.
+        completed = [line for line in messages if "completed in" in line]
+        self.assertEqual(len(completed), 2)
+        self.assertTrue(all("; batch: joined 1 running of 2 rows" in line and "2.0 rows on average" in line
+                            for line in completed), completed)

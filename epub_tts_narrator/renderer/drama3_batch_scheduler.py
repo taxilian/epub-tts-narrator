@@ -42,12 +42,18 @@ class BatchRequest:
     # which a backend may cache for later requests with the same start.
     prefix_hints: tuple = ()
     future: Future = field(default_factory=Future)
+    submitted: float = field(default_factory=time.perf_counter)
+    # Payload-free per-request batching facts, delivered as ``future.batch_stats``.
+    stats: dict = field(default_factory=dict)
 
 
 @dataclass
 class _Row:
     request: BatchRequest
     frames: list = field(default_factory=list)
+    steps: int = 0
+    row_sum: int = 0
+    peak: int = 0
 
 
 class Drama3BatchScheduler:
@@ -136,6 +142,10 @@ class Drama3BatchScheduler:
         if error is not None:
             row.request.future.set_exception(error)
         else:
+            stats = row.request.stats
+            stats.update(steps=row.steps, peak_rows=row.peak,
+                         mean_rows=round(row.row_sum / row.steps, 2) if row.steps else 0.0)
+            row.request.future.batch_stats = stats
             row.request.future.set_result(result)
         self.backend.release(slot)
 
@@ -178,8 +188,10 @@ class Drama3BatchScheduler:
                 self._admitting.remove(request)
                 if not request.future.set_running_or_notify_cancel():
                     continue
-                self._active[slot] = _Row(request)
                 began = time.perf_counter()
+                request.stats.update(waited_seconds=round(began - request.submitted, 3),
+                                     joined_active=len(self._active), rows=self.backend.rows)
+                self._active[slot] = _Row(request)
                 try:
                     self.backend.prefill(slot, request)
                 except BaseException as exc:  # one bad prompt must not stop the others
@@ -187,6 +199,8 @@ class Drama3BatchScheduler:
                 finally:
                     self.prefills += 1
                     self.prefill_seconds += time.perf_counter() - began
+                    request.stats["prefill_seconds"] = round(time.perf_counter() - began, 3)
+                    request.stats.update(getattr(self.backend, "last_prefill", None) or {})
             if not self._active:
                 continue
             slots = sorted(self._active)
@@ -206,6 +220,11 @@ class Drama3BatchScheduler:
             self.steps += 1
             self.row_steps += len(slots)
             self.occupancy[len(slots)] += 1
+            for slot in slots:
+                row = self._active[slot]
+                row.steps += 1
+                row.row_sum += len(slots)
+                row.peak = max(row.peak, len(slots))
             for slot, (frame, finite) in zip(slots, results):
                 row = self._active[slot]
                 if not finite:
