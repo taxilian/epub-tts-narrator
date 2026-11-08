@@ -143,8 +143,15 @@ class NarratorClient:
                 answer = item["options"][0] if self.verify_answer == "first" and item["options"] else "?"
                 answers.append([item["id"], answer])
             return {"r": answers}
+        if mode == "narrator_accents":
+            # Different backgrounds, different accents: the first character is Scottish.
+            names = [row[0] for row in payload["characters"]]
+            return {"a": [["the north", "Scottish", names[:1]], ["the coast", "Irish", names[1:2]]]}
         if mode == "narrator_voices":
-            return {"v": [[row[0], f"A clear voice for {row[1]}.", "General American; even pace",
+            gender = {"m": "male", "f": "female"}
+            # Real-world words only: never a name from the book.
+            return {"v": [[row[0], f"A clear {gender.get(row[2], 'androgynous')} voice number {row[0][1:]}.",
+                           "General American; even pace",
                            "pitch=mid;pace=even;accent=General American"] for row in payload["voices"]]}
         raise ProviderError("unexpected request in fixture")
 
@@ -240,6 +247,31 @@ class LedgerTests(unittest.TestCase):
         ledger = apply_delta(ledger, {"new": [["Proof", "", "m", "", 2]]}, blocks, self.numbers)
         self.assertEqual([row["name"] for row in ledger["characters"]], ["Anderson Royce", "Proof"])
         self.assertEqual(name_index(ledger)["proof"], "2")
+
+    def test_a_merge_into_an_entry_merged_again_later_is_checked_through_the_later_merge(self):
+        from epub_tts_narrator.narrator_read import Meter, check_merges
+        from epub_tts_narrator.pipeline import CachedRequests
+        blocks = {"b000001": "Mara met Mar and Mae.", "b000002": "Mar is Mae, and Mae is Mara."}
+        numbers = {1: "b000001", 2: "b000002"}
+        ledger = apply_delta(new_ledger(), {"new": [["Mara", "", "f", "", 1], ["Mar", "", "f", "", 1], ["Mae", "", "f", "", 1]]},
+                             blocks, numbers)
+        ledger = apply_delta(ledger, {"same": [[2, 3, 2, "Mar is Mae"]]}, blocks, numbers)   # Mar into Mae
+        ledger = apply_delta(ledger, {"same": [[3, 1, 2, "Mae is Mara"]]}, blocks, numbers)  # Mae into Mara
+
+        class Yes:
+            identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
+
+            def complete(self, system, payload):
+                return {"r": [[item["id"], "y"] for item in payload["items"]]}
+
+        source = make_source([[("Mara met Mar and Mae.", "p"), ("Mar is Mae, and Mae is Mara.", "p")]])
+        client = Yes()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        checked, outcomes = check_merges(source, CachedRequests(client, Path(directory.name), repair_attempts=0),
+                                         Meter(client), ledger)
+        self.assertEqual(sorted(outcome["verdict"] for outcome in outcomes), ["superseded", "y"])
+        self.assertEqual([row["name"] for row in checked["characters"]], ["Mara"])
 
     def test_a_new_row_copied_in_cast_line_shape_is_unpacked_into_its_fields(self):
         ledger = apply_delta(new_ledger(), {"new": [["Trag||m|quiet trainer of new singers", 2],
@@ -725,6 +757,74 @@ class NarratedAnalyzeTests(unittest.TestCase):
         self.assertEqual(document["provenance"]["narrator_read"]["hints"],
                          {"cast": "Jon and Mara are siblings.", "attribution": "Elsie often speaks from offstage."})
 
+    def test_every_designed_voice_states_its_gender(self):
+        from epub_tts_narrator.narrator_read import gendered_description
+        self.assertEqual(gendered_description("Deep gravelly old voice.", "m"), "Male voice; deep gravelly old voice.")
+        self.assertEqual(gendered_description("Bright quick voice.", "f"), "Female voice; bright quick voice.")
+        self.assertEqual(gendered_description("Androgynous, cool and dry.", "m"), "Androgynous, cool and dry.")
+        self.assertIsNone(gendered_description("Bright quick voice.", "?"))
+
+        class Genderless(NarratorClient):
+            unknown_too = False
+
+            def complete(self, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_voices":
+                    # A designer reply that leaves the gender out.
+                    sexes = {row[0]: row[2] for row in payload["voices"]}
+                    result["v"] = [[row[0], "A clear steady voice.", *row[2:]]
+                                   if sexes[row[0]] in "mf" or self.unknown_too else row for row in result["v"]]
+                return result
+
+        document = self.analyze(Genderless(), repair_attempts=0)
+        for person in document["cast"]["characters"]:
+            voice = next(item for item in document["cast"]["voices"] if item["id"] == person["voice_id"])
+            self.assertRegex(voice["description"], r"^(Male|Female) voice; ", person["name"])
+        # With no known sex to fall back on, a genderless design is sent back to the model.
+        client = Genderless()
+        client.unknown_too = True
+        self.cache = self.cache.parent / "genderless-cache"
+        with self.assertRaisesRegex(ValueError, 'must begin with "Male", "Female" or "Androgynous"'):
+            self.analyze(client, repair_attempts=0)
+
+    def test_a_voice_described_with_the_books_own_words_is_sent_back(self):
+        from epub_tts_narrator.narrator_read import book_terms
+        source = make_source([[('Mara rode back to Sendaria. "Wait," Mara said, in her Sendarian burr.', "p"),
+                               ("The Sendarian farmers came from Sendaria, past the Guild hall. The Guild met.", "p"),
+                               ("He bowed to His Majesty, and his sword hung at his side; his horse waited.", "p"),
+                               ("They spoke to His Majesty, and his voice was his own.", "p")]])
+        ledger = apply_delta(new_ledger(), {"new": [["Mara", "", "f", "", 1]]},
+                             {block["id"]: block["text"] for block in source["blocks"]}, {1: "b000001"})
+        terms = book_terms(source, ledger)
+        self.assertTrue({"mara", "sendaria", "sendarian", "guild"} <= terms)
+        self.assertFalse({"scottish", "american", "his"} & terms)
+
+        class BookWords(NarratorClient):
+            def complete(self, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_voices" and "real-world terms" not in str(payload.get("correction", "")):
+                    result["v"] = [[row[0], "A warm female voice with a rural Sendarian burr.", *row[2:]]
+                                   for row in result["v"]]
+                return result
+
+        client = BookWords()
+        self.source = source
+        document = self.analyze(client, repair_attempts=1)
+        mara = next(person for person in document["cast"]["characters"] if person["name"] == "Mara")
+        described = next(voice for voice in document["cast"]["voices"] if voice["id"] == mara["voice_id"])["description"]
+        self.assertNotIn("Sendarian", described)
+        corrections = [call for call in client.calls if call.get("mode") == "narrator_voices" and "correction" in call]
+        self.assertTrue(corrections)
+
+    def test_characters_of_different_backgrounds_get_their_assigned_accents(self):
+        client = NarratorClient()
+        self.analyze(client)
+        accents = next(call for call in client.calls if call["mode"] == "narrator_accents")
+        first, second = accents["characters"][0][0], accents["characters"][1][0]
+        notes = {row[1]: row[3] for call in client.calls if call["mode"] == "narrator_voices" for row in call["voices"]}
+        self.assertTrue(notes[first].endswith("; accent: Scottish"))
+        self.assertTrue(notes[second].endswith("; accent: Irish"))
+
     def test_configured_notes_combine_as_in_the_consensus_pipeline(self):
         from epub_tts_narrator.narrator_read import settings_notes
         self.assertEqual(settings_notes({"cast_review_notes": "A", "cast_reconciliation_notes": ["B", ""],
@@ -777,11 +877,13 @@ class NarratedAnalyzeTests(unittest.TestCase):
         # The grown voice at the end of the book is Jon's main voice; the young
         # voice before the change is derived (cloned) from it.
         self.assertEqual(again["voice_id"], jon["voice_id"])
-        self.assertEqual(voices[jon["voice_id"]]["description"], "A clear voice for Jon (later: a grown man now, deeper).")
+        entry = {row[1]: row[0] for call in client.calls if call["mode"] == "narrator_voices" for row in call["voices"]}
+        later, start = entry["Jon (later: a grown man now, deeper)"], entry["Jon (at the start of the book, before any change)"]
+        self.assertEqual(voices[jon["voice_id"]]["description"], f"A clear male voice number {later[1:]}.")
         young = voices[hi["voice_id"]]
         self.assertEqual(young["derived_from"]["voice_id"], jon["voice_id"])
         self.assertFalse(young["derived_from"]["through_end"])
-        self.assertEqual(young["description"], "A clear voice for Jon (at the start of the book, before any change).")
+        self.assertEqual(young["description"], f"A clear male voice number {start[1:]}.")
         self.assertEqual(young["derived_from"]["instruction"], young["description"])
         self.assertEqual(rows['"Can you hear me?"']["voice_effect"]["preset"], "helmet")
         self.assertNotIn("voice_effect", rows['"Visor up,"'])     # the line's own exception
@@ -1018,10 +1120,10 @@ class NarratorCliTests(unittest.TestCase):
         # Series reconciliation renames IDs; each voice is still designed from its own character's notes.
         voices = {voice["id"]: voice for voice in analysis["cast"]["voices"]}
         for person in analysis["cast"]["characters"]:
-            self.assertEqual(voices[person["voice_id"]]["description"], f"A clear voice for {person['name']}.")
+            self.assertRegex(voices[person["voice_id"]]["description"], r"^A clear (male|female) voice number \d+\.$")
         modes = {call.get("mode") for client in self.clients for call in client.calls}
         self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_voices",
-                                  "narrator_merge_check", "narrator_series_check", "audition_script"}, modes)
+                                  "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
 
     def test_a_narrator_read_book_updates_its_new_chapters_with_the_narrator_read(self):
         with (self.root / "epub-tts-narrator.toml").open("a", encoding="utf-8") as handle:
@@ -1044,7 +1146,7 @@ class NarratorCliTests(unittest.TestCase):
         modes = {call.get("mode") for call in sent}
         self.assertIn("narrator_markup", modes)
         self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_voices",
-                                  "narrator_merge_check", "narrator_series_check", "audition_script"}, modes)
+                                  "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
         # Only the new chapter is analyzed, with the configured notes.
         self.assertFalse(any("I heard you" in json.dumps(call) for call in sent
                              if call.get("mode", "").startswith("narrator_")))

@@ -27,7 +27,7 @@ import time
 
 from .narrator_ledger import (EFFECT_PRESETS, IDENTITY_CHANGES, apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
                               name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
-from .narrator_prompts import (HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VOICE,
+from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
 from .provider import OutputTruncatedError
@@ -279,8 +279,14 @@ def prep_read(source, requests, meter, ledger, *, window_chars=PREP_WINDOW_CHARS
 def check_merges(source, requests, meter, ledger, *, workers=1, progress=lambda message: None):
     """One batched yes/no check of prep merges; rejected or uncertain merges are split back."""
     applied = [row for row in ledger["merges"] if row["status"] == "applied"]
+    # A merge into an entry that was itself merged later (A into B, then B into C)
+    # is covered by the later merge's check; only merges whose result still
+    # exists as an entry are checked.
+    superseded = [row for row in applied if character(ledger, row["into"]) is None
+                  or not any(item["id"] == row["from"] for item in character(ledger, row["into"])["merged"])]
+    applied = [row for row in applied if row not in superseded]
     if not applied:
-        return ledger, []
+        return ledger, [{"from": row["from"], "into": row["into"], "verdict": "superseded"} for row in superseded]
     numbers = _numbers(source)
     positions = {block["id"]: index for index, block in enumerate(source["blocks"])}
     items = []
@@ -331,6 +337,7 @@ def check_merges(source, requests, meter, ledger, *, workers=1, progress=lambda 
         outcomes.append({"from": row["from"], "into": row["into"], "verdict": verdict})
         if verdict != "y":
             ledger = undo_merge(ledger, row["from"], row["into"])
+    outcomes += [{"from": row["from"], "into": row["into"], "verdict": "superseded"} for row in superseded]
     return ledger, outcomes
 
 
@@ -1296,6 +1303,91 @@ def _partners(source, labels, extras, spans):
     return pairs
 
 
+# A design without a gender gets men with women's voices and the reverse.
+_GENDERED = re.compile(r"\b(?:male|female|man|woman|men|women|masculine|feminine|androgynous|non-binary|nonbinary"
+                       r"|gender-?neutral)\b", re.I)
+_SEX_WORD = {"m": "Male", "f": "Female", "n": "Androgynous"}
+
+
+def gendered_description(description, sex):
+    """``description`` stating the voice's gender, or None when neither it nor ``sex`` gives one."""
+    if _GENDERED.search(description):
+        return description
+    word = _SEX_WORD.get(sex)
+    if word is None:
+        return None
+    return f"{word} voice; {description[:1].lower()}{description[1:]}"
+
+
+# Real-world words a voice designer understands, even when a book uses them as names.
+_REAL_WORLD = frozenset("""
+american british english scottish irish welsh australian canadian southern northern midwestern texan texas
+cockney london received pronunciation rp yorkshire geordie scouse brummie lancashire west country cornish
+boston bostonian brooklyn bronx york new zealand kiwi south african african nigerian kenyan jamaican caribbean
+indian pakistani french german italian spanish portuguese russian polish dutch swedish norwegian danish finnish
+greek turkish arabic persian chinese japanese korean mexican latin brazilian argentine appalachian cajun
+california californian mid-atlantic transatlantic general standard neutral european asian scandinavian slavic
+east west north south eastern western central midlands highland lowland gaelic hispanic
+""".split())
+
+
+def book_terms(source, ledger):
+    """Proper nouns of the book a voice designer could not know: words capitalized
+    mid-sentence at least twice (and every character name or alias word), minus
+    real-world accent, language and place words."""
+    counts, lower = Counter(), Counter()
+    for block in source["blocks"]:
+        for match in re.finditer(r"(?<=[a-z,;] )([A-Z][a-z]{2,}(?:[-'][A-Za-z]+)?)", block["text"]):
+            counts[match.group(1).casefold()] += 1
+        lower.update(re.findall(r"\b[a-z][a-z'-]{2,}\b", block["text"]))
+    # A book's own term is capitalized more often than not ("Sendaria"); everyday
+    # words capitalized in titles ("His Majesty") appear lowercase far more often.
+    terms = {word for word, count in counts.items() if count >= 2 and lower[word] < count}
+    for row in ledger["characters"]:
+        for name in [row["name"], *row["aliases"]]:
+            terms.update(word.casefold() for word in re.findall(r"[A-Z][\w'-]{2,}", name))
+    return terms - _REAL_WORLD
+
+
+def assign_accents(source, requests, meter, rows, terms, voices=None, *, progress=lambda message: None):
+    """One request mapping the story's origins to distinct real-world accents.
+
+    Returns {ledger id: accent}. Voices are designed in batches; a book-wide map
+    keeps characters from the same place on one accent and gives different
+    backgrounds different ones. An accent naming a book term is dropped.
+    """
+    if not rows:
+        return {}
+    by_name = {row["name"]: row["id"] for row in rows}
+    characters = []
+    for row in rows:
+        note = row["note"]
+        if voices and row["id"] in voices:
+            note = f"{note}; already voiced: {voices[row['id']][:120]}"
+        characters.append([row["name"], note])
+    payload = {"mode": "narrator_accents", "v": PROMPT_VERSION, "book": source["book"]["title"],
+               "characters": characters}
+
+    def validate(response):
+        groups = _unwrap(response.get("a")) if isinstance(response, dict) else None
+        if not isinstance(groups, list):
+            raise ValueError('response must be {"a":[[origin,accent,[name,name]]]}')
+        result = {}
+        for group in groups:
+            if not isinstance(group, list) or len(group) < 3 or not isinstance(group[1], str):
+                continue
+            accent = " ".join(re.sub(r"[\[\]<>{}]", " ", group[1]).split())[:40]
+            if not accent or any(word.casefold() in terms for word in re.findall(r"[A-Za-z][\w'-]{2,}", accent)):
+                continue
+            for name in group[2] if isinstance(group[2], list) else []:
+                if isinstance(name, str) and name in by_name:
+                    result.setdefault(by_name[name], accent)
+        return result
+
+    progress(f"Narrator read: assigning accents across {len(rows)} character(s)")
+    return meter.run(requests, "voices", ACCENTS, payload, validate)
+
+
 def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1, progress=lambda message: None):
     """Fill descriptions/traits for voices that are not inherited series voices.
 
@@ -1328,6 +1420,14 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
         return cast, 0, {}
     narration = ledger["narration"]
     entries, changes_by_short = [], {}
+    terms = book_terms(source, ledger)
+    speaking_rows = [row for _voice, row in [*targets, *inherited_changes] if row is not None]
+    accents = assign_accents(source, requests, meter, speaking_rows, terms,
+                             {row["id"]: voice["description"] for voice, row in inherited_changes},
+                             progress=progress)
+
+    def with_accent(row, note):
+        return f"{note}; accent: {accents[row['id']]}" if row["id"] in accents else note
     for number, (voice, row) in enumerate(targets, 1):
         if row is None:
             entries.append([f"v{number}", "Narrator", "?", f"Main narrator; narration mode {narration['mode'] or 'unknown'}.", "", ""])
@@ -1336,7 +1436,7 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                          if character(ledger, identifier) is not None]
         later = [change for change in row.get("changes", []) if change["kind"] in IDENTITY_CHANGES]
         name = f"{row['name']} (at the start of the book, before any change)" if later else row["name"]
-        entries.append([f"v{number}", name, row["sex"], row["note"],
+        entries.append([f"v{number}", name, row["sex"], with_accent(row, row["note"]),
                         " / ".join(item["quote"] for item in row["voice"][:4]), ", ".join(partner_names)])
         if later:
             changes_by_short[f"v{number}"] = f"start:{row['id']}"
@@ -1345,8 +1445,8 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
             short = f"v{len(targets) + len(changes_by_short) + 1}"
             changes_by_short[short] = change["id"]
             entries.append([short, f"{row['name']} (later: {change['instruction']})", row["sex"],
-                            f"The same person after a {change['kind']} change: {change['instruction']}. "
-                            "Keep their accent and manner; change only what this describes.",
+                            with_accent(row, f"The same person after a {change['kind']} change: {change['instruction']}. "
+                                             "Keep their accent and manner; change only what this describes."),
                             "", ", ".join(partner_names)])
     for voice, row in inherited_changes:
         for change in (item for item in row["changes"] if item["kind"] in IDENTITY_CHANGES):
@@ -1365,6 +1465,7 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
     def run(batch):
         payload = {"mode": "narrator_voices", "v": PROMPT_VERSION, "book": book, "voices": batch}
         expected = {entry[0] for entry in batch}
+        sexes = {entry[0]: entry[2] for entry in batch}
 
         def validate(response):
             rows = _unwrap(response.get("v")) if isinstance(response, dict) else None
@@ -1386,10 +1487,23 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                 if not description:
                     errors.append(f"{row[0]}: description is empty")
                     continue
+                gendered = gendered_description(description, sexes.get(row[0]))
+                if gendered is None:
+                    errors.append(f'{row[0]}: description must begin with "Male", "Female" or "Androgynous"')
+                    continue
+                description = gendered[:600]
+                used = sorted({word for word in re.findall(r"[A-Za-z][\w'-]{2,}", f"{description} {row[2]}")
+                               if word.casefold() in terms})
+                if used:
+                    # The designer never read the book: only real-world words describe a voice.
+                    errors.append(f"{row[0]}: description and speech traits must use real-world terms only, "
+                                  f"not words from the book ({', '.join(used[:6])})")
+                    continue
                 traits = []
                 for pair in (row[3] if len(row) > 3 and isinstance(row[3], str) else "").split(";"):
                     name, _, value = pair.partition("=")
-                    name, value = name.strip().lower()[:40], value.strip()[:80]
+                    # "ReceivedPronunciation" -> "Received Pronunciation".
+                    name, value = name.strip().lower()[:40], re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value.strip())[:80]
                     if name and value:
                         traits.append({"name": name, "value": value, "basis": "casting", "evidence": []})
                 result[row[0]] = {"description": description, "speechTraits": speech, "traits": traits}
@@ -1835,7 +1949,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                 issues.append({"id": f"narrator_question_{question['id']}", "kind": "identity_question",
                                "target": question["block_id"], "reason": question["text"], "resolved": False})
         for outcome in merge_outcomes:
-            if outcome["verdict"] != "y":
+            if outcome["verdict"] not in ("y", "superseded"):
                 issues.append({"id": f"narrator_merge_{outcome['from']}_{outcome['into']}", "kind": "identity_merge",
                                "target": f"char_{outcome['into']}",
                                "reason": f"A prep-read merge was not confirmed ({outcome['verdict']}); entries kept separate.",

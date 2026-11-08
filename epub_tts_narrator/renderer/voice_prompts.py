@@ -55,13 +55,18 @@ def audiobook_voice_prompt(prompt):
 # (light, bright, high), never an age or a word for a child. Rewrites are
 # general vocabulary, applied without adding any prefix.
 _YOUNG_VOICE = re.compile(
-    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+(?:boy|girl)|boy|girl|child|kid)"
-    r"(?:'s|s'|s)?\s+voice\b", re.I)
+    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+(?P<gender>boy|girl)|(?P<gender2>boy|girl)"
+    r"|child|kid)(?:'s|s'|s)?\s+voice\b", re.I)
+# Gendered words for the young keep their gender: a boy is a male voice.
+_YOUNG_MALE = re.compile(r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+)?"
+                         r"(?:boys?|lads?|schoolboys?)\b", re.I)
+_YOUNG_FEMALE = re.compile(r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+)?"
+                           r"(?:girls?|lass(?:es)?|schoolgirls?)\b", re.I)
 _YOUNG_ADJECTIVE = re.compile(r"\b(?:boyish|girlish|childlike|childish|kiddish)\b", re.I)
 _YOUNG_NOUN = re.compile(
-    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:age)?\s+(?:boys?|girls?)|teen(?:ager)?s?|boys?|girls?"
+    r"\b(?:(?:very\s+|quite\s+)?(?:young|little|small)\s+)?(?:teen(?:ager)?s?"
     r"|child(?:ren)?|kids?|kiddos?|adolescents?|toddlers?|infants?|bab(?:y|ies)|pre-?teens?|tweens?"
-    r"|schoolboys?|schoolgirls?|youngsters?|lads?|lasses?|minors?|juveniles?)\b", re.I)
+    r"|youngsters?|minors?|juveniles?)\b", re.I)
 _YOUNG_STATE = re.compile(r"\b(?:pre-?pubescent|pubescent|teenaged?|underage|(?:early|mid|late)[- ]teens)\b", re.I)
 _UNDER_EIGHTEEN = ("one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen"
                    "|sixteen|seventeen")
@@ -83,13 +88,18 @@ _SEXUAL_READING = re.compile(
 def safe_voice_description(text):
     """A voice description a hosted designer can accept for any character.
 
-    Minor-age wording becomes sound ("a young boy's voice" -> "a light, bright
-    voice"; "boyish" -> "light, bright"; "teen boy" -> "character"), ages
+    Minor-age wording becomes sound and keeps its gender ("a young boy's voice"
+    -> "a light, bright male voice"; "teen boy" -> "male"; "boyish" -> "light,
+    bright"; an ungendered "child" -> "character"), ages
     under 18 and words with a sexual reading are removed ("adult performer"
     becomes "voice actor"), and the punctuation left behind is tidied. Adult
     ages and every acoustic quality are kept.
     """
-    result = _YOUNG_VOICE.sub("light, bright voice", text)
+    def young_voice(match):
+        gender = (match.group("gender") or match.group("gender2") or "").casefold()
+        return {"boy": "light, bright male voice", "girl": "light, bright female voice"}.get(gender, "light, bright voice")
+
+    result = _YOUNG_VOICE.sub(young_voice, text)
     result = _YOUNG_ADJECTIVE.sub("light, bright", result)
 
     def under_age(match):
@@ -99,6 +109,8 @@ def safe_voice_description(text):
         result = pattern.sub(under_age, result)
     result = _AGE_WORDS.sub("", result)
     result = _YOUNG_STATE.sub("", result)
+    result = _YOUNG_MALE.sub("male", result)
+    result = _YOUNG_FEMALE.sub("female", result)
     result = _YOUNG_NOUN.sub("character", result)
     result = _PERFORMER.sub("voice actor", result)
     result = _SEXUAL_READING.sub("", result)
@@ -109,7 +121,8 @@ def safe_voice_description(text):
     result = re.sub(r"(^|[.!?]\s+)[,;:]\s*", r"\1", result)
     result = re.sub(r"\b(a|an)\s+(?=[,.;:]|$)", "", result, flags=re.I)
     # "a"/"an" before the words inserted above.
-    result = re.sub(r"\b([Aa])n(\s+(?:light|character|voice)\b)", r"\1\2", result)
+    result = re.sub(r"\b([Aa])n(\s+(?:light|character|voice|male)\b)", r"\1\2", result)
+    result = re.sub(r"\b([Aa])(\s+(?:female)\b)", r"\1\2", result)
     result = re.sub(r"\s{2,}", " ", result).strip(" ,;:")
     return result[:1].upper() + result[1:] if result else "A clear, natural speaking voice."
 

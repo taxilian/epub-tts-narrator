@@ -439,7 +439,7 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         session.update_prompt("voice_mara", prompt, "I will meet you at the gate.")
         selected = session.regenerate("voice_mara")
         sent = calls[0][1]["voice"]["prompted"]["input"]
-        self.assertEqual(sent, "A voice actor voicing a character: light, bright, high and quick, curious.")
+        self.assertEqual(sent, "A voice actor voicing a male: light, bright, high and quick, curious.")
         # The exact prompt sent is recorded; the user's own casting edit is unchanged.
         self.assertEqual(selected["creation"]["requested_description"], sent)
         self.assertEqual(session.rows()[0]["prompt"], prompt)

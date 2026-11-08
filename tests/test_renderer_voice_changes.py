@@ -45,11 +45,12 @@ class VoiceChangeTests(unittest.TestCase):
     def test_voice_descriptions_never_carry_a_minor_age_or_a_sexual_reading(self):
         from epub_tts_narrator.renderer.voice_prompts import designer_prompt, safe_voice_description
         cases = {
-            "Young boy's voice, about 11, clear light treble, curious.": "Light, bright voice, clear light treble, curious.",
-            "Teen boy, about 14, warm cracking-light baritone.": "Character, warm cracking-light baritone.",
+            "Young boy's voice, about 11, clear light treble, curious.": "Light, bright male voice, clear light treble, curious.",
+            "Teen boy, about 14, warm cracking-light baritone.": "Male, warm cracking-light baritone.",
             "Boyish, mid-high, clear, earnest.": "Light, bright, mid-high, clear, earnest.",
-            "A mischievous twelve-year-old girl with a lisp.": "A mischievous character with a lisp.",
-            "An adult performer voicing a 9-year-old girl: bright, quick.": "A voice actor voicing a character: bright, quick.",
+            "A mischievous twelve-year-old girl with a lisp.": "A mischievous female with a lisp.",
+            "An adult performer voicing a 9-year-old girl: bright, quick.": "A voice actor voicing a female: bright, quick.",
+            "A child, soft.": "A character, soft.",
             "Sultry contralto, smoky and slow, mid-30s.": "Contralto, smoky and slow, mid-30s.",
             # Adults keep their ages and plain descriptions.
             "Gravelly old man, about 70, slow and wry.": "Gravelly old man, about 70, slow and wry.",
@@ -60,7 +61,7 @@ class VoiceChangeTests(unittest.TestCase):
                 self.assertEqual(safe_voice_description(text), expected)
         gemini = {"engine": "gemini_voice_design", "model": "fixture"}
         self.assertEqual(designer_prompt("Boy, about 9, piping.", {"engine": "elevenlabs"}), "Boy, about 9, piping.")
-        self.assertEqual(designer_prompt("Boy, about 9, piping.", gemini), "Character, piping.")
+        self.assertEqual(designer_prompt("Boy, about 9, piping.", gemini), "Male, piping.")
 
     def test_every_contract_preset_has_a_versioned_chain(self):
         self.assertEqual(set(CHAINS), set(VOICE_EFFECT_PRESETS))
@@ -125,7 +126,7 @@ class DerivedVoiceCastingTests(unittest.TestCase):
         self.assertEqual(len(self.designer.calls), designed)
         self.assertEqual(self.engine.speech_calls[-1]["voice_id"], "voice_mara")
         # The direction is storytelling wording, never a child's age or a word for a child.
-        self.assertEqual(self.engine.speech_calls[-1]["direction"], "A character, high and light")
+        self.assertEqual(self.engine.speech_calls[-1]["direction"], "A female, high and light")
         self.assertEqual(young["creation"]["method"], "derived_clone")
         self.assertEqual(young["creation"]["derived_from"]["reference_sha256"], base["reference_sha256"])
         row = next(row for row in session.rows() if row["voice_id"] == "voice_mara_young")
