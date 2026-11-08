@@ -39,6 +39,27 @@ def physical_audio(path):
         return None
 
 
+def stylized_spelling_advisory(text):
+    """Chooser evidence for deliberately elongated or stylized spellings.
+
+    A word carrying an alphabetic run of three or more equal letters (all-caps
+    Roman numerals excluded) is an elongated stylization such as ``Wheerrre``;
+    a candidate transcript in its fluent collapsed form may be the intended
+    vocal realization. Returns None for ordinary text.
+    """
+    words = []
+    for word in re.findall(r'[A-Za-z]+', text or ''):
+        if word.isupper() and set(word) <= set('IVXLCDM'):
+            continue
+        if any(letter * 3 in word.lower() for letter in set(word.lower())):
+            words.append(word)
+    if not words:
+        return None
+    return {'elongated_words': words[:20],
+            'guidance': 'Deliberately elongated or stylized spelling; a candidate transcript in its '
+                        'fluent collapsed form may be the intended vocal realization.'}
+
+
 def candidate_summary(request, record, physical):
     expected, heard = logical_text(request), record.get('report', {}).get('transcript') or ''
     expected_words, heard_words = re.findall(r'\w+', expected.lower()), re.findall(r'\w+', heard.lower())

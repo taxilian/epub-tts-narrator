@@ -10,7 +10,7 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .clip_repair_contract import logical_text, plain, synthesis_request
 from .clip_repair_prompts import SELECT
 from .clip_repair_state import ClipRecoveryUnavailable, model_call
-from .exhaustion_candidates import candidate_summary, retained_candidates, same_span
+from .exhaustion_candidates import candidate_summary, retained_candidates, same_span, stylized_spelling_advisory
 
 
 def policy(provider):
@@ -52,6 +52,14 @@ def _correction_payload(base, responses):
     result = deepcopy(base)
     if responses:
         result['format_correction'] = _format_correction(responses, [row['candidate_id'] for row in base['candidates']])
+    return result
+
+
+def _advisory_compatible(payload):
+    # The stylized_spelling advisory derives only from requested_text, which is
+    # already pinned, so pending states saved before it existed stay resumable.
+    result = deepcopy(payload)
+    result.pop('stylized_spelling', None)
     return result
 
 
@@ -150,6 +158,9 @@ def select_retained(directory, request, client):
     payload = {'mode': 'exhaustion_selection', 'request_sha256': digest(request),
                'requested_text': logical_text(request), 'request': deepcopy(request),
                'candidates': [item['summary'] for item in candidates]}
+    advisory = stylized_spelling_advisory(logical_text(request))
+    if advisory is not None:
+        payload['stylized_spelling'] = advisory
     path = directory / 'exhaustion-selection.json'
     identity = policy(client.identity)
     state = {'audit': {'identity': identity, 'payload': payload, 'response': None}, 'response_received': False}
@@ -168,10 +179,11 @@ def select_retained(directory, request, client):
             raise ValueError('Pending exhaustion selection inputs changed')
         responses = []
         for audit in state.get('invalid_responses', []):
-            if audit.get('identity') != identity or audit.get('payload') != _correction_payload(payload, responses):
+            if (audit.get('identity') != identity
+                    or _advisory_compatible(audit.get('payload')) != _advisory_compatible(_correction_payload(payload, responses))):
                 raise ValueError('Saved chooser correction history changed')
             responses.append(audit['response'])
-        if state['audit']['payload'] != _correction_payload(payload, responses):
+        if _advisory_compatible(state['audit']['payload']) != _advisory_compatible(_correction_payload(payload, responses)):
             raise ValueError('Pending exhaustion selection inputs changed')
     else:
         write_json(path, {**state, 'record_sha256': digest(state)})
