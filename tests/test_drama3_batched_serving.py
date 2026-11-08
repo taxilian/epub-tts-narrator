@@ -133,6 +133,27 @@ class BatchedServingTests(unittest.TestCase):
         completed = [line for line in messages if "completed in" in line]
         self.assertTrue(completed and completed[-1].endswith(batch_summary(stats)), messages)
 
+    def test_a_client_that_goes_away_cancels_its_batched_request(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+        from epub_tts_narrator.renderer.request_sampling import current_cancellation
+        engine = BatchingFakeEngine()
+        cancelled = threading.Event()
+
+        def decode_until_cancelled(text, voices, path, *, seed, history=()):
+            signal = current_cancellation()
+            if signal is not None and signal.wait(10):
+                cancelled.set()
+            raise RuntimeError("cancelled")
+
+        engine.synthesize_fish = decode_until_cancelled
+        url = self.serve(engine, batch_rows=2)
+        client = FishHTTPEngine({"url": url, "name": "impatient", "api_key": "", "timeout_seconds": 1},
+                                {"temperature": 0.7})
+        with self.assertRaises(FishHTTPError):
+            client.synthesize("A passage.", self.voice, self.root / "take.wav", seed=4)
+        # The client timed out and closed; serve noticed and stopped the decode.
+        self.assertTrue(cancelled.wait(5))
+
     def test_single_request_engines_keep_the_serialized_path(self):
         engine = FakeEngine()
         url = self.serve(engine)

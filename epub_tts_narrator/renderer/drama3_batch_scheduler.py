@@ -27,6 +27,10 @@ class SchedulerClosed(RuntimeError):
     pass
 
 
+class RequestCancelled(RuntimeError):
+    """The request's cancel signal was set (its client went away); its row was freed."""
+
+
 @dataclass
 class BatchRequest:
     prompt: Any
@@ -41,6 +45,9 @@ class BatchRequest:
     # Optional prompt rows where a shared start ends (references, pinned history),
     # which a backend may cache for later requests with the same start.
     prefix_hints: tuple = ()
+    # Optional threading.Event: once set, the request leaves the batch at the
+    # next step (or is skipped before it starts) and fails RequestCancelled.
+    cancel: Any = None
     future: Future = field(default_factory=Future)
     submitted: float = field(default_factory=time.perf_counter)
     # Payload-free per-request batching facts, delivered as ``future.batch_stats``.
@@ -84,6 +91,7 @@ class Drama3BatchScheduler:
         # Payload-free efficiency counters (seconds on the decode thread).
         self.occupancy = Counter()   # active rows per step -> steps
         self.prefills = 0
+        self.cancelled = 0
         self.prefill_seconds = 0.0
         self.step_seconds = 0.0
         self.observe_seconds = 0.0
@@ -92,13 +100,15 @@ class Drama3BatchScheduler:
         self._thread.start()
 
     def submit(self, prompt, max_new_tokens, *, temperature, top_k, top_p, seed, watch=None,
-               prefix_hints=()) -> Future:
+               prefix_hints=(), cancel=None) -> Future:
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("max_new_tokens must be a positive integer")
         if watch is not None and not callable(getattr(watch, "observe", None)):
             raise ValueError("watch must provide observe(codes)")
+        if cancel is not None and not callable(getattr(cancel, "is_set", None)):
+            raise ValueError("cancel must provide is_set()")
         request = BatchRequest(prompt, max_new_tokens, temperature, top_k, top_p, seed, watch,
-                               tuple(prefix_hints))
+                               tuple(prefix_hints), cancel)
         with self._condition:
             if self._failure is not None:
                 raise SchedulerClosed("The Drama 3 batch scheduler stopped after an internal error") from self._failure
@@ -188,6 +198,9 @@ class Drama3BatchScheduler:
                 self._admitting.remove(request)
                 if not request.future.set_running_or_notify_cancel():
                     continue
+                if request.cancel is not None and request.cancel.is_set():
+                    request.future.set_exception(RequestCancelled("The request was cancelled before it started"))
+                    continue
                 began = time.perf_counter()
                 request.stats.update(waited_seconds=round(began - request.submitted, 3),
                                      joined_active=len(self._active), rows=self.backend.rows)
@@ -201,6 +214,10 @@ class Drama3BatchScheduler:
                     self.prefill_seconds += time.perf_counter() - began
                     request.stats["prefill_seconds"] = round(time.perf_counter() - began, 3)
                     request.stats.update(getattr(self.backend, "last_prefill", None) or {})
+            for slot in [slot for slot, row in self._active.items()
+                         if row.request.cancel is not None and row.request.cancel.is_set()]:
+                self.cancelled += 1
+                self._finish(slot, error=RequestCancelled("The request was cancelled; its row was freed"))
             if not self._active:
                 continue
             slots = sorted(self._active)

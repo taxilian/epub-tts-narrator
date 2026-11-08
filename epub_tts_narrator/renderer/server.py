@@ -23,6 +23,7 @@ import json
 import math
 from pathlib import Path
 import secrets
+import select
 import socket
 import tempfile
 import threading
@@ -274,20 +275,54 @@ class _RenderServer(ThreadingHTTPServer):
                 setattr(self.engine, key, value)
 
     def _infer_concurrent(self, text, voices, history, output, seed, sampling, request_id=None,
-                          queued_at=None, layout="directing"):
-        """A batching engine decodes many requests at once; sampling travels per request."""
-        from .request_sampling import request_sampling
+                          queued_at=None, layout="directing", connection=None):
+        """A batching engine decodes many requests at once; sampling travels per request.
+
+        While it decodes, the client's connection is watched: once the client
+        has gone (a restarted controller, a timeout), the request's cancel
+        signal frees its batch row instead of finishing audio nobody receives.
+        """
+        from .request_sampling import request_cancellation, request_sampling
         if request_id:
             self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
         options = {"layout": layout} if layout != "directing" else {}
-        with request_sampling(sampling):
-            return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history, **options)
+        cancel, finished = threading.Event(), threading.Event()
+        watcher = None
+        if connection is not None:
+            watcher = threading.Thread(target=self._watch_client, args=(connection, cancel, finished, request_id),
+                                       name="serve-client-watch", daemon=True)
+            watcher.start()
+        try:
+            with request_sampling(sampling), request_cancellation(cancel):
+                return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history, **options)
+        finally:
+            finished.set()
+            if watcher is not None:
+                watcher.join(2)
+
+    def _watch_client(self, connection, cancel, finished, request_id, interval=0.5):
+        """Set ``cancel`` once the client closes its connection (it sends nothing while it waits)."""
+        while not finished.is_set():
+            try:
+                readable, _, _ = select.select([connection], [], [], interval)
+                if not readable:
+                    continue
+                if connection.recv(1, socket.MSG_PEEK) != b"":
+                    finished.wait(interval)  # unexpected bytes: keep watching for a close
+                    continue
+            except (OSError, ValueError):
+                pass  # the socket is unusable: the client cannot receive the result either
+            if not finished.is_set():
+                cancel.set()
+                if request_id:
+                    self.activity(request_id, "client disconnected; its batched decode was stopped")
+            return
 
     def synthesize(self, text, voices, output, seed, sampling, *, history=(), layout="directing",
-                   request_id=None, queued_at=None):
+                   request_id=None, queued_at=None, connection=None):
         if getattr(self.engine, "concurrent_requests", 1) > 1:
             return self._infer_concurrent(text, voices, list(history), output, seed, sampling,
-                                          request_id, queued_at, layout)
+                                          request_id, queued_at, layout, connection=connection)
         return self.inference_runtime.run(
             self._infer, text, voices, list(history), output, seed, sampling, request_id, queued_at, layout,
             initialize_mlx=requires_mlx(self.engine),
@@ -490,7 +525,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.server.activity(self.request_id, f"queued: {len(body['text'])} characters, "
                                                      f"{len(voices)} reference(s), {len(history)} history turn(s){suffix}")
                 generated = self.server.synthesize(body["text"], voices, output, seed, sampling, history=history,
-                                                   layout=layout, request_id=self.request_id, queued_at=queued_at)
+                                                   layout=layout, request_id=self.request_id, queued_at=queued_at,
+                                                   connection=self.connection)
                 audio = inspect_wav(output)
                 if output.stat().st_size > MAX_AUDIO_BYTES:
                     raise EngineError("Generated WAV exceeds the 100 MiB response limit")

@@ -216,6 +216,7 @@ class FishHTTPErrorBodyTests(unittest.TestCase):
             reference.write_bytes(wav_bytes())
             voice = {"kind": "reference", "reference_audio": str(reference), "reference_text": "Hello."}
             client = FishHTTPEngine({"url": "https://example.invalid/v1/tts", "api_key": "private-test-key"})
+            client.timeout = 1  # too short to wait out a full queue: a 503 fails at once
             for status in (401, 503):
                 for body_error in (
                     http.client.IncompleteRead(b"Detail before truncation private-test-key", 100),
@@ -625,6 +626,7 @@ class FishHTTPTests(unittest.TestCase):
                 # One occupied slot makes this a queue-rejection logging test.
                 self.server.admission = threading.BoundedSemaphore(1)
                 self.assertTrue(self.server.admission.acquire(blocking=False))
+                self.client.timeout = 1  # fail the 503 at once instead of waiting it out
                 try:
                     with self.assertRaises(FishHTTPError) as raised:
                         self.client.synthesize("Queued.", self.voice, self.root / f"queued-{index}.wav", seed=1)
@@ -815,30 +817,30 @@ class FishHTTPTests(unittest.TestCase):
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(seen, ["/v1/tts"])
 
-    def test_full_queue_rejects_without_additional_inference(self):
+    def test_a_full_queue_is_waited_out_without_spending_the_attempt(self):
         self.server.admission = threading.BoundedSemaphore(1)
         self.voice = dict(self.voice, reference_text="x" * 1000000)
         entered, release = threading.Event(), threading.Event()
         original = self.engine.synthesize_fish
         def blocked(*args, **kwargs):
             entered.set()
-            if not release.wait(5):
+            if not release.wait(10):
                 raise RuntimeError("test did not release generation")
             return original(*args, **kwargs)
         self.engine.synthesize_fish = blocked
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             active = pool.submit(self.client.synthesize, "First.", self.voice, self.root / "first.wav", seed=1)
-            try:
-                self.assertTrue(entered.wait(5))
-                with self.assertRaises(FishHTTPError) as raised:
-                    self.client.synthesize("Second.", self.voice, self.root / "second.wav", seed=2)
-                self.assertIn("503", str(raised.exception))
-                self.assertTrue(raised.exception.retryable)
-            finally:
-                release.set()
-            active.result()
-        self.assertEqual(len(self.engine.calls), 1)
-        self.wait_activity("queue is full (HTTP 503)")
+            self.assertTrue(entered.wait(5))
+            waiting = pool.submit(self.client.synthesize, "Second.", self.voice, self.root / "second.wav", seed=2)
+            self.wait_activity("queue is full (HTTP 503)")
+            # The rejected request never started inference; it retries after Retry-After.
+            self.assertEqual(len(self.engine.calls), 0)
+            self.assertFalse(waiting.done())
+            release.set()
+            active.result(timeout=10)
+            waiting.result(timeout=15)
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertTrue((self.root / "second.wav").exists())
 
     def test_malformed_audio_response_never_published(self):
         class Handler(BaseHTTPRequestHandler):

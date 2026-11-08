@@ -21,6 +21,7 @@ import re
 import socket
 import tempfile
 import threading
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -29,6 +30,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from ..spoken_text import MAX_DELIVERY_CHARACTERS
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
 from .engines import EngineError, HistorySynthesis, _seed, _text
+from .interrupts import stop_if_requested
 from .performance_compiler import validate_compiled_text
 from .diagnostics import safe_error_text
 from .reference_cache import UNKNOWN_REFERENCE_MARKER, ReferenceCache
@@ -41,6 +43,10 @@ PROTOCOLS = {"fish_inline"}
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 STYLE_CONTROL = rf"\[[^\[\]<>\r\n]{{1,{MAX_DELIVERY_CHARACTERS}}}\]"
 SUPPORTED_CONTROLS = re.compile(r"</?(?:whisper|emphasis|soft|fast|slow|stress|forceful)>|<\|phoneme_(?:start|end)\|>|" + STYLE_CONTROL)
+
+
+# serve's Retry-After for a full queue (no work was started).
+QUEUE_FULL_RETRY_SECONDS = 2.0
 
 
 class FishHTTPError(EngineError):
@@ -320,6 +326,23 @@ class FishHTTPEngine(HistorySynthesis):
             self._registered_references.difference_update(content_ids)
 
     def _request(self, text, references, history, output, seed, layout="directing"):
+        """Send one take, waiting out a full worker queue instead of failing the attempt.
+
+        ``serve`` answers 503 (``Retry-After: 2``) before reading a request when
+        all its places are taken, so nothing was generated: resend after the
+        pause, for at most this worker's timeout, without spending an attempt.
+        """
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                return self._request_once(text, references, history, output, seed, layout)
+            except FishHTTPError as exc:
+                if exc.status != 503 or time.monotonic() + QUEUE_FULL_RETRY_SECONDS > deadline:
+                    raise
+            stop_if_requested()
+            time.sleep(QUEUE_FULL_RETRY_SECONDS)
+
+    def _request_once(self, text, references, history, output, seed, layout="directing"):
         wire, seeded, reused = self._references_for_wire(references)
         try:
             return self._transmit(text, wire, history, output, seed, seeded + reused, layout)

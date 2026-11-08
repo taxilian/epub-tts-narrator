@@ -260,9 +260,11 @@ class FishSpeechCudaEngine(HistorySynthesis):
                 if self._scheduler is not None:
                     # Shared decode loop; this request's own prompt, seed and
                     # sampling, and its own frames back.
+                    from .request_sampling import current_cancellation
                     future = self._scheduler.submit(
                         prompt, max_new_tokens, temperature=temperature, top_k=top_k,
-                        top_p=top_p, seed=seed, watch=self._silence_watch(text, codec))
+                        top_p=top_p, seed=seed, watch=self._silence_watch(text, codec),
+                        cancel=current_cancellation())
                     rows, finish_reason = future.result()
                     batch = getattr(future, "batch_stats", None)
                     frames = torch.tensor(rows, dtype=torch.long).reshape(len(rows), -1)

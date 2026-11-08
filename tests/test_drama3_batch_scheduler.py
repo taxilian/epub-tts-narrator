@@ -4,7 +4,7 @@ from concurrent.futures import CancelledError
 import threading
 import unittest
 
-from epub_tts_narrator.renderer.drama3_batch_scheduler import Drama3BatchScheduler, SchedulerClosed
+from epub_tts_narrator.renderer.drama3_batch_scheduler import Drama3BatchScheduler, RequestCancelled, SchedulerClosed
 
 EOS = 0
 
@@ -104,6 +104,34 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual({long.batch_stats["joined_active"], short.batch_stats["joined_active"]}, {0, 1})
         self.assertEqual(short.batch_stats["prompt_rows"], 3)
         self.assertGreaterEqual(short.batch_stats["waited_seconds"], 0)
+
+    def test_a_cancelled_request_frees_its_row_and_a_cancelled_waiting_one_never_starts(self):
+        backend = ScriptedBackend(1)
+        backend.gate = threading.Event()
+        scheduler = Drama3BatchScheduler(backend)
+        self.addCleanup(scheduler.close)
+        running_cancel, waiting_cancel = threading.Event(), threading.Event()
+        running = scheduler.submit(frames(*range(1, 40)) + frames(EOS), 50, temperature=0.7, top_k=30,
+                                   top_p=0.7, seed=1, cancel=running_cancel)
+        waiting = scheduler.submit(frames(4) + frames(EOS), 50, temperature=0.7, top_k=30, top_p=0.7,
+                                   seed=2, cancel=waiting_cancel)
+        after = self.submit(scheduler, frames(6) + frames(EOS), seed=3)
+        deadline = threading.Event()
+        while not backend.prefilled and not deadline.wait(0.01):
+            pass  # the running request is in its row (its first step waits on the gate)
+        waiting_cancel.set()
+        running_cancel.set()
+        backend.gate.set()
+        with self.assertRaises(RequestCancelled):
+            running.result(timeout=5)
+        with self.assertRaises(RequestCancelled):
+            waiting.result(timeout=5)
+        # The freed row serves the next request; the cancelled waiting one was never prefilled.
+        self.assertEqual(after.result(timeout=5), (frames(6), "eos"))
+        self.assertEqual([seed for _slot, seed in backend.prefilled], [1, 3])
+        self.assertEqual(scheduler.cancelled, 1)
+        with self.assertRaisesRegex(ValueError, "is_set"):
+            scheduler.submit(frames(EOS), 5, temperature=0.7, top_k=30, top_p=0.7, seed=0, cancel=object())
 
     def test_end_of_speech_is_never_returned_and_length_limit_reports_length(self):
         _backend, scheduler = self.scheduler(1)

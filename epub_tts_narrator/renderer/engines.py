@@ -623,7 +623,7 @@ class Drama3MLXEngine(HistorySynthesis):
         """
         import numpy as np
         from drama3_mlx.model import Segment
-        from .request_sampling import current_sampling
+        from .request_sampling import current_cancellation, current_sampling
         from .silence_stop import SilenceWatch
         sampling = current_sampling() or {}
 
@@ -634,7 +634,7 @@ class Drama3MLXEngine(HistorySynthesis):
         future = self._scheduler.submit(
             prompt, max_new_tokens, temperature=sampling.get("temperature", self.temperature),
             top_k=sampling.get("top_k", self.top_k), top_p=sampling.get("top_p", self.top_p),
-            seed=seed, watch=watch, prefix_hints=prefix_hints)
+            seed=seed, watch=watch, prefix_hints=prefix_hints, cancel=current_cancellation())
         frames, finish_reason = future.result()
         stats = getattr(future, "batch_stats", None)
         self._batch_stats.value = dict(stats) if isinstance(stats, dict) else None
