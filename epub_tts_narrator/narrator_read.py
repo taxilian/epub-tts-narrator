@@ -27,7 +27,7 @@ import time
 
 from .narrator_ledger import (EFFECT_PRESETS, IDENTITY_CHANGES, apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
                               name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
-from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VOICE,
+from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VERIFY_TIEBREAK, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
 from .provider import OutputTruncatedError
@@ -49,7 +49,7 @@ STAGES = ("prep", "identity_check", "markup", "verify", "voices", "performance")
 # and identity checks, attribution notes steer markup and verification.
 CAST_HINT_MODES = frozenset({"narrator_prep", "narrator_merge_check", "narrator_alias_check",
                              "narrator_duplicate_check", "narrator_series_check"})
-ATTRIBUTION_HINT_MODES = frozenset({"narrator_markup", "narrator_verify"})
+ATTRIBUTION_HINT_MODES = frozenset({"narrator_markup", "narrator_verify", "narrator_verify_tiebreak"})
 
 
 def settings_notes(settings):
@@ -1128,7 +1128,7 @@ def verify(source, requests, meter, ledger, spans, labels, *, workers=1, progres
 
 def _verify_items(source, requests, meter, ledger, spans, labels, items, *, workers=1, progress=lambda message: None):
     if not items:
-        return labels, {"items": 0, "resolved": 0, "changed": 0, "unresolved": 0, "corrections": []}
+        return labels, {"items": 0, "resolved": 0, "changed": 0, "unresolved": 0, "tie_breaks": 0, "corrections": []}
     numbers = _numbers(source)
     positions = {block["id"]: position for position, block in enumerate(source["blocks"])}
     block_spans = spans_by_block(spans)
@@ -1172,6 +1172,17 @@ def _verify_items(source, requests, meter, ledger, spans, labels, items, *, work
     batches = [payload_items[start:start + VERIFY_BATCH] for start in range(0, len(payload_items), VERIFY_BATCH)]
     known = {row["id"] for row in ledger["characters"]}
 
+    def outcome(item, before, verdict):
+        if verdict == "-":
+            return ("narrator",), True
+        if verdict in item["options"]:
+            return ("char", verdict), True
+        if item["reason"] in SELF_CHECK_REASONS and before[0] == "char":
+            # A self-check only nominates a doubt; an unsure answer keeps the
+            # markup label, which was made with the whole chapter in view.
+            return before, False
+        return ("unresolved", item["options"]), False
+
     def run(batch):
         payload = {"mode": "narrator_verify", "v": PROMPT_VERSION, "items": batch}
         expected = {item["id"] for item in batch}
@@ -1197,30 +1208,72 @@ def _verify_items(source, requests, meter, ledger, spans, labels, items, *, work
     verdicts = {}
     for result in _parallel(run, batches, workers):
         verdicts.update(result)
+
+    entries = {entry["id"]: entry for entry in payload_items}
+    tie_items, tie_outcomes = [], {}
+    for item in items:
+        before = labels[item["span"]["id"]]["who"]
+        proposed, _ = outcome(item, before, verdicts[item["item_id"]])
+        if before[0] not in {"char", "narrator"} or proposed[0] not in {"char", "narrator"} or proposed == before:
+            continue
+        entry = entries[item["item_id"]]
+        outcomes = {"a": before, "b": proposed}
+        tie_outcomes[item["item_id"]] = outcomes
+        tie_item = {"id": item["item_id"], "target": entry["target"], "text": entry["text"],
+                    "choices": [{"id": option, "who": "-" if who[0] == "narrator" else who[1]}
+                                for option, who in outcomes.items()],
+                    "cast": "\n".join(_cast_line(character(ledger, identifier)) for identifier in
+                                      dict.fromkeys(who[1] for who in outcomes.values() if who[0] == "char"))}
+        if "named_beside" in entry:
+            tie_item["named_beside"] = entry["named_beside"]
+        tie_items.append(tie_item)
+
+    def choose(batch):
+        payload = {"mode": "narrator_verify_tiebreak", "v": PROMPT_VERSION, "items": batch}
+        expected = {item["id"]: {choice["id"] for choice in item["choices"]} for item in batch}
+
+        def validate(response):
+            rows = _unwrap(response.get("r")) if isinstance(response, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError('response must be {"r":[[item_id,choice_id]]}')
+            result = {}
+            for row in rows:
+                row = _item_row(row, "i")
+                if not (isinstance(row, list) and len(row) == 2 and _is(row[0], expected)
+                        and isinstance(row[1], str) and row[1] in expected[row[0]]):
+                    raise ValueError("tie-break rows must contain an expected item id and one of its two choice ids")
+                if row[0] in result:
+                    raise ValueError(f"duplicate tie-break choice for item: {row[0]}")
+                result[row[0]] = row[1]
+            missing = sorted(expected.keys() - set(result))
+            if missing:
+                raise ValueError(f"missing tie-break choices for items: {', '.join(missing[:20])}")
+            return result
+
+        return meter.run(requests, "verify", VERIFY_TIEBREAK, payload, validate)
+
+    selections = {}
+    tie_batches = [tie_items[start:start + VERIFY_BATCH] for start in range(0, len(tie_items), VERIFY_BATCH)]
+    for result in _parallel(choose, tie_batches, workers):
+        for item_id, choice in result.items():
+            selections[item_id] = tie_outcomes[item_id][choice]
+
     labels = deepcopy(labels)
     stats = {"items": len(items), "resolved": 0, "changed": 0, "unresolved": 0, "kept": 0,
-             "reasons": dict(Counter(item["reason"] for item in items)), "changed_by_reason": {},
-             "corrections": []}
+             "tie_breaks": len(tie_items), "reasons": dict(Counter(item["reason"] for item in items)),
+             "changed_by_reason": {}, "corrections": []}
     for item in items:
         span, verdict = item["span"], verdicts[item["item_id"]]
         label = labels[span["id"]]
         before = label["who"]
-        if verdict == "-":
-            after = ("narrator",)
-        elif verdict in item["options"]:
-            after = ("char", verdict)
-        elif item["reason"] in SELF_CHECK_REASONS and before[0] == "char":
-            # A self-check only nominates a doubt; an unsure answer keeps the
-            # markup label, which was made with the whole chapter in view.
-            after = before
-        else:
-            after = ("unresolved", item["options"])
+        after, decided = outcome(item, before, verdict)
+        if item["item_id"] in selections:
+            after, decided = selections[item["item_id"]], True
         if after != before:
             stats["changed_by_reason"][item["reason"]] = stats["changed_by_reason"].get(item["reason"], 0) + 1
         label["who"] = after
         label["verified"] = item["reason"]
-        # Explicitly decided by the verifier (not left unsure).
-        label["decided"] = verdict == "-" or verdict in item["options"]
+        label["decided"] = decided
         if after[0] == "unresolved":
             stats["unresolved"] += 1
         elif before[0] == "unresolved":

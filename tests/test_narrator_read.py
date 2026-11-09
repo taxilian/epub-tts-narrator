@@ -143,6 +143,8 @@ class NarratorClient:
                 answer = item["options"][0] if self.verify_answer == "first" and item["options"] else "?"
                 answers.append([item["id"], answer])
             return {"r": answers}
+        if mode == "narrator_verify_tiebreak":
+            return {"r": [[item["id"], item["choices"][1]["id"]] for item in payload["items"]]}
         if mode == "narrator_accents":
             # Different backgrounds, different accents: the first character is Scottish.
             names = [row[0] for row in payload["characters"]]
@@ -463,6 +465,8 @@ class NarratedAnalyzeTests(unittest.TestCase):
             identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
 
             def complete(self, system, payload):
+                if payload["mode"] == "narrator_verify_tiebreak":
+                    return {"r": [[item["id"], item["choices"][1]["id"]] for item in payload["items"]]}
                 rows = []
                 for item in payload["items"]:
                     # The beat-tagged line is Divinity's; the untagged absent-speaker line is
@@ -629,6 +633,20 @@ class NarratedAnalyzeTests(unittest.TestCase):
         self.assertEqual(rows['"Go,"']["delivery"]["direction"], "")
         stats = document["provenance"]["narrator_read"]["segments"]
         self.assertEqual((stats["delivery"], stats["delivery_dropped"]), (1, 1))
+
+    def test_tie_break_selection_is_published_with_existing_delivery_evidence(self):
+        self.source = make_source([[('"Stay," Mara whispered.', "p"), ('"Go," Jon said.', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Stay,"], "2", "", "whispered", "Mara whispered hoarsely"],
+                           [qids["Go,"], "2"]]
+
+        document = self.markup_with(rewrite)
+        row = self.by_text(document)['"Stay,"']
+        self.assertEqual(row["role_id"], "role_1")
+        self.assertEqual(row["delivery"],
+                         {"direction": "whispered", "evidence": [{"block_id": "b000001", "quote": "Mara whispered"}]})
+        self.assertEqual(document["provenance"]["narrator_read"]["verification"]["tie_breaks"], 1)
 
     def test_spelling_edits_and_cues_go_through_the_remove_only_review(self):
         self.source = make_source([[('"Nooooo, wait," Mara whispered.', "p"), ("The door went bang.", "p")]])
@@ -949,6 +967,78 @@ class NarratedAnalyzeTests(unittest.TestCase):
         self.assertEqual(readiness(document)["errors"], [])
 
 
+class VerificationTieBreakTests(unittest.TestCase):
+    class Client:
+        identity = {"model": "fixture", "base_url": "http://offline.invalid/v1"}
+
+        def __init__(self, verdict, choice):
+            self.verdict, self.choice = verdict, choice
+            self.calls = []
+
+        def complete(self, system, payload):
+            self.calls.append(deepcopy(payload))
+            if payload["mode"] == "narrator_verify":
+                return {"r": [[item["id"], self.verdict] for item in payload["items"]]}
+            if payload["mode"] == "narrator_verify_tiebreak":
+                return {"r": [[item["id"], self.choice] for item in payload["items"]]}
+            raise AssertionError("unexpected request in fixture")
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.cache = Path(directory.name) / "cache"
+        self.source = make_source([[('"Fine," Mara said.', "p")]])
+        self.spans = quote_spans(self.source)
+        self.ledger = apply_delta(new_ledger(), {"new": [["Mara", "", "f", "", 1], ["Jon", "", "m", "", 1]]},
+                                  {"b000001": self.source["blocks"][0]["text"]}, {1: "b000001"})
+        self.labels = {self.spans[0]["id"]: {"who": ("char", "1")}}
+        self.items = [{"span": self.spans[0], "reason": "tag_disagreement", "options": ["1", "2"]}]
+
+    def run_verification(self, client):
+        from epub_tts_narrator.narrator_read import Meter, _verify_items
+        from epub_tts_narrator.pipeline import CachedRequests
+        return _verify_items(self.source, CachedRequests(client, self.cache, repair_attempts=0), Meter(client),
+                             self.ledger, self.spans, self.labels, self.items)
+
+    def test_agreement_keeps_the_original_label_without_a_tie_break_call(self):
+        client = self.Client(verdict="1", choice="b")
+        labels, stats = self.run_verification(client)
+        self.assertEqual(labels[self.spans[0]["id"]]["who"], ("char", "1"))
+        self.assertEqual([call["mode"] for call in client.calls], ["narrator_verify"])
+        self.assertEqual(stats["tie_breaks"], 0)
+
+    def test_tie_break_can_select_either_supplied_candidate(self):
+        for choice, expected, changed in (("a", "1", 0), ("b", "2", 1)):
+            with self.subTest(choice=choice):
+                self.cache = self.cache.parent / f"cache-choice-{choice}"
+                client = self.Client(verdict="2", choice=choice)
+                labels, stats = self.run_verification(client)
+                self.assertEqual(labels[self.spans[0]["id"]]["who"], ("char", expected))
+                self.assertEqual((stats["tie_breaks"], stats["changed"]), (1, changed))
+                tie_item = next(call["items"][0] for call in client.calls if call["mode"] == "narrator_verify_tiebreak")
+                self.assertEqual(tie_item["target"], self.spans[0]["id"])
+                self.assertIn('"Fine," Mara said.', tie_item["text"])
+                self.assertEqual(tie_item["choices"], [{"id": "a", "who": "1"}, {"id": "b", "who": "2"}])
+                self.assertNotIn("options", tie_item)
+
+    def test_invalid_choice_is_rejected_then_resume_and_replay_use_validated_caches(self):
+        original = deepcopy(self.labels)
+        with self.assertRaises(ValueError):
+            self.run_verification(self.Client(verdict="2", choice="2"))
+        self.assertEqual(self.labels, original)
+
+        resumed = self.Client(verdict="2", choice="a")
+        labels, stats = self.run_verification(resumed)
+        self.assertEqual(labels[self.spans[0]["id"]]["who"], ("char", "1"))
+        self.assertEqual([call["mode"] for call in resumed.calls], ["narrator_verify_tiebreak"])
+
+        replayed = self.Client(verdict="2", choice="b")
+        cached_labels, cached_stats = self.run_verification(replayed)
+        self.assertEqual(replayed.calls, [])
+        self.assertEqual(cached_labels, labels)
+        self.assertEqual(cached_stats, stats)
+
+
 class SeriesCheckedMatchTests(unittest.TestCase):
     def test_quote_backed_series_check_settles_a_name_shared_by_two_prior_characters(self):
         from epub_tts_narrator.series import reconcile_series_cast
@@ -1122,7 +1212,7 @@ class NarratorCliTests(unittest.TestCase):
         for person in analysis["cast"]["characters"]:
             self.assertRegex(voices[person["voice_id"]]["description"], r"^A clear (male|female) voice number \d+\.$")
         modes = {call.get("mode") for client in self.clients for call in client.calls}
-        self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_voices",
+        self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_verify_tiebreak", "narrator_voices",
                                   "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
 
     def test_a_narrator_read_book_updates_its_new_chapters_with_the_narrator_read(self):
@@ -1145,7 +1235,7 @@ class NarratorCliTests(unittest.TestCase):
         sent = [call for client in self.clients for call in client.calls][calls_before:]
         modes = {call.get("mode") for call in sent}
         self.assertIn("narrator_markup", modes)
-        self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_voices",
+        self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_verify_tiebreak", "narrator_voices",
                                   "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
         # Only the new chapter is analyzed, with the configured notes.
         self.assertFalse(any("I heard you" in json.dumps(call) for call in sent
