@@ -15,16 +15,22 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
+from unittest.mock import patch
+
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.engines import DRAMA3_MODEL_REVISION
+from epub_tts_narrator.renderer.interrupts import RenderInterrupted, RenderInterrupts
 from epub_tts_narrator.renderer.pool import RenderPool
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
-from epub_tts_narrator.renderer.workflow import render
+from epub_tts_narrator.renderer.workflow import (
+    ChaptersRenderFailed, RenderBlocked, VerificationUnavailable, make_render_plan, render,
+)
 from audition_fixtures import prepare_bundle
 from shared_fixtures import FFMPEG, FFPROBE, renderer_config, timed_transcript
+from test_chapter_export import chapter_document
 from test_renderer_workflow import EXAMPLE, FixtureEngine, FixtureVerifier, pcm_key
 
 WATCHDOG = 30
@@ -190,6 +196,259 @@ class PipelineLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(transcribed.count(recorded_names[2]), 1)
         self.assertIs(read_json(attempts[0])["report"]["passed"], False)
         self.assertIs(read_json(accepted[0])["report"]["passed"], True)
+
+    def test_failed_chapter_continues_beyond_limit_and_resume_reuses_completed_chapters(self):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first harbor remained silent.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FOUR", "heading", "p"),
+            ("The fourth boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FIVE", "heading", "p"),
+            ("The fifth boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "continued-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "continued-bundle"))
+        self.config["render"]["max_attempts"] = 2
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        self.verifier.wrong_texts.add("The first harbor remained silent.")
+
+        with self.assertRaises(RenderBlocked):
+            render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+
+        checkpoints = {
+            read_json(path)["chapter_number"]: path
+            for path in (self.root / "work" / "completed-chapters").glob("*.json")
+        }
+        self.assertEqual(set(checkpoints), {2, 3, 4, 5})
+        completed_audio = {
+            number: file_hash(read_json(path)["audio_file"])
+            for number, path in checkpoints.items()
+        }
+        self.assertFalse((self.root / "output").exists())
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual([item["number"] for item in status["failed_chapters"]], [1])
+        self.assertEqual(status["failed_chapters"][0]["error_type"], "SpeechVerificationFailed")
+        self.assertIn("after 2 attempts", status["failed_chapters"][0]["error"])
+        failed_chunk = next(
+            chunk for chunk in make_render_plan(self.bundle, self.config, multi_speaker=False)["chapters"][0]["chunks"]
+            if chunk["spoken_text"] == "The first harbor remained silent.")
+        linkage = status["failed_chapters"][0]
+        self.assertEqual(linkage["segment_ids"], [failed_chunk["segment"]["id"]])
+        self.assertEqual(linkage["chunk_id"], failed_chunk["chunk_id"])
+        failed_attempts = sorted(
+            (self.root / "work" / "clips" / linkage["request_hash"]).glob("attempt-*.json"))
+        self.assertEqual(len(failed_attempts), 2)
+
+        self.verifier.wrong_texts.clear()
+        before = len(self.engine.speech_calls)
+        result = render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(self.engine.speech_calls) - before, 1)
+        resumed = {
+            read_json(path)["chapter_number"]: path
+            for path in (self.root / "work" / "completed-chapters").glob("*.json")
+        }
+        self.assertEqual(set(resumed), {1, 2, 3, 4, 5})
+        for number, checksum in completed_audio.items():
+            self.assertEqual(file_hash(read_json(resumed[number])["audio_file"]), checksum)
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
+
+    def test_permanent_chapter_generation_failure_continues_remaining_chapters(self):
+        class PermanentFailure(RuntimeError):
+            retryable = False
+
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FOUR", "heading", "p"),
+            ("The fourth boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "blocked-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "blocked-bundle"))
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        original = self.engine.synthesize
+
+        def generate(*args, **kwargs):
+            if args[0] == "The second boat crossed the harbor.":
+                raise PermanentFailure("Fixture permanent generation error")
+            return original(*args, **kwargs)
+
+        with patch.object(self.engine, "synthesize", side_effect=generate):
+            with self.assertRaises(ChaptersRenderFailed) as raised:
+                render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+
+        self.assertEqual([chapter["number"] for chapter in raised.exception.failed_chapters], [2])
+        self.assertIn("Chapter 2 (RenderBlocked): Fixture permanent generation error",
+                      str(raised.exception))
+        checkpoints = {
+            read_json(path)["chapter_number"]
+            for path in (self.root / "work" / "completed-chapters").glob("*.json")
+        }
+        self.assertEqual(checkpoints, {1, 3, 4})
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual([item["number"] for item in status["failed_chapters"]], [2])
+        self.assertEqual(status["failed_chapters"][0]["error_type"], "RenderBlocked")
+        failed_chunk = next(
+            chunk for chunk in make_render_plan(self.bundle, self.config, multi_speaker=False)["chapters"][1]["chunks"]
+            if chunk["spoken_text"] == "The second boat crossed the harbor.")
+        linkage = status["failed_chapters"][0]
+        self.assertEqual(linkage["segment_ids"], [failed_chunk["segment"]["id"]])
+        self.assertEqual(linkage["chunk_id"], failed_chunk["chunk_id"])
+        failed_attempts = sorted(
+            (self.root / "work" / "clips" / linkage["request_hash"]).glob("attempt-*.json"))
+        self.assertEqual(len(failed_attempts), 1)
+        self.assertFalse((self.root / "output").exists())
+
+    def test_cache_integrity_failure_keeps_failed_request_linkage(self):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "cache-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "cache-bundle"))
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        self.render_chapters(pool)
+
+        # Tamper with one accepted take's audio: its cache lookup raises
+        # ValueError inside execute_take, which keeps the failed request.
+        index = read_json(sorted((self.root / "work" / "speech-cache").glob("*.json"))[0])
+        accepted = read_json(self.root / "work" / "clips" / index["request_hash"] / "accepted.json")
+        (self.root / "work" / "clips" / index["request_hash"] / accepted["audio_file"]).write_bytes(b"tampered")
+        self.clear_chapter_checkpoints()
+
+        with self.assertRaises(ChaptersRenderFailed) as raised:
+            self.render_chapters(pool)
+
+        self.assertEqual(len(raised.exception.failed_chapters), 1)
+        failure = raised.exception.failed_chapters[0]
+        self.assertEqual(failure["error_type"], "RenderBlocked")
+        self.assertIn("audio changed", failure["error"])
+        plan = make_render_plan(self.bundle, self.config, multi_speaker=False)
+        known_chunks = {chunk["chunk_id"]: chunk for chapter in plan["chapters"]
+                        for chunk in chapter["chunks"]}
+        failed_chunk = known_chunks[failure["chunk_id"]]
+        self.assertEqual(failure["segment_ids"], [failed_chunk["segment"]["id"]])
+        self.assertIsInstance(failure["request_hash"], str)
+        checkpoints = {
+            read_json(path)["chapter_number"]
+            for path in (self.root / "work" / "completed-chapters").glob("*.json")
+        }
+        self.assertEqual(checkpoints, {1, 2, 3} - {failure["number"]})
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["failed_chapters"][0]["chunk_id"], failure["chunk_id"])
+
+    def test_failure_linkage_invents_no_ids_without_a_request(self):
+        from epub_tts_narrator.renderer.workflow import _failure_linkage
+        self.assertEqual(_failure_linkage(RenderBlocked("chapter-level block")), {})
+        self.assertEqual(_failure_linkage(RenderBlocked("bad cache", request={"kind": "speech"})), {})
+
+    def test_verification_outage_stops_book_admission(self):
+        import epub_tts_narrator.renderer.workflow as workflow
+
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FOUR", "heading", "p"),
+            ("The fourth boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "outage-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "outage-bundle"))
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        messages = []
+        original_validation = workflow.validate_audio
+
+        def validate(*args, **kwargs):
+            report = original_validation(*args, **kwargs)
+            return {**report, "passed": False, "reasons": ["text_mismatch"],
+                    "text_judge": {"decision": "unavailable", "error_code": "fixture_timeout"}}
+
+        with patch.object(workflow, "validate_audio", side_effect=validate):
+            with self.assertRaises(VerificationUnavailable):
+                render(self.bundle, self.config, pool, self.verifier, notify=messages.append)
+
+        # An outage is run-fatal: only the two admitted chapters generated one
+        # take each, and pending chapters were never admitted.
+        self.assertEqual(len(self.engine.speech_calls), 2)
+        self.assertFalse(any("Processing chapter 3" in message for message in messages))
+        self.assertFalse(list((self.root / "work" / "completed-chapters").glob("*.json")))
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["error_type"], "VerificationUnavailable")
+        self.assertNotIn("failed_chapters", status)
+        self.assertFalse((self.root / "output").exists())
+
+    def test_interrupt_after_chapter_failure_stops_admission_and_publishes_no_partial_book(self):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first harbor remained silent.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FOUR", "heading", "p"),
+            ("The fourth boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FIVE", "heading", "p"),
+            ("The fifth boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "interrupted-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "interrupted-bundle"))
+        self.config["render"]["max_attempts"] = 2
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        self.verifier.wrong_texts.add("The first harbor remained silent.")
+        original = self.engine.synthesize
+        with RenderInterrupts() as control:
+            def generate(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if args[0] == "The second boat crossed the harbor.":
+                    control.requested = True
+                return result
+
+            with patch.object(self.engine, "synthesize", side_effect=generate):
+                with self.assertRaises(RenderInterrupted):
+                    render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+
+        # Chapter 1 was recorded as failed; the interruption during chapter 2
+        # then stopped admission, so no chapter reached a checkpoint and no
+        # partial audiobook was published.
+        self.assertFalse(list((self.root / "work" / "completed-chapters").glob("*.json")))
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "interrupted")
+        self.assertFalse((self.root / "output").exists())
+
+        self.verifier.wrong_texts.clear()
+        result = render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+        self.assertEqual(result["status"], "complete")
+        resumed = {
+            read_json(path)["chapter_number"]
+            for path in (self.root / "work" / "completed-chapters").glob("*.json")
+        }
+        self.assertEqual(resumed, {1, 2, 3, 4, 5})
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_pipeline_local_workers_share_one_persistent_model_thread(self):
         self.config["render_pool"]["workers"] = [

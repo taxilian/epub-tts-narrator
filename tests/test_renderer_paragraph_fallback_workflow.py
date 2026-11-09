@@ -12,7 +12,7 @@ from epub_tts_narrator.renderer.engines import EngineError, format_dialogue, pre
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import (
-    RenderBlocked, VerificationUnavailable, make_render_plan,
+    ChaptersRenderFailed, RenderBlocked, VerificationUnavailable, make_render_plan,
 )
 from epub_tts_narrator.spoken_text import build_spoken
 import epub_tts_narrator.renderer.workflow as workflow
@@ -347,6 +347,36 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.engine.speech_calls), 2)
         self.assertEqual(self.chapters()["status"], "chapters_complete")
         self.assertEqual(len(self.grouped_clips()), 2)
+
+    def test_terminal_group_failure_records_every_turn_segment_in_chapter_status(self):
+        original = deepcopy(self.target())
+        dialogue = self.engine.synthesize_dialogue
+
+        def broken(turns, path, *, seed):
+            if "".join(turn["text"] for turn in turns) == original["spoken_text"]:
+                raise RuntimeError("fixture generator broke")
+            return dialogue(turns, path, seed=seed)
+
+        with patch.object(self.engine, "synthesize_dialogue", side_effect=broken):
+            with self.assertRaises(ChaptersRenderFailed) as raised:
+                self.chapters()
+
+        # Generator errors are not recoverable text failures, so the grouped
+        # paragraph itself is the failed request and links every turn.
+        expected_segments = [turn["segment"]["id"] for turn in original["paragraph_turns"]]
+        self.assertGreater(len(expected_segments), 1)
+        self.assertEqual(len(raised.exception.failed_chapters), 1)
+        failure = raised.exception.failed_chapters[0]
+        self.assertEqual(failure["number"], 1)
+        self.assertEqual(failure["error_type"], "SpeechVerificationFailed")
+        self.assertEqual(failure["chunk_id"], original["chunk_id"])
+        self.assertEqual(failure["segment_ids"], expected_segments)
+        attempts = sorted((self.root / "work" / "clips" / failure["request_hash"]).glob("attempt-*.json"))
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(list((self.root / "work" / "completed-chapters").glob("*.json")))
+        status = read_json(self.root / "work" / "status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["failed_chapters"][0]["segment_ids"], expected_segments)
 
     def test_jev_outage_retains_paragraph_for_reverification_without_fallback(self):
         original = deepcopy(self.target())

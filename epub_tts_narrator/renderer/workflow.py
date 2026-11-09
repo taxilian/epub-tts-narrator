@@ -36,7 +36,10 @@ from .voice_prompts import default_voice_prompt, designer_prompt, safe_voice_des
 
 
 class RenderBlocked(ValueError):
-    pass
+    def __init__(self, message, *, request=None):
+        super().__init__(message)
+        # Optional failed speech request, for chapter-failure passage linkage.
+        self.request = request
 
 
 class ChapterNeedsRendering(RenderBlocked):
@@ -61,6 +64,42 @@ class SpeechVerificationFailed(RenderBlocked):
         super().__init__(message)
         self.request = request
         self.report = report
+
+
+class ChaptersRenderFailed(RenderBlocked):
+    """At least one chapter failed after every otherwise renderable chapter finished."""
+
+    def __init__(self, failed_chapters):
+        self.failed_chapters = tuple(failed_chapters)
+        details = "\n".join(
+            f"Chapter {chapter['number']} ({chapter['error_type']}): {chapter['error']}"
+            for chapter in self.failed_chapters)
+        plural = "" if len(self.failed_chapters) == 1 else "s"
+        super().__init__(f"Rendering incomplete: {len(self.failed_chapters)} chapter{plural} failed; "
+                         f"completed chapters were retained.\n{details}")
+
+
+def _failure_linkage(error):
+    """Stable passage linkage for a chapter failure whose speech request survived.
+
+    Only IDs leave the run: every source segment of the failed chunk (all
+    paragraph turns of a grouped paragraph), its chunk ID, and the digest that
+    names the failed take's directory. Failures without a request stay
+    chapter-only.
+    """
+    request = getattr(error, "request", None)
+    chunk = request.get("chunk") if isinstance(request, dict) else None
+    if not isinstance(chunk, dict) or not isinstance(chunk.get("chunk_id"), str):
+        return {}
+    segment_ids = []
+    turns = chunk.get("paragraph_turns")
+    for row in turns if isinstance(turns, list) else [chunk]:
+        segment = row.get("segment") if isinstance(row, dict) else None
+        segment_id = segment.get("id") if isinstance(segment, dict) else None
+        if isinstance(segment_id, str) and segment_id not in segment_ids:
+            segment_ids.append(segment_id)
+    return {"segment_ids": segment_ids, "chunk_id": chunk["chunk_id"],
+            "request_hash": digest(request)}
 
 
 # Six of nine investigated narrator-read dead ends repeated Drama 3 truncation on 700+ character chunks.
@@ -1897,7 +1936,10 @@ def cleanup_render_work(bundle, config, *, dry_run=False, discard_render_cache=F
 
 def _failed_run(work, exc, notify):
     status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "blocked"
-    write_json(work / "status.json", {"status": status, "error": str(exc), "error_type": type(exc).__name__})
+    record = {"status": status, "error": str(exc), "error_type": type(exc).__name__}
+    if isinstance(exc, ChaptersRenderFailed):
+        record["failed_chapters"] = list(exc.failed_chapters)
+    write_json(work / "status.json", record)
     notify(f"Verified clips and completed chapters are retained in {work}. Rerun the same command to resume.")
 
 
@@ -2099,10 +2141,14 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                         result = recover_or_retry_whole()
                 speech_cache.remember(identity, result[1])
                 return result
-            except RenderBlocked:
+            except RenderBlocked as exc:
+                # Keep the subtype and cause; only fill in the failed request
+                # when the raise site did not record one.
+                if exc.request is None:
+                    exc.request = request
                 raise
             except ValueError as exc:
-                raise RenderBlocked(str(exc)) from exc
+                raise RenderBlocked(str(exc), request=request) from exc
 
     def take(text, generate, request, **options):
         if continuity is None:
@@ -2529,6 +2575,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             max_workers=2 if scheduler is not None else 1, thread_name_prefix="audiobook-assemble")
         pending_assembly = {}  # manifest index -> (future, acceptance, label, started)
         composed_records = {}  # manifest index -> (composed, chapter_acceptance)
+        chapter_failures = {}  # chapter number -> persisted failure reason
         plan_lock = Lock()
         # Take locks are shared across every chapter of this run, local and
         # remote alike, so duplicate work coordinates instead of racing.
@@ -2595,11 +2642,31 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             if composed is None:
                 notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
-                rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
-                    bundle, chapter, voices, engine, engine_identity, verifier, config, work,
-                    notify=notify, retry_budget=retry_budget, speech_cache=speech_cache,
-                    take_locks=take_locks, take_locks_guard=take_locks_guard,
-                    scheduler_owner=(run_key, chapter["number"]))
+                try:
+                    rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
+                        bundle, chapter, voices, engine, engine_identity, verifier, config, work,
+                        notify=notify, retry_budget=retry_budget, speech_cache=speech_cache,
+                        take_locks=take_locks, take_locks_guard=take_locks_guard,
+                        scheduler_owner=(run_key, chapter["number"]))
+                except RenderBlocked as exc:
+                    # Ordinary chapter render failures (bounded speech
+                    # verification, chapter-local recovery/cache blocks) are
+                    # chapter-scoped: keep book admission open so unrelated
+                    # chapters finish, then report every failure after the
+                    # drain. Provider/verification outages are run-fatal —
+                    # every later chapter would fail the same way — and
+                    # interruption and non-RenderBlocked programmer/integrity
+                    # faults propagate unchanged.
+                    if isinstance(exc, VerificationUnavailable):
+                        raise
+                    stop_if_requested()
+                    reason = safe_error_text(exc, secrets=configured_secrets(config))
+                    failure = {"number": chapter["number"], "error_type": type(exc).__name__,
+                               "error": reason, **_failure_linkage(exc)}
+                    with plan_lock:
+                        chapter_failures[chapter["number"]] = failure
+                    notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
+                    return
                 if rendered_chapter != chapter:
                     with plan_lock:
                         plan["chapters"][chapter_index] = rendered_chapter
@@ -2633,6 +2700,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         acceptance = [record for index in sorted(composed_records)
                       for record in composed_records[index][1]]
         stop_if_requested()
+        if chapter_failures:
+            raise ChaptersRenderFailed(
+                [chapter_failures[number] for number in sorted(chapter_failures)])
         if chapters_only:
             result = {
                 "format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
