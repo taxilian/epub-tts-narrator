@@ -14,6 +14,9 @@ from .common import digest, file_hash, read_json, regular_file
 from .quality import normalize_words
 
 
+_SCENE_DIVIDER = re.compile(r"(?:\s*\*){3,}\s*")
+
+
 def chunk_identity_fingerprint(manifest):
     """The source identity that chunk IDs and chapter contexts bind to.
 
@@ -159,6 +162,15 @@ def ranges(indices):
     return result
 
 
+def is_silent_control(text: str) -> bool:
+    """Return whether exact chunk text is a deliberate no-speech control.
+
+    A standalone run of at least three asterisks is a typographic scene
+    divider; asterisk-only text has no speakable words in any case.
+    """
+    return not normalize_words(text) or _SCENE_DIVIDER.fullmatch(text) is not None
+
+
 def chunk_speakers(chunk):
     """Return performers in order; simultaneous entries are never alternatives."""
     if "paragraph_turns" in chunk:
@@ -224,7 +236,7 @@ def make_plan(bundle, config):
         for row in item["rows"]:
             spoken, _ = build_spoken(row)
             speakers = chunk_speakers({"segment": row})
-            if normalize_words(spoken) and not speakers:
+            if not is_silent_control(spoken) and not speakers:
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
             spans = list(split_text(spoken, settings["max_chunk_chars"])) or [(0, 0)]
             performance = row_performance(row, performances, normalization=False)
@@ -237,7 +249,7 @@ def make_plan(bundle, config):
                 chunk = {
                     "segment": row, "spoken_text": speech, "spoken_start": start, "spoken_end": end,
                     "source_ranges": spoken_source_ranges(row, start, end),
-                    "silent_control": not normalize_words(speech),
+                    "silent_control": is_silent_control(speech),
                 }
                 chunk["chunk_id"] = digest({"source": chunk_identity_fingerprint(bundle["manifest"]),
                                             "segment": row["id"], "start": start, "end": end,

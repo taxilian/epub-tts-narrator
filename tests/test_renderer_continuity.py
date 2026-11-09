@@ -8,6 +8,7 @@ import re
 import tempfile
 import unittest
 
+from epub_tts_narrator.renderer.assembly import compose_chapter
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.engines import Drama3MLXEngine
 from epub_tts_narrator.renderer.workflow import _render_chapter_chunks
@@ -249,6 +250,37 @@ class ContinuityTests(unittest.TestCase):
         self.run_chapter([self.chunks[0], silent, self.chunks[2]])
         self.run_chapter([self.chunks[3]])
         self.assertEqual(histories(self.model), [[], [tagged("First words.")], []])
+
+    def test_scene_divider_control_is_silent_between_paragraphs_and_on_resume(self):
+        first = passages(["First words."], block="b1")[0]
+        divider = passages(["* * *"], block="b2")[0]
+        divider["silent_control"] = True
+        third = passages(["Third words."], block="b3")[0]
+        for chunk in (first, divider, third):
+            chunk["segment"]["delivery"]["direction"] = ""
+            chunk["segment"]["kind"] = "narration"
+        chunks = [first, divider, third]
+
+        clips, acceptance = self.run_chapter(chunks)
+
+        self.assertIsNone(clips[1]["wav_path"])
+        self.assertEqual(len(acceptance), 2)
+        self.assertEqual([text for text, options in self.model.calls],
+                         [tagged("First words."), tagged("Third words.")])
+        self.assertEqual(histories(self.model), [[], [tagged("First words.")]])
+        with_divider = compose_chapter(clips, self.root / "chapter-with-divider.wav")
+        without_divider = compose_chapter([clips[0], clips[2]], self.root / "chapter-without-divider.wav")
+        self.assertEqual(with_divider["frames"], without_divider["frames"])
+        self.assertEqual((self.root / "chapter-with-divider.wav").read_bytes(),
+                         (self.root / "chapter-without-divider.wav").read_bytes())
+        timing = with_divider["segments"][1]
+        self.assertTrue(timing["no_speech"])
+        self.assertEqual(timing["chapter_start_frame"], timing["chapter_end_frame"])
+        self.assertEqual(timing["source_text"], "* * *")
+        self.assertEqual(timing["source_ranges"], [{"start": 0, "end": 5}])
+
+        self.run_chapter(chunks)
+        self.assertEqual(len(self.model.calls), 2)
 
     def test_engine_without_history_support_fails_before_synthesis(self):
         from test_renderer_workflow import FixtureEngine

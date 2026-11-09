@@ -109,9 +109,8 @@ def validate_render_settings(settings):
 
 
 def _leaf(chunk, bindings):
-    from .bundle import chunk_speakers
+    from .bundle import chunk_speakers, is_silent_control
     from epub_tts_narrator.spoken_text import build_spoken, effective_delivery, spoken_source_ranges
-    from .quality import normalize_words
     row = chunk.get("segment")
     if not isinstance(row, dict):
         raise ValueError("A chapter passage needs a source segment")
@@ -137,7 +136,7 @@ def _leaf(chunk, bindings):
             or chunk["spoken_text"] != spoken[a:b]
             or chunk.get("source_ranges") != spoken_source_ranges(row, a, b)):
         raise ValueError("Chapter speech must map exactly to its source text")
-    if chunk.get("silent_control") is not (not normalize_words(chunk["spoken_text"])):
+    if chunk.get("silent_control") is not is_silent_control(chunk["spoken_text"]):
         raise ValueError("Invalid silent passage marker")
     speakers = chunk_speakers(chunk)
     if any(not isinstance(speaker[key], str) or not speaker[key]

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from epub_tts_narrator.renderer.bundle import load_bundle, make_plan, ranges, spoken_mapping, split_text
+from epub_tts_narrator.renderer.chapter_protocol import validate_spec
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.performance import apply_bracket_delivery
@@ -274,6 +275,50 @@ class RendererBundleTests(unittest.TestCase):
                 self.assertEqual(plan["voice_ids"], [])
                 self.assertTrue(all(chunk["silent_control"] for chunk in chunks))
                 self.assertEqual(''.join(chunk["spoken_text"] for chunk in chunks), text)
+                self.assertEqual(chunks[0]["source_ranges"], [{"start": 0, "end": len(text)}])
+
+    def test_standalone_asterisk_dividers_are_source_mapped_silent_controls(self):
+        for text in ("* * *", "***", "  *  *\t*\n", "* * * *"):
+            with self.subTest(text=text):
+                document = book_with_text(text)
+                before = deepcopy(document)
+                bundle = load_bundle(self.export(document))
+                plan = make_plan(bundle, self.config)
+                self.assertEqual(document, before)
+                self.assertEqual(plan["errors"], [])
+                self.assertEqual(plan["voice_ids"], [])
+                chunks = plan["chapters"][0]["chunks"]
+                self.assertEqual(len(chunks), 1)
+                chunk = chunks[0]
+                self.assertTrue(chunk["silent_control"])
+                self.assertEqual(chunk["spoken_text"], text)
+                self.assertEqual((chunk["spoken_start"], chunk["spoken_end"]), (0, len(text)))
+                self.assertEqual(chunk["source_ranges"], [{"start": 0, "end": len(text)}])
+                self.assertEqual(chunk["segment"]["text"], text)
+                self.assertEqual(make_plan(bundle, self.config), plan)
+                if text == "* * *":
+                    spec = {"version": 1, "book": plan["book"],
+                            "source_fingerprint": plan["source_fingerprint"],
+                            "renderer_fingerprint": "f" * 64,
+                            "chapter": plan["chapters"][0], "total_chapters": 1,
+                            "voice_bindings": {}, "render": {}}
+                    self.assertEqual(validate_spec(spec), spec)
+                    forged = deepcopy(spec)
+                    forged["chapter"]["chunks"][0]["silent_control"] = False
+                    with self.assertRaisesRegex(ValueError, "silent passage"):
+                        validate_spec(forged)
+
+    def test_asterisks_outside_standalone_dividers_remain_speech(self):
+        for text in ("2 * 3", "Asterisks * * * stay lexical.", "* * *!"):
+            with self.subTest(text=text):
+                bundle = load_bundle(self.export(book_with_text(text)))
+                plan = make_plan(bundle, self.config)
+                chunks = plan["chapters"][0]["chunks"]
+                self.assertEqual(plan["errors"], [])
+                self.assertEqual(plan["voice_ids"], ["vn"])
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0]["silent_control"])
+                self.assertEqual(chunks[0]["spoken_text"], text)
                 self.assertEqual(chunks[0]["source_ranges"], [{"start": 0, "end": len(text)}])
 
     def test_checksum_and_symlink_fail_closed_before_reading_book(self):
