@@ -142,6 +142,11 @@ def _validate_identity(identity):
     return deepcopy(identity)
 
 
+def _identity_differences(record, wanted):
+    return [field for field in _IDENTITY_FIELDS if field != "provider"
+            and record["identity"].get(field) != wanted[field]]
+
+
 def is_pending_directory(output):
     """True when output holds pending analysis state and no published bundle."""
     output = Path(output)
@@ -313,12 +318,24 @@ def create_pending(output, identity):
         if not is_pending_directory(output):
             raise FileExistsError(f"Output directory already exists: {output}; choose another directory")
         handle = PendingAnalysis(output, identity, _acquire_lease(pending / "lease", output))
+        try:
+            if (pending / "state.json").exists():
+                record = _load_validated_state(pending)
+                differing = _identity_differences(record, identity)
+                if differing:
+                    raise ValueError(
+                        "Pending analysis progress belongs to a different run configuration "
+                        f"({', '.join('identity.' + field for field in differing)}): "
+                        f"{pending / 'state.json'}; remove the directory or choose another output")
+            else:
+                # Crash between directory creation and the first state write; no
+                # recorded progress exists, so this run starts the record fresh.
+                _save_state(pending, _initial_state(identity))
+        except ValueError:
+            handle.close()
+            raise
         _write_owner(pending)
         (pending / "snapshots").mkdir(exist_ok=True)
-        if not (pending / "state.json").exists():
-            # Crash between directory creation and the first state write; no
-            # recorded progress exists, so this run starts the record fresh.
-            _save_state(pending, _initial_state(identity))
         return handle
     output.mkdir(parents=True)
     try:
@@ -397,8 +414,9 @@ def resume_document(output, identity):
     """Return (document, next_stage) to continue from, or None when nothing is pending.
 
     The last completed stage's snapshot is verified against the signed record and
-    revalidated as an analysis document before it is trusted. A record whose
-    identity differs from the current run is refused, never silently restarted.
+    revalidated as an analysis document before it is trusted. A source-only change
+    archives its progress under the pending lease and restarts; other identity
+    differences are refused, never silently restarted.
     """
     record = inspect_pending(output)
     if record is None:
@@ -407,8 +425,28 @@ def resume_document(output, identity):
     # Provider selection is execution policy, not analysis semantics. Completed
     # stages remain reusable across model/fallback changes; each new request is
     # still cache-keyed by the provider that actually serves it.
-    differing = [field for field in _IDENTITY_FIELDS if field != "provider"
-                 and record["identity"].get(field) != wanted[field]]
+    differing = _identity_differences(record, wanted)
+    if differing == ["source_fingerprint"]:
+        pending = Path(output) / PENDING_DIRNAME
+        lease = _acquire_lease(pending / "lease", output)
+        try:
+            record = _load_validated_state(pending)
+            differing = _identity_differences(record, wanted)
+            if differing == ["source_fingerprint"]:
+                archive = pending / "archives" / (
+                    f"{record['identity']['source_fingerprint']}-{uuid.uuid4().hex}")
+                archive.mkdir(parents=True)
+                write_json(archive / "state.json", record)
+                # The fresh signed state precedes the snapshot move: a crash can
+                # leave only unrecorded orphans, never old-source completion.
+                _save_state(pending, _initial_state(wanted))
+                snapshots = pending / "snapshots"
+                if snapshots.exists():
+                    snapshots.rename(archive / "snapshots")
+                    snapshots.mkdir()
+                return None, STAGES[0]
+        finally:
+            lease.close()
     if differing:
         raise ValueError("Pending analysis progress belongs to a different run configuration "
                          f"({', '.join('identity.' + field for field in differing)}): "

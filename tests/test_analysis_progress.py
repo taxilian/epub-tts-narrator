@@ -138,23 +138,67 @@ class AnalysisProgressTests(unittest.TestCase):
         record = inspect_pending(self.output)
         self.assertEqual(record["completed_stages"], ["analyzed", "speech-normalized-1"])
 
-    def test_resume_refuses_progress_from_a_different_run_identity(self):
-        other_source = valid_document()
-        other_source["source"]["book"]["title"] = "A Different Book"
-        for field, alternate in (("source", run_identity(other_source)),
-                                 ("options", pending_identity(valid_document(), CLIENT_IDENTITY,
-                                                              fingerprint({"chunk_chars": 1200})))):
-            with self.subTest(field=field):
-                output = Path(self.temporary.name) / f"book-{field}"
+    def test_resume_refuses_progress_from_different_options(self):
+        alternate = pending_identity(valid_document(), CLIENT_IDENTITY,
+                                     fingerprint({"chunk_chars": 1200}))
+        with create_pending(self.output, run_identity()) as handle:
+            handle.begin_stage("analyzed")
+            handle.complete_stage("analyzed", valid_document())
+        with self.assertRaises(ValueError) as raised:
+            resume_document(self.output, alternate)
+        message = str(raised.exception)
+        self.assertIn("different run configuration", message)
+        self.assertIn("options", message)
+        self.assertIn("state.json", message)
+
+    def test_source_change_archives_progress_and_restarts_from_current_source(self):
+        for completed in (0, 1):
+            with self.subTest(completed=completed):
+                output = Path(self.temporary.name) / f"book-source-{completed}"
                 with create_pending(output, run_identity()) as handle:
-                    handle.begin_stage("analyzed")
-                    handle.complete_stage("analyzed", valid_document())
-                with self.assertRaises(ValueError) as raised:
-                    resume_document(output, alternate)
-                message = str(raised.exception)
-                self.assertIn("different run configuration", message)
-                self.assertIn(field, message)
-                self.assertIn("state.json", message)
+                    document = self.advance(handle, completed)
+                corrected = valid_document()
+                corrected["source"]["book"]["title"] = "Corrected Book"
+                self.assertEqual(resume_document(output, run_identity(corrected)), (None, "analyzed"))
+                record = inspect_pending(output)
+                self.assertEqual(record["identity"], run_identity(corrected))
+                self.assertEqual(record["completed_stages"], [])
+                self.assertEqual(record["snapshots"], {})
+                archives = list((output / PENDING_DIRNAME / "archives").iterdir())
+                self.assertEqual(len(archives), 1)
+                archived = json.loads((archives[0] / "state.json").read_text(encoding="utf-8"))
+                self.assertEqual(archived["identity"]["source_fingerprint"],
+                                 run_identity()["source_fingerprint"])
+                self.assertEqual(archived["completed_stages"], list(STAGES[:completed]))
+                if completed:
+                    snapshot = json.loads((archives[0] / "snapshots" / "analyzed.json").read_text(
+                        encoding="utf-8"))
+                    self.assertEqual(snapshot, document)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX fcntl required")
+    def test_source_change_cannot_archive_progress_while_its_lease_is_active(self):
+        with create_pending(self.output, run_identity()) as handle:
+            handle.begin_stage("analyzed")
+            handle.complete_stage("analyzed", valid_document())
+            before = state_path(self.output).read_bytes()
+            corrected = valid_document()
+            corrected["source"]["book"]["title"] = "Corrected Book"
+            with self.assertRaises(FileExistsError):
+                resume_document(self.output, run_identity(corrected))
+            self.assertEqual(state_path(self.output).read_bytes(), before)
+            self.assertFalse((self.output / PENDING_DIRNAME / "archives").exists())
+
+    def test_source_change_between_resume_and_create_is_refused(self):
+        create_pending(self.output, run_identity()).close()
+        corrected = valid_document()
+        corrected["source"]["book"]["title"] = "Corrected Book"
+        self.assertEqual(resume_document(self.output, run_identity(corrected)), (None, "analyzed"))
+        self.assertEqual(resume_document(self.output, run_identity()), (None, "analyzed"))
+        with self.assertRaises(ValueError) as raised:
+            create_pending(self.output, run_identity(corrected))
+        self.assertIn("identity.source_fingerprint", str(raised.exception))
+        with create_pending(self.output, run_identity()):
+            pass
 
     def test_foreign_content_prevents_pending_directory_recognition(self):
         cases = {

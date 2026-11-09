@@ -17,7 +17,7 @@ from epub_tts_narrator.analysis_progress import (
     inspect_pending, is_pending_directory,
 )
 from epub_tts_narrator.audition_scripts import prepare_document_samples
-from epub_tts_narrator.cli import main
+from epub_tts_narrator.cli import main, source_from
 from epub_tts_narrator.pipeline import analyze
 from epub_tts_narrator.speaker_completion import unassigned_segments
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
@@ -398,30 +398,40 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
     def state_bytes(self, output):
         return (output / PENDING_DIRNAME / "state.json").read_bytes()
 
-    def test_rerun_with_a_changed_epub_refuses_and_preserves_pending_progress(self):
-        output = self.root / "book"
-        self.interrupt_after_analyzed(output)
-        before = self.state_bytes(output)
-        other = make_epub(self.root / "other.epub", "Other Story", "other-story",
-                          EPUB_BODY.replace("Mara", "Jules"))
-        factory, made = self.clients()
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
-            status, _, stderr = self.run_cli("analyze", other, "-o", output, "--config", self.config)
-        self.assertEqual(status, 1)
-        self.assertIn("different run configuration", stderr)
-        self.assertIn("identity.source_fingerprint", stderr)
-        self.assertIn("state.json", stderr)
-        self.assertEqual(self.model_calls(made), [], "A refused rerun must not issue model requests")
-        # The refusal never discards the checkpointed progress.
-        self.assertEqual(self.state_bytes(output), before)
-        self.assertEqual(inspect_pending(output)["completed_stages"], ["analyzed"])
-        # The original command still resumes the preserved progress.
-        factory, _ = self.clients()
-        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory):
-            status, _, stderr = self.run_cli(*self.analyze_command(output))
-        self.assertEqual(status, 0, stderr)
-        _completed_directory(output)
-        self.assertFalse((output / PENDING_DIRNAME).exists())
+    def test_rerun_with_a_changed_epub_uses_current_source_and_retains_request_cache(self):
+        for completed in (False, True):
+            with self.subTest(analyzed_checkpoint=completed):
+                output = self.root / f"book-source-{completed}"
+                if completed:
+                    self.interrupt_after_analyzed(output)
+                else:
+                    def finish_without_checkpoint(*args, **kwargs):
+                        analyze(*args, **kwargs)
+                        raise KeyboardInterrupt
+                    factory, _ = self.clients()
+                    with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
+                            patch("epub_tts_narrator.cli.analyze", side_effect=finish_without_checkpoint):
+                        status, _, stderr = self.run_cli(*self.analyze_command(output))
+                    self.assertEqual(status, 130, stderr)
+                    self.assertEqual(inspect_pending(output)["completed_stages"], [])
+                cache_before = snapshot(output / CACHE_DIRNAME)
+                self.assertTrue(cache_before)
+                corrected = make_epub(self.root / f"corrected-{completed}.epub", "Corrected Story",
+                                      f"corrected-story-{completed}", EPUB_BODY.replace("They left.", "They departed."))
+                factory, made = self.clients()
+                wrapper, analysis_calls = self.spy("epub_tts_narrator.cli.analyze")
+                with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
+                        patch("epub_tts_narrator.cli.analyze", side_effect=wrapper):
+                    status, _, stderr = self.run_cli("analyze", corrected, "-o", output, "--config", self.config)
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(analysis_calls, [1], "The corrected source must not resume an old-source snapshot")
+                modes = {payload.get("mode") for payload in self.model_calls(made)}
+                self.assertTrue(modes & ANALYSIS_MODES, "Old-source requests must not complete the corrected source")
+                document, _, _ = _completed_directory(output)
+                self.assertEqual(document["source"], source_from(corrected))
+                cache_after = snapshot(output / CACHE_DIRNAME)
+                self.assertEqual({name: cache_after[name] for name in cache_before}, cache_before)
+                self.assertFalse((output / PENDING_DIRNAME).exists())
 
     def test_rerun_with_changed_options_or_prompt_version_is_refused_by_name(self):
         for field in ("identity.options_fingerprint", "identity.prompt_version"):
