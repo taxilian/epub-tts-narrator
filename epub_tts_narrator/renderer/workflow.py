@@ -2341,10 +2341,14 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             request, report = exc.request, exc.report
             reasons = report.get("reasons", [])
             chunk = request.get("chunk", {})
+            drama3_split = (report.get("resolution_action") == "split"
+                            and reasons == ["generation_or_verification_error"]
+                            and report.get("retry_on_resume") is not True
+                            and _drama3_truncation(report))
             if (request.get("kind") != "paragraph_speech"
                     or report.get("resolution_action") == "stop"
                     or not isinstance(reasons, list) or not reasons
-                    or any(reason not in recoverable for reason in reasons)
+                    or (not drama3_split and any(reason not in recoverable for reason in reasons))
                     or text_confirmation_unavailable(report)
                     or not any(item == chunk for item in chapter["chunks"])):
                 raise

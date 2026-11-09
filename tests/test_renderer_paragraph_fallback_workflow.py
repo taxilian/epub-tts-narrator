@@ -6,19 +6,58 @@ from time import sleep
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.performance_plan import text_sha256
 from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.engines import EngineError, format_dialogue, prepare_synthesis
+from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import (
     RenderBlocked, VerificationUnavailable, make_render_plan,
 )
+from epub_tts_narrator.spoken_text import build_spoken
 import epub_tts_narrator.renderer.workflow as workflow
+from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
+from shared_fixtures import fixture_codes
 import test_renderer_paragraph_workflow as paragraph_fixtures
-from test_renderer_workflow import FFMPEG, FFPROBE
+from test_renderer_recurring_resolution import PlanClient
+from test_renderer_workflow import FFMPEG, FFPROBE, FixtureVerifier
 
 
 class TransportFailure(RuntimeError):
     transport_error = True
     retryable = True
+
+
+class StructuredParagraphFixtureEngine(paragraph_fixtures.ParagraphFixtureEngine):
+    capabilities = {**paragraph_fixtures.ParagraphFixtureEngine.capabilities,
+                    "structured_performance": True}
+    identity = {"engine": "drama3_mlx", "model": "fixture-model-v1",
+                "checkpoint_files_sha256": {"weights.safetensors": "fixture-weights"},
+                "temperature": 1.0, "top_p": .9, "top_k": 30}
+    voice_binding_identity = paragraph_fixtures.ParagraphFixtureEngine.identity
+
+    def __init__(self):
+        super().__init__()
+        self.performance_calls = []
+
+    def synthesize_dialogue(self, turns, path, *, seed):
+        self.dialogue_calls.append({
+            "turns": [{"text": turn["text"], "voice_hash": turn["voice"]["asset_hash"],
+                       "voice_id": turn["voice"]["voice_id"], "direction": turn["direction"]}
+                      for turn in turns],
+            "seed": seed,
+        })
+        text = "".join(turn["text"] for turn in turns)
+        formatted, ordered_voices, formatting = format_dialogue(turns)
+        return {**self._write(text, path, seed), "synthesis_text": formatted, **formatting,
+                **fixture_codes(formatted, ordered_voices)}
+
+    def synthesize(self, text, voice, path, *, seed, direction="", performance=None, traits=""):
+        prepared, compiled, delivery = prepare_synthesis(
+            text, direction, performance=performance, traits=traits)
+        self.performance_calls.append({"text": text, "performance": deepcopy(performance)})
+        return {**super().synthesize(prepared, voice, path, seed=seed, direction=direction),
+                **delivery, "synthesis_text": compiled}
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required for paragraph recovery")
@@ -143,6 +182,92 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.target_calls()), 2)
         self.assert_snapshot_unchanged(before)
         self.assert_individual_plan(original)
+
+    def test_repeated_drama3_truncation_splits_expressive_paragraph_and_resumes_fallback(self):
+        row = next(row for row in self.bundle["chapters"][0]["rows"]
+                   if row["block_id"] == "b000004")
+        spoken = build_spoken(row)[0]
+        row["performance_controls"] = {
+            "version": 1, "text_sha256": text_sha256(spoken),
+            "controls": [{"kind": "pronunciation", "start": 0, "end": 4, "text": "Lena",
+                          "alphabet": "respelling", "replacement": "LEE-nuh"}],
+        }
+        self.engine = StructuredParagraphFixtureEngine()
+        client = PlanClient([{"action": "retry", "edits": [],
+                              "reason": "Try another complete take."}])
+        self.verifier = RecurringSpeechVerifier(
+            FixtureVerifier(self.engine.fixture_transcripts), SpeechResolver(client))
+        original = deepcopy(self.target())
+        self.assertEqual(original["paragraph_turns"][0]["expressive_performance"],
+                         row["performance_controls"])
+        dialogue = self.engine.synthesize_dialogue
+        failed_turns, accepted_before_failure = [], {}
+
+        def unfinished(turns, path, *, seed):
+            if "".join(turn["text"] for turn in turns) == original["spoken_text"]:
+                if not failed_turns:
+                    accepted_before_failure.update(self.snapshot_accepted())
+                failed_turns.append(deepcopy(turns))
+                raise EngineError("Drama 3 did not finish the text: 'silence'")
+            return dialogue(turns, path, seed=seed)
+
+        synthesize = self.engine.synthesize
+        first_child = original["paragraph_turns"][0]["spoken_text"]
+        interrupted = []
+
+        def interrupt_first_child(text, *args, **kwargs):
+            if text == first_child and not interrupted:
+                interrupted.append(text)
+                raise KeyboardInterrupt("first truncation fallback child interrupted")
+            return synthesize(text, *args, **kwargs)
+
+        with patch.object(self.engine, "synthesize_dialogue", side_effect=unfinished), \
+             patch.object(self.engine, "synthesize", side_effect=interrupt_first_child):
+            with self.assertRaisesRegex(KeyboardInterrupt, "first truncation fallback child"):
+                self.chapters()
+
+        self.assertEqual(len(failed_turns), 2)
+        self.assertEqual(client.plans, [])
+        self.assertEqual(interrupted, [first_child])
+        self.assert_individual_plan(original)
+        self.assertTrue(accepted_before_failure)
+        self.assert_snapshot_unchanged(accepted_before_failure)
+        self.assertEqual(len(list((self.root / "work" / "paragraph-fallbacks").glob("*.json"))), 1)
+        failed_attempts = [read_json(path) for path in (self.root / "work" / "clips").glob("*/attempt-*.json")
+                           if read_json(path)["request"]["chunk"]["chunk_id"] == original["chunk_id"]]
+        self.assertEqual(len(failed_attempts), 2)
+        self.assertTrue(all(record["report"]["reasons"] == ["generation_or_verification_error"]
+                            and record["report"]["error_type"] == "EngineError"
+                            and record["audio_file"] is None for record in failed_attempts))
+
+        before = self.snapshot_accepted()
+        completed = self.chapters()
+
+        self.assertEqual(completed["status"], "chapters_complete")
+        self.assertEqual(len(failed_turns), 2)
+        self.assert_individual_plan(original)
+        self.assert_snapshot_unchanged(before)
+        accepted_target = sorted(
+            (record for record in self.accepted_clips().values()
+             if record["request"]["chunk"]["segment"]["block_id"] == "b000004"),
+            key=lambda record: record["request"]["chunk"]["segment"]["start"])
+        self.assertEqual([record["request"]["chunk"] for record in accepted_target],
+                         original["paragraph_turns"])
+        self.assertTrue(all(record["request"]["kind"] == "speech"
+                            and record["report"]["passed"] for record in accepted_target))
+        controlled = next(call for call in self.engine.performance_calls
+                          if call["text"] == first_child)
+        self.assertEqual(controlled["performance"],
+                         original["paragraph_turns"][0]["expressive_performance"])
+
+        snapshot = self.snapshot_accepted()
+        counts = (len(self.engine.speech_calls), len(self.engine.dialogue_calls), len(self.verifier.calls))
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("regenerated clip")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("reencoded chapter")):
+            self.assertEqual(self.chapters()["chapters"], completed["chapters"])
+        self.assert_snapshot_unchanged(snapshot)
+        self.assertEqual(counts, (len(self.engine.speech_calls), len(self.engine.dialogue_calls),
+                                  len(self.verifier.calls)))
 
     def test_failed_individual_child_gets_fresh_attempts_only_in_next_render_invocation(self):
         original = deepcopy(self.target())
