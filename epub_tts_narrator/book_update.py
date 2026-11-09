@@ -72,7 +72,7 @@ def _matched(old_keys, new_keys):
     return sum(block.size for block in matcher.get_matching_blocks())
 
 
-def compare_sources(saved, current):
+def compare_sources(saved, current, *, preserve_citations_from=None):
     """Align ``current`` with a saved source by paragraph content.
 
     Every paragraph is keyed by its text and markup (not its position or EPUB
@@ -80,10 +80,12 @@ def compare_sources(saved, current):
     ``difflib``. Unchanged paragraphs keep their saved block IDs, so their
     segments, speaker choices and rendered audio stay attached; edited,
     inserted and appended paragraphs get new IDs after the highest saved one,
-    and saved paragraphs no longer present are removed. Chapters keep their
-    saved IDs by position. A saved chapter with no paragraph in common with its
-    position, or that matches a neighbouring position better, means chapters
-    were removed, inserted or reordered, which is refused.
+    and saved paragraphs no longer present are removed. A one-for-one replacement
+    cited by ``preserve_citations_from`` instead keeps its old block ID, leaving
+    that cast record intact while its changed text still gets a new chunk ID.
+    Chapters keep their saved IDs by position. A saved chapter with no paragraph
+    in common with its position, or that matches a neighbouring position better,
+    means chapters were removed, inserted or reordered, which is refused.
 
     Returns the merged ``source`` (saved book identity, new content, stable
     IDs) with a description of what changed.
@@ -107,6 +109,15 @@ def compare_sources(saved, current):
     next_block = max((_number(identifier, "b") for identifier in old_blocks), default=0)
     next_chapter = max((_number(chapter["id"], "ch") for chapter in old_chapters), default=0)
     chapters, blocks, edited, block_map, changed = [], [], [], {}, set()
+    cited_blocks, pending, replaced = set(), [preserve_citations_from], set()
+    while pending:
+        item = pending.pop()
+        if _is_citation(item):
+            cited_blocks.add(item["block_id"])
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
     for index, chapter in enumerate(new_chapters):
         record = deepcopy(chapter)
         old = old_chapters[index] if index < len(old_chapters) else None
@@ -133,16 +144,22 @@ def compare_sources(saved, current):
                     identifiers[j1 + offset] = old["block_ids"][i1 + offset]
                 continue
             fresh = []
-            for position in range(j1, j2):
-                next_block += 1
-                identifiers[position] = f"b{next_block:06d}"
+            previous = old["block_ids"][i1:i2] if tag == "replace" else []
+            for offset, position in enumerate(range(j1, j2)):
+                old_id = previous[offset] if len(previous) == j2 - j1 else None
+                if old_id in cited_blocks:
+                    identifiers[position] = old_id
+                    replaced.add(old_id)
+                else:
+                    next_block += 1
+                    identifiers[position] = f"b{next_block:06d}"
                 fresh.append(identifiers[position])
                 changed.add(identifiers[position])
             if tag == "replace":
                 summary["edited_paragraphs"] += min(i2 - i1, j2 - j1)
                 summary["inserted_paragraphs"] += max(0, (j2 - j1) - (i2 - i1))
                 summary["removed_paragraphs"] += max(0, (i2 - i1) - (j2 - j1))
-                for old_id in old["block_ids"][i1:i2]:
+                for old_id in previous:
                     block_map[old_id] = list(fresh)
             elif tag == "insert":
                 summary["inserted_paragraphs"] += j2 - j1
@@ -165,7 +182,7 @@ def compare_sources(saved, current):
     return {"unchanged_chapters": len(old_chapters) - len(edited),
             "appended_chapters": deepcopy(chapters[len(old_chapters):]), "edited_chapters": edited,
             "changed_blocks": sorted(changed),
-            "removed_blocks": [identifier for identifier in old_blocks if identifier not in kept],
+            "removed_blocks": [identifier for identifier in old_blocks if identifier not in kept or identifier in replaced],
             "block_map": block_map, "source": _source_like(saved, current, chapters, blocks)}
 
 
@@ -515,7 +532,7 @@ def _rebind_sidecars(directory, saved, document):
     another occurrence of the word; a choice for a word no longer in the book
     is retired. Every kept entry is revalidated against the new source.
     """
-    comparison = compare_sources(saved["source"], document["source"])
+    comparison = compare_sources(saved["source"], document["source"], preserve_citations_from=saved["cast"])
     if comparison["source"] != document["source"]:
         raise ValueError("The updated source does not align with the saved book")
     old_source, new_source = fingerprint(saved["source"]), fingerprint(document["source"])
@@ -756,7 +773,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     if strategy not in (None, "consensus", "narrator"):
         raise ValueError("strategy must be consensus or narrator")
     strategy = strategy or saved_strategy(original)
-    comparison = compare_sources(original["source"], source)
+    comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
     if not has_changes(comparison):
         log("No new or edited chapters: the EPUB's chapters match the saved book. "
             "The saved analysis is unchanged.")
@@ -884,7 +901,7 @@ def plan_update(directory, source, config):
     from .analysis_plan import plan_analysis
     directory = Path(directory).resolve()
     original, registry, _ = _completed_directory(directory)
-    comparison = compare_sources(original["source"], source)
+    comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
     update = {"unchanged_chapters": comparison["unchanged_chapters"],
               "added_chapters": [{"id": chapter["id"], "title": chapter["title"]}
                                  for chapter in comparison["appended_chapters"]],
