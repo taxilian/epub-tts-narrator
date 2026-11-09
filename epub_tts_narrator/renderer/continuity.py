@@ -42,7 +42,7 @@ SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 # Joins, repairs and best-effort choices remain accepted audio but are not one
 # generation of the exact logical text, so they never become history.
 _NOT_HISTORY = {"recovery", "clip_repair", "speech_resolution", "fragment_recovery",
-                "delivery_recovery", "direction_repair", "exhaustion_selection"}
+                "delivery_recovery", "direction_repair", "exhaustion_selection", "manual_selection"}
 
 
 def current():

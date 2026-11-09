@@ -1,6 +1,8 @@
 """Pure behavior tests for the published-book review model."""
 
 from copy import deepcopy
+from pathlib import Path
+import tempfile
 from typing import Any
 import unittest
 
@@ -9,7 +11,9 @@ from epub_tts_narrator.review_tui_model import (
     XTERM_RGB, apply_edits, contrast_ok, contrast_ratio, edit_direction,
     edit_review, edit_speaker, metadata, palette, passages, toc,
 )
+from epub_tts_narrator.review_tui_render import RenderIndex, TakeRow, format_take, playback_notice
 from tests.test_contracts import valid_document
+from tests.test_review_tui import add_render_work, publish_book
 
 
 Document = dict[str, Any]
@@ -308,6 +312,93 @@ class ReviewModelTests(unittest.TestCase):
             apply_edits(document, {"missing": replacement})
         with self.assertRaisesRegex(ValueError, "does not match"):
             apply_edits(document, {"s2": dict(replacement, id="other")})
+
+
+class RenderReviewModelTests(unittest.TestCase):
+    root: Path = Path()
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def test_chapter_index_joins_split_segments_to_checkpoint_hashes_without_scanning_other_clips(self):
+        directory, _ = publish_book(self.root, long_passage=True)
+        fixture = add_render_work(directory)
+        expected = [{"chunk_id": row["chunk_id"], "request_hash": row["request_hash"]}
+                    for row in fixture["acceptance"]
+                    if fixture["clips"][row["request_hash"]]["segment_id"] == "s3"]
+        index = RenderIndex(directory, config={"render": {"max_chunk_chars": 40}})
+
+        chapter = index.chapter(1)
+
+        self.assertGreater(len(expected), 1)
+        self.assertEqual(chapter["segments"]["s3"], expected)
+        self.assertIs(index.chapter(1), chapter)
+
+    def test_checkpoint_plan_drift_falls_back_to_only_listed_acceptance_records(self):
+        directory, _ = publish_book(self.root)
+        fixture = add_render_work(directory, drift=True)
+        expected = [{"chunk_id": row["chunk_id"], "request_hash": row["request_hash"]}
+                    for row in fixture["acceptance"]
+                    if fixture["clips"][row["request_hash"]]["segment_id"] == "s2"]
+
+        chapter = RenderIndex(directory, config={"render": {"max_chunk_chars": 40}}).chapter(1)
+
+        self.assertEqual(chapter["segments"]["s2"], expected)
+        self.assertTrue(all(ref["chunk_id"].startswith("drifted-") for ref in chapter["segments"]["s2"]))
+
+    def test_unplannable_book_falls_back_to_checkpoint_records(self):
+        from unittest.mock import patch
+
+        directory, _ = publish_book(self.root)
+        fixture = add_render_work(directory)
+        expected = [{"chunk_id": row["chunk_id"], "request_hash": row["request_hash"]}
+                    for row in fixture["acceptance"]
+                    if fixture["clips"][row["request_hash"]]["segment_id"] == "s2"]
+
+        with patch("epub_tts_narrator.renderer.bundle.make_plan",
+                   side_effect=ValueError("name uses are not tagged")):
+            chapter = RenderIndex(directory, config={"render": {"max_chunk_chars": 40}}).chapter(1)
+
+        self.assertEqual(chapter["status"], "indexed")
+        self.assertEqual(chapter["segments"]["s2"], expected)
+
+    def test_missing_render_work_is_an_index_status_not_an_exception(self):
+        directory, _ = publish_book(self.root)
+
+        chapter = RenderIndex(directory).chapter(1)
+
+        self.assertEqual(chapter["status"], "render_work_missing")
+        self.assertEqual(chapter["segments"], {})
+
+    def test_take_format_includes_acceptance_verification_duration_and_eligibility_without_transcript(self):
+        row: TakeRow = {"attempt": 3, "accepted": True, "audio_path": None, "passed": False, "reasons": ["text_mismatch"],
+               "text_confirmation_method": "heard_variant", "duration_seconds": 4.25,
+               "transcript": "DO NOT DISPLAY", "echo": True, "eligible": False,
+               "ineligible_reason": "history_echo"}
+
+        text = format_take(row)
+
+        self.assertIn("* Take 3", text)
+        self.assertIn("failed", text)
+        self.assertIn("text_mismatch", text)
+        self.assertIn("heard_variant", text)
+        self.assertIn("4.25s", text)
+        self.assertIn("echo=yes", text)
+        self.assertIn("eligible=no", text)
+        self.assertIn("history_echo", text)
+        self.assertNotIn("DO NOT DISPLAY", text)
+
+    def test_playback_outcomes_become_single_line_sanitized_notices(self):
+        self.assertEqual(playback_notice(True), "Playback finished")
+        self.assertEqual(playback_notice(False), "Playback interrupted")
+
+        notice = playback_notice(RuntimeError("failed\n\x1b[31mraw"))
+
+        self.assertTrue(notice.startswith("Playback failed: failed"))
+        self.assertNotIn("\n", notice)
+        self.assertNotIn("\x1b", notice)
 
 
 if __name__ == "__main__":

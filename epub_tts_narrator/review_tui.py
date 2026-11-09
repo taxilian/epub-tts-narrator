@@ -8,12 +8,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
+from typing import Any
 
 from .analysis_directory import _completed_directory
 from .analysis_revision import related_directories, revise_directories
+from .renderer.terminal import play_sample
 from .review_tui_model import (
     apply_edits, edit_direction, edit_review, edit_speaker, metadata, palette, passages, toc,
+)
+from .review_tui_render import (
+    ChapterIndex, ClipRef, RenderIndex, TakeRow, archive_checkpoint, format_take, playback_notice,
 )
 from .speaker_decisions import _display, _role_labels
 from .speaker_suggestions import rank_speakers
@@ -32,22 +38,33 @@ def _selected(selected, role=None):
     return {"reverse": bool(selected), "role": role}
 
 
+def _audio_player(command):
+    from .renderer.audition import AudioPlayer
+    return AudioPlayer(command)
+
+
 class ReviewApp:
     """Curses-independent review state machine with receipt-bound saves."""
 
-    def __init__(self, directory, document, *, revise_directories, related_directories):
+    def __init__(self, directory, document, *, revise_directories, related_directories,
+                 player=None, play_sample=play_sample, list_takes=None, select_take=None, render_config=None):
         self.directory = Path(directory).resolve()
         self.document = document
         self._revise = revise_directories
         self.directories = [Path(path).resolve() for path in related_directories([self.directory])]
         self.expected_manifest_hashes = self._manifest_hashes()
+        self.player = player if player is not None else _audio_player(["/usr/bin/afplay"])
+        self._play_sample = play_sample
+        self._list_takes = list_takes
+        self._select_take = select_take
+        self.render_index = RenderIndex(self.directory, config=render_config)
         self.pending = {}
         self.running = True
         self.view = "toc"
         self.chapter_index = 0
         self.passage_index = 0
         self.passage_scroll = 0
-        self.info_segment_id = None
+        self.info_segment_id: str | None = None
         self.info_cursor = 0
         self.info_scroll = 0
         self.speaker_options = []
@@ -56,6 +73,14 @@ class ReviewApp:
         self.speaker_candidates = []
         self.speaker_reasons = {}
         self.direction_buffer = ""
+        self.takes_segment_id: str | None = None
+        self.takes_chapter: ChapterIndex | None = None
+        self.takes_clips: list[ClipRef] = []
+        self.takes_chunk_index = 0
+        self.takes_rows: list[TakeRow] = []
+        self.takes_index = 0
+        self.takes_scroll = 0
+        self.confirm_take_attempt: int | None = None
         self.return_view = "toc"
         self.notice = ""
         self.progress = []
@@ -120,7 +145,7 @@ class ReviewApp:
         ordered = list(self.speaker_candidates)
         ordered.extend(role["id"] for role in document["cast"]["roles"] if role["id"] not in ordered)
         self.speaker_options = [None, *ordered]
-        current: list = metadata(document, self.info_segment_id)["role_ids"]
+        current: list[str] = metadata(document, self.info_segment_id)["role_ids"]
         self.speaker_selected = list(current)
         self.speaker_index = self.speaker_options.index(current[0]) if current else 0
         self.view = "speaker"
@@ -152,6 +177,182 @@ class ReviewApp:
             self.view = "direction"
         elif field == "review":
             self._toggle_review()
+        elif field == "takes":
+            self._open_takes()
+
+    def _render_chapter(self) -> ChapterIndex:
+        try:
+            return self.render_index.chapter(self.chapter_index + 1)
+        except (ValueError, OSError) as exc:
+            return {"status": "error", "work_directory": self.directory / "render-work",
+                    "segments": {}, "error": _flat(exc)}
+
+    def _not_rendered_notice(self, chapter: ChapterIndex):
+        status = chapter["status"]
+        if status == "render_work_missing":
+            return "Not rendered: this book has no render-work directory."
+        if status == "checkpoint_missing":
+            return f"Not rendered: chapter {self.chapter_index + 1} has no completed-chapter checkpoint."
+        if status == "error":
+            return "Could not read rendered takes: " + chapter.get("error", "unknown error")
+        return "Not rendered: no clip for this passage."
+
+    def _take_lister(self):
+        if self._list_takes is None:
+            from .renderer.take_selection import list_takes
+            self._list_takes = list_takes
+        return self._list_takes
+
+    def _take_selector(self):
+        if self._select_take is None:
+            from .renderer.take_selection import select_take
+            self._select_take = select_take
+        return self._select_take
+
+    def _clip_takes(self, chapter: ChapterIndex, clip: ClipRef):
+        clips = chapter["work_directory"] / "clips"
+        return self._take_lister()(clips, clip["request_hash"])
+
+    def _open_takes(self):
+        self.takes_segment_id = self.info_segment_id
+        self.takes_chapter = self._render_chapter()
+        clips = self.takes_chapter["segments"].get(self.takes_segment_id, [])
+        self.takes_clips = list(clips)
+        self.takes_chunk_index = 0
+        self.takes_index = self.takes_scroll = 0
+        self.takes_rows = []
+        self.view = "takes"
+        if not self.takes_clips:
+            self.notice = self._not_rendered_notice(self.takes_chapter)
+            return
+        self._load_takes()
+
+    def _load_takes(self):
+        if not self.takes_clips:
+            self.takes_rows = []
+            return
+        clip = self.takes_clips[self.takes_chunk_index]
+        assert self.takes_chapter is not None
+        try:
+            self.takes_rows = list(self._clip_takes(self.takes_chapter, clip))
+        except (ValueError, OSError) as exc:
+            self.takes_rows = []
+            self.notice = "Could not list takes: " + _flat(exc)
+            return
+        self.takes_index = max(0, min(self.takes_index, len(self.takes_rows) - 1))
+
+    def _current_take(self) -> TakeRow | None:
+        if not self.takes_rows:
+            return None
+        return self.takes_rows[self.takes_index]
+
+    def _play_audio(self, row: TakeRow, screen):
+        attempt = row.get("attempt", "?")
+        if not row.get("audio_path"):
+            self.notice = f"Take {attempt} has no playable audio file."
+            return
+        if screen is not None:
+            screen.clear()
+            self._header(screen, f"Playing take {attempt}")
+            screen.write(3, 0, f"Playing take {attempt} — any key stops", None)
+            self._footer(screen, "Any key stops playback")
+            screen.refresh()
+        try:
+            outcome = self._play_sample(self.player, row["audio_path"])
+        except (ValueError, RuntimeError, OSError) as exc:
+            outcome = exc
+        self.notice = playback_notice(outcome)
+
+    def _play_info_accepted(self, screen):
+        chapter = self._render_chapter()
+        clips = chapter["segments"].get(self.info_segment_id, [])
+        if not clips:
+            self.notice = self._not_rendered_notice(chapter)
+            return
+        if len(clips) > 1:
+            self._open_takes()
+            self.notice = "This passage has multiple rendered chunks; choose a chunk and take to play."
+            return
+        try:
+            rows = self._clip_takes(chapter, clips[0])
+        except (ValueError, OSError) as exc:
+            self.notice = "Could not list takes: " + _flat(exc)
+            return
+        accepted = next((row for row in rows if row.get("accepted")), None)
+        if accepted is None:
+            self.notice = "Not rendered: this passage has no accepted take."
+            return
+        self._play_audio(accepted, screen)
+
+    def _request_take_acceptance(self):
+        assert self.takes_chapter is not None
+        row = self._current_take()
+        if row is None:
+            self.notice = self._not_rendered_notice(self.takes_chapter)
+            return
+        attempt = row["attempt"]
+        if row.get("echo"):
+            reason = row.get("ineligible_reason") or "history echo"
+            self.notice = f"Take {attempt} cannot be accepted: {_flat(reason)}."
+            return
+        if not row.get("eligible"):
+            reason = row.get("ineligible_reason") or "not eligible"
+            self.notice = f"Take {attempt} cannot be accepted: {_flat(reason)}."
+            return
+        self.confirm_take_attempt = attempt
+        self.view = "confirm_take"
+
+    def _confirm_take_acceptance(self):
+        assert self.takes_chapter is not None and self.confirm_take_attempt is not None
+        attempt = self.confirm_take_attempt
+        clip = self.takes_clips[self.takes_chunk_index]
+        clips = self.takes_chapter["work_directory"] / "clips"
+        self.view = "takes"
+        try:
+            self._take_selector()(clips, clip["request_hash"], attempt, note="")
+        except ValueError as exc:
+            self.notice = _flat(exc)
+            return
+        chapter_number = self.chapter_index + 1
+        try:
+            archived = archive_checkpoint(self.takes_chapter["work_directory"], chapter_number, token=attempt)
+            archive_error = ""
+        except OSError as exc:
+            archived = None
+            archive_error = _flat(exc)
+        self._load_takes()
+        book = shlex.quote(str(self.directory))
+        command = (f"audiobook-render render {book} --chapters-only {chapter_number} && "
+                   f"audiobook-render assemble {book}")
+        archived_notice = "Chapter checkpoint archived. " if archived else ""
+        if archive_error:
+            archived_notice = "Checkpoint archive failed: " + archive_error + ". "
+        self.notice = f"Accepted take {attempt}. {archived_notice}Rerun: {command}"
+
+    def _handle_takes(self, key, screen):
+        if key == "ESC":
+            self.view = "info"
+        elif key in {"UP", "k"} and self.takes_rows:
+            self.takes_index = max(0, self.takes_index - 1)
+        elif key in {"DOWN", "j"} and self.takes_rows:
+            self.takes_index = min(len(self.takes_rows) - 1, self.takes_index + 1)
+        elif key in {"LEFT", "RIGHT"} and self.takes_clips:
+            amount = -1 if key == "LEFT" else 1
+            self.takes_chunk_index = max(0, min(len(self.takes_clips) - 1, self.takes_chunk_index + amount))
+            self.takes_index = self.takes_scroll = 0
+            self._load_takes()
+        elif key in {"ENTER", "p", "P"}:
+            row = self._current_take()
+            if row is not None:
+                self._play_audio(row, screen)
+        elif key in {"a", "A"}:
+            self._request_take_acceptance()
+
+    def _handle_confirm_take(self, key):
+        if key in {"y", "Y"}:
+            self._confirm_take_acceptance()
+        elif key in {"n", "ESC", "q", "Q"}:
+            self.view = "takes"
 
     def _request_quit(self):
         if not self.pending:
@@ -178,6 +379,7 @@ class ReviewApp:
             return False
         self.document = revised
         self.pending.clear()
+        self.render_index.reset()
         self.expected_manifest_hashes = self._manifest_hashes()
         self.progress.extend(messages)
         backup = result.get("backup_directory") if isinstance(result, dict) else None
@@ -239,16 +441,22 @@ class ReviewApp:
         else:
             self._commit_speaker([role_id])
 
-    def handle_key(self, key):
+    def handle_key(self, key, *, screen=None):
         """Apply one symbolic key and return whether the app continues running."""
         if self.view == "confirm_quit":
             self._handle_confirm_quit(key)
+            return self.running
+        if self.view == "confirm_take":
+            self._handle_confirm_take(key)
             return self.running
         if self.view == "direction":
             self._handle_direction(key)
             return self.running
         if self.view == "speaker":
             self._handle_speaker(key)
+            return self.running
+        if self.view == "takes":
+            self._handle_takes(key, screen)
             return self.running
         if key in {"s", "S"}:
             self.save()
@@ -299,12 +507,16 @@ class ReviewApp:
                 self._activate_info_field("direction")
             elif key in {"F4", "r"}:
                 self._toggle_review()
+            elif key in {"t", "T"}:
+                self._open_takes()
+            elif key in {"p", "P"}:
+                self._play_info_accepted(screen)
             elif key == "ESC":
                 self.view = "passages"
         return self.running
 
     def _info_rows(self):
-        data: dict = metadata(self._effective_document(), self.info_segment_id)
+        data: dict[str, Any] = metadata(self._effective_document(), self.info_segment_id)
         attribution = data["attribution"]
         delivery = data["delivery"]
         speaker = ", ".join(data["speaker_labels"]) if data["speaker_labels"] else "Unassigned"
@@ -312,6 +524,7 @@ class ReviewApp:
             ("speaker", "Speaker(s): " + speaker),
             ("direction", "Direction: " + (delivery["direction"] or "(none)")),
             ("review", "Review required: " + ("yes" if attribution["review_required"] else "no")),
+            ("takes", "Takes: view and play rendered attempts"),
             (None, ""),
             (None, "Passage: " + data["text"]),
             (None, f"ID: {data['id']}  Block: {data['block_id']}  Chapter: {data['chapter_id']}"),
@@ -409,7 +622,39 @@ class ReviewApp:
             index = self.info_scroll + line - 3
             marker = "> " if index == self.info_cursor and field else "  "
             screen.write(line, 0, marker + _flat(text), _selected(index == self.info_cursor and field is not None))
-        self._footer(screen, "Enter edit  F2 speaker  F3 direction  F4/R review  PgUp/PgDn scroll  Esc back  S save")
+        self._footer(screen, "Enter edit/action  P play  T takes  F2 speaker  F3 direction  F4/R review  Esc back  S save")
+
+    def _draw_takes(self, screen):
+        height, _ = screen.size()
+        chapter_number = self.chapter_index + 1
+        self._header(screen, f"Rendered takes  Chapter {chapter_number}")
+        if not self.takes_clips:
+            screen.write(3, 0, "No rendered clips for this passage.", None)
+            self._footer(screen, "Esc passage")
+            return
+        clip = self.takes_clips[self.takes_chunk_index]
+        chunk = f"Chunk {self.takes_chunk_index + 1}/{len(self.takes_clips)}  {clip['chunk_id']}"
+        screen.write(3, 0, chunk, None)
+        screen.write(4, 0, "* accepted", None)
+        self.page_size = max(1, height - 9)
+        if self.takes_index < self.takes_scroll:
+            self.takes_scroll = self.takes_index
+        if self.takes_index >= self.takes_scroll + self.page_size:
+            self.takes_scroll = self.takes_index - self.page_size + 1
+        for line, row in enumerate(self.takes_rows[self.takes_scroll:self.takes_scroll + self.page_size], 6):
+            index = self.takes_scroll + line - 6
+            selected = index == self.takes_index
+            screen.write(line, 0, ("> " if selected else "  ") + format_take(row), _selected(selected))
+        chunks = "  Left/Right chunk" if len(self.takes_clips) > 1 else ""
+        self._footer(screen, "Up/Down take  Enter/P play  A accept" + chunks + "  Esc passage")
+
+    def _draw_confirm_take(self, screen):
+        self._header(screen, "Accept rendered take")
+        row = next(row for row in self.takes_rows if row["attempt"] == self.confirm_take_attempt)
+        screen.write(3, 0, f"Accept take {self.confirm_take_attempt}?", None)
+        if row.get("passed") is not True:
+            screen.write(4, 0, "It did not pass ordinary verification.", None)
+        self._footer(screen, "Y accept  N/Esc cancel")
 
     def _draw_speaker(self, screen):
         height, _ = screen.size()
@@ -444,6 +689,10 @@ class ReviewApp:
             self._draw_passages(screen)
         elif self.view == "info":
             self._draw_info(screen)
+        elif self.view == "takes":
+            self._draw_takes(screen)
+        elif self.view == "confirm_take":
+            self._draw_confirm_take(screen)
         elif self.view == "speaker":
             self._draw_speaker(screen)
         elif self.view == "direction":
@@ -513,6 +762,7 @@ class CursesScreen:
         if isinstance(key, int):
             mapping = {
                 self.curses.KEY_UP: "UP", self.curses.KEY_DOWN: "DOWN",
+                self.curses.KEY_LEFT: "LEFT", self.curses.KEY_RIGHT: "RIGHT",
                 self.curses.KEY_PPAGE: "PPAGE", self.curses.KEY_NPAGE: "NPAGE",
                 self.curses.KEY_ENTER: "ENTER", self.curses.KEY_BACKSPACE: "BACKSPACE",
                 self.curses.KEY_F2: "F2", self.curses.KEY_F3: "F3", self.curses.KEY_F4: "F4",
@@ -536,18 +786,19 @@ def _drive(app, screen):
         key = screen.read_key()
         if key is None:
             raise ValueError("review-ui input ended")
-        app.handle_key(key)
+        app.handle_key(key, screen=screen)
     return app
 
 
-def run_review(directory, *, screen=None):
+def run_review(directory, *, screen=None, player_command=None):
     """Open a completed book in the review UI; never create voices or call models."""
     directory = Path(directory).resolve()
     if screen is None and (not sys.stdin.isatty() or not sys.stdout.isatty() or not os.environ.get("TERM")):
         raise ValueError("review-ui requires an interactive terminal")
     document = _completed_directory(directory)[0]
+    player = _audio_player(player_command or ["/usr/bin/afplay"])
     app = ReviewApp(directory, document, revise_directories=revise_directories,
-                    related_directories=related_directories)
+                    related_directories=related_directories, player=player)
     if screen is not None:
         return _drive(app, screen)
     import curses

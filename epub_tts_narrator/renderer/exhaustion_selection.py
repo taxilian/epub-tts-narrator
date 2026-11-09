@@ -106,6 +106,10 @@ def validate_selection(request, marker):
 
 def validate_record(record):
     metadata = record.get('engine_metadata', {})
+    if 'manual_selection' in metadata:
+        from .take_selection import validate_manual_selection
+        validate_manual_selection(record)
+        return
     marker = metadata.get('exhaustion_selection')
     if marker is None:
         if 'clip_repair' in metadata:

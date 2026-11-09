@@ -18,7 +18,41 @@ try:
 except ImportError:
     pty = None
 
-from tests.test_review_tui import publish_book
+from tests.test_review_tui import add_render_work, publish_book
+
+
+_REVIEW_WITH_FAKE_TAKES = r"""
+import curses
+from pathlib import Path
+import sys
+
+from epub_tts_narrator.analysis_directory import _completed_directory
+from epub_tts_narrator.analysis_revision import related_directories, revise_directories
+from epub_tts_narrator.review_tui import CursesScreen, ReviewApp, _drive
+from epub_tts_narrator.review_tui_model import palette
+
+
+def list_takes(clips_directory, request_hash):
+    return [{"attempt": 1, "audio_path": None, "passed": True, "reasons": [],
+             "text_confirmation_method": "verbatim", "duration_seconds": 1.0,
+             "transcript": "DO NOT DISPLAY", "echo": False, "eligible": True,
+             "ineligible_reason": None, "accepted": True}]
+
+
+directory = Path(sys.argv[1]).resolve()
+document = _completed_directory(directory)[0]
+app = ReviewApp(directory, document, revise_directories=revise_directories,
+                related_directories=related_directories, player=object(),
+                play_sample=lambda player, path: False, list_takes=list_takes,
+                select_take=lambda *args, **kwargs: {})
+
+
+def wrapped(stdscr):
+    return _drive(app, CursesScreen(curses, stdscr, palette(len(app.roles))))
+
+
+curses.wrapper(wrapped)
+"""
 
 
 @unittest.skipUnless(os.name == "posix" and pty is not None, "POSIX required")
@@ -26,7 +60,9 @@ class ReviewTerminalTests(unittest.TestCase):
     root: Path = Path()
     directory: Path = Path()
     master: int = -1
+    slave: int = -1
     process: Any = None
+    environment: dict[str, str] = {}
     pending: bytes = b""
     transcript: bytes = b""
 
@@ -37,24 +73,29 @@ class ReviewTerminalTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         self.directory, _ = publish_book(self.root, two_chapters=True)
-        self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 110, 0, 0))
-        environment = dict(os.environ, TERM="xterm-256color", LINES="24", COLUMNS="110")
-        self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui", str(self.directory)],
-            cwd=Path(__file__).resolve().parent.parent,
-            env=environment, stdin=slave, stdout=slave, stderr=slave,
-            start_new_session=True,
-        )
-        os.close(slave)
+        self.master, self.slave = pty.openpty()
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 110, 0, 0))
+        self.environment = dict(os.environ, TERM="xterm-256color", LINES="24", COLUMNS="110")
         self.pending = b""
         self.transcript = b""
         self.addCleanup(self.close_child)
 
+    def start(self, command=None):
+        command = command or [sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui", str(self.directory)]
+        self.process = subprocess.Popen(
+            command, cwd=Path(__file__).resolve().parent.parent,
+            env=self.environment, stdin=self.slave, stdout=self.slave, stderr=self.slave,
+            start_new_session=True,
+        )
+        os.close(self.slave)
+        self.slave = -1
+
     def close_child(self):
-        if self.process.poll() is None:
+        if self.process is not None and self.process.poll() is None:
             self.process.kill()
             self.process.wait()
+        if self.slave >= 0:
+            os.close(self.slave)
         os.close(self.master)
 
     def read_more(self, timeout):
@@ -89,6 +130,7 @@ class ReviewTerminalTests(unittest.TestCase):
         self.assertEqual(self.process.returncode, 0, self.transcript.decode(errors="replace"))
 
     def test_real_terminal_opens_toc_navigates_to_passages_and_quits(self):
+        self.start()
         self.wait_for(b"Review chapters 1/2")
         self.wait_for(b"Chapter Two")
 
@@ -99,6 +141,24 @@ class ReviewTerminalTests(unittest.TestCase):
         self.wait_for(b"Passage 1/1")
         self.wait_for(b"Later, Lena waited.")
 
+        os.write(self.master, b"q")
+        self.finish()
+
+    def test_real_terminal_opens_takes_with_injected_audio_and_take_boundaries(self):
+        add_render_work(self.directory)
+        self.start([sys.executable, "-u", "-c", _REVIEW_WITH_FAKE_TAKES, str(self.directory)])
+        self.wait_for(b"Review chapters 1/2")
+
+        os.write(self.master, b"\r")
+        self.wait_for(b"Passage 1/3")
+        os.write(self.master, b"\r")
+        self.wait_for(b"Takes: view and play rendered attempts")
+        os.write(self.master, b"t")
+
+        self.wait_for(b"Rendered takes")
+        self.wait_for(b"* Take 1")
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"Passage metadata")
         os.write(self.master, b"q")
         self.finish()
 

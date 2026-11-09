@@ -68,7 +68,9 @@ def _run_directory_command(args):
     """Dispatch completed-book commands that need no shared pipeline state."""
     if args.command == "review-ui":
         from .review_tui import run_review
-        run_review(args.directory.resolve())
+        config = load_config(args.config)
+        player_command = config.get("casting", {}).get("player", ["/usr/bin/afplay"])
+        run_review(args.directory.resolve(), player_command=player_command)
         return 0
     from .voice_profile_refresh import refresh_book_voice_profiles
     refresh_book_voice_profiles(args.directory, args.config, workers=args.workers)

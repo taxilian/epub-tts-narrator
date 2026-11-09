@@ -19,6 +19,7 @@ _RESERVED_STEMS: Final = frozenset(
      *(f"LPT{number}" for number in range(1, 10))}
 )
 _AUDIO_SUFFIXES: Final = frozenset({".aac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".wav"})
+MANUAL_SELECTION_ROLE: Final = "manual-selection"
 
 
 def _filename_error(suffix: str) -> ValueError:

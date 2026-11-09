@@ -114,7 +114,7 @@ def candidate_echo(record, expected, heard=None):
 def rejected_pick(record, heard=None):
     """Echo evidence when ``record`` is a published exhaustion choice of an echo."""
     metadata = record.get("engine_metadata") or {}
-    if "exhaustion_selection" not in metadata:
+    if not {"exhaustion_selection", "manual_selection"}.intersection(metadata):
         return None
     report = record.get("report") or {}
     original = report.get("original_failed_report") or {}

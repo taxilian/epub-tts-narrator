@@ -16,8 +16,10 @@ def ordinarily_verified(record):
     """True for a take accepted by ordinary verification, not a best-effort choice."""
     report = record.get("report") or {}
     return (report.get("passed") is True
-            and report.get("text_confirmation_method") != "llm_exhaustion_selection"
-            and "exhaustion_selection" not in (record.get("engine_metadata") or {}))
+            and report.get("text_confirmation_method") not in {
+                "llm_exhaustion_selection", "manual_take_selection"}
+            and not {"exhaustion_selection", "manual_selection"}.intersection(
+                record.get("engine_metadata") or {}))
 
 
 class SpeechCache:
@@ -109,8 +111,12 @@ class SpeechCache:
         if not audio.exists() and not audio.is_symlink():
             return None
         regular_file(audio)
-        from .exhaustion_selection import validate_record
-        validate_record(record)
+        if "manual_selection" in (record.get("engine_metadata") or {}):
+            from .take_selection import validate_manual_selection
+            validate_manual_selection(record)
+        else:
+            from .exhaustion_selection import validate_record
+            validate_record(record)
         return path, audio, record
 
     def _load(self):

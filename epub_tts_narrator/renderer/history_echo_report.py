@@ -61,7 +61,9 @@ def scan(work, chapter_numbers):
             record = read_json(regular_file(path))
         except (OSError, ValueError):
             continue
-        if not isinstance(record, dict) or "exhaustion_selection" not in (record.get("engine_metadata") or {}):
+        if (not isinstance(record, dict)
+                or not {"exhaustion_selection", "manual_selection"}.intersection(
+                    record.get("engine_metadata") or {})):
             continue
         choices += 1
         request = record.get("request") or {}

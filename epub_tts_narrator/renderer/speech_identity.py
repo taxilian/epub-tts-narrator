@@ -478,6 +478,9 @@ def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None)
     chunk = request.get("chunk")
     if not isinstance(chunk, Mapping):
         raise ValueError("Speech request is missing its chunk")
+    if isinstance(engine_metadata, Mapping) and 'manual_selection' in engine_metadata:
+        from .take_selection import selected_generation_identity
+        return selected_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and 'exhaustion_selection' in engine_metadata:
         from .exhaustion_selection import selected_generation_identity
         return selected_generation_identity(request, voices_by_asset, engine_metadata)

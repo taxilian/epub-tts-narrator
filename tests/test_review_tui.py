@@ -2,14 +2,18 @@
 # noqa: SIZE_OK — one FakeScreen contract covers the complete ReviewApp state machine.
 
 import contextlib
+from collections.abc import Callable
+from copy import deepcopy
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
 from typing import Any
 import unittest
 from unittest.mock import patch
+import wave
 
 from epub_tts_narrator.analysis_directory import fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle, main
@@ -21,8 +25,12 @@ from tests.test_contracts import valid_document
 Document = dict[str, Any]
 
 
-def review_document(*, two_chapters=False, unresolved=False) -> Document:
+def review_document(*, two_chapters=False, unresolved=False, long_passage=False) -> Document:
     document: Document = valid_document()
+    if long_passage:
+        text = " ".join(f"word{index}" for index in range(30)) + "."
+        document["source"]["blocks"][1]["text"] = text
+        document["segments"][2].update(text=text, end=len(text))
     if unresolved:
         document["segments"][1].update(role_id=None, voice_id=None)
         document["segments"][1]["attribution"].update(
@@ -45,14 +53,117 @@ def review_document(*, two_chapters=False, unresolved=False) -> Document:
     return document
 
 
-def publish_book(root, *, two_chapters=False, unresolved=False):
+def publish_book(root, *, two_chapters=False, unresolved=False, long_passage=False):
     """Publish a self-contained temporary book through the real exporter/loader contract."""
     directory = Path(root) / "review-book"
-    document = review_document(two_chapters=two_chapters, unresolved=unresolved)
+    document = review_document(two_chapters=two_chapters, unresolved=unresolved, long_passage=long_passage)
     registry = fresh_registry(directory)
     linked = link_analysis(document, registry)
     publish_directory(linked, registry, directory, export_bundle)
     return directory, linked
+
+
+def write_wave(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+        output.writeframes(b"\x01\x00" * 80)
+
+
+def add_render_work(directory, *, drift=False) -> dict[str, Any]:
+    """Build chapter-local rendered state from the real one-chapter source plan."""
+    from epub_tts_narrator.renderer.book_context import resolve_book_config
+    from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
+    from epub_tts_narrator.renderer.config import DEFAULTS
+
+    bundle = load_bundle(directory)
+    settings: dict[str, Any] = deepcopy(DEFAULTS)
+    settings["render"].update(chapter_numbers=[1], max_chunk_chars=40)
+    settings = resolve_book_config(bundle, settings)
+    plan: dict[str, Any] = make_plan(bundle, settings)
+    chunks: list[dict[str, Any]] = plan["chapters"][0]["chunks"]
+    work = Path(settings["render"]["work_dir"])
+    acceptance, clips = [], {}
+    for chunk in chunks:
+        if chunk["silent_control"]:
+            continue
+        segment_id = chunk["segment"]["id"]
+        request_hash = hashlib.sha256(("rendered:" + chunk["chunk_id"]).encode()).hexdigest()
+        clip = work / "clips" / request_hash
+        audio_paths = []
+        for attempt in (1, 2):
+            audio = clip / f"passage-{segment_id}-attempt-{attempt:03d}.wav"
+            write_wave(audio)
+            audio_paths.append(audio)
+            record = {"attempt": attempt, "report": {"passed": attempt == 2,
+                      "reasons": [] if attempt == 2 else ["text_mismatch"]}}
+            (clip / f"attempt-{attempt:03d}.json").write_text(json.dumps(record), encoding="utf-8")
+        accepted = {"request_hash": request_hash, "request": {"kind": "speech", "chunk": chunk},
+                    "audio_file": audio_paths[-1].name,
+                    "audio_sha256": hashlib.sha256(audio_paths[-1].read_bytes()).hexdigest(),
+                    "validation_key": "2" * 64, "report": {"passed": True}}
+        (clip / "accepted.json").write_text(json.dumps(accepted), encoding="utf-8")
+        checkpoint_chunk_id = ("drifted-" if drift else "") + chunk["chunk_id"]
+        acceptance.append({"chunk_id": checkpoint_chunk_id, "request_hash": request_hash,
+                           "audio_sha256": accepted["audio_sha256"], "validation_key": "2" * 64,
+                           "report": {"passed": True}})
+        clips[request_hash] = {"directory": clip, "audio_paths": audio_paths,
+                               "chunk_id": checkpoint_chunk_id, "segment_id": segment_id}
+    checkpoint = work / "completed-chapters" / "chapter-0001.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(json.dumps({"format": "audiobook-chapter-checkpoint", "version": 1,
+                                      "chapter_number": 1, "acceptance": acceptance}), encoding="utf-8")
+    unrelated = work / "clips" / ("f" * 64)
+    unrelated.mkdir(parents=True)
+    (unrelated / "accepted.json").write_text("{not json", encoding="utf-8")
+    return {"work": work, "checkpoint": checkpoint, "acceptance": acceptance, "clips": clips}
+
+
+class TakeSelectionStub:
+    def __init__(self, fixture: dict[str, Any]):
+        self.fixture = fixture
+        self.rows_by_hash = {}
+        self.list_calls = []
+        self.select_calls = []
+        self.error: ValueError | None = None
+        for request_hash, clip in fixture["clips"].items():
+            self.rows_by_hash[request_hash] = [
+                {"attempt": 1, "audio_path": str(clip["audio_paths"][0]), "passed": False,
+                 "reasons": ["text_mismatch"], "text_confirmation_method": None,
+                 "duration_seconds": 1.25, "transcript": "DO NOT DISPLAY", "echo": False,
+                 "eligible": True, "ineligible_reason": None, "accepted": False},
+                {"attempt": 2, "audio_path": str(clip["audio_paths"][1]), "passed": True,
+                 "reasons": [], "text_confirmation_method": "verbatim", "duration_seconds": 2.5,
+                 "transcript": "DO NOT DISPLAY", "echo": False, "eligible": True,
+                 "ineligible_reason": None, "accepted": True},
+            ]
+
+    def list(self, clips_directory, request_hash):
+        self.list_calls.append((Path(clips_directory), request_hash))
+        return deepcopy(self.rows_by_hash[request_hash])
+
+    def select(self, clips_directory, request_hash, attempt, *, note=""):
+        self.select_calls.append((Path(clips_directory), request_hash, attempt, note))
+        if self.error is not None:
+            raise self.error
+        for row in self.rows_by_hash[request_hash]:
+            row["accepted"] = row["attempt"] == attempt
+        return {"request_hash": request_hash, "attempt": attempt}
+
+
+class PlaybackStub:
+    def __init__(self, outcome: bool | Exception = True):
+        self.outcome = outcome
+        self.calls = []
+        self.before: Callable[[], None] | None = None
+
+    def __call__(self, player, path):
+        if self.before is not None:
+            self.before()
+        self.calls.append((player, path))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
 
 
 class FakeScreen:
@@ -121,6 +232,20 @@ class ReviewAppTests(unittest.TestCase):
 
         app = ReviewApp(directory, document, revise_directories=revision, related_directories=related)
         return app, revision, related_calls
+
+    def rendered_app(self, *, root=None, long_passage=False, drift=False, playback=None):
+        root = Path(root) if root is not None else self.root
+        root.mkdir(parents=True, exist_ok=True)
+        directory, document = publish_book(root, long_passage=long_passage)
+        fixture = add_render_work(directory, drift=drift)
+        revision = RevisionStub(directory)
+        takes = TakeSelectionStub(fixture)
+        playback = playback if playback is not None else PlaybackStub()
+        app = ReviewApp(directory, document, revise_directories=revision,
+                        related_directories=lambda directories: [directory], player=object(),
+                        play_sample=playback, list_takes=takes.list, select_take=takes.select,
+                        render_config={"render": {"max_chunk_chars": 40}})
+        return app, fixture, takes, playback
 
     def open_second_passage(self, app):
         app.handle_key("ENTER")
@@ -237,6 +362,140 @@ class ReviewAppTests(unittest.TestCase):
         self.assertIn("Unresolved attribution", app.notice)
         self.assertEqual(app.view, "info")
 
+    def test_takes_action_lists_every_attempt_for_the_passage_clip(self):
+        app, fixture, takes, _ = self.rendered_app()
+        self.open_second_passage(app)
+
+        app.handle_key("t")
+        screen = FakeScreen()
+        app.draw(screen)
+
+        clip = next(clip for clip in fixture["clips"].values() if clip["segment_id"] == "s2")
+        request_hash = clip["directory"].name
+        self.assertEqual(app.view, "takes")
+        self.assertEqual(takes.list_calls, [(fixture["work"] / "clips", request_hash)])
+        self.assertEqual([row["attempt"] for row in app.takes_rows], [1, 2])
+        self.assertIn("Take 1", screen.text)
+        self.assertIn("* Take 2", screen.text)
+        self.assertIn("text_mismatch", screen.text)
+        self.assertNotIn("DO NOT DISPLAY", screen.text)
+
+    def test_takes_playback_draws_status_first_and_maps_completion_interruption_and_failure(self):
+        cases = ((True, "Playback finished"), (False, "Playback interrupted"),
+                 (ValueError("player failed\n\x1b[31mraw"), "Playback failed:"))
+        for index, (outcome, notice) in enumerate(cases):
+            with self.subTest(outcome=outcome):
+                playback = PlaybackStub(outcome)
+                app, _, _, _ = self.rendered_app(root=self.root / str(index), playback=playback)
+                self.open_second_passage(app)
+                app.handle_key("t")
+                screen = FakeScreen()
+                playback.before = lambda: self.assertIn("Playing take 1 — any key stops", screen.text)
+
+                app.handle_key("ENTER", screen=screen)
+
+                self.assertEqual(len(playback.calls), 1)
+                self.assertTrue(playback.calls[0][1].endswith("attempt-001.wav"))
+                self.assertIn(notice, app.notice)
+                self.assertNotIn("\x1b", app.notice)
+                self.assertNotIn("\n", app.notice)
+                self.assertTrue(app.running)
+
+    def test_info_play_key_plays_the_accepted_take(self):
+        app, _, _, playback = self.rendered_app()
+        self.open_second_passage(app)
+
+        app.handle_key("p", screen=FakeScreen())
+
+        self.assertEqual(len(playback.calls), 1)
+        self.assertTrue(playback.calls[0][1].endswith("attempt-002.wav"))
+        self.assertEqual(app.view, "info")
+        self.assertEqual(app.notice, "Playback finished")
+
+    def test_multi_chunk_passage_can_change_the_selected_chunk(self):
+        app, _, takes, _ = self.rendered_app(long_passage=True)
+        app.handle_key("ENTER")
+        app.handle_key("DOWN")
+        app.handle_key("DOWN")
+        app.handle_key("ENTER")
+        app.handle_key("t")
+        first_hash = takes.list_calls[-1][1]
+
+        app.handle_key("RIGHT")
+        screen = FakeScreen()
+        app.draw(screen)
+
+        self.assertGreater(len(app.takes_clips), 1)
+        self.assertNotEqual(takes.list_calls[-1][1], first_hash)
+        self.assertIn(f"Chunk 2/{len(app.takes_clips)}", screen.text)
+
+    def test_accepting_a_failed_eligible_take_confirms_archives_and_refreshes(self):
+        app, fixture, takes, _ = self.rendered_app()
+        self.open_second_passage(app)
+        app.handle_key("t")
+
+        app.handle_key("a")
+        confirmation = FakeScreen()
+        app.draw(confirmation)
+        app.handle_key("y")
+
+        self.assertIn("It did not pass ordinary verification.", confirmation.text)
+        self.assertEqual(len(takes.select_calls), 1)
+        self.assertEqual(takes.select_calls[0][2:], (1, ""))
+        self.assertFalse(fixture["checkpoint"].exists())
+        archived = list(fixture["checkpoint"].parent.glob("chapter-0001.json.superseded-*"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(len(archived[0].name.rsplit("-", 1)[1]), 12)
+        self.assertTrue(app.takes_rows[0]["accepted"])
+        self.assertFalse(app.takes_rows[1]["accepted"])
+        self.assertIn("--chapters-only 1", app.notice)
+        self.assertIn("audiobook-render assemble", app.notice)
+
+    def test_take_selection_refusal_changes_no_acceptance_or_checkpoint(self):
+        app, fixture, takes, _ = self.rendered_app()
+        takes.error = ValueError("selection refused")
+        self.open_second_passage(app)
+        app.handle_key("t")
+        app.handle_key("a")
+
+        app.handle_key("y")
+
+        self.assertEqual(app.notice, "selection refused")
+        self.assertTrue(fixture["checkpoint"].exists())
+        self.assertEqual(list(fixture["checkpoint"].parent.glob("*.superseded-*")), [])
+        self.assertFalse(app.takes_rows[0]["accepted"])
+        self.assertTrue(app.takes_rows[1]["accepted"])
+
+    def test_ineligible_and_echo_takes_refuse_before_calling_selection(self):
+        cases = (("echo", {"echo": True, "eligible": False, "ineligible_reason": "history_echo"}),
+                 ("ineligible", {"echo": False, "eligible": False, "ineligible_reason": "corrupt_audio"}))
+        for name, changes in cases:
+            with self.subTest(name=name):
+                app, fixture, takes, _ = self.rendered_app(root=self.root / name)
+                request_hash = next(key for key, clip in fixture["clips"].items() if clip["segment_id"] == "s2")
+                takes.rows_by_hash[request_hash][0].update(changes)
+                self.open_second_passage(app)
+                app.handle_key("t")
+
+                app.handle_key("a")
+
+                self.assertEqual(app.view, "takes")
+                self.assertEqual(takes.select_calls, [])
+                self.assertIn(changes["ineligible_reason"], app.notice)
+                self.assertTrue(fixture["checkpoint"].exists())
+
+    def test_takes_view_reports_a_book_without_render_state(self):
+        app, _, _ = self.app()
+        self.open_second_passage(app)
+
+        app.handle_key("t")
+        screen = FakeScreen()
+        app.draw(screen)
+
+        self.assertEqual(app.view, "takes")
+        self.assertIn("Not rendered: this book has no render-work directory.", app.notice)
+        self.assertIn("No rendered clips for this passage.", screen.text)
+
     def test_save_publishes_revised_document_and_clears_pending_edits(self):
         app, revision, related_calls = self.app()
         original_hash = hashlib.sha256((app.directory / "manifest.json").read_bytes()).hexdigest()
@@ -310,11 +569,14 @@ class ReviewAppTests(unittest.TestCase):
         self.assertIn("Chapter One", screen.text)
 
     def test_cli_dispatches_review_ui_with_the_resolved_directory(self):
-        with patch("epub_tts_narrator.review_tui.run_review") as review:
-            status = main(["review-ui", str(self.root / "book"), "--config", str(self.root / "config.toml")])
+        config_path = self.root / "config.toml"
+        with (patch("epub_tts_narrator.review_tui.run_review") as review,
+              patch("epub_tts_narrator.cli.load_config", return_value={"casting": {"player": ["fixture-player"]}}) as config):
+            status = main(["review-ui", str(self.root / "book"), "--config", str(config_path)])
 
         self.assertEqual(status, 0)
-        review.assert_called_once_with((self.root / "book").resolve())
+        config.assert_called_once_with(config_path)
+        review.assert_called_once_with((self.root / "book").resolve(), player_command=["fixture-player"])
 
     def test_non_tty_cli_returns_the_interactive_terminal_error_before_loading(self):
         stdout, stderr = io.StringIO(), io.StringIO()

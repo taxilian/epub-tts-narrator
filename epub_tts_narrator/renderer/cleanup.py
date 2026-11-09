@@ -115,7 +115,7 @@ def _request(record, path):
 
 def _normalized(record, directory, plan, *, request_hash, attempt=None):
     number = record.get("attempt")
-    if 'exhaustion_selection' in record.get('engine_metadata', {}):
+    if {'exhaustion_selection', 'manual_selection'}.intersection(record.get('engine_metadata', {})):
         from .exhaustion_selection import validate_record
         validate_record(record)
         if not _hash(record.get('audio_sha256')):

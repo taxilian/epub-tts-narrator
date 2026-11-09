@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 
-from .cli import script_partitions
 from .contracts import has_assigned_speakers
 from .speaker_decisions import _role_labels
 
@@ -99,6 +98,7 @@ def _chapter_spans(document):
     rendered M4B actually use, so the review UI navigates those, not the
     raw spine chapters.
     """
+    from .cli import script_partitions
     segments = document["segments"]
     spans = []
     cursor = 0
