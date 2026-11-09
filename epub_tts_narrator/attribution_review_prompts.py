@@ -3,7 +3,7 @@
 from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE
 
 
-REVIEW_VERSION = "2"
+REVIEW_VERSION = "3"
 LENSES = (
     ("attribution_reviewer_1", "Trace the actual speaker through speech tags, scene context, and continuing quotations."),
     ("attribution_reviewer_2", "Check every boundary between communicated words and narrative tags/actions; apply narrator and thought policies."),
@@ -40,6 +40,13 @@ Do not change the cast, identities, roles, voices, source, or performance_policy
 Only existing role IDs may be selected. Never change an explicit user correction
 (original segment basis=user). Brackets receive deterministic performance cues
 after this review; preserve every bracket and all source punctuation exactly.
+Some books mark direct speech with dashes instead of quotation marks, as in
+"-I learned the language- she replied.- A very long time ago-" or a paragraph
+that closes with a stray apostrophe. Copy source punctuation exactly: never
+add, remove, or convert quotation marks, apostrophes, or dashes. A dialogue
+segment in such a book begins and ends with the source's own dashes and must
+not be wrapped in quotation marks the source does not contain, and a block's
+reconstructed segments must end exactly where the source block ends.
 Only evidence visible in target_units or context_units can support a decision.
 Cast descriptions, existing assignments, and suggestions are fallible context.
 Do not reject a source-supported, policy-correct role assignment merely because
