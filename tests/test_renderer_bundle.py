@@ -278,7 +278,7 @@ class RendererBundleTests(unittest.TestCase):
                 self.assertEqual(chunks[0]["source_ranges"], [{"start": 0, "end": len(text)}])
 
     def test_standalone_asterisk_dividers_are_source_mapped_silent_controls(self):
-        for text in ("* * *", "***", "  *  *\t*\n", "* * * *"):
+        for text in ("* * *", "***", "  *  *\t*\n", "* * * *", "*", "**", "* *"):
             with self.subTest(text=text):
                 document = book_with_text(text)
                 before = deepcopy(document)

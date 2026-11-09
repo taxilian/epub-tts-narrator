@@ -14,7 +14,7 @@ from .common import digest, file_hash, read_json, regular_file
 from .quality import normalize_words
 
 
-_SCENE_DIVIDER = re.compile(r"(?:\s*\*){3,}\s*")
+_SCENE_DIVIDER = re.compile(r"(?:\s*\*)+\s*")
 
 
 def chunk_identity_fingerprint(manifest):
@@ -165,8 +165,10 @@ def ranges(indices):
 def is_silent_control(text: str) -> bool:
     """Return whether exact chunk text is a deliberate no-speech control.
 
-    A standalone run of at least three asterisks is a typographic scene
-    divider; asterisk-only text has no speakable words in any case.
+    A standalone run of asterisks (one or more) is a typographic scene divider:
+    a lone asterisk is a divider in this layout too, and asterisk-only text has
+    no speakable words in any case. Asterisks mixed with any other content
+    retain their ordinary speech policy.
     """
     return not normalize_words(text) or _SCENE_DIVIDER.fullmatch(text) is not None
 
