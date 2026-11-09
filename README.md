@@ -92,6 +92,14 @@ epub-tts-narrator verify-attribution runs/book-01 --chapter 5 \
   --interactive
 ```
 
+Browse and correct a finished book by hand with `review-ui` (or `just review-ui`):
+
+```sh
+epub-tts-narrator review-ui runs/book-01
+```
+
+It opens a chapter list, shows each passage with its reader in a distinct per-reader color, and on Enter reveals the passage's full metadata with edits: reassign any existing cast member (multi-select composes simultaneous speech), mark a passage unresolved, edit its delivery direction, or toggle the review flag. Saving publishes the same receipt-bound attribution revisions as `verify-attribution --apply`, with backups and series descendant rebinding; the published cast never changes and no model calls are made.
+
 Analysis is resumable: after a failure, rerun the same command. Validated model responses and journaled interactive speaker choices are reused. The output directory contains a `.analysis-pending/` workspace until publication, so an interrupted run resumes completed stages rather than starting over. Unassigned speech requires an explicit speaker choice and blocks rendering; advisory notes do not.
 
 `refresh-voice-profiles` never touches source text, segments, attribution, characters, roles, voice identity or order, audition scripts, reference recordings, or render caches. It rebinds the hidden `cast_fingerprint` records (analysis provenance and the book-local `audition-scripts.json`) so casting keeps working, backs up the originals, and refreshes descendant continuation links in the same transaction. The next render picks up the new profiles automatically; rerunning after everything is current makes no changes.

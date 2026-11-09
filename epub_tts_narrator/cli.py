@@ -64,6 +64,17 @@ def _speaker_judge(config):
                      timeout_seconds=settings["timeout_seconds"])
 
 
+def _run_directory_command(args):
+    """Dispatch completed-book commands that need no shared pipeline state."""
+    if args.command == "review-ui":
+        from .review_tui import run_review
+        run_review(args.directory.resolve())
+        return 0
+    from .voice_profile_refresh import refresh_book_voice_profiles
+    refresh_book_voice_profiles(args.directory, args.config, workers=args.workers)
+    return 0
+
+
 def read_analysis(path):
     document = read_json(path)
     errors = validate_document(document)
@@ -304,6 +315,11 @@ def parser():
     verification.add_argument("--apply", action="store_true", help="Apply the complete audited document after printing findings")
     verification.add_argument("--interactive", action="store_true", help="Choose each correction interactively; takes precedence over --apply")
     verification.add_argument("--workers", type=int, default=3, help="Concurrent model requests, 1-5 (default 3)")
+    review_ui = commands.add_parser(
+        "review-ui", help="Browse and edit passages in a published book with an interactive terminal UI")
+    review_ui.add_argument("directory", type=Path, help="Completed analysis directory to review")
+    review_ui.add_argument("--config", type=Path,
+                           help="Global TOML file (accepted for command consistency; review-ui makes no model calls)")
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
     speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
     speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -658,10 +674,8 @@ def main(argv=None):
             print(f"Applying {len(applied)} accepted correction(s).")
             publish(revised)
             return 0
-        if args.command == "refresh-voice-profiles":
-            from .voice_profile_refresh import refresh_book_voice_profiles
-            refresh_book_voice_profiles(args.directory, args.config, workers=args.workers)
-            return 0
+        if args.command in {"refresh-voice-profiles", "review-ui"}:
+            return _run_directory_command(args)
         directory_mode = (args.command == "analyze" and
                           (args.input.is_dir() or args.output is None or args.output.suffix.lower() != ".json"))
         if args.command == "analyze" and directory_mode:
