@@ -1,6 +1,7 @@
 """Pure behavior tests for the published-book review model."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -11,9 +12,11 @@ from epub_tts_narrator.review_tui_model import (
     XTERM_RGB, apply_edits, contrast_ok, contrast_ratio, edit_direction,
     edit_review, edit_speaker, metadata, palette, passages, toc,
 )
-from epub_tts_narrator.review_tui_render import RenderIndex, TakeRow, format_take, playback_notice
+from epub_tts_narrator.review_tui_render import (
+    RenderIndex, TakeRow, format_take, load_failed_chapters, playback_notice,
+)
 from tests.test_contracts import valid_document
-from tests.test_review_tui import add_render_work, publish_book
+from tests.test_review_tui import add_failure_status, add_render_work, publish_book
 
 
 Document = dict[str, Any]
@@ -371,6 +374,74 @@ class RenderReviewModelTests(unittest.TestCase):
 
         self.assertEqual(chapter["status"], "render_work_missing")
         self.assertEqual(chapter["segments"], {})
+
+    def test_status_json_failed_chapters_parse_with_optional_exact_linkage(self):
+        work = self.root / "work"
+        work.mkdir()
+        record = {"status": "blocked", "error_type": "ChaptersRenderFailed",
+                  "error": "Rendering incomplete: 2 chapters failed.",
+                  "failed_chapters": [
+                      {"number": 2, "error_type": "SpeechVerificationFailed",
+                       "error": "Verification exhausted", "segment_ids": ["s4", "s9"],
+                       "chunk_id": "chunk-2", "request_hash": "ab" * 32},
+                      {"number": 5, "error_type": "RenderBlocked", "error": "Chapter cache unreadable"},
+                      "not-a-dict",
+                      {"number": "6", "error_type": "RenderBlocked", "error": "bad number"},
+                      {"number": 7, "error_type": "RenderBlocked"},
+                  ]}
+        (work / "status.json").write_text(json.dumps(record), encoding="utf-8")
+
+        failures = load_failed_chapters(work)
+
+        self.assertEqual(failures, {
+            2: {"number": 2, "error_type": "SpeechVerificationFailed",
+                "error": "Verification exhausted", "segment_ids": ["s4", "s9"],
+                "chunk_id": "chunk-2", "request_hash": "ab" * 32},
+            5: {"number": 5, "error_type": "RenderBlocked",
+                "error": "Chapter cache unreadable", "segment_ids": []},
+        })
+
+    def test_failures_require_the_aggregate_chapters_render_failed_record(self):
+        work = self.root / "work"
+        work.mkdir()
+        cases = (
+            {"status": "blocked", "error_type": "RenderBlocked", "error": "outage"},
+            {"status": "blocked", "error_type": "ChaptersRenderFailed", "error": "x",
+             "failed_chapters": "not-a-list"},
+            {"status": "blocked", "error_type": "ChaptersRenderFailed", "error": "x"},
+        )
+        for record in cases:
+            with self.subTest(record=record):
+                (work / "status.json").write_text(json.dumps(record), encoding="utf-8")
+                self.assertEqual(load_failed_chapters(work), {})
+        (work / "status.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(load_failed_chapters(work), {})
+        self.assertEqual(load_failed_chapters(self.root / "missing"), {})
+
+    def test_render_index_failures_come_from_the_books_render_work_status(self):
+        directory, _ = publish_book(self.root)
+        work = add_failure_status(directory, 1, error="Verification exhausted",
+                                  segment_ids=["s2"], chunk_id="chunk-1")
+        self.assertEqual(work, directory / "render-work")
+        index = RenderIndex(directory)
+
+        failures = index.failures()
+
+        self.assertEqual(failures, {1: {"number": 1, "error_type": "SpeechVerificationFailed",
+                                        "error": "Verification exhausted",
+                                        "segment_ids": ["s2"], "chunk_id": "chunk-1"}})
+        self.assertIs(index.failures(), failures)
+
+    def test_render_index_without_render_work_or_after_reset_has_no_failures(self):
+        directory, _ = publish_book(self.root)
+        index = RenderIndex(directory)
+        self.assertEqual(index.failures(), {})
+
+        add_failure_status(directory, 1)
+        index.reset()
+
+        self.assertEqual(index.failures(), {1: {"number": 1, "error_type": "SpeechVerificationFailed",
+                                                "error": "Verification exhausted", "segment_ids": []}})
 
     def test_take_format_includes_acceptance_verification_duration_and_eligibility_without_transcript(self):
         row: TakeRow = {"attempt": 3, "accepted": True, "audio_path": None, "passed": False, "reasons": ["text_mismatch"],

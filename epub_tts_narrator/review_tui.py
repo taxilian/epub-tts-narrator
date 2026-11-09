@@ -97,11 +97,28 @@ class ReviewApp:
     def _effective_document(self):
         return apply_edits(self.document, self.pending) if self.pending else self.document
 
+    def _chapter_failure(self, chapter_index=None):
+        """Return the persisted render failure for one chapter, if any."""
+        index = self.chapter_index if chapter_index is None else chapter_index
+        try:
+            return self.render_index.failures().get(index + 1)
+        except (ValueError, OSError):
+            return None
+
     def _toc_rows(self):
-        return toc(self._effective_document())
+        rows = toc(self._effective_document())
+        for row in rows:
+            row["failure"] = self._chapter_failure(row["id"])
+        return rows
 
     def _passage_rows(self):
-        return passages(self._effective_document(), self.chapter_index)
+        rows = passages(self._effective_document(), self.chapter_index)
+        failure = self._chapter_failure()
+        known_ids = {row["segment_id"] for row in rows}
+        failed_ids = set(failure["segment_ids"]) & known_ids if failure else set()
+        for row in rows:
+            row["failed"] = row["segment_id"] in failed_ids
+        return rows
 
     def _segment(self, segment_id):
         if segment_id in self.pending:
@@ -127,6 +144,22 @@ class ReviewApp:
     def _move_passage(self, amount):
         count = len(self._passage_rows())
         self.passage_index = max(0, min(count - 1, self.passage_index + amount))
+
+    def _jump_to_failure(self):
+        """Open the chapter at its first known failed passage, when linkage exists."""
+        failure = self._chapter_failure()
+        if failure is None:
+            self.notice = "This chapter has no recorded render failure."
+            return
+        rows = self._passage_rows()
+        target = next((index for index, row in enumerate(rows) if row["failed"]), None)
+        if target is None:
+            self.notice = (f"Chapter {self.chapter_index + 1} render failed "
+                           f"({failure['error_type']}); no exact failed-passage linkage was recorded.")
+            return
+        self.passage_index = target
+        self.passage_scroll = 0
+        self.view = "passages"
 
     def _open_info(self):
         segment_id = self._current_passage_id()
@@ -188,6 +221,14 @@ class ReviewApp:
                     "segments": {}, "error": _flat(exc)}
 
     def _not_rendered_notice(self, chapter: ChapterIndex):
+        failure = self._chapter_failure()
+        if failure is not None:
+            # The failure record alone never proves audio absence; only the
+            # empty segment index does. Rejected takes can stay playable.
+            return (f"Render failed for chapter {self.chapter_index + 1} "
+                    f"({failure['error_type']}): {_flat(failure['error'])} "
+                    "No completed audio is indexed for this passage; "
+                    "rerun render to regenerate it.")
         status = chapter["status"]
         if status == "render_work_missing":
             return "Not rendered: this book has no render-work directory."
@@ -386,6 +427,9 @@ class ReviewApp:
         if backup:
             self.progress.append("Original analysis files and revision journal: " + str(backup))
         self.notice = "Saved revision"
+        if self.render_index.failures():
+            self.progress.append("Render failures are unchanged: failed chapters still need a successful rerender.")
+            self.notice = "Saved revision; recorded render failures still need a successful rerender"
         return True
 
     def _handle_confirm_quit(self, key):
@@ -476,6 +520,8 @@ class ReviewApp:
             elif key == "ENTER":
                 self.passage_index = self.passage_scroll = 0
                 self.view = "passages"
+            elif key in {"f", "F"}:
+                self._jump_to_failure()
         elif self.view == "passages":
             if key in {"UP", "k"}:
                 self._move_passage(-1)
@@ -487,6 +533,8 @@ class ReviewApp:
                 self._move_passage(self.page_size)
             elif key == "ENTER":
                 self._open_info()
+            elif key in {"f", "F"}:
+                self._jump_to_failure()
             elif key == "ESC":
                 self.view = "toc"
         elif self.view == "info":
@@ -544,6 +592,22 @@ class ReviewApp:
             rows.append((None, f"Attribution evidence {item['block_id']}: {item['quote']}"))
         for item in delivery["evidence"]:
             rows.append((None, f"Delivery evidence {item['block_id']}: {item['quote']}"))
+        failure = self._chapter_failure()
+        if failure is not None:
+            rows.append((None, "Render: FAILED — " + failure["error_type"] + ": " + _flat(failure["error"])))
+            linked = set(failure["segment_ids"])
+            if data["id"] in linked:
+                rows.append((None, "The recorded failure is linked to this passage."))
+                rows.append((None, "These edits stay pending until a successful rerender."))
+            elif linked:
+                rows.append((None, "The recorded failure is linked to another passage, not this one."))
+                rows.append((None, "This chapter still needs a successful rerender before edits "
+                                   "reach audio."))
+            else:
+                rows.append((None, "The render failure has no exact passage linkage."))
+                rows.append((None, "Which passages lack completed audio is unknown until a "
+                                   "successful rerender."))
+                rows.append((None, "These edits stay pending until then."))
         controls = data["performance_controls"]
         kinds = ", ".join(f"{kind}={count}" for kind, count in sorted(controls["kinds"].items())) or "none"
         rows.append((None, f"Performance controls (read-only): {controls['total']} ({kinds})"))
@@ -575,16 +639,20 @@ class ReviewApp:
         for line, row in enumerate(rows[start:start + self.page_size], 3):
             index = start + line - 3
             marker = "> " if index == self.chapter_index else "  "
-            text = (f"{marker}{row['title']}  {row['passage_count']} passages; "
+            prefix = f"FAILED {row['failure']['error_type']}  " if row.get("failure") else ""
+            text = (f"{marker}{prefix}{row['title']}  {row['passage_count']} passages; "
                     f"{row['review_count']} review; {row['unassigned_count']} unassigned")
             screen.write(line, 0, text, _selected(index == self.chapter_index))
-        self._footer(screen, "Up/Down select  Enter passages  S save  Q quit")
+        self._footer(screen, "Up/Down select  Enter passages  F failed passage  S save  Q quit")
 
     def _draw_passages(self, screen):
         height, _ = screen.size()
         rows = self._passage_rows()
         chapter = self._toc_rows()[self.chapter_index]
-        self._header(screen, chapter["title"] + f"  Passage {self.passage_index + 1}/{len(rows)}")
+        title = chapter["title"] + f"  Passage {self.passage_index + 1}/{len(rows)}"
+        if chapter.get("failure"):
+            title = "FAILED  " + title + "  " + _flat(chapter["failure"]["error"])
+        self._header(screen, title)
         self.page_size = max(1, height - 5)
         if self.passage_index < self.passage_scroll:
             self.passage_scroll = self.passage_index
@@ -596,6 +664,9 @@ class ReviewApp:
             badge = f"{_KIND_BADGES.get(row['kind'], '?')}{'!' if row['review_required'] else ' '}"
             screen.write(line, 0, ("> " if selected else "  ") + badge + " ", _selected(selected))
             x = 5
+            if row.get("failed"):
+                screen.write(line, x, "[failed] ", _selected(selected))
+                x += len("[failed] ")
             if row["speaker_labels"]:
                 for speaker_index, (label, role_index) in enumerate(zip(row["speaker_labels"], row["role_indices"])):
                     if speaker_index:
@@ -607,7 +678,7 @@ class ReviewApp:
                 screen.write(line, x, "Unassigned", _selected(selected))
                 x += len("Unassigned")
             screen.write(line, x, "  " + _flat(row["text"]), _selected(selected))
-        self._footer(screen, "Up/Down/PgUp/PgDn  Enter info  Esc chapters  S save  Q quit")
+        self._footer(screen, "Up/Down/PgUp/PgDn  Enter info  F failed passage  Esc chapters  S save  Q quit")
 
     def _draw_info(self, screen):
         height, _ = screen.size()
@@ -630,6 +701,11 @@ class ReviewApp:
         self._header(screen, f"Rendered takes  Chapter {chapter_number}")
         if not self.takes_clips:
             screen.write(3, 0, "No rendered clips for this passage.", None)
+            failure = self._chapter_failure()
+            if failure is not None:
+                screen.write(4, 0, "Render failed: " + _flat(failure["error_type"]) + ": "
+                             + _flat(failure["error"]), None)
+                screen.write(5, 0, "No completed audio is indexed for this passage.", None)
             self._footer(screen, "Esc passage")
             return
         clip = self.takes_clips[self.takes_chunk_index]

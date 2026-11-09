@@ -24,6 +24,21 @@ class ChapterIndex(TypedDict):
     error: NotRequired[str]
 
 
+class ChapterFailure(TypedDict):
+    """One persisted chapter failure from render-work/status.json.
+
+    ``segment_ids`` are the renderer's own stable segment IDs; empty means the
+    failure was only recorded at chapter level and no exact passage linkage
+    exists. ``chunk_id``/``request_hash`` are optional renderer linkage.
+    """
+    number: int
+    error_type: str
+    error: str
+    segment_ids: list[str]
+    chunk_id: NotRequired[str]
+    request_hash: NotRequired[str]
+
+
 class TakeRow(TypedDict):
     attempt: int
     accepted: bool
@@ -90,6 +105,42 @@ def _read_json(path: str | Path) -> dict[str, Any]:
     return value
 
 
+def load_failed_chapters(work_directory: str | Path) -> dict[int, ChapterFailure]:
+    """Parse failed_chapters persisted by ChaptersRenderFailed in status.json.
+
+    Missing, malformed, or non-aggregate status records simply carry no
+    failures; the review UI then shows the ordinary not-rendered state.
+    """
+    try:
+        record = _read_json(Path(work_directory) / "status.json")
+    except (OSError, ValueError):
+        return {}
+    if record.get("error_type") != "ChaptersRenderFailed":
+        return {}
+    entries = record.get("failed_chapters")
+    if not isinstance(entries, list):
+        return {}
+    failures: dict[int, ChapterFailure] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        number, error_type, error = entry.get("number"), entry.get("error_type"), entry.get("error")
+        if type(number) is not int or not isinstance(error_type, str) or not isinstance(error, str):
+            continue
+        failure: ChapterFailure = {"number": number, "error_type": error_type,
+                                   "error": error, "segment_ids": []}
+        segment_ids = entry.get("segment_ids")
+        if isinstance(segment_ids, list):
+            failure["segment_ids"] = [segment_id for segment_id in segment_ids
+                                      if isinstance(segment_id, str)]
+        if isinstance(entry.get("chunk_id"), str):
+            failure["chunk_id"] = entry["chunk_id"]
+        if isinstance(entry.get("request_hash"), str):
+            failure["request_hash"] = entry["request_hash"]
+        failures[number] = failure
+    return failures
+
+
 def _acceptance_clips(acceptance: list[Any] | None):
     """Yield (chunk_id, request_hash) for ordinary and simultaneous clip records."""
     for row in acceptance if isinstance(acceptance, list) else []:
@@ -142,6 +193,7 @@ class RenderIndex:
         self.config = config
         self._bundle: dict[str, Any] | None = None
         self._chapters: dict[int, ChapterIndex] = {}
+        self._failures: dict[int, ChapterFailure] | None = None
 
     def _settings(self) -> dict[str, Any]:
         from .renderer.config import DEFAULTS
@@ -197,7 +249,28 @@ class RenderIndex:
             self._chapters[chapter_number] = self._load(chapter_number)
         return self._chapters[chapter_number]
 
+    def failures(self) -> dict[int, ChapterFailure]:
+        """Return the cached book-level failure map from render-work/status.json."""
+        if self._failures is None:
+            self._failures = self._load_failures()
+        return self._failures
+
+    def _load_failures(self) -> dict[int, ChapterFailure]:
+        from .renderer.book_context import resolve_book_config
+        from .renderer.bundle import load_bundle
+        try:
+            if self._bundle is None:
+                self._bundle = load_bundle(self.directory)
+            resolved: dict[str, Any] = resolve_book_config(self._bundle, self._settings())
+        except (ValueError, OSError):
+            return {}
+        work = Path(resolved["render"]["work_dir"])
+        if not work.is_dir():
+            return {}
+        return load_failed_chapters(work)
+
     def reset(self) -> None:
-        """Drop saved-document and chapter assumptions after an attribution publication."""
+        """Drop saved-document, chapter, and failure assumptions after a publication."""
         self._bundle = None
         self._chapters.clear()
+        self._failures = None

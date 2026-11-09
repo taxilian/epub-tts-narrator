@@ -119,6 +119,26 @@ def add_render_work(directory, *, drift=False) -> dict[str, Any]:
     return {"work": work, "checkpoint": checkpoint, "acceptance": acceptance, "clips": clips}
 
 
+def add_failure_status(directory, number, *, error_type="SpeechVerificationFailed",
+                       error="Verification exhausted", segment_ids=None,
+                       chunk_id=None, request_hash=None):
+    """Persist one ChaptersRenderFailed chapter entry in render-work/status.json."""
+    work = Path(directory) / "render-work"
+    work.mkdir(parents=True, exist_ok=True)
+    entry = {"number": number, "error_type": error_type, "error": error}
+    if segment_ids is not None:
+        entry["segment_ids"] = list(segment_ids)
+    if chunk_id is not None:
+        entry["chunk_id"] = chunk_id
+    if request_hash is not None:
+        entry["request_hash"] = request_hash
+    record = {"status": "blocked", "error_type": "ChaptersRenderFailed",
+              "error": "Rendering incomplete: 1 chapter failed; completed chapters were retained.",
+              "failed_chapters": [entry]}
+    (work / "status.json").write_text(json.dumps(record), encoding="utf-8")
+    return work
+
+
 class TakeSelectionStub:
     def __init__(self, fixture: dict[str, Any]):
         self.fixture = fixture
@@ -193,6 +213,19 @@ class FakeScreen:
     @property
     def text(self):
         return "\n".join(row["text"] for row in self.current)
+
+
+class ClippedScreen(FakeScreen):
+    """FakeScreen that clips each write the way CursesScreen clips at the edge."""
+
+    def write(self, y, x, text, attributes):
+        height, width = self.height, self.width
+        if y < 0 or y >= height or x < 0 or x >= width or not text:
+            return
+        available = width - x - (1 if y == height - 1 else 0)
+        if available <= 0:
+            return
+        super().write(y, x, str(text)[:available], attributes)
 
 
 class RevisionStub:
@@ -483,6 +516,221 @@ class ReviewAppTests(unittest.TestCase):
                 self.assertEqual(takes.select_calls, [])
                 self.assertIn(changes["ineligible_reason"], app.notice)
                 self.assertTrue(fixture["checkpoint"].exists())
+
+    def test_toc_marks_failed_chapters_with_the_saved_error_type(self):
+        app, _, _ = self.app(two_chapters=True)
+        add_failure_status(app.directory, 2, error_type="SpeechVerificationFailed",
+                           error="Verification exhausted")
+
+        screen = FakeScreen()
+        app.draw(screen)
+
+        self.assertIn("FAILED SpeechVerificationFailed", screen.text)
+        self.assertFalse(app.notice)
+
+    def test_jump_key_opens_the_chapter_at_its_first_known_failed_passage(self):
+        app, _, _ = self.app(two_chapters=True)
+        add_failure_status(app.directory, 2, segment_ids=["s4"])
+        app.handle_key("DOWN")
+
+        app.handle_key("f")
+
+        self.assertEqual(app.view, "passages")
+        self.assertEqual(app.passage_index, 0)
+        rows = app._passage_rows()
+        self.assertEqual(rows[0]["segment_id"], "s4")
+        self.assertTrue(rows[0]["failed"])
+        screen = FakeScreen()
+        app.draw(screen)
+        self.assertIn("Later, Lena waited.", screen.text)
+        self.assertIn("[failed]", screen.text)
+        self.assertIn("FAILED Chapter Two", screen.text)
+        self.assertIn("Verification exhausted", screen.text)
+
+    def test_jump_key_without_linkage_keeps_the_chapter_only_failure_visible(self):
+        app, _, _ = self.app(two_chapters=True)
+        add_failure_status(app.directory, 2, error_type="RenderBlocked",
+                           error="Chapter cache unreadable")
+        app.handle_key("DOWN")
+
+        app.handle_key("f")
+
+        self.assertEqual(app.view, "toc")
+        self.assertIn("no exact failed-passage linkage", app.notice)
+        screen = FakeScreen()
+        app.draw(screen)
+        self.assertIn("FAILED RenderBlocked", screen.text)
+
+    def test_unknown_segment_ids_never_mark_passages_failed(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1, segment_ids=["bogus", "s2"])
+        app.handle_key("ENTER")
+
+        rows = app._passage_rows()
+
+        self.assertEqual([row["failed"] for row in rows], [False, True, False])
+
+    def test_failed_chapter_reports_missing_indexed_audio_instead_of_claiming_absence(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1, error="Verification exhausted")
+        app.handle_key("ENTER")
+        app.handle_key("ENTER")
+
+        app.handle_key("p", screen=FakeScreen())
+
+        self.assertEqual(app.view, "info")
+        self.assertIn("Render failed for chapter 1", app.notice)
+        self.assertIn("(SpeechVerificationFailed)", app.notice)
+        self.assertIn("Verification exhausted", app.notice)
+        self.assertIn("No completed audio is indexed for this passage", app.notice)
+        self.assertNotIn("No audio exists", app.notice)
+
+        app.handle_key("t")
+        screen = FakeScreen()
+        app.draw(screen)
+
+        self.assertEqual(app.view, "takes")
+        self.assertIn("No completed audio is indexed for this passage", app.notice)
+        self.assertIn("No completed audio is indexed for this passage.", screen.text)
+        self.assertIn("Render failed: SpeechVerificationFailed", screen.text)
+
+    def test_info_dialog_shows_the_saved_error_and_pending_rerender_state(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1, error="Verification exhausted", segment_ids=["s2"])
+        self.open_second_passage(app)
+        screen = FakeScreen()
+
+        app.draw(screen)
+
+        self.assertIn("Render: FAILED — SpeechVerificationFailed: Verification exhausted", screen.text)
+        self.assertIn("linked to this passage", screen.text)
+        self.assertIn("stay pending until a successful rerender", screen.text)
+
+    def test_info_dialog_rerender_guidance_stays_visible_at_80_columns(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1, error="Verification exhausted", segment_ids=["s2"])
+        self.open_second_passage(app)
+        screen = ClippedScreen(width=80)
+
+        app.draw(screen)
+
+        self.assertIn("linked to this passage", screen.text)
+        self.assertIn("stay pending until a successful rerender", screen.text)
+        for row in screen.current:
+            self.assertLessEqual(row["x"] + len(row["text"]), 80, msg=row["text"])
+
+    def test_chapter_only_failure_shows_the_generic_pending_rerender_notice(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1)
+        self.open_second_passage(app)
+        screen = FakeScreen()
+
+        app.draw(screen)
+
+        self.assertIn("no exact passage linkage", screen.text)
+        self.assertIn("Which passages lack completed audio is unknown", screen.text)
+
+    def test_unaffected_passage_in_a_failed_chapter_reports_linkage_elsewhere(self):
+        app, _, _ = self.app()
+        add_failure_status(app.directory, 1, error="Verification exhausted", segment_ids=["s2"])
+        app.handle_key("ENTER")
+        app.handle_key("DOWN")
+        app.handle_key("DOWN")
+        app.handle_key("ENTER")
+        screen = FakeScreen()
+
+        app.draw(screen)
+
+        self.assertEqual(app.info_segment_id, "s3")
+        self.assertIn("Render: FAILED — SpeechVerificationFailed: Verification exhausted", screen.text)
+        self.assertIn("linked to another passage, not this one", screen.text)
+        self.assertNotIn("no exact passage linkage", screen.text)
+
+    def test_failed_chapter_with_indexed_takes_keeps_playback_available(self):
+        app, _, takes, playback = self.rendered_app()
+        add_failure_status(app.directory, 1, error="Verification exhausted", segment_ids=["s2"])
+        self.open_second_passage(app)
+        info_screen = FakeScreen()
+        app.draw(info_screen)
+
+        self.assertIn("Render: FAILED — SpeechVerificationFailed: Verification exhausted", info_screen.text)
+        self.assertIn("linked to this passage", info_screen.text)
+
+        app.handle_key("p", screen=FakeScreen())
+
+        self.assertEqual(len(playback.calls), 1)
+        self.assertTrue(playback.calls[0][1].endswith("attempt-002.wav"))
+
+        app.handle_key("t")
+
+        self.assertEqual(app.view, "takes")
+        self.assertEqual(len(takes.list_calls), 2)
+        self.assertEqual([row["attempt"] for row in app.takes_rows], [1, 2])
+        self.assertNotIn("No completed audio is indexed", app.notice)
+        self.assertNotIn("No audio exists", app.notice)
+
+    def test_editing_and_saving_a_failed_chapter_keeps_the_failure_pending_rerender(self):
+        app, revision, _ = self.app()
+        add_failure_status(app.directory, 1, segment_ids=["s2"])
+        self.open_second_passage(app)
+        app.handle_key("r")
+
+        app.handle_key("S")
+
+        self.assertEqual(len(revision.calls), 1)
+        self.assertIn("still need a successful rerender", app.notice)
+        info_screen = FakeScreen()
+        app.draw(info_screen)
+        self.assertIn("Render: FAILED", info_screen.text)
+        self.assertTrue(app._passage_rows()[1]["failed"])
+        app.handle_key("ESC")
+        app.handle_key("ESC")
+        self.assertEqual(app.view, "toc")
+        toc_screen = FakeScreen()
+        app.draw(toc_screen)
+        self.assertIn("FAILED SpeechVerificationFailed", toc_screen.text)
+
+    def test_toc_failure_marker_stays_visible_with_long_titles_at_80_columns(self):
+        document = review_document(two_chapters=True)
+        document["source"]["chapters"][1]["title"] = (
+            "Chapter Two: The Extremely Long Chapter Title That Would Push "
+            "Any Trailing Failure Marker Right Off The Narrow Terminal")
+        directory = self.root / "long-title-book"
+        registry = fresh_registry(directory)
+        linked = link_analysis(document, registry)
+        publish_directory(linked, registry, directory, export_bundle)
+        app = ReviewApp(directory, linked, revise_directories=RevisionStub(directory),
+                        related_directories=lambda directories: [directory])
+        add_failure_status(directory, 2, error="Verification exhausted")
+        app.handle_key("DOWN")
+        screen = ClippedScreen(width=80)
+
+        app.draw(screen)
+
+        failed_rows = [row for row in screen.current
+                       if "FAILED SpeechVerificationFailed" in row["text"]]
+        self.assertEqual(len(failed_rows), 1)
+        row = failed_rows[0]
+        self.assertTrue(row["text"].startswith("> FAILED SpeechVerificationFailed"))
+        self.assertLessEqual(row["x"] + len(row["text"]), 80)
+
+    def test_passage_failure_marker_stays_visible_with_long_passages_at_80_columns(self):
+        directory, document = publish_book(self.root, long_passage=True)
+        app = ReviewApp(directory, document, revise_directories=RevisionStub(directory),
+                        related_directories=lambda directories: [directory])
+        add_failure_status(directory, 1, error="Verification exhausted", segment_ids=["s3"])
+        app.handle_key("ENTER")
+        screen = ClippedScreen(width=80)
+
+        app.draw(screen)
+
+        marker = next(row for row in screen.current if "[failed]" in row["text"])
+        self.assertEqual(marker["x"], 5)
+        self.assertTrue(marker["text"].startswith("[failed] "))
+        self.assertLessEqual(marker["x"] + len(marker["text"]), 80)
+        header = next(row for row in screen.current if row["y"] == 0)
+        self.assertTrue(header["text"].startswith("FAILED Chapter One"))
+        self.assertLessEqual(len(header["text"]), 80)
 
     def test_takes_view_reports_a_book_without_render_state(self):
         app, _, _ = self.app()

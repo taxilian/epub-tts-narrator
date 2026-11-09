@@ -144,6 +144,74 @@ class ReviewTerminalTests(unittest.TestCase):
         os.write(self.master, b"q")
         self.finish()
 
+    def test_real_terminal_marks_failed_chapter_jumps_and_edits_without_audio(self):
+        from tests.test_review_tui import add_failure_status
+        add_failure_status(self.directory, 2, error="Verification exhausted", segment_ids=["s4"])
+        self.start()
+        self.wait_for(b"Review chapters 1/2")
+        self.wait_for(b"FAILED SpeechVerificationFailed")
+
+        os.write(self.master, b"\x1bOB")
+        self.wait_for(b"> FAILED SpeechVerificationFailed")
+        os.write(self.master, b"f")
+        self.wait_for(b"Verification exhausted")
+        self.wait_for(b"[failed]")
+
+        os.write(self.master, b"\r")
+        self.wait_for(b"Passage metadata")
+        self.wait_for(b"Render: FAILED")
+        os.write(self.master, b"\r")
+        self.wait_for(b"Choose existing speaker(s)")
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"Passage metadata")
+        os.write(self.master, b"q")
+        self.finish()
+        self._save_evidence("failed-chapter-flow")
+
+    def test_real_terminal_failure_markers_stay_visible_at_80_and_120_columns(self):
+        from tests.test_review_tui import add_failure_status, review_document
+        from epub_tts_narrator.analysis_directory import fresh_registry, publish_directory
+        from epub_tts_narrator.cli import export_bundle
+        from epub_tts_narrator.series import link_analysis
+        for cols in (80, 120):
+            with self.subTest(cols=cols):
+                document = review_document(long_passage=True)
+                document["source"]["chapters"][0]["title"] = (
+                    "Chapter One: The Extremely Long Chapter Title That Would Push "
+                    "Any Trailing Failure Marker Right Off The Narrow Terminal")
+                directory = self.root / f"wide-book-{cols}"
+                registry = fresh_registry(directory)
+                linked = link_analysis(document, registry)
+                publish_directory(linked, registry, directory, export_bundle)
+                add_failure_status(directory, 1, error="Verification exhausted", segment_ids=["s3"])
+                self._resize(cols)
+                self.start([sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui",
+                            str(directory)])
+                self.wait_for(b"FAILED SpeechVerificationFailed")
+                os.write(self.master, b"\r")
+                # The long title legitimately pushes the error text off the
+                # narrow header; the marker before the passage text is the
+                # guaranteed-visible evidence.
+                self.wait_for(b"[failed]")
+                os.write(self.master, b"q")
+                self.finish()
+                self._save_evidence(f"failure-markers-{cols}-cols")
+
+    def _resize(self, cols):
+        if self.slave >= 0:
+            os.close(self.slave)
+        os.close(self.master)
+        self.master, self.slave = pty.openpty()
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cols, 0, 0))
+        self.pending = b""
+        self.transcript = b""
+
+    def _save_evidence(self, name):
+        evidence = (Path(__file__).resolve().parent.parent / ".omo" / "evidence"
+                    / "review-ui-failures")
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / f"{name}.txt").write_bytes(self.transcript)
+
     def test_real_terminal_opens_takes_with_injected_audio_and_take_boundaries(self):
         add_render_work(self.directory)
         self.start([sys.executable, "-u", "-c", _REVIEW_WITH_FAKE_TAKES, str(self.directory)])
