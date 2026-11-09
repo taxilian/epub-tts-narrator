@@ -26,7 +26,7 @@ class ClipRepairState:
         self.path = Path(directory) / 'clip-repair.json'
         self.request, self.client = request, client
         self.lock = Lock()
-        self.binding = {'request_sha256': digest(request), 'policy': policy(client.identity)}
+        self.binding = {'request_sha256': digest(request), 'policy': policy(client.identity, request)}
         self.state = {'binding': self.binding, 'phase': 'pending', 'audit': None, 'parts': []}
         if self.path.exists() or self.path.is_symlink():
             saved = read_json(regular_file(self.path))
@@ -44,10 +44,15 @@ class ClipRepairState:
         if self.state['phase'] in {'rejected', 'evaluated', 'failed'}:
             return None
         if self.state['audit'] is None:
-            self.state['audit'] = {'identity': self.binding['policy'], 'payload': {
-                'mode': 'clip_repair', 'request': deepcopy(self.request), 'request_sha256': digest(self.request),
-                'failures': deepcopy(failures), 'remaining_starts': max(0, remaining)},
-                'proposal': None, 'reviews': [None, None]}
+            payload = {'mode': 'clip_repair', 'request': deepcopy(self.request),
+                       'request_sha256': digest(self.request),
+                       'failures': deepcopy(failures), 'remaining_starts': max(0, remaining)}
+            from .clip_repair_performance import controlled_repair_guidance
+            guidance = controlled_repair_guidance(self.request)
+            if guidance is not None:
+                payload['controlled_pronunciation'] = guidance
+            self.state['audit'] = {'identity': self.binding['policy'], 'payload': payload,
+                                   'proposal': None, 'reviews': [None, None]}
             self.state['proposal_received'] = False
             self.save()
         audit = self.state['audit']
@@ -69,6 +74,15 @@ class ClipRepairState:
             return None
         if not plan['parts']:
             self.state['phase'] = 'rejected'
+            self.save()
+            return None
+        try:
+            from .clip_repair_performance import project_plan_performance
+            project_plan_performance(self.request, plan)
+        except ValueError as exc:
+            self.state.update(phase='rejected', error_code=(
+                'unsupported_performance_controls'
+                if str(exc).startswith('Clip repair cannot preserve') else 'invalid_control_projection'))
             self.save()
             return None
         missing = [number for number in (1, 2) if audit['reviews'][number - 1] is None]

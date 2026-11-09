@@ -73,8 +73,10 @@ class PerformancePlanTests(unittest.TestCase):
         for phones in ("JH AE3 S", "JH1 AE1 S", "dʒ æ z", "JH  AE1 S", "JH AE1\nS", "<whisper>"):
             with self.subTest(phones=phones), self.assertRaises(ValueError):
                 validate_performance(record(text, pronunciation(text, 0, 3, phones)), text)
-        with self.assertRaises(ValueError):
-            validate_performance(record(text, pronunciation(text, 0, 9)), text)
+        two_word = record(text, pronunciation(text, 0, 9))
+        self.assertEqual(validate_performance(two_word, text), two_word)
+        with self.assertRaisesRegex(ValueError, "whole lexical words"):
+            validate_performance(record("Jas  spoke.", pronunciation("Jas  spoke.", 0, 10)), "Jas  spoke.")
         with self.assertRaisesRegex(ValueError, "part of a word"):
             validate_performance(record(text, pronunciation(text, 0, 2)), text)
 

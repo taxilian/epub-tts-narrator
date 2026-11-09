@@ -8,7 +8,9 @@ from .assembly import normalize_clip
 from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .clip_repair_contract import approved, confirm_part, logical_text
+from .clip_repair_performance import project_plan_performance, repair_traits
 from .clip_repair_state import ClipRecoveryUnavailable
+from .performance_runtime import verification_options
 from .quality import text_confirmation_unavailable, validate_audio, validation_key
 from .render_backlog import begin_attempt_ticket
 from .retry_budget import generation_attempts
@@ -21,6 +23,14 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
     if state['phase'] in {'failed', 'rejected'}:
         return None
     plan = approved(request, state['audit'])
+    try:
+        projected_performance = project_plan_performance(request, plan)
+    except ValueError as exc:
+        state.update(phase='rejected', error_code=(
+            'unsupported_performance_controls'
+            if str(exc).startswith('Clip repair cannot preserve') else 'invalid_control_projection'))
+        session.save()
+        return None
     maximum = config.get('verification', {}).get('max_resolution_attempts', 12)
     if 'attempt' not in state:
         state.update(attempt=max(generation_attempts(directory), default=0) + 1, phase='executing')
@@ -29,7 +39,8 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
     attempt = state['attempt']
     candidate_path = directory / f'attempt-{attempt:03d}.json'
     target = directory / speech_take_filename(request, attempt)
-    key = validation_key(logical_text(request), verifier, config['quality'], purpose='speech')
+    key = validation_key(logical_text(request), verifier, config['quality'], purpose='speech',
+                         **verification_options(request))
     base = {'request': request, 'request_hash': digest(request), 'attempt': attempt,
             'seed': request.get('base_seed', config['render']['seed']), 'validation_key': key}
     if candidate_path.exists():
@@ -66,12 +77,13 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
         folder.mkdir(exist_ok=True)
         for number, saved in enumerate(state['parts'], 1):
             part = plan['parts'][number - 1]
+            performance = projected_performance[number - 1]
             if saved['part'] != part:
                 raise ValueError('Pending clip repair part changed')
             if 'audio_sha256' in saved:
                 if file_hash(regular_file(folder / saved['audio_file'])) != saved['audio_sha256']:
                     raise ValueError('Completed clip repair part changed')
-                confirm_part(part, saved['metadata'])
+                confirm_part(request, part, saved['metadata'], performance=performance)
                 continue
             if 'raw_sha256' not in saved:
                 stop_if_requested()
@@ -87,10 +99,13 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                 session.save()
                 seed = int(digest({'request': request, 'part': number, 'start': saved['starts']})[:8], 16) % 2**32
                 try:
-                    metadata = generate(part, folder / saved['raw_file'], seed)
+                    if performance is None:
+                        metadata = generate(part, folder / saved['raw_file'], seed)
+                    else:
+                        metadata = generate(part, folder / saved['raw_file'], seed, performance=performance)
                     # Repair parts are joined; a join is never chapter history.
                     metadata = {key: value for key, value in metadata.items() if key != 'generated_codes'}
-                    confirm_part(part, metadata)
+                    confirm_part(request, part, metadata, performance=performance)
                 except (OSError, RuntimeError, ValueError) as exc:
                     state.update(phase='failed', error_code='synthesis_or_input_failure', error_type=type(exc).__name__)
                     session.save()
@@ -127,9 +142,15 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
             raise ValueError('Clip repair joined audio changed')
         if attempt_ticket is not None:
             attempt_ticket.update_bytes(regular_file(target).stat().st_size)
-        marker = {'audit': deepcopy(state['audit']), 'parts': [
-            {key: deepcopy(part[key]) for key in ('part', 'metadata', 'audio_sha256')} for part in state['parts']],
-            'audio_sha256': state['joined_sha256']}
+        evidence = []
+        for number, part in enumerate(state['parts'], 1):
+            item = {key: deepcopy(part[key]) for key in ('part', 'metadata', 'audio_sha256')}
+            if projected_performance[number - 1] is not None:
+                item['performance'] = deepcopy(projected_performance[number - 1])
+                item['traits'] = repair_traits(request)
+            evidence.append(item)
+        marker = {'audit': deepcopy(state['audit']), 'parts': evidence,
+                  'audio_sha256': state['joined_sha256']}
         metadata = {'synthesis_text': ' '.join(part['text'] for part in plan['parts']), 'clip_repair': marker}
         pending = {**base, 'audio_file': target.name, 'audio_sha256': state['joined_sha256'], 'engine_metadata': metadata,
                    'report': {'passed': False, 'reasons': ['verification_pending']}}

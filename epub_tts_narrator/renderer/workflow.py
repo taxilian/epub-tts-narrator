@@ -2211,15 +2211,20 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 direction=performance_direction(chunk, voice_id, scene_direction=replacement))
             return {"synthesis_text": prepared, **metadata}
 
-        def synthesize_plan_part(part, path, seed, v=voice):
+        def synthesize_plan_part(part, path, seed, v=voice, performance=None):
             from .clip_repair_contract import part_direction
-            prepared = trim_speech_text(part['text'])
-            metadata = engine.synthesize(prepared, v, path, seed=seed, direction=part_direction(part))
-            return {'synthesis_text': prepared, **metadata}
+            prepared = part['text'] if performance is not None else trim_speech_text(part['text'])
+            options = ({'performance': performance, 'traits': expressive_options.get('traits', '')}
+                       if performance is not None else {})
+            metadata = engine.synthesize(prepared, v, path, seed=seed,
+                                         direction=part_direction(part), **options)
+            if performance is None:
+                return {'synthesis_text': prepared, **metadata}
+            return metadata
 
-        recovery = {} if is_expressive(chunk) else {
+        recovery = ({'generate_plan_part': synthesize_plan_part} if is_expressive(chunk) else {
             "synthesize_part": synthesize_part, "generate_plain": synthesize_plain,
-            "generate_direction": synthesize_direction, "generate_plan_part": synthesize_plan_part}
+            "generate_direction": synthesize_direction, "generate_plan_part": synthesize_plan_part})
         wav, accepted = take(chunk["spoken_text"], generate, request, **recovery)
         lanes.append(dict(speaker, wav_path=str(wav), **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")}))

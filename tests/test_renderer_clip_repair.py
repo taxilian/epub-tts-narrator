@@ -1,16 +1,21 @@
 from copy import deepcopy
+from pathlib import Path
 from threading import Barrier, Lock
+from types import SimpleNamespace
+import tempfile
 import unittest
 import wave
 from unittest.mock import patch
 
+from epub_tts_narrator.renderer import clip_recovery
+from epub_tts_narrator.renderer.clip_repair_state import ClipRepairState
 from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver, _accept_pairs
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import VerificationUnavailable
 import test_renderer_direction_repair as fixtures
 from test_renderer_recurring_resolution import PlanClient
-from test_renderer_speech_identity import speech_request
+from test_renderer_speech_identity import reference, speech_request
 from test_renderer_workflow import FFMPEG, FFPROBE
 
 
@@ -47,6 +52,41 @@ class BroadClient(PlanClient):
                 raise TimeoutError('offline chooser outage')
             return {'candidate_id': payload['candidates'][-1]['candidate_id'], 'reason': 'Best available rendition.'}
         return super().complete(prompt, payload)
+
+
+class TerminalClipRepairResumeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.voice = reference('character')
+        self.request = speech_request(self.voice, 'Hello.')
+        self.client = SimpleNamespace(identity={'model': 'offline'})
+        self.verifier = SimpleNamespace(
+            speech_resolver=SimpleNamespace(clip_recovery_client=self.client))
+        self.config = {'verification': {'max_resolution_attempts': 12}}
+        self.calls = []
+
+    def ordinary(self, text, generate, directory, request, verifier, config, **options):
+        self.calls.append((text, directory, request))
+        return 'ordinary-result'
+
+    def save_state(self, phase, parts=()):
+        state = ClipRepairState(self.directory, self.request, self.client)
+        state.state.update(phase=phase, parts=list(parts))
+        state.save()
+
+    def test_terminal_repair_states_allow_ordinary_recovery(self):
+        for phase in ('rejected', 'failed', 'evaluated'):
+            with self.subTest(phase=phase):
+                self.calls.clear()
+                self.save_state(phase)
+                result = clip_recovery.run(
+                    self.ordinary, 'Hello.', lambda *args: None,
+                    self.directory, self.request, self.verifier, self.config,
+                    generate_plan_part=None)
+                self.assertEqual(result, 'ordinary-result')
+                self.assertEqual(len(self.calls), 1)
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, 'FFmpeg and ffprobe required')
@@ -238,6 +278,57 @@ class BroadRepairTests(unittest.TestCase):
                 self.render_chunk()
         self.assertEqual(self.client.selection_calls, [])
         self.assertFalse(list((self.work / 'clips').glob('*/accepted.json')))
+
+    def test_rejected_terminal_repair_allows_fresh_ordinary_generation_on_rerun(self):
+        from legacy_recovery_fixtures import LegacySpeechResolver
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+        self.client.plan = {'parts': [], 'reason': 'No further useful rendering plan.'}
+        synthesize = self.engine.synthesize
+
+        def silent(text, voice, path, **kwargs):
+            metadata = synthesize(text, voice, path, **kwargs)
+            with wave.open(str(path), 'wb') as audio:
+                audio.setparams((1, 2, 44100, 0, 'NONE', ''))
+                audio.writeframes(bytes(88200))
+            return metadata
+
+        self.verifier = RecurringSpeechVerifier(self.base, LegacySpeechResolver(self.client))
+        with patch.object(self.engine, 'synthesize', side_effect=silent):
+            with self.assertRaises(SpeechVerificationFailed):
+                self.render_chunk()
+        self.verifier = RecurringSpeechVerifier(self.base, SpeechResolver(self.client))
+        with patch.object(self.engine, 'synthesize', side_effect=silent):
+            with self.assertRaisesRegex(ValueError, 'No physically usable'):
+                self.render_chunk()
+        state = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+        self.assertEqual(state['phase'], 'rejected')
+        resolution = next((self.work / 'clips').glob('*/speech-resolution.json'))
+        self.assertTrue(resolution.is_file())
+        saved_before = {path: path.read_bytes()
+                        for path in (self.work / 'clips').glob('*/*.json')}
+        calls = len(self.engine.calls)
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertGreater(len(self.engine.calls), calls)
+        self.assertEqual({path: path.read_bytes() for path in saved_before}, saved_before)
+
+    def test_failed_terminal_repair_without_part_audio_allows_fresh_ordinary_generation_on_rerun(self):
+        from epub_tts_narrator.renderer.workflow import RenderBlocked
+        self.client.plan = {'parts': [{'text': 'Hum.', 'delivery': 'thoughtful', 'speech_traits': ''}],
+                            'reason': 'Try a clip-local repair.'}
+        with patch.object(self.engine, 'synthesize', side_effect=RuntimeError('offline part failure')):
+            with self.assertRaises(RenderBlocked):
+                self.render_chunk()
+        state = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+        self.assertEqual(state['phase'], 'failed')
+        self.assertEqual(state['error_code'], 'synthesis_or_input_failure')
+        self.assertFalse(list((self.work / 'clips').glob('*/clip-repair-parts/*')))
+        self.engine.heard_override = lambda text, direction, number: text
+        calls = len(self.engine.calls)
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertGreater(len(self.engine.calls), calls)
+        self.assertNotIn('clip_repair', self.accepted_record(result)['engine_metadata'])
 
     def test_selection_proof_rejects_changed_reference_audio_or_original_report(self):
         from epub_tts_narrator.renderer.exhaustion_selection import validate_record

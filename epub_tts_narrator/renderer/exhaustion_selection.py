@@ -10,6 +10,7 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .clip_repair_contract import logical_text, plain, synthesis_request
 from .clip_repair_prompts import SELECT
 from .clip_repair_state import ClipRecoveryUnavailable, model_call
+from .diagnostics import safe_error_text
 from .exhaustion_candidates import candidate_summary, retained_candidates, same_span, stylized_spelling_advisory
 
 
@@ -145,7 +146,16 @@ def selected_generation_identity(request, voices, metadata):
     return generation_identity(request, voices)
 
 
-def select_retained(directory, request, client):
+def _failure_context(failure_report):
+    if not isinstance(failure_report, dict):
+        return ''
+    error = failure_report.get('provider_error') or failure_report.get('error')
+    if not error:
+        return ''
+    return '; original failure: ' + safe_error_text(str(error))
+
+
+def select_retained(directory, request, client, *, failure_report=None):
     from .history_echo import archive, candidate_echo
     directory = Path(directory)
     retained = retained_candidates(directory, request)
@@ -155,10 +165,11 @@ def select_retained(directory, request, client):
               if (echo := candidate_echo(item['record'], logical_text(request))) is not None}
     candidates = [item for item in retained if item['summary']['candidate_id'] not in echoes]
     if not candidates:
+        context = _failure_context(failure_report) + f'. Inspect {directory}'
         if echoes:
             raise ValueError('Every retained take repeats an earlier line of chapter history (history echo); '
-                             'none is a rendition of this passage, so none is published')
-        raise ValueError('No physically usable bound full-span candidate remains')
+                             'none is a rendition of this passage, so none is published' + context)
+        raise ValueError('No physically usable bound full-span candidate remains' + context)
     payload = {'mode': 'exhaustion_selection', 'request_sha256': digest(request),
                'requested_text': logical_text(request), 'request': deepcopy(request),
                'candidates': [item['summary'] for item in candidates]}

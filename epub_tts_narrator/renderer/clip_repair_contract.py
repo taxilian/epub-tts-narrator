@@ -20,6 +20,22 @@ class ClipPlan(TypedDict):
     reason: str
 
 
+def uses_controlled_pronunciation(request):
+    """Whether this request carries confirmed structured pronunciation controls."""
+    if not isinstance(request, dict):
+        return False
+    chunk = request.get('chunk', {})
+    records = []
+    if request.get('kind') == 'speech' and isinstance(chunk, dict):
+        records = [chunk.get('expressive_performance')]
+    elif request.get('kind') == 'paragraph_speech' and isinstance(chunk, dict):
+        records = [turn.get('expressive_performance') for turn in chunk.get('paragraph_turns', [])
+                   if isinstance(turn, dict)]
+    return any(isinstance(record, dict) and any(
+        isinstance(control, dict) and control.get('kind') == 'pronunciation'
+        for control in record.get('controls', [])) for record in records)
+
+
 def synthesis_request(request):
     return request.get('synthesis_request', request) if request.get('kind') == 'speech_recovery_part' else request
 
@@ -58,10 +74,16 @@ def part_direction(part):
     return '; '.join(value for value in (part['speech_traits'], part['delivery']) if value)
 
 
-def policy(provider):
-    return {'name': 'broad_clip_repair', 'version': 1, 'provider': deepcopy(provider),
-            'plan_sha256': digest(PLAN), 'review_sha256': digest(REVIEW), 'reviewers': 2,
-            'required_approvals': 2, 'candidates': 1}
+def policy(provider, request=None):
+    result = {'name': 'broad_clip_repair', 'version': 1, 'provider': deepcopy(provider),
+              'plan_sha256': digest(PLAN), 'review_sha256': digest(REVIEW), 'reviewers': 2,
+              'required_approvals': 2, 'candidates': 1}
+    if uses_controlled_pronunciation(request):
+        # The prompt bytes and two-vote authorization are unchanged. Only a
+        # request that actually carries protected controls gets the projection
+        # identity; legacy plain repair records retain their exact old policy.
+        result['controlled_pronunciation'] = {'version': 1, 'projection': 'exact_word_v1'}
+    return result
 
 
 def review_payload(payload, plan, reviewer):
@@ -73,7 +95,7 @@ def approved(request, audit):
             or not isinstance(audit['identity'], dict) or not isinstance(audit['identity'].get('provider'), dict)
             or not isinstance(audit['payload'], dict) or not isinstance(audit['reviews'], list)
             or type(audit['payload'].get('remaining_starts')) is not int
-            or audit['identity'] != policy(audit['identity'].get('provider'))
+            or audit['identity'] != policy(audit['identity'].get('provider'), request)
             or audit['payload'].get('request') != request
             or audit['payload'].get('request_sha256') != digest(request)
             or audit['payload'].get('mode') != 'clip_repair'):
@@ -92,12 +114,26 @@ def approved(request, audit):
     return plan
 
 
-def confirm_part(part, metadata):
-    text = trim_speech_text(part['text'])
-    directed, control = _directed_text(text, part_direction(part))
-    if (metadata.get('synthesis_text') not in (text, directed)
-            or any(metadata.get(key) != control[key] for key in ('direction', 'direction_applied', 'applied_control'))):
-        raise ValueError('Actual clip repair inputs differ from the approved plan')
+def confirm_part(request, part, metadata, *, performance=None):
+    if performance is None:
+        text = trim_speech_text(part['text'])
+        directed, control = _directed_text(text, part_direction(part))
+        if (metadata.get('synthesis_text') not in (text, directed)
+                or any(metadata.get(key) != control[key]
+                       for key in ('direction', 'direction_applied', 'applied_control'))):
+            raise ValueError('Actual clip repair inputs differ from the approved plan')
+        return
+    from .clip_repair_performance import repair_traits
+    from .engines import prepare_synthesis
+
+    _, directed, control = prepare_synthesis(
+        part['text'], part_direction(part),
+        performance=performance, traits=repair_traits(request))
+    if (metadata.get('synthesis_text') != directed
+            or any(metadata.get(key) != control[key]
+                   for key in ('direction', 'direction_applied', 'applied_control'))
+            or metadata.get('expressive_performance') != control['expressive_performance']):
+        raise ValueError('Actual controlled clip repair inputs differ from the approved plan')
 
 
 def confirm_plan(request, marker):
@@ -113,12 +149,22 @@ def confirm_plan(request, marker):
     plan = approved(original, marker['audit'])
     if len(marker['parts']) != len(plan['parts']):
         raise ValueError('Incomplete clip repair generation provenance')
-    for part, evidence in zip(plan['parts'], marker['parts']):
-        if (not isinstance(evidence, dict) or set(evidence) != {'part', 'metadata', 'audio_sha256'}
+    from .clip_repair_performance import project_plan_performance, repair_traits
+
+    projected = project_plan_performance(original, plan)
+    for number, (part, evidence) in enumerate(zip(plan['parts'], marker['parts']), 1):
+        fields = {'part', 'metadata', 'audio_sha256'}
+        if projected[number - 1] is not None:
+            fields |= {'performance', 'traits'}
+        if (not isinstance(evidence, dict) or set(evidence) != fields
                 or evidence['part'] != part or not isinstance(evidence['metadata'], dict)
-                or not re.fullmatch(r'[0-9a-f]{64}', str(evidence['audio_sha256']))):
+                or not re.fullmatch(r'[0-9a-f]{64}', str(evidence['audio_sha256']))
+                or evidence.get('performance') != projected[number - 1]
+                or (projected[number - 1] is not None
+                    and evidence.get('traits') != repair_traits(original))):
             raise ValueError('Clip repair part binding changed')
-        confirm_part(part, evidence['metadata'])
+        confirm_part(original, part, evidence['metadata'],
+                     performance=evidence.get('performance'))
     return plan
 
 

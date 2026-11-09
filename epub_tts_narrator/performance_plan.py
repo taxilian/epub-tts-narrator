@@ -131,10 +131,13 @@ whispered name without inventing a general conflicting-style nesting policy.
             _span(item, text, label)
             if not isinstance(alphabet, str) or alphabet not in {"cmu_arpabet", "respelling"}:
                 raise ValueError(f"{label}.alphabet is unsupported")
-            # A phoneme control replaces one lexical word; adjacent punctuation
-            # and whitespace remain canonical text outside the model token.
-            if not re.fullmatch(r"[^\W_]+(?:['’\-‐‑][^\W_]+)*", item["text"], re.UNICODE):
-                raise ValueError(f"{label} pronunciation must replace one word without surrounding punctuation")
+            # A phoneme control replaces one or more single-space-separated
+            # lexical words (a compound proper name); adjacent punctuation and
+            # whitespace remain canonical text outside the model token.
+            if not re.fullmatch(r"[^\W_]+(?:['’\-‐‑][^\W_]+)*(?: [^\W_]+(?:['’\-‐‑][^\W_]+)*)*",
+                                item["text"], re.UNICODE):
+                raise ValueError(f"{label} pronunciation must replace whole lexical words without "
+                                 "surrounding punctuation")
             if (item["start"] and text[item["start"] - 1].isalnum()
                     or item["end"] < len(text) and text[item["end"]].isalnum()):
                 raise ValueError(f"{label} pronunciation must not replace only part of a word")
