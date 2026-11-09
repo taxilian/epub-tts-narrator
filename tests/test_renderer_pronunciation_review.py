@@ -9,11 +9,13 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
+from epub_tts_narrator.name_pronunciations import book_occurrences
 from epub_tts_narrator.pronunciations import load_pronunciations, save_candidates, set_pronunciation
 from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_store
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from epub_tts_narrator.renderer.engines import prepare_synthesis
+from epub_tts_narrator.renderer.name_pronunciation_tool import sentence_controls, test_sentence
 from epub_tts_narrator.renderer.pronunciation_review import (
     PronunciationReviewSession, _sample_bounds, run_pronunciation_review,
 )
@@ -606,6 +608,35 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertFalse(self.engine.voice_calls)
         self.assertEqual(corrected["purpose"], "unverified_pronunciation_listening_preview")
         self.assertNotIn("DO_NOT_ECHO", Path(corrected["path"]).with_name("preview.json").read_text())
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_name_test_sentence_finds_saved_voice_when_command_spelling_differs_in_case(self):
+        # Observed with a book whose registry defines "milekey" exactly as typed
+        # while every script row spells "Milekey": the name test sentence (the
+        # confirmed reading and the B default reading) must audition a real
+        # saved voice of a row that speaks the name, in any capitalization.
+        sentence = test_sentence("mara", book_occurrences(self.bundle["source"], "mara"))
+        controls = sentence_controls("mara", sentence, "M AA1 R AH0")
+        confirmed = self.session.audition_sentence("mara", sentence, controls,
+                                                   pronunciation={"alphabet": "cmu_arpabet", "value": "M AA1 R AH0"})
+        self.assertEqual(confirmed["context"]["voice_id"], "voice_mara")
+        self.assertIsNotNone(self.store.load("voice_mara"))
+        self.assertEqual(confirmed["purpose"], "unverified_name_pronunciation_test")
+        self.assertIn("<|phoneme_start|>M AA1 R AH0<|phoneme_end|>", self.engine.calls[-1]["compiled"])
+        self.assertIn("<|phoneme_start|>M AA1 R AH0 Z<|phoneme_end|>", self.engine.calls[-1]["compiled"])
+        default = self.session.audition_sentence("mara", sentence, [])
+        self.assertEqual(default["context"]["voice_id"], "voice_mara")
+        self.assertEqual(self.engine.calls[-1]["compiled"].count("<|phoneme_start|>"), 0)
+        self.assertFalse(self.engine.voice_calls)
+
+    def test_name_sentence_case_insensitivity_stays_opt_in_for_ordinary_words(self):
+        # Ordinary word previews keep exact-case matching so a capitonym never
+        # auditions another capitalization's context; only the name test
+        # sentence asks for case-insensitive candidates.
+        with self.assertRaisesRegex(ValueError, "No spoken excerpt"):
+            self.session.audition("mara")
+        self.factory.assert_not_called()
+        self.assertEqual([item["voice_id"] for item in self.session._occurrences("Mara")], ["voice_mara"])
 
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_preview_names_identify_word_voice_and_artifact_stage(self):

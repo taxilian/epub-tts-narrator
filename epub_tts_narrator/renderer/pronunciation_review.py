@@ -389,12 +389,16 @@ class PronunciationReviewSession:
         reset_pronunciation(self.bundle["directory"], word, scope=self.scope)
         self.clear_drafts(current[0] if current else {"word": word})
 
-    def _occurrences(self, word):
+    def _occurrences(self, word, *, case_insensitive=False):
         """Saved-voice candidates where the exact whole word occurs, best first.
 
         Selection only needs the word's original source occurrence and a saved
         voice; it never maps pronunciations, so one ambiguously-normalized
         occurrence cannot poison the candidates for the whole menu.
+        ``case_insensitive`` serves the name test sentence, whose command
+        spelling may differ in case from the script rows (``milekey`` vs
+        ``Milekey``); ordinary word previews keep exact-case matching so
+        capitonyms never audition another capitalization's context.
         """
         from ..pronunciations import WORD_PATTERN
         from ..spoken_text import build_spoken
@@ -411,7 +415,9 @@ class PronunciationReviewSession:
         candidates, selected_voices = [], {}
         for chapter in self.bundle["chapters"]:
             for row in chapter["rows"]:
-                matches = [match for match in WORD_PATTERN.finditer(row["text"]) if match.group() == word]
+                matches = [match for match in WORD_PATTERN.finditer(row["text"])
+                           if match.group() == word or
+                           (case_insensitive and match.group().casefold() == word.casefold())]
                 if self.scope is not None:
                     from .pronunciation_scopes import scoped_matches
                     matches = scoped_matches(self.bundle, self.scope, row, matches, snapshot=self._name_annotations)
@@ -621,7 +627,7 @@ class PronunciationReviewSession:
         from .engines import create_engine
         from .speech_identity import voice_conditioning_identity
         validate_word(word)
-        candidates = self._occurrences(word)
+        candidates = self._occurrences(word, case_insensitive=True)
         if voice_id is not None:
             candidates = [item for item in candidates if item["voice_id"] == voice_id]
         if not candidates:
