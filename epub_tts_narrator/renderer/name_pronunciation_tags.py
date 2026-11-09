@@ -1,7 +1,8 @@
 """Bind tagged name uses to the engine's sanctioned pronunciation controls.
 
 Only spans the book's ``name-pronunciations.json`` marks as the name receive
-the confirmed reading; homonyms and untagged words are untouched. The controls
+the confirmed reading (phonemes, or a say-as spelling spoken in place of the
+word); homonyms and untagged words are untouched. The controls
 travel through ``merge_row_pronunciations`` exactly like registry choices, so
 Drama 3 phoneme tags are emitted only by the performance compiler.
 """
@@ -40,8 +41,9 @@ def with_tagged_names(row, legacy, matches, snapshot):
         match = re.compile(re.escape(item["word"])).match(row["text"], item["start"] - row["start"])
         if match is None or match.end() != item["end"] - row["start"]:
             raise ValueError("A tagged name no longer matches the script text; rerun pronounce-name for this book")
-        tagged.append((match, {"word": item["word"], "status": "confirmed",
-                               "pronunciation": {"alphabet": "cmu_arpabet", "value": item["phonemes"]}}))
+        pronunciation = ({"alphabet": "respelling", "value": item["say_as"]} if "say_as" in item
+                         else {"alphabet": "cmu_arpabet", "value": item["phonemes"]})
+        tagged.append((match, {"word": item["word"], "status": "confirmed", "pronunciation": pronunciation}))
     kept = [pair for pair in base
             if not any(pair[0].start() < other.end() and other.start() < pair[0].end() for other, _ in tagged)]
     return sorted([*kept, *tagged], key=lambda pair: pair[0].start())

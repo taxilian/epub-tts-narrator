@@ -392,6 +392,16 @@ def main(argv=None):
                   "rerun the same command with the same input, output, and configuration; "
                   "incomplete requests will be retried.", file=sys.stderr)
 
+    def with_name_tags(directory, config, status):
+        """Tag every untagged use of names whose pronunciation this book defines or inherits."""
+        from .name_pronunciation_model import tag_defined_names
+        unresolved = tag_defined_names(directory, config, client_factory=provider_client, progress=print)
+        if unresolved:
+            print(f"Pronunciation tagging incomplete for {', '.join(sorted(unresolved))}; rendering stays "
+                  "blocked until a person decides those uses. Exiting with status 2.", file=sys.stderr)
+            return 2
+        return status
+
     def resume_book(directory, config):
         """Reuse the saved cast; repair narration boundaries and remaining speakers."""
         nonlocal model_cache
@@ -692,7 +702,8 @@ def main(argv=None):
             if output.is_dir():
                 args.output = output.resolve()
                 if not is_pending_directory(args.output):
-                    return resume_book(args.output, load_config(args.config))
+                    config = load_config(args.config)
+                    return with_name_tags(args.output, config, resume_book(args.output, config))
                 # A checkpointed run resumes below, after source extraction and
                 # identity computation prove it belongs to this command.
             else:
@@ -878,7 +889,7 @@ def main(argv=None):
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
-                return _speaker_completion_status(document)
+                return with_name_tags(args.output, config, _speaker_completion_status(document))
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:
                 save_registry(series_path, registry, document)

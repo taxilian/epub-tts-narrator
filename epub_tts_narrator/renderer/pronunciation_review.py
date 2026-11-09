@@ -209,6 +209,35 @@ def _retry_rejected_take(folder, state, request):
             "rejections": rejections}
 
 
+_UNFINISHED_TAKES = 3
+
+
+def _unfinished_take(exc):
+    """Drama 3 stopped a take before the end of its text (silence, token limit)."""
+    return (type(exc).__name__ in {"EngineError", "FishHTTPError"}
+            and "did not finish the text" in str(exc))
+
+
+def _name_take_files(state, prefix, word, voice_id):
+    owner = (word, voice_id, f"take-{state['take']:03d}")
+    state.setdefault("audio_file", descriptive_audio_filename(prefix, *owner, suffix=".flac"))
+    raw_name = "raw.wav" if state.get("raw_sha256") is not None else descriptive_audio_filename(
+        "raw-preview", *owner, suffix=".wav")
+    state.setdefault("raw_file", raw_name)
+    state.setdefault("normalized_file", descriptive_audio_filename("normalized-preview", *owner, suffix=".wav"))
+
+
+def _next_take_after_unfinished(state, exc):
+    """A take that produced no audio moves on to the next seed; its audit is kept."""
+    rejection = {"request_sha256": digest(state["request"]), "take": state["take"],
+                 "seed": state["take_seed"], "reason": str(exc), "kind": "unfinished_take"}
+    rejection["sha256"] = digest(rejection)
+    kept = {key: state[key] for key in ("format", "request", "status", "purpose") if key in state}
+    return dict(kept, status="pending", take=state["take"] + 1,
+                take_seed=(state["take_seed"] + 1) % (2**32),
+                rejections=[*state.get("rejections", []), rejection])
+
+
 def _reject_preview(folder, state, reason):
     """Checkpoint a physical rejection without authorizing a retry loop."""
     normalized = _preview_path(folder, state, ("normalized_file", "normalized.wav"))
@@ -698,23 +727,33 @@ class PronunciationReviewSession:
                                "purpose": purpose}
             state.setdefault("take", 1)
             state.setdefault("take_seed", request["seed"])
-            owner = (word, context["voice_id"], f"take-{state['take']:03d}")
-            state.setdefault("audio_file", descriptive_audio_filename(
-                prefix, *owner, suffix=".flac"))
-            raw_name = "raw.wav" if state.get("raw_sha256") is not None else descriptive_audio_filename(
-                "raw-preview", *owner, suffix=".wav")
-            state.setdefault("raw_file", raw_name)
-            state.setdefault("normalized_file", descriptive_audio_filename(
-                "normalized-preview", *owner, suffix=".wav"))
+            _name_take_files(state, prefix, word, context["voice_id"])
             write_json(state_path, state)
             raw = _preview_path(folder, state, ("raw_file", "raw.wav"))
             normalized = _preview_path(folder, state, ("normalized_file", "normalized.wav"))
             audio = _preview_path(folder, state, ("audio_file", "sample.flac"))
             if state.get("raw_sha256") is None:
-                if raw.exists() or raw.is_symlink():
-                    regular_file(raw).unlink()
                 self.notify(display(f"Generating listening preview: {word} — {_description(pronunciation)}"))
-                engine.synthesize(text, voice, raw, seed=state["take_seed"], **options)
+                for attempt in range(1, _UNFINISHED_TAKES + 1):
+                    if raw.exists() or raw.is_symlink():
+                        regular_file(raw).unlink()
+                    try:
+                        engine.synthesize(text, voice, raw, seed=state["take_seed"], **options)
+                        break
+                    except Exception as exc:
+                        if not _unfinished_take(exc):
+                            raise
+                        # The same seed would stop the same way: checkpoint a fresh take first.
+                        state = _next_take_after_unfinished(state, exc)
+                        _name_take_files(state, prefix, word, context["voice_id"])
+                        write_json(state_path, state)
+                        raw = _preview_path(folder, state, ("raw_file", "raw.wav"))
+                        normalized = _preview_path(folder, state, ("normalized_file", "normalized.wav"))
+                        audio = _preview_path(folder, state, ("audio_file", "sample.flac"))
+                        if attempt == _UNFINISHED_TAKES:
+                            raise ValueError(f"{_UNFINISHED_TAKES} takes in a row stopped before finishing the text ({exc}). "
+                                             "Play again to try new takes") from exc
+                        self.notify(display(f"Take {attempt} stopped before finishing the text; trying a new take…"))
                 state.update(raw_sha256=file_hash(regular_file(raw)), status="generated")
                 write_json(state_path, state)
             elif file_hash(regular_file(raw)) != state["raw_sha256"]:

@@ -11,7 +11,8 @@ from bisect import bisect_left
 import re
 import unicodedata
 
-from ..performance_plan import DELIVERY_TAGS, plain_direction, text_sha256, validate_performance, validate_phonemes
+from ..performance_plan import (DELIVERY_TAGS, phoneme_groups, plain_direction, text_sha256, validate_performance,
+                                validate_phonemes)
 
 
 COMPILER_VERSION = "performance-compiler-v1"
@@ -170,8 +171,10 @@ The plain backend explicitly reports every unsupported requested control.
                 starts[a], closes[b] = f"<{tag}>", f"</{tag}>"
             result["applied_controls"].append(item)
         elif kind == "pronunciation":
+            # A grouped reading ("M AY1 L | K IY1") is one tag per group, read as consecutive parts.
             spoken = (control["replacement"] if control["alphabet"] == "respelling"
-                      else f"<|phoneme_start|>{control['phonemes']}<|phoneme_end|>")
+                      else " ".join(f"<|phoneme_start|>{group}<|phoneme_end|>"
+                                    for group in phoneme_groups(control["phonemes"])))
             replacements[control["start"]] = (control["end"], spoken)
             result["applied_controls"].append(item)
         else:

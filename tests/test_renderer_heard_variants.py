@@ -259,7 +259,7 @@ class PronounceNameHeardVariantTests(unittest.TestCase):
         self.recognizer = Recognizer(heard=[heard])
         args = SimpleNamespace(name="Mara", sound=None, phonemes="M AA1 R AH0", voice_id=None, tag_only=False,
                                review_tags=False, list=False)
-        model = FakeModel(decide=lambda item: "name")
+        model = FakeModel(decide=lambda item: "proper_noun")
         return run_pronounce_name(
             self.bundle, self.config, args, analysis_config=lambda: {"analysis": {"attribution_workers": 1}},
             input_fn=lambda prompt: next(answers), output=self.output.append, engine_factory=self.factory,
@@ -268,10 +268,10 @@ class PronounceNameHeardVariantTests(unittest.TestCase):
             interactive=False, verifier_factory=lambda: self.recognizer)
 
     def test_an_accepted_test_sentence_teaches_how_the_recognizer_hears_the_name(self):
-        self.run_tool(["A"], "The name is Marla. It is Marla’s name. Give it to Marla.")
+        self.run_tool(["A"], "My name is Marla.")  # The book's own sentence with the name.
         self.assertEqual(self.recognizer.calls, 1)
         learned = effective_variants(self.directory, recognizer_key(self.recognizer))
-        self.assertEqual(set(learned), {("mara", "marla"), ("mara's", "marla's")})
+        self.assertEqual(set(learned), {("mara", "marla")})
         self.assertTrue(all(heard_variants.trust_basis(variant) == "listened" for variant in learned.values()))
         self.assertTrue(any("hears Mara as" in line for line in self.output), self.output)
         # The first render take heard that way is accepted.
@@ -281,7 +281,7 @@ class PronounceNameHeardVariantTests(unittest.TestCase):
         self.assertEqual(report["heard_variants"]["variants"][0]["basis"], "listened")
 
     def test_a_test_sentence_heard_wrong_elsewhere_teaches_nothing(self):
-        self.run_tool(["A"], "The name is Marla. It was Marla’s name. Give it to Marla.")
+        self.run_tool(["A"], "My name was Marla.")
         self.assertFalse((self.directory / FILENAME).exists())
         self.assertTrue(any("not cleanly enough" in line for line in self.output), self.output)
 

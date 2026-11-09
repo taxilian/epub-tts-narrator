@@ -1,22 +1,35 @@
-"""User-defined character-name pronunciations and their tagged uses.
+"""User-defined pronunciations of names and invented words, and their tagged uses.
 
 One book-local sidecar, ``name-pronunciations.json``, holds two things:
 
-- ``definitions``: a name's confirmed CMU Arpabet reading, chosen by a person
-  through ``audiobook-render pronounce-name``; they inherit live from
-  continuation ancestors, nearest book first, like the pronunciation registry.
-  ``drafts`` checkpoint an unconfirmed choice while listening and never affect
-  rendering.
-- ``mentions``: this book's per-occurrence decisions saying whether a source
-  word really is that name (``name``) or a homonym/ordinary word (``other``).
-  Each decision is bound to its block's exact text, so a book update retags
-  only the blocks whose text changed. Ancestor mentions never apply here.
+- ``definitions``: a word's confirmed reading and the parts of speech it
+  applies to. The reading is CMU Arpabet ``phonemes`` (optionally in
+  consecutive groups, ``M AY1 L | K IY1``, sent to the engine as separate
+  phoneme tags), or a ``say_as`` spelling the engine reads instead of the
+  word (``mile-key``; ``phonemes`` is then null). The parts of speech are (``parts_of_speech``: proper noun, common noun,
+  adjective, verb, adverb, interjection), chosen by a person through
+  ``audiobook-render pronounce``; they inherit live from continuation
+  ancestors, nearest book first, like the pronunciation registry. ``drafts``
+  checkpoint an unconfirmed choice while listening and never affect rendering.
+- ``mentions``: this book's per-occurrence evidence. A model ``label`` is the
+  part of speech of that use in context (or ``unsure``), stamped with the
+  labelling version that produced it; a person's decision is ``use`` true or
+  false and always wins. Each entry is bound to its block's exact text, so a
+  book update relabels only the blocks whose text changed. Ancestor mentions
+  never apply here.
+
+A use gets the special reading when a person said so, or when its label is one
+of the definition's parts of speech. Labels do not depend on the chosen parts,
+so changing them needs no new requests. When the spelling is not in the CMU
+dictionary and every part of speech applies, no other word can share it, so
+every use is tagged without labels (``needs_labels``).
 
 Inflections are derived from the confirmed base reading by general English
-rules (possessive/plural S, Z or IH0 Z by the final sound); any other
+rules (possessive/plural S, Z or IH0 Z by the final sound; a ``say_as``
+reading keeps the source word's own ending, ``mile-key's``); any other
 apostrophe or hyphen continuation keeps its suffix in plain text and tags only
-the name part. Rendering uses tagged ``name`` spans only and fails closed while
-any current occurrence of an effective name is undecided.
+the word part. Rendering fails closed while any current use of an effective
+word is unlabelled or unsure.
 """
 
 from copy import deepcopy
@@ -26,15 +39,26 @@ from pathlib import Path
 import re
 import unicodedata
 
-from .performance_plan import validate_phonemes
+from .performance_plan import phoneme_groups, validate_phonemes
 from .pronunciations import WORD_PATTERN, validate_word
 
 
 FILENAME = "name-pronunciations.json"
 FORMAT = "epub-tts-name-pronunciations"
-VERSION = 1
-DECISIONS = frozenset({"name", "other", "unsure"})
+VERSION = 2
+PARTS_OF_SPEECH = ("proper_noun", "common_noun", "adjective", "verb", "adverb", "interjection")
+PART_LABELS = {"proper_noun": "proper noun", "common_noun": "common noun", "adjective": "adjective",
+               "verb": "verb", "adverb": "adverb", "interjection": "interjection"}
+LABELS = frozenset(PARTS_OF_SPEECH) | {"unsure"}
+# Bump when the labelling prompt's meaning changes: older model labels then
+# count as unlabelled and are relabelled; a person's decisions never are.
+LABEL_VERSION = 1
 BASES = frozenset({"model", "user"})
+_PART_ALIASES = {"proper": "proper_noun", "proper_noun": "proper_noun", "name": "proper_noun",
+                 "propernoun": "proper_noun", "common": "common_noun", "common_noun": "common_noun",
+                 "noun": "common_noun", "improper": "common_noun", "improper_noun": "common_noun",
+                 "adjective": "adjective", "adj": "adjective", "verb": "verb", "adverb": "adverb", "adv": "adverb",
+                 "interjection": "interjection"}
 HISTORY_SOURCES = frozenset({"model", "model_revision", "manual", "inherited", "command_line"})
 MAX_HISTORY = 64
 VOWELS = frozenset("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW".split())
@@ -43,6 +67,8 @@ _SIBILANTS = frozenset({"S", "Z", "SH", "ZH", "CH", "JH"})
 _APOSTROPHES = "'’"
 _HYPHENS = "-‐‑"
 _RESPELLING = re.compile(r"[^\W\d_]+(?:[ '’\-‐‑][^\W\d_]+)*", re.UNICODE)
+_SAY_AS = re.compile(r"[^\W\d_]+(?:['’\-‐‑][^\W\d_]+)*", re.UNICODE)
+MAX_SAY_AS = 80
 
 
 def name_key(name):
@@ -54,18 +80,70 @@ def normalize_phonemes(text):
     """Accept typed input in any case/spacing; stored values stay canonical."""
     if not isinstance(text, str):
         raise ValueError("Phonemes must be text")
-    return " ".join(text.upper().split())
+    return " ".join(text.upper().replace("|", " | ").split())
 
 
 def validate_name_phonemes(value):
-    """CMUdict-style Arpabet: every vowel stressed, at least one primary."""
+    """CMUdict-style Arpabet: every vowel stressed, at least one primary.
+
+    ``|`` splits the reading into consecutive groups (``M AY1 L | K IY1``);
+    the primary stress may be in any group.
+    """
     validate_phonemes(value)
-    tokens = value.split(" ")
+    tokens = [token for group in phoneme_groups(value) for token in group.split(" ")]
     if any(token in VOWELS for token in tokens):
         raise ValueError("Name phonemes must mark every vowel with stress 0, 1 or 2 (for example AO1)")
     if not any(token[:-1] in VOWELS and token[-1] == "1" for token in tokens):
         raise ValueError("Name phonemes need one vowel with primary stress 1")
     return value
+
+
+def validate_parts(value):
+    if (not isinstance(value, (list, tuple)) or not value or len(set(value)) != len(value)
+            or any(part not in PARTS_OF_SPEECH for part in value)):
+        raise ValueError("Parts of speech must be a non-empty list from: " + ", ".join(PARTS_OF_SPEECH))
+    return [part for part in PARTS_OF_SPEECH if part in value]
+
+
+def parse_parts(text):
+    """Typed parts of speech ("proper noun, adjective", "all") in canonical order."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Name at least one part of speech, or all")
+    pieces = [" ".join(piece.split()) for piece in re.split(r"[,;/+]|\band\b", text.casefold())]
+    pieces = [piece for piece in pieces if piece]
+    if any(piece in {"all", "any", "everything"} for piece in pieces):
+        return list(PARTS_OF_SPEECH)
+    parts = []
+    for piece in pieces:
+        key = piece.replace("-", " ").replace(" ", "_")
+        part = _PART_ALIASES.get(key) or _PART_ALIASES.get(key.removesuffix("s"))
+        if part is None:
+            raise ValueError(f"Unknown part of speech {piece!r}; use proper noun, common noun, adjective, "
+                             "verb, adverb, interjection or all")
+        if part not in parts:
+            parts.append(part)
+    return validate_parts(parts)
+
+
+def describe_parts(parts):
+    if list(parts) == list(PARTS_OF_SPEECH):
+        return "every part of speech"
+    return ", ".join(PART_LABELS[part] for part in parts)
+
+
+def in_dictionary(word):
+    """Whether an ordinary English word can share this spelling."""
+    from .pronunciation_dictionary import dictionary_readings
+    return bool(dictionary_readings(word))
+
+
+def default_parts(word):
+    """A dictionary spelling is a name only by default; an invented one is every use."""
+    return ["proper_noun"] if in_dictionary(word) else list(PARTS_OF_SPEECH)
+
+
+def needs_labels(word, parts):
+    return in_dictionary(word) or list(parts) != list(PARTS_OF_SPEECH)
 
 
 def validate_respelling(value):
@@ -74,6 +152,59 @@ def validate_respelling(value):
     if not isinstance(value, str) or not 1 <= len(value) <= 80 or _RESPELLING.fullmatch(value) is None:
         raise ValueError("A pronunciation respelling hint must be short plain letters, hyphens or spaces")
     return value
+
+
+def normalize_say_as(text):
+    """Typed say-as text: spaces between parts become hyphens (``mile key`` → ``mile-key``)."""
+    if not isinstance(text, str):
+        raise ValueError("Say-as text must be text")
+    return "-".join(text.split())
+
+
+def validate_say_as(value):
+    """A spelling the engine reads in place of the word: letters, joined by hyphens or apostrophes."""
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_SAY_AS or _SAY_AS.fullmatch(value) is None:
+        raise ValueError(f"Say-as text must be up to {MAX_SAY_AS} letters, with parts joined by hyphens "
+                         "(for example mile-key)")
+    return value
+
+
+def reading_of(value):
+    """The reading of a definition, draft or history step: ``{"phonemes": …}`` or ``{"say_as": …}``."""
+    if value.get("say_as") is not None:
+        return {"say_as": value["say_as"]}
+    return {"phonemes": value["phonemes"]}
+
+
+def validate_reading(reading):
+    if not isinstance(reading, dict) or len(reading) != 1 or not {"phonemes", "say_as"} >= set(reading):
+        raise ValueError("A reading is either phonemes or a say-as spelling")
+    if "phonemes" in reading:
+        return {"phonemes": validate_name_phonemes(reading["phonemes"])}
+    return {"say_as": validate_say_as(reading["say_as"])}
+
+
+def describe_reading(reading):
+    return f"said as {reading['say_as']}" if "say_as" in reading else reading["phonemes"]
+
+
+def word_pronunciation(name, reading, word):
+    """The engine pronunciation for one tagged source word (base or inflected).
+
+    Phonemes derive the possessive/plural ending by sound; a say-as spelling
+    keeps the word's own ending (``Milekey's`` → ``mile-key's``) and is
+    capitalized throughout for a word written in capitals.
+    """
+    lower = word.casefold()
+    if "phonemes" in reading:
+        forms = form_phonemes(name, reading["phonemes"])
+        return {"alphabet": "cmu_arpabet", "value": forms[lower][1] if lower in forms else reading["phonemes"]}
+    value = validate_say_as(reading["say_as"])
+    if form_spellings(name).get(lower, "base") != "base":
+        value += word[len(name):]
+    if len(word) > 1 and word.isupper():
+        value = value.upper()
+    return {"alphabet": "respelling", "value": validate_say_as(value)}
 
 
 def _suffix(phonemes):
@@ -176,37 +307,78 @@ def _book_id(directory):
 
 
 def _validate_definition(key, value):
-    fields = {"name", "phonemes", "respelling", "history"}
-    if not isinstance(value, dict) or set(value) != fields:
+    fields = {"name", "phonemes", "respelling", "parts_of_speech", "history"}
+    # ``say_as`` is present only for a say-as reading, so phoneme records keep
+    # their exact bytes and older readers refuse say-as records.
+    if not isinstance(value, dict) or set(value) not in (fields, fields | {"say_as"}):
         raise ValueError("Name pronunciation definition has missing or unsupported fields")
     if name_key(value["name"]) != key:
         raise ValueError("Name pronunciation definition identity is invalid")
-    validate_name_phonemes(value["phonemes"])
+    if "say_as" in value:
+        if value["phonemes"] is not None or value["respelling"] is not None:
+            raise ValueError("A say-as pronunciation has no phonemes or respelling hint")
+        validate_say_as(value["say_as"])
+    else:
+        validate_name_phonemes(value["phonemes"])
     validate_respelling(value["respelling"])
+    if validate_parts(value["parts_of_speech"]) != value["parts_of_speech"]:
+        raise ValueError("Name pronunciation parts of speech must be in canonical order")
     history = value["history"]
     if not isinstance(history, list) or not 1 <= len(history) <= MAX_HISTORY:
         raise ValueError("Name pronunciation history must be a bounded list")
     for item in history:
-        if (not isinstance(item, dict) or not {"phonemes", "source"} <= set(item)
-                or set(item) - {"phonemes", "source", "instruction", "respelling"}
+        if (not isinstance(item, dict) or "source" not in item or len({"phonemes", "say_as"} & set(item)) != 1
+                or set(item) - {"phonemes", "say_as", "source", "instruction", "respelling"}
                 or item["source"] not in HISTORY_SOURCES):
             raise ValueError("Name pronunciation history entry is invalid")
-        validate_name_phonemes(item["phonemes"])
+        validate_reading(reading_of({"phonemes": None, **item}))
         validate_respelling(item.get("respelling"))
         if "instruction" in item and not _plain(item["instruction"], 1000):
             raise ValueError("Name pronunciation instruction must be bounded plain text")
 
 
+_SPAN_FIELDS = ("block_id", "start", "end", "word", "block_sha256")
+
+
 def _validate_mention(value):
-    fields = {"block_id", "start", "end", "word", "block_sha256", "decision", "basis"}
-    if (not isinstance(value, dict) or set(value) != fields or not isinstance(value["block_id"], str)
+    """A model label (part of speech + labelling version) or a person's use decision."""
+    if not isinstance(value, dict) or value.get("basis") not in BASES:
+        raise ValueError("Name pronunciation mention is invalid")
+    labelled = {"label", "labeler"} <= set(value)
+    fields = {*_SPAN_FIELDS, "basis", *(("label", "labeler") if labelled else ())}
+    if value["basis"] == "user":
+        fields.add("use")
+    if (set(value) != fields or not isinstance(value["block_id"], str)
             or type(value["start"]) is not int or type(value["end"]) is not int
             or not 0 <= value["start"] < value["end"] or not isinstance(value["word"], str)
             or len(value["word"]) != value["end"] - value["start"]
             or not isinstance(value["block_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", value["block_sha256"]) is None
-            or value["decision"] not in DECISIONS or value["basis"] not in BASES
-            or value["decision"] == "unsure" and value["basis"] != "model"):
+            or value["basis"] == "model" and not labelled
+            or value["basis"] == "user" and type(value["use"]) is not bool
+            or labelled and (value["label"] not in LABELS or type(value["labeler"]) is not int or value["labeler"] < 1)):
         raise ValueError("Name pronunciation mention is invalid")
+
+
+def _upgrade(record):
+    """Read a version 1 record: keep a person's name/other decisions as use
+    decisions; drop model name/other verdicts, which the labelling replaces."""
+    for section in ("definitions", "drafts"):
+        for value in record[section].values():
+            if isinstance(value, dict) and "parts_of_speech" not in value and isinstance(value.get("name"), str):
+                value["parts_of_speech"] = default_parts(value["name"])
+    mentions = {}
+    for key, values in record["mentions"].items():
+        if not isinstance(values, list):
+            raise ValueError("Name pronunciation mentions must be a bounded list")
+        kept = []
+        for value in values:
+            if not isinstance(value, dict) or value.get("decision") not in {"name", "other", "unsure"}:
+                raise ValueError("Name pronunciation mention is invalid")
+            if value.get("basis") == "user" and value["decision"] in {"name", "other"}:
+                kept.append({**{field: value.get(field) for field in _SPAN_FIELDS}, "basis": "user",
+                             "use": value["decision"] == "name"})
+        mentions[key] = kept
+    return dict(record, version=VERSION, mentions=mentions)
 
 
 def load_local(directory):
@@ -218,10 +390,12 @@ def load_local(directory):
                 "drafts": {}, "mentions": {}}
     record = _regular_json(path)
     if (not isinstance(record, dict) or set(record) != {"format", "version", "book_id", "definitions", "drafts", "mentions"}
-            or record["format"] != FORMAT or type(record["version"]) is not int or record["version"] != VERSION
+            or record["format"] != FORMAT or type(record["version"]) is not int or record["version"] not in {1, VERSION}
             or record["book_id"] != _book_id(directory) or not isinstance(record["definitions"], dict)
             or not isinstance(record["drafts"], dict) or not isinstance(record["mentions"], dict)):
         raise ValueError("Name pronunciation record is invalid or belongs to a different book")
+    if record["version"] == 1:
+        record = _upgrade(record)
     for section in ("definitions", "drafts"):
         for key, value in record[section].items():
             _validate_definition(key, value)
@@ -276,14 +450,26 @@ def _mutate(directory, operation):
         lock.rmdir()
 
 
-def save_definition(directory, name, phonemes, *, status, source, respelling=None, instruction=None):
-    """Checkpoint a draft or confirm a choice; history keeps every listened step."""
+def save_definition(directory, name, phonemes, *, status, source, respelling=None, instruction=None,
+                    parts_of_speech=None, say_as=None):
+    """Checkpoint a draft or confirm a choice; history keeps every listened step.
+
+    Give ``phonemes`` or ``say_as`` (with ``phonemes`` None), not both.
+    ``parts_of_speech`` None keeps the draft's or confirmed choice's parts, or
+    the default for the spelling (``default_parts``).
+    """
     key = name_key(name)
-    validate_name_phonemes(phonemes)
+    if (phonemes is None) == (say_as is None):
+        raise ValueError("A pronunciation is either phonemes or a say-as spelling")
+    reading = validate_reading({"say_as": say_as} if say_as is not None else {"phonemes": phonemes})
     validate_respelling(respelling)
+    if say_as is not None and respelling is not None:
+        raise ValueError("A say-as pronunciation has no separate respelling hint")
+    if parts_of_speech is not None:
+        parts_of_speech = validate_parts(parts_of_speech)
     if status not in {"draft", "confirmed"} or source not in HISTORY_SOURCES:
         raise ValueError("Invalid name pronunciation status or source")
-    step = {"phonemes": phonemes, "source": source}
+    step = {**reading, "source": source}
     if respelling is not None:
         step["respelling"] = respelling
     if instruction is not None:
@@ -296,7 +482,9 @@ def save_definition(directory, name, phonemes, *, status, source, respelling=Non
         history = list(previous["history"]) if previous else []
         if not history or history[-1] != step:
             history.append(step)
-        value = {"name": name, "phonemes": phonemes, "respelling": respelling, "history": history[-MAX_HISTORY:]}
+        parts = parts_of_speech or (previous["parts_of_speech"] if previous else default_parts(name))
+        value = {"name": name, "phonemes": phonemes, "respelling": respelling, "parts_of_speech": parts,
+                 "history": history[-MAX_HISTORY:], **({"say_as": say_as} if say_as is not None else {})}
         if status == "draft":
             record["drafts"][key] = value
         else:
@@ -314,6 +502,27 @@ def discard_draft(directory, name):
         _mutate(directory, update)
 
 
+def remove_definition(directory, name):
+    """Remove this book's own confirmed choice and draft for a name.
+
+    Returns the removed confirmed definition (or None when only a draft was
+    removed). This book's labels and decisions stay: they record what each use
+    is, not how it sounds, and apply again if the word is defined in an
+    ancestor. Books continued from this one stop inheriting the removed choice.
+    """
+    key = name_key(name)
+    if not (Path(directory) / FILENAME).exists() or (
+            key not in load_local(directory)["definitions"] and key not in load_local(directory)["drafts"]):
+        inherited = effective_definitions(directory).get(key)
+        where = (f"; it is inherited from {inherited['origin_directory']}, so remove it there"
+                 if inherited is not None else "")
+        raise ValueError(f"{name} has no pronunciation defined in this book{where}")
+    def update(record):
+        record["drafts"].pop(key, None)
+        return record["definitions"].pop(key, None)
+    return _mutate(directory, update)
+
+
 def local_draft(directory, name):
     value = load_local(directory)["drafts"].get(name_key(name))
     return deepcopy(value) if value else None
@@ -324,25 +533,52 @@ def local_definition(directory, name):
     return deepcopy(value) if value else None
 
 
-def tagging_state(directory, source, name):
-    """Current occurrences split by saved decision; stale decisions are ignored."""
+def parts_for(directory, name):
+    """The parts of speech that apply here: the effective choice, else the default."""
+    definition = effective_definitions(directory).get(name_key(name))
+    return definition["parts_of_speech"] if definition is not None else default_parts(name)
+
+
+def tagging_state(directory, source, name, parts=None):
+    """Current uses split into decided, unlabelled (pending) and unsure.
+
+    A decided use carries ``use`` (whether it gets the special reading),
+    ``basis`` (``user``, ``model`` or ``rule``) and its ``label`` when known.
+    Labels from an older labelling version, or for text that changed, are
+    ignored, so those uses are pending again.
+    """
+    parts = validate_parts(parts) if parts is not None else parts_for(directory, name)
+    labels_needed = needs_labels(name, parts)
     saved = {mention_key(item): item for item in load_local(directory)["mentions"].get(name_key(name), [])}
     current = book_occurrences(source, name)
-    decided, pending, unsure = [], [], []
+    decided, pending, unsure, counts = [], [], [], {}
     for item in current:
-        decision = saved.get(mention_key(item))
-        if decision is None:
+        mention = saved.get(mention_key(item))
+        label = (mention["label"] if mention is not None and mention.get("labeler") == LABEL_VERSION else None)
+        if label is not None:
+            counts[label] = counts.get(label, 0) + 1
+        if mention is not None and mention["basis"] == "user":
+            decided.append(dict(item, use=mention["use"], basis="user", label=label))
+        elif not labels_needed:
+            decided.append(dict(item, use=True, basis="rule", label=label))
+        elif label is None:
             pending.append(item)
-        elif decision["decision"] == "unsure":
-            unsure.append(dict(item, decision="unsure", basis="model"))
+        elif label == "unsure":
+            unsure.append(dict(item, use=None, basis="model", label="unsure"))
         else:
-            decided.append(dict(item, decision=decision["decision"], basis=decision["basis"]))
+            decided.append(dict(item, use=label in parts, basis="model", label=label))
     return {"occurrences": current, "decided": decided, "pending": pending, "unsure": unsure,
-            "ready": not pending and not unsure}
+            "ready": not pending and not unsure, "parts_of_speech": parts, "labels_needed": labels_needed,
+            "label_counts": counts}
 
 
 def save_decisions(directory, source, name, decisions):
-    """Merge decisions for current occurrences; drop ones whose text changed."""
+    """Merge model labels or a person's decisions for current uses.
+
+    Entries whose text changed are dropped. A person's decision keeps the
+    model label it overrides (for display); a model label never replaces a
+    person's decision.
+    """
     key = name_key(name)
     current = {mention_key(item): item for item in book_occurrences(source, name)}
     checked = []
@@ -354,6 +590,11 @@ def save_decisions(directory, source, name, decisions):
     def update(record):
         merged = {mention_key(item): item for item in record["mentions"].get(key, []) if mention_key(item) in current}
         for value in checked:
+            old = merged.get(mention_key(value))
+            if value["basis"] == "model" and old is not None and old["basis"] == "user":
+                value = dict(old, label=value["label"], labeler=value["labeler"])
+            elif value["basis"] == "user" and "label" not in value and old is not None and "label" in old:
+                value = dict(value, label=old["label"], labeler=old["labeler"])
             merged[mention_key(value)] = value
         record["mentions"][key] = sorted(merged.values(), key=lambda item: (item["block_id"], item["start"]))
     _mutate(directory, update)
@@ -363,7 +604,7 @@ def pending_tagging(directory, source):
     """Effective names whose current uses are not all decided in this book."""
     result = []
     for _, definition in sorted(effective_definitions(directory).items()):
-        state = tagging_state(directory, source, definition["name"])
+        state = tagging_state(directory, source, definition["name"], definition["parts_of_speech"])
         if not state["ready"]:
             result.append((definition, state))
     return result
@@ -381,25 +622,26 @@ def render_snapshot(directory, source):
         return None
     spans, blocked = {}, []
     for key, definition in sorted(definitions.items()):
-        state = tagging_state(directory, source, definition["name"])
+        state = tagging_state(directory, source, definition["name"], definition["parts_of_speech"])
         if not state["ready"]:
             origin = " (inherited)" if definition["inherited"] else ""
             blocked.append(f"{definition['name']}{origin}: {len(state['pending'])} untagged, {len(state['unsure'])} unsure")
             continue
-        forms = form_phonemes(definition["name"], definition["phonemes"])
+        reading = reading_of(definition)
         for item in state["decided"]:
-            if item["decision"] != "name":
+            if not item["use"]:
                 continue
-            lower = item["word"].casefold()
-            phonemes = forms[lower][1] if lower in forms else definition["phonemes"]
+            pronunciation = word_pronunciation(definition["name"], reading, item["word"])
+            field = "phonemes" if pronunciation["alphabet"] == "cmu_arpabet" else "say_as"
             spans.setdefault(item["block_id"], []).append(
-                {"start": item["start"], "end": item["end"], "word": item["word"], "phonemes": phonemes, "name": key})
+                {"start": item["start"], "end": item["end"], "word": item["word"], field: pronunciation["value"],
+                 "name": key})
     if blocked:
         raise ValueError("Name pronunciations need this book's name uses tagged before rendering ("
-                         + "; ".join(blocked) + "). Run: audiobook-render pronounce-name BOOK "
-                         "(or just pronounce-name BOOK) to tag them; nothing was rendered")
+                         + "; ".join(blocked) + "). Run: audiobook-render pronounce BOOK "
+                         "(or just pronounce BOOK) to tag them; nothing was rendered")
     for block_id, items in spans.items():
         items.sort(key=lambda item: item["start"])
         if any(a["end"] > b["start"] for a, b in zip(items, items[1:])):
-            raise ValueError(f"Two defined name pronunciations claim overlapping words in block {block_id}")
+            raise ValueError(f"Two defined pronunciations claim overlapping words in block {block_id}")
     return {"spans": spans}

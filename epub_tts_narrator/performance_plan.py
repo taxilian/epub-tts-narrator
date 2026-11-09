@@ -39,19 +39,37 @@ def plain_direction(value, label="Performance direction", *, required=False):
     return value.strip()
 
 
+PHONEME_GROUP_SEPARATOR = " | "
+
+
+def phoneme_groups(value):
+    """Split a reading into consecutive groups (``M AY1 L | K IY1``).
+
+    Each group becomes its own engine phoneme tag, so a compound such as
+    "mile key" is read as its parts instead of one blended word.
+    """
+    return value.split(PHONEME_GROUP_SEPARATOR)
+
+
 def validate_phonemes(value):
-    """Validate CMU inventory/stress syntax, not pronunciation equivalence."""
+    """Validate CMU inventory/stress syntax, not pronunciation equivalence.
+
+    One group of space-separated symbols, or up to eight groups joined by
+    `` | ``; a value without ``|`` is unchanged from before groups existed.
+    """
     if not isinstance(value, str) or not 1 <= len(value) <= 512:
         raise ValueError("Performance phonemes must be bounded CMU Arpabet text")
-    tokens = value.split(" ")
-    if not 1 <= len(tokens) <= 128:
-        raise ValueError("Performance pronunciation has too many phonemes")
+    groups = phoneme_groups(value)
+    tokens = [token for group in groups for token in group.split(" ")]
+    if not 1 <= len(tokens) <= 128 or len(groups) > 8:
+        raise ValueError("Performance pronunciation has too many phonemes or groups")
     for token in tokens:
         if token in _CONSONANTS or token in _VOWELS:
             continue
         if len(token) >= 2 and token[-1] in "012" and token[:-1] in _VOWELS:
             continue
-        raise ValueError("Performance phonemes contain an invalid CMU Arpabet symbol or stress")
+        raise ValueError("Performance phonemes contain an invalid CMU Arpabet symbol or stress"
+                         + (" (separate groups with ' | ')" if "|" in value else ""))
     return value
 
 

@@ -1,38 +1,52 @@
-"""``pronounce-name``: choose a name's reading by ear, then tag its real uses.
+"""``pronounce`` (alias ``pronounce-name``): choose a word's reading by ear, then tag its uses.
 
-Flow for ``pronounce-name BOOK NAME``:
+Flow for ``pronounce BOOK WORD``:
 
 1. Start from your unconfirmed draft, this book's or an inherited confirmed
-   choice, ``--phonemes``, or a model guess (``fish-phoneme-tags`` rules).
-2. Render and play a short test sentence that uses the name several times,
-   including its possessive (and plural when the book uses one).
-3. Accept, ask the model to revise from your description, ask for a different
-   guess, or edit the phonemes yourself; repeat until accepted. Each step is
-   checkpointed as a draft, so quitting and rerunning resumes it. On accept,
-   the configured recognizer transcribes the accepted test sentence once, and
-   how it spells the name there is saved as a trusted heard variant
+   choice, ``--phonemes``, a description of the sound, or a model guess
+   (``fish-phoneme-tags`` rules). ``--as`` (or ``S`` in the menu) chooses the
+   parts of speech that get the reading; the default is every part of speech
+   for an invented spelling and proper nouns for an ordinary English word.
+2. When an ordinary word could share the spelling, or only some parts of
+   speech apply, the model labels each use's part of speech first, in
+   checkpointed batches, and the counts are shown.
+3. Render and play up to three short sentences from the book with uses that
+   get the reading (a built-in sentence when none is short enough).
+4. Accept, ask the model to revise from your description, ask for a different
+   guess, edit the phonemes yourself, or change the parts of speech; repeat
+   until accepted. Each step is checkpointed as a draft. On accept, the
+   configured recognizer transcribes the accepted test sentence once, and how
+   it spells the word there is saved as a trusted heard variant
    (``heard_variants.py``) so renders do not reject that spelling.
-4. Tag every occurrence that really is the name (homonyms stay untagged), with
-   per-batch checkpoints; you decide any the model is unsure about.
+5. You decide any use the model was unsure about (``--review-tags``: every
+   model-labelled use).
 
-``pronounce-name BOOK`` with no name tags every defined (including inherited)
-name still untagged in this book; ``--list`` shows status.
+``pronounce BOOK`` with no word labels and tags every defined (including
+inherited) word still untagged in this book; ``--list`` shows status.
 """
 
 from pathlib import Path
+import re
 import sys
 
-from ..name_pronunciations import (book_occurrences, effective_definitions, form_phonemes, local_definition,
-                                   local_draft, load_local,
-                                   name_key, normalize_phonemes, occurrences, plural_spelling, save_decisions,
-                                   save_definition, tagging_state, validate_name_phonemes)
+from ..name_pronunciations import (PART_LABELS, book_occurrences, default_parts, describe_parts,
+                                   effective_definitions, form_phonemes, in_dictionary, local_definition,
+                                   local_draft, load_local, mention_key, name_key, normalize_phonemes, occurrences,
+                                   parse_parts, parts_for, plural_spelling, save_decisions, save_definition,
+                                   tagging_state, validate_name_phonemes, describe_reading, normalize_say_as,
+                                   reading_of, validate_reading, word_pronunciation)
 from ..pronunciations import validate_word
 from .audition import AudioPlayer, display
 
 
 MENU = ("A: accept   P: play again   B: play the default (untagged) reading   "
         "I [text]: tell the model how it should sound   N: different model guess   "
-        "E [phonemes]: edit phonemes yourself   Q: quit (your draft is kept)")
+        "E [phonemes]: edit phonemes yourself (| splits groups: M AY1 L | K IY1)   "
+        "R [spelling]: say it as another spelling (e.g. mile-key)   "
+        "S [parts]: choose the parts of speech that get it   Q: quit (your draft is kept)")
+MAX_SAMPLE_SENTENCE = 200
+MAX_SAMPLE_SENTENCES = 3
+_SENTENCE_END = re.compile(r"[.!?…]+[\"'”’)\]]*(?=\s|$)")
 
 
 def test_sentence(name, source_occurrences, source_text_sample=""):
@@ -46,12 +60,83 @@ def test_sentence(name, source_occurrences, source_text_sample=""):
     return sentence
 
 
-def sentence_controls(name, sentence, phonemes):
-    forms = form_phonemes(name, phonemes)
-    return [{"kind": "pronunciation", "start": item["start"], "end": item["end"], "text": item["word"],
-             "alphabet": "cmu_arpabet",
-             "phonemes": forms[item["word"].casefold()][1] if item["word"].casefold() in forms else phonemes}
-            for item in occurrences(sentence, name)]
+def _sentence_span(text, start, end):
+    left = 0
+    for match in _SENTENCE_END.finditer(text, 0, start):
+        left = match.end()
+    match = _SENTENCE_END.search(text, end)
+    right = match.end() if match else len(text)
+    while left < right and text[left].isspace():
+        left += 1
+    return left, right
+
+
+def book_sentences(source, name, state):
+    """Up to three short book sentences whose every use of the word gets the reading.
+
+    Returns (text, spans) with spans relative to the joined text, preferring
+    different forms and parts of speech; (None, []) when no sentence fits.
+    """
+    used = {mention_key(item) for item in state["decided"] if item["use"]}
+    blocks = {block["id"]: block["text"] for block in source["blocks"]}
+    by_block = {}
+    for item in state["occurrences"]:
+        by_block.setdefault(item["block_id"], []).append(item)
+    candidates, seen = [], set()
+    for item in state["decided"]:
+        if not item["use"]:
+            continue
+        text = blocks[item["block_id"]]
+        left, right = _sentence_span(text, item["start"], item["end"])
+        inside = [other for other in by_block[item["block_id"]] if left <= other["start"] and other["end"] <= right]
+        sentence = text[left:right]
+        if (len(sentence) > MAX_SAMPLE_SENTENCE or sentence in seen
+                or any(mention_key(other) not in used for other in inside)):
+            continue
+        seen.add(sentence)
+        candidates.append((item["form"], item.get("label"), sentence,
+                           [(other["start"] - left, other["end"] - left, other["word"]) for other in inside]))
+    chosen, kinds = [], set()
+    for candidate in sorted(candidates, key=lambda value: len(value[2])):
+        if (candidate[0], candidate[1]) not in kinds and len(chosen) < MAX_SAMPLE_SENTENCES:
+            kinds.add((candidate[0], candidate[1]))
+            chosen.append(candidate)
+    for candidate in sorted(candidates, key=lambda value: len(value[2])):
+        if len(chosen) >= MAX_SAMPLE_SENTENCES:
+            break
+        if candidate not in chosen:
+            chosen.append(candidate)
+    if not chosen:
+        return None, []
+    text, spans = "", []
+    for _, _, sentence, inside in chosen:
+        offset = len(text) + (1 if text else 0)
+        text = (text + " " + sentence) if text else sentence
+        spans += [(start + offset, end + offset, word) for start, end, word in inside]
+    return text, spans
+
+
+def sentence_controls(name, sentence, reading, spans=None):
+    """Pronunciation controls for each use in a test sentence.
+
+    ``reading`` is ``{"phonemes": …}``, ``{"say_as": …}``, or (older callers) a
+    phoneme string.
+    """
+    if isinstance(reading, str):
+        reading = {"phonemes": reading}
+    if spans is None:
+        spans = [(item["start"], item["end"], item["word"]) for item in occurrences(sentence, name)]
+    controls = []
+    for start, end, word in spans:
+        pronunciation = word_pronunciation(name, reading, word)
+        field = "phonemes" if pronunciation["alphabet"] == "cmu_arpabet" else "replacement"
+        controls.append({"kind": "pronunciation", "start": start, "end": end, "text": word,
+                         "alphabet": pronunciation["alphabet"], field: pronunciation["value"]})
+    return controls
+
+
+def _reading_key(reading):
+    return tuple(sorted(reading.items()))
 
 
 def _excerpt(source, item, width=160):
@@ -81,6 +166,7 @@ class NameTool:
         # once, so renders accept how it spells the name (heard_variants.py).
         self._verifier_factory, self._verifier = verifier_factory, None
         self._previews = {}
+        self._samples = {}
 
     def say(self, value):
         self.output(display(value))
@@ -99,24 +185,66 @@ class NameTool:
             return 1
 
     # Listening -------------------------------------------------------------
-    def play(self, name, phonemes, *, default=False):
-        sentence = test_sentence(name, book_occurrences(self.source, name),
-                                 " ".join(block["text"] for block in self.source["blocks"][:200]))
-        controls = [] if default else sentence_controls(name, sentence, phonemes)
-        pronunciation = None if default else {"alphabet": "cmu_arpabet", "value": phonemes}
+    def _sample(self, name, parts):
+        key = (name_key(name), tuple(parts))
+        if key not in self._samples:
+            state = tagging_state(self.directory, self.source, name, parts)
+            sentence, spans = book_sentences(self.source, name, state)
+            if sentence is None and "proper_noun" not in parts:
+                sentence, spans = f"The word is {name}. Say {name} again: {name}.", None
+            elif sentence is None:
+                sentence = test_sentence(name, book_occurrences(self.source, name),
+                                         " ".join(block["text"] for block in self.source["blocks"][:200]))
+                spans = None
+            self._samples[key] = (sentence, spans)
+        return self._samples[key]
+
+    def play(self, name, reading, *, default=False, parts=None):
+        sentence, spans = self._sample(name, parts if parts is not None else parts_for(self.directory, name))
+        controls = [] if default else sentence_controls(name, sentence, reading, spans)
+        pronunciation = None if default else word_pronunciation(name, reading, name)
         preview = self.session.audition_sentence(name, sentence, controls, pronunciation=pronunciation,
                                                  voice_id=self.voice_id)
-        label = "default reading (no tags)" if default else phonemes
+        label = "default reading (no tags)" if default else describe_reading(reading)
         self.say(f"Test sentence ({label}), voice {preview['context']['voice_id']}: {sentence}")
         self.say(f"Audio: {preview['path']}")
         self.say("Press any key to stop.")
         self.playback_fn(self.player, preview["path"])
         self.session.mark_played(preview)
         if not default:
-            self._previews[phonemes] = preview
+            self._previews[_reading_key(reading)] = preview
 
-    def define(self, name, *, phonemes=None):
-        """Listening loop; returns the accepted phonemes, or None on quit."""
+    def ensure_labels(self, name, parts, *, announce=True):
+        """Label unlabelled uses when the chosen parts need it; returns the state."""
+        from ..name_pronunciation_model import describe_state, label
+        state = tagging_state(self.directory, self.source, name, parts)
+        if state["pending"]:
+            self.say(f"Labelling the part of speech of {len(state['pending'])} use(s) of {name}…")
+            label(self.bundle, name, self.requests, state["pending"], workers=self._workers(), progress=self.say,
+                  on_batch=lambda decisions: save_decisions(self.directory, self.source, name, decisions))
+            state = tagging_state(self.directory, self.source, name, parts)
+        if announce:
+            if state["labels_needed"]:
+                self.say(f"Uses of {name} in this book: {describe_state(state) or 'none labelled'}"
+                         + (f", {len(state['unsure'])} unsure" if state["unsure"] else "")
+                         + f". Getting this reading: {describe_parts(parts)}"
+                         f" ({sum(bool(item['use']) for item in state['decided'])} use(s)).")
+            else:
+                self.say(f"{name} is not an ordinary English word, so all {len(state['occurrences'])} use(s) get "
+                         "this reading (no labelling needed).")
+        return state
+
+    def _save(self, name, reading, *, status="draft", source, respelling=None, instruction=None, parts=None):
+        save_definition(self.directory, name, reading.get("phonemes"), say_as=reading.get("say_as"), status=status,
+                        source=source, respelling=respelling if "phonemes" in reading else None,
+                        instruction=instruction, parts_of_speech=parts)
+
+    def define(self, name, *, phonemes=None, sound=None, parts=None, say_as=None):
+        """Listening loop; returns the accepted reading, or None on quit.
+
+        A reading is ``{"phonemes": …}`` (CMU Arpabet, optionally in ``|``
+        groups) or ``{"say_as": …}`` (a spelling the engine reads instead).
+        """
         from ..name_pronunciation_model import guess
         key = name_key(name)
         found = book_occurrences(self.source, name)
@@ -124,42 +252,63 @@ class NameTool:
             raise ValueError(f"{name} does not occur in this book's source text")
         effective = effective_definitions(self.directory).get(key)
         draft = local_draft(self.directory, name)
-        history = [step["phonemes"] for step in (draft or local_definition(self.directory, name) or {}).get("history", [])]
+        chosen_parts = parts
+        parts = (parts or (draft or {}).get("parts_of_speech") or (effective or {}).get("parts_of_speech")
+                 or default_parts(name))
+        history = [step["phonemes"] for step in (draft or local_definition(self.directory, name) or {}).get("history", [])
+                   if "phonemes" in step]
         respelling = None
-        if phonemes is not None:
-            current = validate_name_phonemes(normalize_phonemes(phonemes))
-            save_definition(self.directory, name, current, status="draft", source="command_line")
+        if phonemes is not None or say_as is not None:
+            current = validate_reading({"phonemes": normalize_phonemes(phonemes)} if phonemes is not None
+                                       else {"say_as": normalize_say_as(say_as)})
+            self._save(name, current, source="command_line", parts=parts)
             last_source = "command_line"
+        elif sound is not None:
+            # The listener's own description wins over any saved draft or inherited reading.
+            self.say(f"Asking the model for phonemes that sound like: {sound}")
+            result = guess(self.bundle, name, self.requests, found, instruction=sound, parts=parts)
+            current, respelling = {"phonemes": result["phonemes"]}, result["respelling"]
+            self._save(name, current, source="model_revision", respelling=respelling, instruction=sound, parts=parts)
+            last_source = "model_revision"
         elif draft is not None:
-            current, respelling = draft["phonemes"], draft["respelling"]
+            current, respelling = reading_of(draft), draft["respelling"]
             last_source = draft["history"][-1]["source"]
             self.say(f"Resuming your unconfirmed choice for {name}.")
         elif effective is not None:
-            current, respelling = effective["phonemes"], effective["respelling"]
+            current, respelling = reading_of(effective), effective["respelling"]
             last_source = "inherited" if effective["inherited"] else effective["history"][-1]["source"]
             where = f"inherited from {effective['origin_directory']}" if effective["inherited"] else "in this book"
             self.say(f"{name} is already defined ({where}). Accept it as is, or modify it.")
         else:
             self.say(f"Asking the model how to pronounce {name}…")
-            result = guess(self.bundle, name, self.requests, found)
-            current, respelling = result["phonemes"], result["respelling"]
-            save_definition(self.directory, name, current, status="draft", source="model", respelling=respelling)
+            result = guess(self.bundle, name, self.requests, found, parts=parts)
+            current, respelling = {"phonemes": result["phonemes"]}, result["respelling"]
+            self._save(name, current, source="model", respelling=respelling, parts=parts)
             last_source = "model"
+        if (chosen_parts is not None and (draft or effective) is not None and phonemes is None and say_as is None
+                and sound is None):
+            self._save(name, current, source=last_source, respelling=respelling, parts=parts)
         counts = {}
         for item in found:
             counts[item["form"]] = counts.get(item["form"], 0) + 1
         self.say(f"{name}: {len(found)} possible uses in this book ("
                  + ", ".join(f"{count} {form}" for form, count in sorted(counts.items())) + ").")
+        if in_dictionary(name) and parts == ["proper_noun"] and chosen_parts is None:
+            self.say(f"{name} is also an ordinary English word, so this reading applies only where it is used as a "
+                     "proper noun. Use S to choose other parts of speech.")
+        self.ensure_labels(name, parts)
         play_next = True
         while True:
-            hint = f" (say it like {respelling})" if respelling else ""
-            self.say(f"Current reading of {name}: {current}{hint}")
-            forms = form_phonemes(name, current)
-            self.say(f"Possessive/plural derive from it: {name}'s → {forms[(name + chr(39) + 's').casefold()][1]}")
+            hint = f" (say it like {respelling})" if respelling and "phonemes" in current else ""
+            self.say(f"Current reading of {name}: {describe_reading(current)}{hint}; applies to {describe_parts(parts)}")
+            possessive = name + chr(39) + "s"
+            derived = word_pronunciation(name, current, possessive)["value"]
+            self.say(f"Possessive/plural derive from it: {possessive} → "
+                     + (derived if "phonemes" in current else f"said as {derived}"))
             if play_next:
                 play_next = False
                 try:
-                    self.play(name, current)
+                    self.play(name, current, parts=parts)
                 except (ValueError, RuntimeError, OSError) as exc:
                     from .diagnostics import configured_secrets, safe_error_text
                     self.say("Playback stopped: " + safe_error_text(exc, secrets=configured_secrets(self.config))
@@ -170,63 +319,95 @@ class NameTool:
             verb, rest = verb.casefold(), rest.strip()
             try:
                 if verb in {"a", "accept"}:
-                    self._accept(name, current, respelling, last_source, effective)
+                    self._accept(name, current, respelling, last_source, effective, parts)
                     self._learn_heard(name, current)
                     return current
                 if verb in {"q", "quit"}:
                     self.say(f"No change confirmed for {name}; your draft is kept for the next run.")
                     return None
                 if verb in {"p", "play"}:
-                    self.play(name, current)
+                    self.play(name, current, parts=parts)
                 elif verb == "b":
-                    self.play(name, current, default=True)
+                    self.play(name, current, default=True, parts=parts)
+                elif verb == "s":
+                    value = rest or self.input_fn(
+                        f"Parts of speech for {name} (now {describe_parts(parts)}; e.g. proper noun, adjective, "
+                        "or all; empty cancels): ").strip()
+                    if not value:
+                        continue
+                    parts = parse_parts(value)
+                    self._save(name, current, source=last_source, respelling=respelling, parts=parts)
+                    self.ensure_labels(name, parts)
+                    play_next = True
                 elif verb in {"i", "n"}:
                     instruction = rest if verb == "i" else "Give a different plausible reading than the ones already heard."
                     if not instruction:
                         instruction = self.input_fn("How should it sound? (e.g. more like sal-vuh-TORE-ee): ").strip()
                     if not instruction:
                         continue
-                    history.append(current)
+                    if "say_as" in current:
+                        # The model writes phonemes; tell it what the say-as spelling sounded like.
+                        instruction = f"Currently said as the spelling {current['say_as']}. {instruction}"
+                    else:
+                        history.append(current["phonemes"])
                     self.say("Asking the model to revise…" if verb == "i" else "Asking the model for a different guess…")
-                    result = guess(self.bundle, name, self.requests, found, current=current,
-                                   instruction=instruction, rejected=history)
-                    current, respelling = result["phonemes"], result["respelling"]
-                    save_definition(self.directory, name, current, status="draft", source="model_revision",
-                                    respelling=respelling, instruction=instruction)
+                    result = guess(self.bundle, name, self.requests, found, current=current.get("phonemes"),
+                                   instruction=instruction, rejected=history, parts=parts)
+                    current, respelling = {"phonemes": result["phonemes"]}, result["respelling"]
+                    self._save(name, current, source="model_revision", respelling=respelling, instruction=instruction,
+                               parts=parts)
                     last_source = "model_revision"
                     play_next = True
                 elif verb == "e":
-                    value = rest or self.input_fn(f"Phonemes (now {current}; empty cancels): ").strip()
+                    now = current["phonemes"] if "phonemes" in current else "none"
+                    value = rest or self.input_fn(f"Phonemes (now {now}; | splits groups, e.g. M AY1 L | K IY1; "
+                                                  "empty cancels): ").strip()
                     if not value:
                         continue
-                    proposed = validate_name_phonemes(normalize_phonemes(value))
-                    history.append(current)
+                    proposed = validate_reading({"phonemes": normalize_phonemes(value)})
+                    if "phonemes" in current:
+                        history.append(current["phonemes"])
                     current, respelling = proposed, None
-                    save_definition(self.directory, name, current, status="draft", source="manual")
+                    self._save(name, current, source="manual")
+                    last_source = "manual"
+                    play_next = True
+                elif verb == "r":
+                    now = current["say_as"] if "say_as" in current else "none"
+                    value = rest or self.input_fn(f"Say {name} as this spelling instead (now {now}; e.g. mile-key; "
+                                                  "empty cancels): ").strip()
+                    if not value:
+                        continue
+                    proposed = validate_reading({"say_as": normalize_say_as(value)})
+                    if "phonemes" in current:
+                        history.append(current["phonemes"])
+                    current, respelling = proposed, None
+                    self._save(name, current, source="manual")
                     last_source = "manual"
                     play_next = True
                 elif verb:
-                    raise ValueError("Use A, P, B, I, N, E or Q")
+                    raise ValueError("Use A, P, B, I, N, E, R, S or Q")
             except (ValueError, RuntimeError, OSError) as exc:
                 from .diagnostics import configured_secrets, safe_error_text
                 self.say("Action stopped: " + safe_error_text(exc, secrets=configured_secrets(self.config)))
 
-    def _accept(self, name, current, respelling, source, effective):
-        """Confirm locally unless this exact reading is already the effective one."""
+    def _accept(self, name, current, respelling, source, effective, parts):
+        """Confirm locally unless this exact reading and parts are already the effective ones."""
         from ..name_pronunciations import discard_draft
         local = local_definition(self.directory, name)
-        if local is not None and local["phonemes"] == current:
+        same = lambda value: reading_of(value) == current and value["parts_of_speech"] == parts
+        shown = describe_reading(current)
+        if local is not None and same(local):
             discard_draft(self.directory, name)
-            self.say(f"Keeping {name}: {current}.")
+            self.say(f"Keeping {name}: {shown} ({describe_parts(parts)}).")
             return
-        if local is None and effective is not None and effective["inherited"] and effective["phonemes"] == current:
+        if local is None and effective is not None and effective["inherited"] and same(effective):
             discard_draft(self.directory, name)
-            self.say(f"Keeping the inherited reading of {name}: {current}.")
+            self.say(f"Keeping the inherited reading of {name}: {shown} ({describe_parts(parts)}).")
             return
-        save_definition(self.directory, name, current, status="confirmed", source=source, respelling=respelling)
-        self.say(f"Confirmed {name}: {current}. Existing audio is unchanged.")
+        self._save(name, current, status="confirmed", source=source, respelling=respelling, parts=parts)
+        self.say(f"Confirmed {name}: {shown} for {describe_parts(parts)}. Existing audio is unchanged.")
 
-    def _learn_heard(self, name, phonemes):
+    def _learn_heard(self, name, reading):
         """Record how the recognizer hears the accepted test sentence's name.
 
         The person just accepted this audio, so a recognizer spelling of the
@@ -240,7 +421,7 @@ class NameTool:
         from .quality import normalize_words
         if self.config.get("verification", {}).get("heard_variants", "learn") != "learn":
             return
-        preview = self._previews.get(phonemes)
+        preview = self._previews.get(_reading_key(reading))
         if preview is None:
             return
         try:
@@ -271,38 +452,39 @@ class NameTool:
 
     # Tagging ---------------------------------------------------------------
     def tag(self, name, *, review=False):
-        """Tag real uses; returns True when every current occurrence is decided."""
-        from ..name_pronunciation_model import tag
-        state = tagging_state(self.directory, self.source, name)
-        if state["pending"]:
-            self.say(f"Tagging {len(state['pending'])} occurrence(s) of {name} (homonyms stay untagged)…")
-            tag(self.bundle, name, self.requests, state["pending"], workers=self._workers(), progress=self.say,
-                on_batch=lambda decisions: save_decisions(self.directory, self.source, name, decisions))
-            state = tagging_state(self.directory, self.source, name)
+        """Label uses and settle unsure ones; returns True when every current use is decided."""
+        from ..name_pronunciation_model import describe_state
+        parts = parts_for(self.directory, name)
+        state = self.ensure_labels(name, parts, announce=False)
         asked = list(state["unsure"])
         if review:
             asked += [item for item in state["decided"] if item["basis"] == "model"]
         for index, item in enumerate(asked, 1):
             if not self.interactive:
                 break
-            label = "unsure" if item["decision"] == "unsure" else f"model said {item['decision']}"
+            label = ("unsure" if item["label"] == "unsure"
+                     else f"labelled {PART_LABELS.get(item['label'], item['label'])}, "
+                          + ("gets the reading" if item["use"] else "keeps the default reading"))
             self.say(f"[{index}/{len(asked)}] {label}: {_excerpt(self.source, item)}")
-            answer = self.input_fn(f"Is »{item['word']}« the name {name}? y/n (Enter keeps, Q stops): ").strip().casefold()
+            answer = self.input_fn(f"Should »{item['word']}« here get the reading of {name}? y/n "
+                                   "(Enter keeps, Q stops): ").strip().casefold()
             if answer == "q":
                 break
             if answer in {"y", "n"}:
                 decision = {key: item[key] for key in ("block_id", "start", "end", "word", "block_sha256")}
                 save_decisions(self.directory, self.source, name,
-                               [dict(decision, decision="name" if answer == "y" else "other", basis="user")])
-        state = tagging_state(self.directory, self.source, name)
-        names = [item for item in state["decided"] if item["decision"] == "name"]
-        others = [item for item in state["decided"] if item["decision"] == "other"]
-        self.say(f"{name}: {len(names)} use(s) tagged as the name; {len(others)} other use(s) keep the default "
-                 f"reading; {len(state['unsure'])} unsure; {len(state['pending'])} untagged.")
+                               [dict(decision, basis="user", use=answer == "y")])
+        state = tagging_state(self.directory, self.source, name, parts)
+        used = [item for item in state["decided"] if item["use"]]
+        others = [item for item in state["decided"] if not item["use"]]
+        self.say(f"{name} ({describe_parts(parts)}): {len(used)} use(s) get the reading; {len(others)} keep the "
+                 f"default reading; {len(state['unsure'])} unsure; {len(state['pending'])} unlabelled."
+                 + (f" Labels: {describe_state(state)}." if state["label_counts"] else ""))
         for item in others[:10]:
-            self.say("  not the name: " + _excerpt(self.source, item, 70))
+            how = PART_LABELS.get(item["label"], "your choice") if item["basis"] != "user" else "your choice"
+            self.say(f"  default reading ({how}): " + _excerpt(self.source, item, 70))
         if others and not review:
-            self.say("Use --review-tags to check or change the model's decisions.")
+            self.say("Use --review-tags to check or change the model's labels.")
         if not state["ready"]:
             self.say(f"Rendering stays blocked until every use of {name} is decided; rerun this command.")
         return state["ready"]
@@ -310,33 +492,35 @@ class NameTool:
     def tag_all(self, *, review=False):
         definitions = effective_definitions(self.directory)
         if not definitions:
-            self.say("No name pronunciations are defined for this book or its series ancestors.")
+            self.say("No pronunciations are defined for this book or its series ancestors.")
             return True
         ready = True
         for _, definition in sorted(definitions.items()):
-            state = tagging_state(self.directory, self.source, definition["name"])
+            state = tagging_state(self.directory, self.source, definition["name"], definition["parts_of_speech"])
             if state["ready"] and not review:
                 continue
             ready = self.tag(definition["name"], review=review) and ready
         if ready:
-            self.say("Every defined name is tagged in this book.")
+            self.say("Every defined word is tagged in this book.")
         return ready
 
     def show(self):
         definitions = effective_definitions(self.directory)
         drafts = load_local(self.directory)["drafts"]
         if not definitions and not drafts:
-            self.say("No name pronunciations are defined for this book or its series ancestors.")
+            self.say("No pronunciations are defined for this book or its series ancestors.")
         for key in sorted({*definitions, *drafts}):
             definition = definitions.get(key)
             if definition is not None:
-                state = tagging_state(self.directory, self.source, definition["name"])
+                state = tagging_state(self.directory, self.source, definition["name"], definition["parts_of_speech"])
                 origin = f"inherited from {definition['origin_directory']}" if definition["inherited"] else "this book"
                 status = "tagged" if state["ready"] else f"{len(state['pending'])} untagged, {len(state['unsure'])} unsure"
-                tagged = sum(item["decision"] == "name" for item in state["decided"])
-                self.say(f"{definition['name']}: {definition['phonemes']} ({origin}); {tagged} tagged uses; {status}")
+                tagged = sum(bool(item["use"]) for item in state["decided"])
+                self.say(f"{definition['name']}: {describe_reading(reading_of(definition))} for {describe_parts(definition['parts_of_speech'])} "
+                         f"({origin}); {tagged} tagged uses; {status}")
             if key in drafts:
-                self.say(f"{drafts[key]['name']}: unconfirmed draft {drafts[key]['phonemes']}")
+                self.say(f"{drafts[key]['name']}: unconfirmed draft {describe_reading(reading_of(drafts[key]))} "
+                         f"for {describe_parts(drafts[key]['parts_of_speech'])}")
 
     def close(self):
         if self.player is not None:
@@ -347,12 +531,54 @@ class NameTool:
         self.session.close()
 
 
+def _remove(directory, name, output):
+    from ..name_pronunciations import remove_definition
+    removed = remove_definition(directory, name)
+    if removed is None:
+        output(display(f"Removed the unconfirmed draft for {name}; nothing was confirmed in this book."))
+    else:
+        reading = reading_of(removed)
+        option = (f"--say-as {reading['say_as']}" if "say_as" in reading else f"--phonemes \"{reading['phonemes']}\"")
+        output(display(f"Removed {removed['name']} ({describe_reading(reading)}) from {directory}. To define it again: "
+                       f"pronounce BOOK {removed['name']} {option} --as \"{describe_parts(removed['parts_of_speech'])}\""))
+    now = effective_definitions(directory).get(name_key(name))
+    if now is not None:
+        output(display(f"This book now inherits {now['name']} ({describe_reading(reading_of(now))}) from {now['origin_directory']}."))
+    else:
+        output(display(f"{name} now uses the engine's default reading here and in books continued from this one, "
+                       "unless one of them defines it; re-render affected chapters to hear the change."))
+    return 0
+
+
 def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, output=print, engine_factory=None,
                        store=None, player=None, playback_fn=None, requests=None, interactive=None,
                        verifier_factory=None):
     name = getattr(args, "name", None)
     if name is not None:
         validate_word(name)
+    if getattr(args, "remove", False):
+        if name is None:
+            raise ValueError("Name the pronunciation to remove, e.g. pronounce-name BOOK Salvatore --remove")
+        if any(getattr(args, field, None) for field in ("sound", "phonemes", "say_as", "tag_only", "review_tags", "list",
+                                                         "parts_of_speech")):
+            raise ValueError("--remove cannot be combined with other pronounce choices")
+        return _remove(Path(bundle["directory"]), name, output)
+    sound = getattr(args, "sound", None)
+    if sound is not None:
+        sound = " ".join(sound.split())
+        if name is None or not sound or len(sound) > 1000:
+            raise ValueError("Give the name first, then how it should sound in up to 1000 characters, e.g. pronounce-name BOOK Salvatore 'sal-vuh-TORE'")
+        if (getattr(args, "phonemes", None) is not None or getattr(args, "say_as", None) is not None
+                or getattr(args, "tag_only", False)):
+            raise ValueError("Choose how it sounds, --phonemes or --say-as, not more than one, and not with --tag-only")
+    if getattr(args, "say_as", None) is not None and (name is None or getattr(args, "phonemes", None) is not None
+                                                      or getattr(args, "tag_only", False)):
+        raise ValueError("--say-as needs a word, and cannot be combined with --phonemes or --tag-only")
+    parts = getattr(args, "parts_of_speech", None)
+    if parts is not None:
+        if name is None or getattr(args, "tag_only", False) or getattr(args, "list", False):
+            raise ValueError("--as needs a word to define and cannot be combined with --tag-only or --list")
+        parts = parse_parts(parts)
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -375,7 +601,8 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
         if name is None:
             return 0 if tool.tag_all(review=review) else 2
         if not getattr(args, "tag_only", False):
-            if tool.define(name, phonemes=getattr(args, "phonemes", None)) is None:
+            if tool.define(name, phonemes=getattr(args, "phonemes", None), sound=sound, parts=parts,
+                           say_as=getattr(args, "say_as", None)) is None:
                 return 0
         elif effective_definitions(tool.directory).get(name_key(name)) is None:
             raise ValueError(f"{name} has no confirmed pronunciation here or in a series ancestor")

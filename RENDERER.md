@@ -554,44 +554,69 @@ Both commands read analysis-provider and renderer settings from the same global 
 
 Initial analysis can carry reviewed, source-linked spoken-spelling edits and inline `performance_controls`. These are consumed during default rendering without `prepare-performance`; a whisper, emotion, or laughing delivery may cover only part of a segment. Point vocalizations and pauses remain separate from lexical text. Optional external records merge only when compatible; conflicting overlaps fail rather than silently replacing an instruction. Actual adherence to a cue still depends on the selected model.
 
-Pronunciation work is optional and manual. Nothing runs automatically: the renderer never discovers candidates, creates CMU suggestions or estimates, or generates name annotations on its own. The `pronunciations` commands need no analysis-provider configuration or network access. The one model-assisted tool is `pronounce-name`, which you invoke for one name at a time (below). Existing confirmed and keep-default choices remain valid, including inherited choices and saved literal respellings.
+Pronunciation work is optional and manual. Nothing runs automatically: the renderer never discovers candidates, creates CMU suggestions or estimates, or generates name annotations on its own. The `pronunciations` commands need no analysis-provider configuration or network access. The one model-assisted tool is `pronounce` (formerly `pronounce-name`), which you invoke for one name or invented word at a time (below). Existing confirmed and keep-default choices remain valid, including inherited choices and saved literal respellings.
 
-### Character names (`pronounce-name`)
+### Names and invented words (`pronounce`)
 
-Use this when the engine reads a name inconsistently or wrongly (for example "Salvatore" coming out sometimes as "sal-vuh-tore" and sometimes as "sal-vuh-torie"):
+Use this when the engine reads a name or invented word inconsistently or wrongly (for example "Salvatore" coming out sometimes as "sal-vuh-tore" and sometimes as "sal-vuh-torie", or a place, people or term such as "Yarran" or "Rivan"). `pronounce-name` is the same command under its older name.
 
 ```sh
-just pronounce-name runs/quest-academy-08 Salvatore
-# or: audiobook-render pronounce-name BOOK Salvatore [--phonemes "S AE2 L V AH0 T AO1 R IY0"] [--voice-id VOICE]
+just pronounce runs/quest-academy-08 Salvatore
+just pronounce runs/quest-academy-08 Salvatore "sal-vuh-TORE, no ee at the end"
+just pronounce runs/book Ally --as "proper noun"
+just pronounce runs/book Milekey --say-as mile-key
+just pronounce runs/book Milekey --phonemes "M AY1 L | K IY1"
+# or: audiobook-render pronounce BOOK WORD ["HOW IT SOUNDS" | --phonemes "S AE2 L V AH0 T AO1 R" | --say-as SPELLING] [--as PARTS] [--voice-id VOICE]
 ```
 
-1. The analysis model proposes CMUdict-style ARPAbet with stress digits (the Fish/Drama 3 phoneme-tag convention). It sees the name, the bundled CMUdict readings, the matching cast entries, and a few book excerpts as untrusted data. `--phonemes` starts from your own reading instead. A confirmed choice from this book or a series ancestor is offered first.
-2. The tool renders and plays a short test sentence that uses the name several times, including its possessive, with the voice that says the name most often (normally the narrator). For example: "The name is Salvatore. It is Salvatore's name. Give it to Salvatore." When the book uses the plural, the sentence adds that too. The audio file path is printed. These are lossless listening previews under `render-work/pronunciations/`, not book audio.
-3. Choose one:
+A reading is one of three things:
+- **Phonemes:** for example `S AE2 L V AH0 T AO1 R`.
+- **Phoneme groups:** phonemes split with ` | `, for example `M AY1 L | K IY1`. Each group becomes its own engine phoneme tag, so a compound like "milekey" is read as "mile key" rather than blended into "mily-key" or "milky". The primary stress may be in any group.
+- **A say-as spelling:** for example `mile-key`. The engine reads that spelling in place of the word, with possessives keeping their ending (`Milekey's` → `mile-key's`) and capitals for a word written in capitals. Parts typed with spaces are joined with hyphens.
+
+Each choice says which parts of speech get the reading: proper noun, common noun, adjective, verb, adverb, or interjection. This keeps homonyms apart. A character called Ally can be read "AL-ee" while "an ally" keeps its ordinary reading. "Rivan" can cover "the Rivan King" (proper noun), "a Rivan" (proper noun), and "Rivan kings" (adjective). `--as` sets the parts up front, for example `--as "proper noun, adjective"` or `--as all`. `S` in the menu changes them. When you don't choose:
+
+- A spelling that isn't in the CMU dictionary (Yarran, Rivan, Mandorallen) applies to every part of speech. No ordinary word can share it, so every use is tagged without asking the model.
+- A spelling that is also an ordinary English word (Rose, Grant, Ally, Riva) applies only to proper nouns, and the tool says so.
+
+1. The analysis model proposes CMUdict-style ARPAbet with stress digits (the Fish/Drama 3 phoneme-tag convention). It sees the word, the bundled CMUdict readings, the matching cast entries, the chosen parts of speech, and a few book excerpts as untrusted data. A final argument describing how the word should sound, in your own words, is passed to the model as your instruction for the first guess. It takes precedence over a saved draft or an existing choice. `--phonemes` starts from your own ARPAbet instead. Without either, a saved draft resumes, and otherwise a confirmed choice from this book or a series ancestor is offered first.
+2. When the model's help is needed (an ordinary-word spelling, or only some parts of speech), it first labels each use's part of speech in context, in checkpointed batches. The tool shows the counts, for example "41 proper noun, 3 common noun", and how many uses get the reading. The labels don't depend on your choice of parts, so changing the parts later needs no new requests.
+3. The tool renders and plays up to three short sentences from the book with uses that get the reading, preferring different forms and parts of speech. It uses the voice that says the word most often (normally the narrator). A sentence that also contains a use that keeps the default reading is skipped. When no sentence is short enough, a built-in one is used instead, such as "The name is Salvatore. It is Salvatore's name. Give it to Salvatore." The audio file path is printed. These are lossless listening previews under `render-work/pronunciations/`, not book audio. If Drama 3 stops a take before the end of the sentence (for example when it runs into silence), the tool tries up to three fresh seeds. If all three stop early, the next `P` continues with new seeds and never repeats one that already failed.
+4. Choose one:
    - `A` accepts.
    - `I more like sal-vuh-TORE-ee` asks the model to revise from your description.
    - `N` asks for a different guess.
-   - `E S AE2 L V AH0 T AO1 R` sets the phonemes yourself. Input is case-insensitive; every vowel needs a 0/1/2 stress digit.
+   - `E S AE2 L V AH0 T AO1 R` sets the phonemes yourself. Input is case-insensitive; every vowel needs a 0/1/2 stress digit. `E M AY1 L | K IY1` sets phoneme groups.
+   - `R mile-key` says the word as that spelling instead.
+   - `S proper noun, adjective` (or `S all`) changes which parts of speech get the reading.
    - `B` plays the engine's default reading for comparison.
    - `P` replays.
    - `Q` quits.
 
    Every listened step is checkpointed as a draft in `name-pronunciations.json`. Drafts never affect rendering, and rerunning resumes the draft.
 
-   On `A`, the configured speech recognizer transcribes the test sentence you just accepted, once. If it spells the name differently (for example `Marla` for `Mara`) and every other word of the sentence is heard as written, that spelling is saved as a trusted heard variant for the name and its possessive (see "Learned heard variants"), so renders with the same recognizer accept it. If anything else in the sentence is heard differently, nothing is learned. A missing or failing recognizer only skips this step; the confirmed choice stays.
-4. After acceptance, the model reads each occurrence in context, in checkpointed batches, and tags only real uses of the name. Homonyms stay untagged, such as "a rose" next to a character called Rose, or "hope" beside Hope. The tool asks you about anything the model was unsure of and lists the uses it excluded. `--review-tags` lets you check or flip every model decision.
+   On `A`, the configured speech recognizer transcribes the test sentence you just accepted, once. If it spells the word differently (for example `Marla` for `Mara`) and every other word of the sentence is heard as written, that spelling is saved as a trusted heard variant for the word and its possessive (see "Learned heard variants"), so renders with the same recognizer accept it. If anything else in the sentence is heard differently, nothing is learned. A missing or failing recognizer only skips this step; the confirmed choice stays.
+5. After acceptance, the tool asks you about any use the model was unsure of and lists the uses that keep the default reading, with their labels. `--review-tags` lets you check or flip every use the model labelled. Your answers ("should this use get the reading?") always win over labels.
 
-Possessive and plural readings are derived from the base by the final sound: S, Z, or IH0 Z, so `Salvatore's` → `… R IY0 Z`. Other continuations (`Salvatore'll`, `Salvatore-like`) tag only the name part. Matching ignores case, so shouted names are included.
+Possessive and plural readings are derived from the base by the final sound: S, Z, or IH0 Z, so `Salvatore's` → `… R IY0 Z`. Other continuations (`Salvatore'll`, `Salvatore-like`) tag only the word part. Matching ignores case, so shouted names are included. Related words with a different ending, such as Riva and Rivan, are separate choices.
 
 At render, every tagged use becomes a structured CMU pronunciation control, compiled into Drama 3 `<|phoneme_start|>…<|phoneme_end|>` tags only by the performance compiler. Untagged uses keep the default reading, and tagged spans take precedence over `pronunciations.json` choices for the same word. Only affected speech regenerates on the next `render`.
 
-Confirmed choices inherit through `--continue-from` continuation links, nearest book first. Each book tags its own uses. Decisions are bound to each paragraph's exact text, so after a book update only changed paragraphs need tagging. Rendering, and `plan`, fail closed while any defined or inherited name has untagged or unsure uses in the book. To tag every pending name, run:
+Confirmed choices, including their parts of speech, inherit through `--continue-from` continuation links, nearest book first. Each book labels and tags its own uses. Labels are bound to each paragraph's exact text and to the version of the labelling prompt. After a book update, only changed paragraphs need labelling. After a prompt improvement, the model's older labels are redone; your own decisions are kept. `analyze` does this for you: whenever it publishes, reruns, or updates a book (including a new book with `--continue-from`), it finishes by labelling every new, changed or outdated use of each word confirmed in this book or inherited from an earlier one. A book whose defined words need no labels makes no extra requests. If the model is unsure about some uses, `analyze` exits with status 2 and names the command that asks you about them. Rendering, and `plan`, fail closed while any defined or inherited word has unlabelled or unsure uses in the book. To tag every pending word yourself (for example after defining a word in an earlier book), run:
 
 ```sh
-just pronounce-name BOOK
+just pronounce BOOK
 ```
 
-Use `--list` to show status, and `--tag-only NAME` to tag without listening again.
+Use `--list` to show each word's reading, parts of speech, and status, and `--tag-only WORD` to tag without listening again. Older `name-pronunciations.json` files (version 1) are read as they are. Their choices get the default parts of speech, your yes/no decisions are kept, and the model's older "name / not the name" verdicts are replaced by labels the next time the word is tagged. The file is saved in the new format the next time it changes.
+
+To undo a choice, for example one defined in the wrong book, remove it from the book that defines it:
+
+```sh
+just pronounce runs/quest-academy-08 Salvatore --remove
+```
+
+This deletes that book's confirmed reading and any draft for the word, and prints the removed phonemes and parts of speech so you can enter them elsewhere with `--phonemes` and `--as`. Books continued from it stop inheriting the choice. They fall back to a choice from an earlier book if one exists, or to the engine's default reading. Removing an inherited choice from a later book is refused, and the message names the book that owns it. Each book keeps its labels and decisions, because they record what each use is, not how it sounds. If the word is defined again, they are reused without new requests. Re-render the affected chapters to hear the change.
 
 ### Manual commands
 

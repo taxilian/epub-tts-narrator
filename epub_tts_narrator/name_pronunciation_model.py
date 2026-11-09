@@ -1,24 +1,25 @@
-"""LLM help for a user-chosen name pronunciation: guesses and use tagging.
+"""LLM help for a user-chosen word pronunciation: guesses and part-of-speech labels.
 
 Every request goes through ``CachedRequests`` inside the book's own analysis
 cache, so an interrupted run resumes without repeating completed requests, and
-tagging checkpoints each batch's decisions into ``name-pronunciations.json``.
-Nothing here confirms a pronunciation; the listener does that.
+labelling checkpoints each batch into ``name-pronunciations.json``. The model
+only labels each use's part of speech; which uses get the reading follows from
+the definition's chosen parts. Nothing here confirms a pronunciation; the
+listener does that.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 
-from .name_pronunciation_prompts import GUESS_SYSTEM, TAG_SYSTEM
-from .name_pronunciations import (DECISIONS, name_key, normalize_phonemes, validate_name_phonemes,
-                                  validate_respelling)
+from .name_pronunciation_prompts import GUESS_SYSTEM, LABEL_SYSTEM
+from .name_pronunciations import (LABEL_VERSION, LABELS, describe_parts, name_key, normalize_phonemes,
+                                  validate_name_phonemes, validate_respelling)
 from .pronunciation_dictionary import dictionary_readings
 from .pronunciations import WORD_PATTERN
 
 
-GUESS_VERSION = 1
-TAG_VERSION = 1
+GUESS_VERSION = 2
 MAX_CONTEXTS = 4
 CONTEXT_BEFORE = 320
 CONTEXT_AFTER = 200
@@ -36,7 +37,7 @@ def make_requests(directory, config, *, progress=print, client_factory=None):
     settings = config["analysis"]
     cache = analysis_cache_directory(directory, settings["cache_dir"])
     client = (client_factory or OpenAICompatibleClient)(**config["provider"])
-    progress(f"Using {client.model} at {client.base_url}; book excerpts containing the name are sent to this endpoint.")
+    progress(f"Using {client.model} at {client.base_url}; book excerpts containing the word are sent to this endpoint.")
     return CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
                           max_request_chars=settings["max_request_chars"], progress=progress)
 
@@ -70,7 +71,7 @@ def character_context(document, name):
     return found
 
 
-def guess(document, name, requests, occurrences, *, current=None, instruction=None, rejected=()):
+def guess(document, name, requests, occurrences, *, current=None, instruction=None, rejected=(), parts=None):
     """One proposed reading; a revision follows the listener's instruction."""
     blocks = {block["id"]: block["text"] for block in document["source"]["blocks"]}
     contexts = []
@@ -85,6 +86,8 @@ def guess(document, name, requests, occurrences, *, current=None, instruction=No
                "book_language": document["source"]["book"].get("language"),
                "dictionary_readings": list(dictionary_readings(name)),
                "characters": character_context(document, name), "excerpts": contexts}
+    if parts is not None:
+        payload["used_as"] = describe_parts(parts)
     if current is not None:
         payload["current"] = current
     if instruction is not None:
@@ -124,35 +127,35 @@ def _batches(items, document):
         yield batch
 
 
-def tag(document, name, requests, pending, *, on_batch, workers=1, progress=print):
-    """Classify every pending occurrence; ``on_batch`` checkpoints each batch."""
+def label(document, name, requests, pending, *, on_batch, workers=1, progress=print):
+    """Label every pending use's part of speech; ``on_batch`` checkpoints each batch."""
     characters = character_context(document, name)
     batches = list(_batches(pending, document))
     total = len(pending)
 
     def run(batch):
-        payload = {"mode": "name_use_tagging", "version": TAG_VERSION, "name": name, "characters": characters,
+        payload = {"mode": "word_part_of_speech", "version": LABEL_VERSION, "word": name, "characters": characters,
                    "occurrences": [{"n": index + 1, "text": text} for index, (_, text) in enumerate(batch)]}
-        if len(TAG_SYSTEM) + len(json.dumps(payload, ensure_ascii=False)) > requests.max_request_chars:
-            raise ValueError("Name tagging batch exceeds analysis.max_request_chars; increase the request budget")
+        if len(LABEL_SYSTEM) + len(json.dumps(payload, ensure_ascii=False)) > requests.max_request_chars:
+            raise ValueError("Labelling batch exceeds analysis.max_request_chars; increase the request budget")
 
         def validate(response):
-            if (not isinstance(response, dict) or set(response) != {"decisions"}
-                    or not isinstance(response["decisions"], list) or len(response["decisions"]) != len(batch)):
-                raise ValueError(f"Return exactly {len(batch)} decisions, one per occurrence in order")
-            if any(not isinstance(value, str) or value not in DECISIONS for value in response["decisions"]):
-                raise ValueError('Each decision must be "name", "other" or "unsure"')
-            return response["decisions"]
-        decisions = requests.run(TAG_SYSTEM, payload, validate)
+            if (not isinstance(response, dict) or set(response) != {"labels"}
+                    or not isinstance(response["labels"], list) or len(response["labels"]) != len(batch)):
+                raise ValueError(f"Return exactly {len(batch)} labels, one per occurrence in order")
+            if any(not isinstance(value, str) or value not in LABELS for value in response["labels"]):
+                raise ValueError("Each label must be one of: " + ", ".join(sorted(LABELS)))
+            return response["labels"]
+        labels = requests.run(LABEL_SYSTEM, payload, validate)
         return [{key: item[key] for key in ("block_id", "start", "end", "word", "block_sha256")}
-                | {"decision": decision, "basis": "model"} for (item, _), decision in zip(batch, decisions)]
+                | {"basis": "model", "label": value, "labeler": LABEL_VERSION} for (item, _), value in zip(batch, labels)]
 
     done = 0
     if workers <= 1 or len(batches) <= 1:
         for batch in batches:
             on_batch(run(batch))
             done += len(batch)
-            progress(f"Tagged {done}/{total} occurrences of {name}")
+            progress(f"Labelled {done}/{total} uses of {name}")
         return
     with ThreadPoolExecutor(max_workers=min(workers, len(batches))) as executor:
         futures = [executor.submit(run, batch) for batch in batches]
@@ -161,13 +164,63 @@ def tag(document, name, requests, pending, *, on_batch, workers=1, progress=prin
                 result = future.result()
                 on_batch(result)
                 done += len(result)
-                progress(f"Tagged {done}/{total} occurrences of {name}")
+                progress(f"Labelled {done}/{total} uses of {name}")
         except BaseException:
             for future in futures:
                 future.cancel()
             raise
 
 
+def describe_state(state):
+    """'41 proper noun, 3 common noun' style counts of the labelled uses."""
+    from .name_pronunciations import PART_LABELS
+    counts = state["label_counts"]
+    return ", ".join(f"{count} {PART_LABELS.get(label, label)}" for label, count in
+                     sorted(counts.items(), key=lambda pair: -pair[1]))
+
+
 def directory_document(directory):
     from .analysis_directory import _completed_directory
     return _completed_directory(Path(directory).resolve())[0]
+
+
+def tag_defined_names(directory, config, *, client_factory=None, progress=print, requests=None):
+    """Label and tag every new use of each confirmed or inherited word in a published book.
+
+    Runs after ``analyze`` publishes, resumes, or updates a book. Labels bound
+    to unchanged block text and the current labelling version are kept; only
+    new, edited or outdated uses reach the model, and each batch is
+    checkpointed. A word with no possible homonym (not in the dictionary, every
+    part of speech) needs no request; no definition means no model call.
+    Returns the words that still need a person (unsure uses), with counts.
+    """
+    from .name_pronunciations import effective_definitions, save_decisions, tagging_state
+    directory = Path(directory).resolve()
+    definitions = effective_definitions(directory)
+    if not definitions:
+        return {}
+    document = directory_document(directory)
+    source = document["source"]
+    parts = {definition["name"]: definition["parts_of_speech"] for _, definition in sorted(definitions.items())}
+    states = {name: tagging_state(directory, source, name, parts[name]) for name in parts}
+    for name, state in states.items():
+        if not state["pending"]:
+            continue
+        if requests is None:
+            requests = make_requests(directory, config, progress=progress, client_factory=client_factory)
+        progress(f"Labelling {len(state['pending'])} new or changed use(s) of {name}, whose pronunciation "
+                 f"is defined for this book or inherited from an earlier one ({describe_parts(parts[name])})…")
+        label(document, name, requests, state["pending"],
+              workers=max(1, min(5, config["analysis"]["attribution_workers"])), progress=progress,
+              on_batch=lambda decisions, name=name: save_decisions(directory, source, name, decisions))
+        states[name] = tagging_state(directory, source, name, parts[name])
+    unresolved = {}
+    for name, state in states.items():
+        tagged = sum(bool(item["use"]) for item in state["decided"])
+        if state["ready"]:
+            progress(f"Pronunciation of {name}: every use is decided ({tagged} use(s) get the reading).")
+        else:
+            unresolved[name] = len(state["unsure"]) + len(state["pending"])
+            progress(f"Pronunciation of {name}: {len(state['unsure'])} unsure use(s) need your decision "
+                     f"before rendering. Run: audiobook-render pronounce {directory} (or just pronounce {directory}).")
+    return unresolved
