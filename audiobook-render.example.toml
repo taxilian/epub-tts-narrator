@@ -85,6 +85,11 @@ recurring_resolution = "analysis"
 recurrence_threshold = 3
 max_resolution_attempts = 12
 max_resolution_rounds = 2
+# Learn how the recognizer consistently hears unusual words (book-local
+# heard-variants.json): accepted after 3 independent takes heard the same
+# plausible way, a sound review, or a confirmed pronounce-name test sentence.
+# Never excuses missing/extra words, numbers, negation or acoustic failures.
+heard_variants = "learn"
 # Optional second recognizer for small wording discrepancies in voice samples.
 # Download the model first; book passages always use the strict speech policy.
 # reference_model = "./models/parakeet-tdt-0.6b-v3"

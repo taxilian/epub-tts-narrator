@@ -8,7 +8,10 @@ Flow for ``pronounce-name BOOK NAME``:
    including its possessive (and plural when the book uses one).
 3. Accept, ask the model to revise from your description, ask for a different
    guess, or edit the phonemes yourself; repeat until accepted. Each step is
-   checkpointed as a draft, so quitting and rerunning resumes it.
+   checkpointed as a draft, so quitting and rerunning resumes it. On accept,
+   the configured recognizer transcribes the accepted test sentence once, and
+   how it spells the name there is saved as a trusted heard variant
+   (``heard_variants.py``) so renders do not reject that spelling.
 4. Tag every occurrence that really is the name (homonyms stay untagged), with
    per-batch checkpoints; you decide any the model is unsure about.
 
@@ -60,7 +63,8 @@ def _excerpt(source, item, width=160):
 
 class NameTool:
     def __init__(self, bundle, config, *, analysis_config, input_fn, output, engine_factory=None, store=None,
-                 player=None, playback_fn=None, requests=None, interactive=True, voice_id=None):
+                 player=None, playback_fn=None, requests=None, interactive=True, voice_id=None,
+                 verifier_factory=None):
         from .pronunciation_review import PronunciationReviewSession
         self.bundle, self.config = bundle, config
         self.directory = Path(bundle["directory"])
@@ -73,6 +77,10 @@ class NameTool:
         self._requests = requests
         self.interactive = interactive
         self.voice_id = voice_id
+        # The configured speech recognizer hears each confirmed test sentence
+        # once, so renders accept how it spells the name (heard_variants.py).
+        self._verifier_factory, self._verifier = verifier_factory, None
+        self._previews = {}
 
     def say(self, value):
         self.output(display(value))
@@ -104,6 +112,8 @@ class NameTool:
         self.say("Press any key to stop.")
         self.playback_fn(self.player, preview["path"])
         self.session.mark_played(preview)
+        if not default:
+            self._previews[phonemes] = preview
 
     def define(self, name, *, phonemes=None):
         """Listening loop; returns the accepted phonemes, or None on quit."""
@@ -161,6 +171,7 @@ class NameTool:
             try:
                 if verb in {"a", "accept"}:
                     self._accept(name, current, respelling, last_source, effective)
+                    self._learn_heard(name, current)
                     return current
                 if verb in {"q", "quit"}:
                     self.say(f"No change confirmed for {name}; your draft is kept for the next run.")
@@ -214,6 +225,49 @@ class NameTool:
             return
         save_definition(self.directory, name, current, status="confirmed", source=source, respelling=respelling)
         self.say(f"Confirmed {name}: {current}. Existing audio is unchanged.")
+
+    def _learn_heard(self, name, phonemes):
+        """Record how the recognizer hears the accepted test sentence's name.
+
+        The person just accepted this audio, so a recognizer spelling of the
+        name in it is trusted ("listened") for renders with the same
+        recognizer. Any other difference in the sentence means the preview was
+        not heard cleanly, and nothing is kept.
+        """
+        from ..name_pronunciations import form_spellings
+        from .common import file_hash, regular_file
+        from .heard_variants import learn_from_listening
+        from .quality import normalize_words
+        if self.config.get("verification", {}).get("heard_variants", "learn") != "learn":
+            return
+        preview = self._previews.get(phonemes)
+        if preview is None:
+            return
+        try:
+            if self._verifier is None:
+                if self._verifier_factory is not None:
+                    self._verifier = self._verifier_factory()
+                else:
+                    from .verification import create_verifier
+                    self._verifier = create_verifier(self.config["verification"])
+            result = self._verifier.transcribe(Path(preview["path"]))
+            transcript = result.get("text") if isinstance(result, dict) else None
+            if not isinstance(transcript, str) or not transcript.strip():
+                raise ValueError("the recognizer returned no transcript")
+            words = {word for form in form_spellings(name) for word in normalize_words(form)}
+            learned = learn_from_listening(self.directory, self._verifier, preview["request"]["text"], transcript,
+                                           words, audio_sha256=file_hash(regular_file(Path(preview["path"]))))
+        except Exception as exc:  # Optional: never undoes the confirmed choice.
+            from .diagnostics import configured_secrets, safe_error_text
+            self.say(f"Skipped learning how the recognizer hears {name}: "
+                     + safe_error_text(exc, secrets=configured_secrets(self.config)))
+            return
+        if learned:
+            self.say(f"The recognizer hears {name} as: " + "; ".join(f"{heard} (for {expected})"
+                                                                    for expected, heard in learned)
+                     + ". Renders accept that spelling for this name.")
+        else:
+            self.say(f"The recognizer heard the test sentence for {name} as written, or not cleanly enough to learn from.")
 
     # Tagging ---------------------------------------------------------------
     def tag(self, name, *, review=False):
@@ -287,11 +341,15 @@ class NameTool:
     def close(self):
         if self.player is not None:
             self.player.stop()
+        close = getattr(self._verifier, "close", None)
+        if callable(close):
+            close()
         self.session.close()
 
 
 def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, output=print, engine_factory=None,
-                       store=None, player=None, playback_fn=None, requests=None, interactive=None):
+                       store=None, player=None, playback_fn=None, requests=None, interactive=None,
+                       verifier_factory=None):
     name = getattr(args, "name", None)
     if name is not None:
         validate_word(name)
@@ -307,7 +365,8 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
     player = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
     tool = NameTool(bundle, config, analysis_config=analysis_config, input_fn=input_fn, output=output,
                     engine_factory=engine_factory, store=store, player=player, playback_fn=playback_fn,
-                    requests=requests, interactive=interactive, voice_id=getattr(args, "voice_id", None))
+                    requests=requests, interactive=interactive, voice_id=getattr(args, "voice_id", None),
+                    verifier_factory=verifier_factory)
     review = bool(getattr(args, "review_tags", False))
     try:
         if getattr(args, "list", False):

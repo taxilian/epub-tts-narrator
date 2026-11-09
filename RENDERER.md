@@ -577,6 +577,8 @@ just pronounce-name runs/quest-academy-08 Salvatore
    - `Q` quits.
 
    Every listened step is checkpointed as a draft in `name-pronunciations.json`. Drafts never affect rendering, and rerunning resumes the draft.
+
+   On `A`, the configured speech recognizer transcribes the test sentence you just accepted, once. If it spells the name differently (for example `Marla` for `Mara`) and every other word of the sentence is heard as written, that spelling is saved as a trusted heard variant for the name and its possessive (see "Learned heard variants"), so renders with the same recognizer accept it. If anything else in the sentence is heard differently, nothing is learned. A missing or failing recognizer only skips this step; the confirmed choice stays.
 4. After acceptance, the model reads each occurrence in context, in checkpointed batches, and tags only real uses of the name. Homonyms stay untagged, such as "a rose" next to a character called Rose, or "hope" beside Hope. The tool asks you about anything the model was unsure of and lists the uses it excluded. `--review-tags` lets you check or flip every model decision.
 
 Possessive and plural readings are derived from the base by the final sound: S, Z, or IH0 Z, so `Salvatore's` → `… R IY0 Z`. Other continuations (`Salvatore'll`, `Salvatore-like`) tag only the name part. Matching ignores case, so shouted names are included.
@@ -1213,6 +1215,29 @@ reference_model = "./models/parakeet-tdt-0.6b-v3"
 ```
 
 This adds about 2.5 GB of model weights. The adapter uses MLX Audio's local Parakeet implementation. [MLX Audio Parakeet documentation](https://github.com/blaizzy/mlx-audio/blob/main/docs/models/stt/parakeet.md)
+
+### Learned heard variants
+
+Recognizers often turn an invented name, or another word they do not know, into ordinary words: `Kvothe` becomes `quote`. When that is the only thing wrong with a take, the renderer records how the word was heard, and once the same spelling is confirmed it stops rejecting it. This is on by default and needs no model or network:
+
+```toml
+[verification]
+heard_variants = "learn" # "off" keeps ordinary verification only
+```
+
+Each take that fails only with `text_mismatch` is compared word by word with its passage. Every remaining difference (one that the spacing and Double Metaphone checks above do not already accept) must be a small block of one to three words heard as one to three other words, at most four blocks and one per five words. A block may not contain numbers, negation, digits or non-word tokens; the passage side may not contain function words (`the`, `and`, `is`, ...), the heard side may not be only function words, and no word may appear on both sides. If any difference fails these rules, the take records nothing. Otherwise each block is saved as a *sighting* of a variant of that word (`kvothe` → `quote`), bound to the take's audio hash, request hash and transcript hash.
+
+A variant becomes trusted in one of three ways:
+
+- **Repeated:** three different takes (three different audio files, from any lines or seeds) were heard the same way, and the variant passes a sound-plausibility check: letter lengths within a factor of two, and Double Metaphone keys at least half similar, or sharing their first sound and at least 0.3 similar. `kvothe` / `quote` passes; `kvothe` / `banana` never does. Rechecking the same saved audio after an interruption is not a new take.
+- **Review:** an accepted take whose differences three separate pronunciation reviews approved (`phonetic_primary` or `phonetic_secondary`, see "Optional JEV confirmation") trusts its blocks immediately.
+- **Listened:** the variant came from a `pronounce-name` test sentence you accepted.
+
+A failed take whose every remaining difference is a trusted variant is accepted. The take that brings a variant to its third sighting is accepted too. The report keeps the original transcript, word metrics and `previous_reasons: ["text_mismatch"]`, and records `text_confirmation_method: "heard_variant"` with a `heard_variants` audit (policy, recognizer, and each variant's basis, take count and sightings). It is never reported as a verbatim match. Takes that were heard differently once or twice still fail as before, with a `heard_variant_observations` note and a progress line such as `Heard variant noted: kvothe → quote (heard this way in 2 of 3 takes)`.
+
+A learned variant never excuses a missing or extra whole word, a changed number or negation, a reordered word, a difference in any other word, a history echo, or any failed acoustic check (those takes are not `text_mismatch`-only and record nothing). A variant is bound to its exact word and to the primary recognizer's identity without its machine-local model path: changing the recognizer model, package or decoding options starts a fresh set, while JEV, sound-review and recovery settings do not matter.
+
+Variants live in the analysis directory as `heard-variants.json`, beside `name-pronunciations.json`, and are checked against the book's ID on every read. A book continued with `--continue-from` inherits its ancestors' variants read-only, nearest book first: their sightings count toward trust, and new sightings are written only to the book being rendered. Writes hold `.heard-variants.lock` and replace the file atomically, so concurrent chunks and interrupted runs keep every completed sighting. Remote chapter workers have no book directory and use ordinary verification only. Delete `heard-variants.json` to forget what a book learned; existing accepted audio is unaffected, and variants never change synthesis, caches or chapter identities.
 
 ### Optional JEV confirmation
 

@@ -191,6 +191,38 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
         raise RenderBlocked(f"Saved ElevenLabs generation metadata or audio changed; inspect {path}") from None
 
 
+def _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify):
+    """Learn this take's heard variants; accept a failed take only when all are trusted.
+
+    Book-local and never part of any identity (``heard_variants.py``). Off for
+    references, remote chapter workers (no book directory) and
+    ``verification.heard_variants = "off"``. A store problem skips learning and
+    never accepts audio.
+    """
+    directory = config.get("_heard_variants_directory")
+    if purpose != "speech" or directory is None or not isinstance(report, dict):
+        return report
+    from .heard_variants import POLICY, apply
+    try:
+        audio = file_hash(regular_file(wav))
+        report, outcome = apply(report, directory=directory, verifier=verifier,
+                                request_hash=request_hash, audio_sha256=audio)
+    except (ValueError, OSError) as exc:
+        notify("  Heard-variant learning skipped: " + safe_error_text(exc, secrets=configured_secrets(config)))
+        return report
+    if outcome and "accepted" in outcome:
+        pairs = "; ".join(" ".join(row["expected"]) + " → " + " ".join(row["heard"])
+                          + f" ({row['basis']}" + (f", {row['takes']} takes)" if row["basis"] == "repeated" else ")")
+                          for row in outcome["accepted"])
+        notify("  Accepted by learned heard variants, not as a verbatim match: " + _diagnostic_text(pairs, 240))
+    elif outcome and "rows" in outcome:
+        pairs = "; ".join(" ".join(row["expected"]) + " → " + " ".join(row["heard"])
+                          + f" (heard this way in {row['takes']} of {POLICY['repeat_takes']} takes)"
+                          for row in outcome["rows"] if row["basis"] is None)
+        notify("  Heard variant noted: " + _diagnostic_text(pairs, 240))
+    return report
+
+
 def verified_take(text, generate, directory, request, verifier, config, *, generate_plan_part=None, **options):
     from .clip_recovery import run
     return run(_verified_take, text, generate, directory, request, verifier, config,
@@ -508,6 +540,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             if marker is not None:
                 from .recurring_resolution import confirm_rewritten_report
                 latest["report"] = confirm_rewritten_report(latest["report"], marker)
+            from .history_echo import attempt_evidence
+            if attempt_evidence(latest["report"], latest.get("engine_metadata", {}), text) is None:
+                # A take replaying a history turn never teaches or uses a variant.
+                latest["report"] = _heard_variant_check(latest["report"], config, verifier, request_hash,
+                                                        directory / name, purpose, notify)
             if latest["report"].get("passed"):
                 latest["validation_key"] = validation_key
                 write_json(accepted_path, latest)
@@ -771,6 +808,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             echo = attempt_evidence(report, metadata, text)
             if echo is not None:
                 report = {**report, "history_echo": echo}
+        if wav.exists():
+            report = _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify)
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -1337,6 +1376,10 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         raise RenderBlocked(str(exc)) from exc
     from .speech_traits import speech_trait_overrides
     config["_speech_traits_snapshot"] = speech_trait_overrides(bundle, config)
+    # Learned recognizer variants live beside the analysis (heard_variants.py).
+    # Only the path is carried, so copies of this config stay plain data.
+    config["_heard_variants_directory"] = (
+        str(bundle["directory"]) if config.get("verification", {}).get("heard_variants", "learn") == "learn" else None)
     plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
                             single_speaker_paragraph=single_speaker_paragraph)
     if plan["errors"]:

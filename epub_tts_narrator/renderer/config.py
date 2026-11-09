@@ -89,6 +89,7 @@ DEFAULTS = {
         "reference_model": None,
         "phonetic_fallback": "analysis",
         "recurring_resolution": "analysis", "recurrence_threshold": 3,
+        "heard_variants": "learn",
         "max_resolution_attempts": 12, "max_resolution_rounds": 2,
         "device": "cpu", "compute_type": "int8", "cpu_threads": 4,
     },
@@ -429,6 +430,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     if (not isinstance(verification["recurring_resolution"], str)
             or verification["recurring_resolution"] not in {"analysis", "off"}):
         raise ValueError("verification.recurring_resolution must be analysis or off")
+    if not isinstance(verification["heard_variants"], str) or verification["heard_variants"] not in {"learn", "off"}:
+        raise ValueError("verification.heard_variants must be learn or off")
     for key, low, high in (("recurrence_threshold", 2, 10),
                           ("max_resolution_attempts", 3, 30),
                           ("max_resolution_rounds", 1, 5)):
