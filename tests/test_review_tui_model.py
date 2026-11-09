@@ -45,7 +45,7 @@ def make_unresolved(segment: Document) -> Document:
 
 
 class ReviewModelTests(unittest.TestCase):
-    def test_toc_counts_each_source_chapter_review_and_unassigned_passage(self):
+    def test_toc_counts_each_rendered_chapter_review_and_unassigned_passages(self):
         document = review_document()
         make_unresolved(document["segments"][1])
         document["segments"][2]["attribution"]["review_required"] = True
@@ -68,11 +68,45 @@ class ReviewModelTests(unittest.TestCase):
 
         self.assertEqual(validate_document(document), [])
         self.assertEqual(rows, [
-            {"id": "ch1", "title": "Chapter One", "passage_count": 3,
+            {"id": 0, "title": "Chapter One", "passage_count": 3,
              "review_count": 2, "unassigned_count": 1},
-            {"id": "ch2", "title": "Chapter Two", "passage_count": 1,
+            {"id": 1, "title": "Chapter Two", "passage_count": 1,
              "review_count": 0, "unassigned_count": 0},
         ])
+
+    def test_one_source_chapter_splits_into_rendered_chapters_at_numbered_headings(self):
+        document = review_document()
+        document["source"]["chapters"][0]["title"] = "Volume One"
+        chapter = document["source"]["chapters"][0]
+        additions = (
+            ("b3", "CHAPTER ONE", "h1", "heading"),
+            ("b4", "First chapter prose.", "p", "narration"),
+            ("b5", "CHAPTER TWO", "h1", "heading"),
+            ("b6", "Second chapter prose.", "p", "narration"),
+        )
+        for block_id, text, tag, kind in additions:
+            chapter["block_ids"].append(block_id)
+            document["source"]["blocks"].append({
+                "id": block_id, "chapter_id": "ch1", "text": text,
+                "source": {"href": "text/ch1.xhtml", "element_id": None, "tag": tag},
+            })
+            document["segments"].append({
+                "id": f"s_{block_id}", "block_id": block_id, "start": 0, "end": len(text),
+                "text": text, "kind": kind, "role_id": "narrator", "voice_id": "vn",
+                "delivery": {"direction": "", "evidence": []},
+                "attribution": {"basis": "explicit", "reason": "Narrative.", "evidence": [],
+                                "candidates": [], "review_required": False},
+            })
+
+        rows = toc(document)
+        second_chapter = passages(document, 1)
+
+        self.assertEqual(validate_document(document), [])
+        self.assertEqual([(row["id"], row["title"], row["passage_count"]) for row in rows], [
+            (0, "Volume One", 3), (1, "CHAPTER ONE", 2), (2, "CHAPTER TWO", 2),
+        ])
+        self.assertEqual([row["sequence"] for row in second_chapter], [3, 4])
+        self.assertEqual([row["text"] for row in second_chapter], ["CHAPTER ONE", "First chapter prose."])
 
     def test_passage_rows_keep_cast_palette_slots_and_join_simultaneous_labels(self):
         document = review_document()
@@ -83,7 +117,7 @@ class ReviewModelTests(unittest.TestCase):
         ])
         segment["attribution"].update(basis="user", review_required=False)
 
-        rows = passages(document, "ch1")
+        rows = passages(document, 0)
 
         self.assertEqual([row["sequence"] for row in rows], [0, 1, 2])
         self.assertEqual(rows[0]["role_index"], 0)
@@ -97,7 +131,7 @@ class ReviewModelTests(unittest.TestCase):
         document = review_document()
         make_unresolved(document["segments"][1])
 
-        row = passages(document, "ch1")[1]
+        row = passages(document, 0)[1]
 
         self.assertEqual(row["from_label"], "Unassigned")
         self.assertIsNone(row["role_index"])

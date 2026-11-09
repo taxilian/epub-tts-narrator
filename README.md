@@ -98,7 +98,7 @@ Browse and correct a finished book by hand with `review-ui` (or `just review-ui`
 epub-tts-narrator review-ui runs/book-01
 ```
 
-It opens a chapter list, shows each passage with its reader in a distinct per-reader color, and on Enter reveals the passage's full metadata with edits: reassign any existing cast member (multi-select composes simultaneous speech), mark a passage unresolved, edit its delivery direction, or toggle the review flag. Saving publishes the same receipt-bound attribution revisions as `verify-attribution --apply`, with backups and series descendant rebinding; the published cast never changes and no model calls are made.
+It opens the book's rendered chapter list — the same chapters the exported scripts and final M4B use, so one EPUB file holding several story chapters splits at its chapter headings — shows each passage with its reader in a distinct per-reader color, and on Enter reveals the passage's full metadata with edits: reassign any existing cast member (multi-select composes simultaneous speech), mark a passage unresolved, edit its delivery direction, or toggle the review flag. Saving publishes the same receipt-bound attribution revisions as `verify-attribution --apply`, with backups and series descendant rebinding; the published cast never changes and no model calls are made.
 
 Analysis is resumable: after a failure, rerun the same command. Validated model responses and journaled interactive speaker choices are reused. The output directory contains a `.analysis-pending/` workspace until publication, so an interrupted run resumes completed stages rather than starting over. Unassigned speech requires an explicit speaker choice and blocks rendering; advisory notes do not.
 

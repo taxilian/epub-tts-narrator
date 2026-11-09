@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 
+from .cli import script_partitions
 from .contracts import has_assigned_speakers
 from .speaker_decisions import _role_labels
 
@@ -90,32 +91,47 @@ def _needs_review(segment):
     return bool(attribution["review_required"] or attribution["basis"] == "unresolved")
 
 
+def _chapter_spans(document):
+    """Return (partition, sequence_start, segments) per rendered chapter.
+
+    Source chapters are EPUB resources that may hold several story chapters;
+    ``script_partitions`` defines the boundaries the exported scripts and the
+    rendered M4B actually use, so the review UI navigates those, not the
+    raw spine chapters.
+    """
+    segments = document["segments"]
+    spans = []
+    cursor = 0
+    for partition in script_partitions(document):
+        block_ids = set(partition["block_ids"])
+        start = cursor
+        while cursor < len(segments) and segments[cursor]["block_id"] in block_ids:
+            cursor += 1
+        spans.append((partition, start, segments[start:cursor]))
+    return spans
+
+
 def toc(document):
-    """Summarize passages and outstanding review work per source chapter."""
-    blocks = {block["id"]: block for block in document["source"]["blocks"]}
+    """Summarize passages and outstanding review work per rendered chapter."""
     rows = []
-    for chapter in document["source"]["chapters"]:
-        segments = [segment for segment in document["segments"]
-                    if blocks[segment["block_id"]]["chapter_id"] == chapter["id"]]
+    for index, (partition, _, chapter_segments) in enumerate(_chapter_spans(document)):
         rows.append({
-            "id": chapter["id"],
-            "title": chapter["title"],
-            "passage_count": len(segments),
-            "review_count": sum(_needs_review(segment) for segment in segments),
-            "unassigned_count": sum(not has_assigned_speakers(segment) for segment in segments),
+            "id": index,
+            "title": partition["title"],
+            "passage_count": len(chapter_segments),
+            "review_count": sum(_needs_review(segment) for segment in chapter_segments),
+            "unassigned_count": sum(not has_assigned_speakers(segment) for segment in chapter_segments),
         })
     return rows
 
 
-def passages(document, chapter_id):
-    """Return display rows in global script order for one source chapter."""
-    blocks = {block["id"]: block for block in document["source"]["blocks"]}
+def passages(document, chapter_index):
+    """Return display rows in global script order for one rendered chapter."""
     labels = _labels(document)
     slots = {role["id"]: index for index, role in enumerate(document["cast"]["roles"])}
+    _, start, chapter_segments = _chapter_spans(document)[chapter_index]
     rows = []
-    for sequence, segment in enumerate(document["segments"]):
-        if blocks[segment["block_id"]]["chapter_id"] != chapter_id:
-            continue
+    for sequence, segment in enumerate(chapter_segments, start):
         role_ids = _role_ids(segment)
         speaker_labels = [labels[role_id] for role_id in role_ids]
         rows.append({

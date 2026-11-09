@@ -75,11 +75,8 @@ class ReviewApp:
     def _toc_rows(self):
         return toc(self._effective_document())
 
-    def _chapter_id(self):
-        return self._toc_rows()[self.chapter_index]["id"]
-
     def _passage_rows(self):
-        return passages(self._effective_document(), self._chapter_id())
+        return passages(self._effective_document(), self.chapter_index)
 
     def _segment(self, segment_id):
         if segment_id in self.pending:
