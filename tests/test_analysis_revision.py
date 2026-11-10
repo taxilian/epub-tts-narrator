@@ -3,10 +3,12 @@ from copy import deepcopy
 import contextlib
 import hashlib
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -123,6 +125,182 @@ class AnalysisRevisionTests(unittest.TestCase):
         self.assertTrue((lock / "owner.json").is_file())
         revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
         self.assertFalse(lock.exists())
+
+    def crashed_render_lock(self, path):
+        lock = path / ".audio-render.lock"
+        crashed = subprocess.run([
+            sys.executable, "-c",
+            "import os, sys; from epub_tts_narrator.renderer.run_locks import acquire_directory_lock; "
+            "acquire_directory_lock(sys.argv[1]); os._exit(130)",
+            str(lock),
+        ])
+        self.assertEqual(crashed.returncode, 130)
+        self.assertTrue((lock / "owner.json").is_file())
+        return lock
+
+    def test_abandoned_marked_render_lock_publishes_without_deleting_ownership_records(self):
+        lock = self.crashed_render_lock(self.paths[1])
+        lease = lock.with_name(lock.name + ".lease")
+        inode = lease.stat().st_ino
+        owner = (lock / "owner.json").read_bytes()
+        revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
+        self.assertTrue(lock.is_dir())
+        self.assertEqual((lock / "owner.json").read_bytes(), owner)
+        self.assertEqual(lease.stat().st_ino, inode)
+
+    def test_live_marked_render_lock_blocks_revision_and_artifacts_are_kept(self):
+        lock = self.paths[1] / ".audio-render.lock"
+        held, release = self.root / "held", self.root / "release"
+        child = subprocess.Popen([
+            sys.executable, "-c",
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "from epub_tts_narrator.renderer.run_locks import acquire_directory_lock\n"
+            "lock = acquire_directory_lock(sys.argv[1])\n"
+            "Path(sys.argv[2]).write_text('held')\n"
+            "while not Path(sys.argv[3]).exists():\n"
+            "    time.sleep(0.01)\n",
+            str(lock), str(held), str(release)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 15
+            while not held.exists():
+                self.assertIsNone(child.poll())
+                self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
+            with self.assertRaisesRegex(ValueError, "Rendering is active.*live process"):
+                revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+            self.assertTrue((lock / "owner.json").is_file())
+            self.assertTrue(lock.is_dir())
+        finally:
+            release.write_text("go")
+            self.assertEqual(child.wait(timeout=15), 0)
+        revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+        self.assertTrue(lock.is_dir())
+        self.assertTrue((lock / "owner.json").is_file())
+
+    def test_reserved_scope_holds_publication_ownership_for_the_whole_chain(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        with reserve_revision_scope([self.paths[0]]) as reserved:
+            self.assertEqual(sorted(reserved), sorted(self.paths))
+            for path in self.paths:
+                self.assertTrue((path / ".analysis-update.lock").is_dir())
+            with self.assertRaisesRegex(ValueError, "already active"):
+                revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+            revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                               reserved_update_locks=reserved)
+        for path in self.paths:
+            self.assertFalse((path / ".analysis-update.lock").exists())
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
+
+    def test_reservation_refuses_a_renderer_starting_before_the_update_lock(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        lock = self.paths[0] / ".audio-render.lock"
+        held, release = self.root / "held", self.root / "release"
+        child = subprocess.Popen([
+            sys.executable, "-c",
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "from epub_tts_narrator.renderer.run_locks import acquire_directory_lock\n"
+            "lock = acquire_directory_lock(sys.argv[1])\n"
+            "Path(sys.argv[2]).write_text('held')\n"
+            "while not Path(sys.argv[3]).exists():\n"
+            "    time.sleep(0.01)\n",
+            str(lock), str(held), str(release)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 15
+            while not held.exists():
+                self.assertIsNone(child.poll())
+                self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
+            with self.assertRaisesRegex(ValueError, "Rendering is active"):
+                with reserve_revision_scope([self.paths[0]]):
+                    pass
+            self.assertTrue((lock / "owner.json").is_file())
+            for path in self.paths:
+                self.assertFalse((path / ".analysis-update.lock").exists())
+        finally:
+            release.write_text("go")
+            self.assertEqual(child.wait(timeout=15), 0)
+
+    def test_unowned_reservation_mapping_is_rejected_without_publication(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        before = self.managed()
+        for forged in ({path: object() for path in self.paths},
+                       {path: None for path in self.paths}):
+            with self.subTest(value=forged[self.paths[0]]):
+                with self.assertRaisesRegex(ValueError, "not currently owned"):
+                    revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                       reserved_update_locks=forged)
+                self.assertEqual(self.managed(), before)
+        # A handle for the wrong lock path is equally unowned, even when real.
+        with reserve_revision_scope([self.paths[0]]) as reserved:
+            mismatched = {path: (reserved[path] if path == self.paths[0] else reserved[self.paths[0]])
+                          for path in self.paths}
+            with self.assertRaisesRegex(ValueError, "not currently owned"):
+                revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                   reserved_update_locks=mismatched)
+            self.assertEqual(self.managed(), before)
+
+    def test_reservation_mapping_cannot_be_reused_after_release(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        with reserve_revision_scope([self.paths[0]]) as reserved:
+            pass
+        for path in self.paths:
+            self.assertFalse((path / ".analysis-update.lock").exists())
+        with self.assertRaisesRegex(ValueError, "not currently owned"):
+            revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                               reserved_update_locks=reserved)
+
+    def test_reservation_with_altered_ownership_is_rejected(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        with reserve_revision_scope([self.paths[0]]) as reserved:
+            marker = self.paths[0] / ".analysis-update.lock" / "owner.json"
+            lease = self.paths[0] / ".analysis-update.lock.lease"
+            original_marker = marker.read_bytes()
+            original_lease = lease.read_bytes()
+            with self.subTest(tamper="owner record"):
+                record = json.loads(marker.read_text(encoding="utf-8"))
+                record["token"] = "0" * 32
+                marker.write_text(json.dumps(record))
+                with self.assertRaisesRegex(ValueError, "not currently owned"):
+                    revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                       reserved_update_locks=reserved)
+                marker.write_bytes(original_marker)
+            # The restored record owns the lock again, so publication proceeds.
+            revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                               reserved_update_locks=reserved)
+            with self.subTest(tamper="replaced lease inode"):
+                lease.unlink()
+                lease.write_bytes(original_lease)
+                with self.assertRaisesRegex(ValueError, "not currently owned"):
+                    revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                       reserved_update_locks=reserved)
+
+    def test_reservation_destroyed_during_staging_cannot_write(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        before = self.managed()
+
+        def tamper_after_export(document, after, **kwargs):
+            result = export_bundle(document, after, **kwargs)
+            marker = self.paths[0] / ".analysis-update.lock" / "owner.json"
+            marker.write_text(json.dumps({**json.loads(marker.read_text(encoding="utf-8")),
+                                          "token": "1" * 32}))
+            return result
+
+        with reserve_revision_scope([self.paths[0]]) as reserved:
+            marker = self.paths[0] / ".analysis-update.lock" / "owner.json"
+            original_marker = marker.read_bytes()
+            with patch("epub_tts_narrator.cli.export_bundle", side_effect=tamper_after_export):
+                with self.assertRaisesRegex(ValueError, "not currently owned"):
+                    revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                       reserved_update_locks=reserved)
+            self.assertEqual(self.managed(), before)
+            marker.write_bytes(original_marker)
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "unresolved")
 
     def test_partial_publication_failure_restores_all_originals(self):
         before = self.managed()

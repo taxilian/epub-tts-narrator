@@ -1,6 +1,6 @@
 """Revise attribution while preserving voices and validated continuation history."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import hashlib
 import json
@@ -24,11 +24,75 @@ def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+_RENDER_LOCKS = (".audio-render.lock", ("render-work", ".render.lock"))
+
+
 def _render_active(path):
-    # New renderers lock the book too, including when work_dir is customized.
-    # Retain the original work lock check for older/default renderer sessions.
-    return ((path / ".audio-render.lock").exists()
-            or (path / "render-work" / ".render.lock").exists())
+    """Return why a renderer still holds this book, or None when it is idle.
+
+    New renderers lock the book too, including when work_dir is customized.
+    Retain the original work lock check for older/default renderer sessions.
+    A marked lock whose kernel lease no live process holds is proven idle by
+    the read-only probe; anything legacy, malformed, or genuinely live reports
+    an actionable reason instead.
+    """
+    from .renderer.run_locks import directory_lock_status
+    reasons = []
+    for name in _RENDER_LOCKS:
+        lock = path.joinpath(*name) if isinstance(name, tuple) else path / name
+        reason = directory_lock_status(lock)
+        if reason:
+            reasons.append(f"{lock}: {reason}")
+    return "; ".join(reasons) or None
+
+
+@contextmanager
+def reserve_revision_scope(directories):
+    """Hold the publication write scope before expensive revision work begins.
+
+    Every book in the chain is probed for live renderers (a marked lock whose
+    kernel lease no live process holds is proven idle), its
+    ``.analysis-update.lock`` is acquired, and render activity is probed again
+    so a renderer that started in between is refused here, before any costly
+    work. A renderer starting after the reservation refuses itself through the
+    ``.analysis-update.lock`` handshake in ``renderer.workflow._lock_book_audio``,
+    so publication cannot hit a late lock conflict. Yield the mapping of
+    directory to owned lock for ``revise_directories(reserved_update_locks=...)``;
+    release on exit.
+    """
+    from .renderer.run_locks import acquire_directory_lock
+    paths = related_directories(directories)
+    locks = {}
+    try:
+        _require_renderers_idle(paths)
+        for path in paths:
+            lock_path = path / ".analysis-update.lock"
+            try:
+                locks[path] = acquire_directory_lock(lock_path)
+            except FileExistsError as exc:
+                raise ValueError(
+                    f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
+                    f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
+        _require_renderers_idle(paths)
+        yield dict(locks)
+    finally:
+        for lock in reversed(list(locks.values())):
+            lock.rmdir()
+
+
+def _require_renderers_idle(paths):
+    for path in paths:
+        reason = _render_active(path)
+        if reason:
+            raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
+
+
+def _require_owned_reservation(path, lock):
+    from .renderer.run_locks import DirectoryLock
+    if not isinstance(lock, DirectoryLock) or not lock.still_owns(path / ".analysis-update.lock"):
+        raise ValueError(
+            f"Reserved publication lock is not currently owned by this process: "
+            f"{path / '.analysis-update.lock'}; reserve the revision scope again before publishing")
 
 
 def related_directories(directories):
@@ -142,16 +206,20 @@ def _install(source, destination):
 
 
 def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
-                       scope="attribution", sidecars=None, speaker_decision_inputs=None):
+                       scope="attribution", sidecars=None, speaker_decision_inputs=None,
+                       reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
     if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, or speaker-decisions")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
+    if reserved_update_locks is not None and scope == "speaker-decisions":
+        raise ValueError("speaker-decisions revisions acquire their own locks through the profile-refresh lease")
     if scope != "speaker-decisions":
         return _revise_directories(revisions, directories=directories,
                                    expected_manifest_hashes=expected_manifest_hashes,
-                                   progress=progress, scope=scope, sidecars=sidecars)
+                                   progress=progress, scope=scope, sidecars=sidecars,
+                                   reserved_update_locks=reserved_update_locks)
     if speaker_decision_inputs is None:
         raise ValueError("speaker-decisions revisions require trusted pre-UI input documents")
     from .voice_profile_guard import _require_ready, refresh_locks, require_valid_profiles
@@ -175,7 +243,8 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
 
 
 def _revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
-                        scope="attribution", sidecars=None, speaker_decision_inputs=None):
+                        scope="attribution", sidecars=None, speaker_decision_inputs=None,
+                        reserved_update_locks=None):
     """Stage and validate all changes, back up originals, and refresh descendants.
 
     This operation revises attribution and its audit/review state. Source and book
@@ -192,6 +261,10 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     ``sidecars`` optionally maps a directory to already validated JSON records
     (keyed by plain existing filenames, e.g. audition-scripts.json) that are
     backed up, replaced, and rolled back atomically with the revision.
+    ``reserved_update_locks`` optionally maps exactly the update chain's
+    directories to locks already owned through ``reserve_revision_scope``;
+    publication reuses them instead of acquiring the locks again, and the
+    render-activity re-checks trust that reservation's probe handshake.
     """
     from .cli import export_bundle
     sidecars = {} if sidecars is None else {
@@ -205,6 +278,12 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     if scope == "speaker-decisions" and set(speaker_decision_inputs) != set(revisions):
         raise ValueError("Every speaker-decisions revision needs exactly one trusted pre-UI input document")
     paths = related_directories(directories or revisions)
+    reserved = ({Path(path).resolve(): lock for path, lock in (reserved_update_locks or {}).items()}
+                if reserved_update_locks is not None else {})
+    if reserved and set(reserved) != set(paths):
+        raise ValueError("Reserved revision locks must cover exactly the update chain")
+    for path, lock in reserved.items():
+        _require_owned_reservation(path, lock)
     if not set(revisions) <= set(paths):
         raise ValueError("Revision directories must be included in the update chain")
     if not set(sidecars) <= set(paths):
@@ -262,14 +341,16 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 original_hashes[path][sidecar.name] = _hash(sidecar)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if _render_active(path):
-            raise ValueError(f"Rendering is active; finish it before revising analysis: {path}")
+        if not reserved and (reason := _render_active(path)):
+            raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
     transaction = None
     installed = []
     try:
         from .renderer.run_locks import acquire_directory_lock
         for path in paths:
+            if path in reserved:
+                continue
             lock_path = path / ".analysis-update.lock"
             try:
                 lock = acquire_directory_lock(lock_path)
@@ -343,8 +424,13 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if _render_active(path):
-                raise ValueError(f"Rendering started during revision: {path}")
+            if not reserved and (reason := _render_active(path)):
+                raise ValueError(f"Rendering started during revision: {path} ({reason})")
+        # A reservation destroyed or replaced after entry cannot write: each
+        # handle must still prove exclusive ownership immediately before the
+        # first install, with no silent reacquisition of stale ownership.
+        for path, lock in reserved.items():
+            _require_owned_reservation(path, lock)
         journal["status"] = "applying"
         write_json(transaction / "revision.json", journal, overwrite=True)
         for entry in journal["books"]:

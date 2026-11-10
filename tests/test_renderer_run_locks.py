@@ -6,10 +6,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.renderer.run_locks import acquire_directory_lock
+from epub_tts_narrator.renderer.run_locks import acquire_directory_lock, directory_lock_status
 from epub_tts_narrator.renderer.voices import VoiceStore
 
 
@@ -120,6 +121,131 @@ class DirectoryLockTests(unittest.TestCase):
             acquire_directory_lock(self.path)
         self.assertEqual(extra.read_text(), "keep")
         self.assertTrue((self.path / "owner.json").exists())
+
+    def test_status_probe_keeps_an_abandoned_marker_and_its_ownership_record(self):
+        self.abandoned()
+        lease = self.path.with_name(self.path.name + ".lease")
+        inode = lease.stat().st_ino
+        owner = (self.path / "owner.json").read_bytes()
+        self.assertIsNone(directory_lock_status(self.path))
+        self.assertTrue(self.path.is_dir())
+        self.assertEqual((self.path / "owner.json").read_bytes(), owner)
+        self.assertEqual(lease.stat().st_ino, inode)
+        self.assertEqual(lease.read_bytes(), b"")
+
+    def test_status_probe_reports_a_live_lease_until_the_owner_releases_it(self):
+        held, release = self.root / "held", self.root / "release"
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time\n"
+             "from pathlib import Path\n"
+             "from epub_tts_narrator.renderer.run_locks import acquire_directory_lock\n"
+             "lock = acquire_directory_lock(sys.argv[1])\n"
+             "Path(sys.argv[2]).write_text('held')\n"
+             "while not Path(sys.argv[3]).exists():\n"
+             "    time.sleep(0.01)\n",
+             str(self.path), str(held), str(release)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 15
+        try:
+            while not held.exists():
+                self.assertIsNone(child.poll())
+                self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
+            reason = directory_lock_status(self.path)
+            self.assertIsNotNone(reason)
+            self.assertIn("live process", reason)
+            self.assertTrue(self.path.is_dir())
+            self.assertTrue((self.path / "owner.json").is_file())
+        finally:
+            release.write_text("go")
+            self.assertEqual(child.wait(timeout=15), 0)
+        self.assertIsNone(directory_lock_status(self.path))
+        self.assertTrue(self.path.is_dir())
+        self.assertTrue((self.path / "owner.json").is_file())
+
+    def test_status_probe_reports_a_lease_held_before_the_directory_exists(self):
+        lease = self.path.with_name(self.path.name + ".lease")
+        held, release = self.root / "held", self.root / "release"
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, os, sys, time\n"
+             "from pathlib import Path\n"
+             "descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+             "fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+             "Path(sys.argv[2]).write_text('held')\n"
+             "while not Path(sys.argv[3]).exists():\n"
+             "    time.sleep(0.01)\n",
+             str(lease), str(held), str(release)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 15
+        try:
+            while not held.exists():
+                self.assertIsNone(child.poll())
+                self.assertGreater(deadline, time.monotonic(), "lease holder never signaled")
+            reason = directory_lock_status(self.path)
+            self.assertIsNotNone(reason)
+            self.assertIn("live process", reason)
+            self.assertFalse(self.path.exists())
+        finally:
+            release.write_text("go")
+            self.assertEqual(child.wait(timeout=15), 0)
+        self.assertIsNone(directory_lock_status(self.path))
+
+    def test_status_probe_leaves_legacy_and_unverifiable_locks_untouched(self):
+        self.path.mkdir()
+        self.assertIn("manually", directory_lock_status(self.path))
+        self.assertEqual(list(self.path.iterdir()), [])
+        self.path.rmdir()
+        self.abandoned()
+        (self.path / "unrelated.txt").write_text("keep")
+        self.assertIn("manually", directory_lock_status(self.path))
+        self.assertTrue((self.path / "owner.json").is_file())
+        (self.path / "unrelated.txt").unlink()
+        (self.path / "owner.json").write_text("{not json")
+        self.assertIn("manually", directory_lock_status(self.path))
+        lease = self.path.with_name(self.path.name + ".lease")
+        lease.rename(self.root / "old-lease")
+        self.assertIn("manually", directory_lock_status(self.path))
+        self.assertTrue(self.path.is_dir())
+        target = self.root / "target"
+        target.mkdir()
+        (self.path / "owner.json").rename(target / "owner.json")
+        (self.path / "owner.json").symlink_to(target / "owner.json")
+        self.assertIn("manually", directory_lock_status(self.path))
+        self.assertTrue((self.path / "owner.json").is_symlink())
+
+    def test_status_probe_without_any_lock_reports_none(self):
+        self.assertIsNone(directory_lock_status(self.path))
+
+    def test_status_probe_never_reports_idle_for_an_existing_unverifiable_lease(self):
+        lease = self.path.with_name(self.path.name + ".lease")
+        target = self.root / "keep"
+        target.write_text("keep")
+        with self.subTest(lease="symlink"):
+            lease.symlink_to(target)
+            self.assertIn("manually", directory_lock_status(self.path))
+            lease.unlink()
+        with self.subTest(lease="directory"):
+            lease.mkdir()
+            self.assertIn("manually", directory_lock_status(self.path))
+            lease.rmdir()
+        with self.subTest(lease="unreadable"):
+            lease.write_bytes(b"")
+            lease.chmod(0o000)
+            self.assertIn("manually", directory_lock_status(self.path))
+            lease.chmod(0o600)
+            lease.unlink()
+        with self.subTest(lease="nonempty"):
+            lease.write_bytes(b"junk")
+            self.assertIn("manually", directory_lock_status(self.path))
+            lease.unlink()
+        with self.subTest(lease="group-readable"):
+            lease.write_bytes(b"")
+            lease.chmod(0o640)
+            self.assertIn("manually", directory_lock_status(self.path))
+            lease.unlink()
+        self.assertEqual(target.read_text(), "keep")
+        self.assertIsNone(directory_lock_status(self.path))
 
     def test_replaced_directory_cannot_inherit_copied_ownership(self):
         self.abandoned()

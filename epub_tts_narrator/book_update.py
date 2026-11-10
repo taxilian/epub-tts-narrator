@@ -601,8 +601,8 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
         manifest = _read_json(directory / "manifest.json")
         if _hash(directory / "manifest.json") != expected_manifest_sha256:
             raise ValueError("The saved book changed while its new chapters were analyzed; rerun the update")
-        if _render_active(directory):
-            raise ValueError(f"Rendering is active; finish it before updating the book: {directory}")
+        if reason := _render_active(directory):
+            raise ValueError(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
         lock_path = directory / ".analysis-update.lock"
         try:
             lock = acquire_directory_lock(lock_path)
@@ -656,8 +656,8 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
         try:
             if any(_hash(directory / name) != checksum for name, checksum in original_hashes.items()):
                 raise ValueError(f"The saved book changed before publication: {directory}")
-            if _render_active(directory):
-                raise ValueError(f"Rendering started during the update: {directory}")
+            if reason := _render_active(directory):
+                raise ValueError(f"Rendering started during the update: {directory} ({reason})")
             journal["status"] = "applying"
             write_json(transaction / "revision.json", journal, overwrite=True)
             for name in added:
@@ -735,8 +735,8 @@ def describe_update(document):
 def ensure_updatable(directory, comparison=None):
     """Refuse only updates the book's dependents could not survive."""
     directory = Path(directory).resolve()
-    if _render_active(directory):
-        raise ValueError(f"Rendering is active; finish it before updating the book: {directory}")
+    if reason := _render_active(directory):
+        raise ValueError(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
     related = related_directories([directory])
     if (related != [directory] and comparison is not None
             and comparison.get("appended_chapters")):

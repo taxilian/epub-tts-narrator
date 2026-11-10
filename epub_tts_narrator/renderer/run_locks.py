@@ -68,6 +68,56 @@ def _remove_owned(path, lease_info, owner):
     path.rmdir()
 
 
+def directory_lock_status(path: Path) -> str | None:
+    """Report why ``path`` counts as a held lock, or None when it is idle.
+
+    Returns None only when the kernel proves no live process holds the lease:
+    a valid marked lock whose lease is unlocked, an absent directory whose
+    surviving lease is unlocked, or no lock and no lease at all. Any other
+    sentinel (legacy directory, malformed or replaced ownership record,
+    missing or replaced lease, symlink, lease held by any process including
+    one still starting up) returns an actionable reason and is left untouched
+    for the operator. The probe is read-only: it never removes a lock
+    directory, an ownership record, or a lease file, and it never keeps the
+    lease locked. A renderer reclaims a proven-abandoned lock itself the next
+    time it acquires that lock.
+    """
+    path = Path(path).absolute()
+    lease = path.with_name(path.name + ".lease")
+    manual = "; confirm no renderer runs, then remove the lock directory manually"
+    try:
+        # Never O_CREAT: a missing lease cannot prove abandonment, and creating
+        # or replacing the inode would break the ownership record's binding.
+        descriptor = os.open(lease, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT and not path.exists() and not path.is_symlink():
+            return None
+        return "its lease file cannot be opened for verification" + manual
+    try:
+        lease_info = os.fstat(descriptor)
+        if (not stat.S_ISREG(lease_info.st_mode) or lease_info.st_nlink != 1
+                or lease_info.st_size or stat.S_IMODE(lease_info.st_mode) & 0o077):
+            return "its lease file is not this format's empty exclusive regular file" + manual
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return "a live process holds its kernel lease; finish or stop that renderer first"
+        # Holding the lease excludes any renderer that is still starting up, so
+        # the directory cannot change under the checks below.
+        if not path.exists() and not path.is_symlink():
+            return None
+        current = lease.lstat()
+        if not stat.S_ISREG(current.st_mode) or _identity(current) != _identity(lease_info):
+            return "its lease file was replaced and cannot be verified" + manual
+        try:
+            _read_owner(path, lease_info)
+        except FileExistsError:
+            return "its ownership record cannot be verified as this format's recoverable lock" + manual
+        return None
+    finally:
+        os.close(descriptor)
+
+
 class DirectoryLock:
     """Path-like ownership handle; rmdir() releases both sentinel and lease."""
 
@@ -95,6 +145,31 @@ class DirectoryLock:
                 _remove_owned(self.path, self._lease_info, self._owner)
             finally:
                 os.close(descriptor)
+
+    def still_owns(self, path) -> bool:
+        """True while this open handle exclusively owns the exact lock at ``path``.
+
+        Proves the lease descriptor is still open (not released), the lease file
+        on disk is still the inode this handle flocked, and the marked directory
+        still carries this handle's ownership record unchanged. Read-only: it
+        never acquires, releases, creates, or removes anything, so a caller
+        holding a reservation can reverify it without disturbing ownership.
+        """
+        if self._descriptor is None:
+            return False
+        path = Path(path).absolute()
+        if self.path != path:
+            return False
+        try:
+            open_info = os.fstat(self._descriptor)
+            if not stat.S_ISREG(open_info.st_mode) or _identity(open_info) != _identity(self._lease_info):
+                return False
+            current = path.with_name(path.name + ".lease").lstat()
+            if not stat.S_ISREG(current.st_mode) or _identity(current) != _identity(self._lease_info):
+                return False
+            return _read_owner(path, self._lease_info) == self._owner
+        except (OSError, FileExistsError):
+            return False
 
 
 def acquire_directory_lock(path: Path) -> DirectoryLock:

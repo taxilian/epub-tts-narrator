@@ -56,8 +56,10 @@ def refresh_locks(directory):
         for path in paths:
             if path != directory and ((path / FILENAME).exists() or (path / FILENAME).is_symlink()):
                 _require_ready(path)
-            sentinels = [path / ".audio-render.lock", path / "render-work" / ".render.lock",
-                         path / "voices" / ".lock", path / ".analysis-update.lock"]
+            # The render locks are covered by the lease-aware _render_active
+            # probe; a bare existence check would keep blocking on a lock whose
+            # renderer is provably gone.
+            sentinels = [path / "voices" / ".lock", path / ".analysis-update.lock"]
             sentinels.extend((path / "voices").glob("*/.lock"))
             if _render_active(path) or any(marker.exists() or marker.is_symlink() for marker in sentinels):
                 raise ValueError(f"Rendering, casting, or analysis revision is active in the refresh chain: {path}")
