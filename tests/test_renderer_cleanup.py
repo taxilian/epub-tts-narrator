@@ -8,6 +8,7 @@ import unittest
 from epub_tts_narrator.renderer.cleanup import (
     clean_take_intermediates, cleanup_work, discard_interrupted_raw,
 )
+from epub_tts_narrator.renderer.audio_naming import descriptive_audio_filename
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 
 
@@ -522,6 +523,89 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
         self.assertEqual(before, self.snapshot())
 
+    def chapter_staging(self, names, suffix="a1b2c3d4"):
+        directory = self.work / "chapters" / (".chapter-" + suffix)
+        (directory / "ready").mkdir(parents=True)
+        for name in names:
+            path = directory / "ready" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("interrupted chapter " + name).encode())
+        return directory
+
+    def test_orphaned_chapter_assembly_staging_has_an_exact_resumable_cleanup_preview(self):
+        self.chapter(checkpoint="current", recorded=True)
+        protected = self.snapshot()
+        layouts = (
+            ("chapter-0007.wav", descriptive_audio_filename("loudness-normalized", "chapter-0007", suffix=".wav")),
+            (".compose-1234abcd/chapter-0007.wav", ".compose-1234abcd/masked-0.wav",
+             ".compose-1234abcd/effect-2.wav"),
+            ("chapter-0007.wav", ".chapter-1234abcd/chapter-0007.m4a"),
+            ("chapter-0007.wav", "chapter-0007.m4a", ".chapter-1234abcd/chapter-0007.m4a"),
+            ("chapter-10000.wav", ".chapter-1234abcd/chapter-10000.mp3"),
+        )
+        for index, names in enumerate(layouts):
+            with self.subTest(layout=names):
+                staging = self.chapter_staging(names, suffix=f"{index:08d}")
+                before = self.snapshot()
+                obsolete = {path: data for path, data in before.items() if path not in protected}
+                preview = cleanup_work(self.work, dry_run=True)
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual({item["path"] for item in preview["files"]}, set(obsolete))
+                self.assertEqual(preview["categories"], {
+                    "interrupted_chapters": {"files_removed": len(obsolete),
+                                             "bytes_removed": sum(map(len, obsolete.values()))}})
+                self.assertTrue(preview["preserves_resumability"])
+                removed = cleanup_work(self.work)
+                self.assertEqual(removed["files"], preview["files"])
+                self.assertFalse(staging.exists())
+                self.assertEqual(self.snapshot(), protected)
+        self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
+
+    def test_unknown_chapter_staging_contents_are_retained_as_a_whole(self):
+        layouts = (
+            ("chapter-0007.wav", "voice-reference.wav"),
+            ("chapter-0007.wav", "chapter-0008.m4a"),
+            ("chapter-0007.wav", ".chapter-1234abcd/unknown.m4a"),
+            ("chapter-0007.wav", ".chapter-1234abcd/ready/chapter-0007.m4a"),
+            ("chapter-0007.wav", "loudness-normalized-chapter-0007.wav"),
+            ("chapter-0007.wav", "chapter-0007.m4a", "chapter-0007.mp3"),
+            ("chapter-0007.wav", ".compose-1234abcd/chapter-0007.wav", "chapter-0007.m4a"),
+            ("chapter-00007.wav",),
+        )
+        for index, names in enumerate(layouts):
+            with self.subTest(layout=names):
+                self.chapter_staging(names, suffix=f"{index:08d}")
+                before = self.snapshot()
+                self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_symlinked_chapter_staging_audio_blocks_every_planned_deletion(self):
+        self.chapter(name="Obsolete chapter")
+        staging = self.chapter_staging(("chapter-0007.wav", ".chapter-1234abcd/chapter-0007.m4a"))
+        encoded = staging / "ready" / ".chapter-1234abcd" / "chapter-0007.m4a"
+        encoded.unlink()
+        target = self.work / "saved-chapter.m4a"
+        target.write_bytes(b"keep the real recording")
+        encoded.symlink_to(target)
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "nonregular files or symlinks"):
+            cleanup_work(self.work)
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue(encoded.is_symlink())
+
+    def test_completed_staging_requires_its_valid_signed_chapter_record(self):
+        current = self.chapter(checkpoint="current", recorded=True)
+        staging = self.chapter_staging(("chapter-0007.wav", "chapter-0007.m4a"))
+        ready = staging / "ready"
+        for name in ("chapter-0007.wav", "chapter-0007.m4a", "chapter.json"):
+            (ready / name).write_bytes((current / name).read_bytes())
+        preview = cleanup_work(self.work, dry_run=True)
+        self.assertEqual(preview["files_removed"], 3)
+        (ready / "chapter.json").write_text("{}")
+        before = self.snapshot()
+        self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
+        self.assertEqual(self.snapshot(), before)
+
     def test_corrupt_or_missing_checkpoint_reference_blocks_all_cleanup(self):
         directory, _ = self.take()
         current = self.chapter(checkpoint="current")
@@ -702,6 +786,7 @@ class CleanupTests(unittest.TestCase):
         partial = self.work / "chapters" / ".chapter-abcd1234" / "ready"
         partial.mkdir(parents=True)
         (partial / "normalized.wav").write_bytes(b"partial staging file")
+        self.chapter_staging(("chapter-0007.wav", ".chapter-1234abcd/chapter-0007.mp3"))
         before = self.snapshot()
         preview = cleanup_work(self.work, discard_render_cache=True, dry_run=True)
         self.assertFalse(preview["preserves_resumability"])

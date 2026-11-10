@@ -1223,7 +1223,7 @@ For files created by earlier runs, preview and then run cleanup for one book:
 .venv-renderer/bin/audiobook-render cleanup runs/book-01
 ```
 
-The default cleanup removes redundant raw speech files and complete chapter cache versions that are no longer referenced by any saved chapter checkpoint. It preserves accepted speech, normalized rejected takes, current chapter checkpoints, and finished audiobook outputs. Cleanup loads no TTS or transcription model and refuses to run alongside a render or assembly for the same book or work directory. Use the same `--work-dir` as the render if you overrode it. Dry runs list the files and bytes eligible for removal.
+The default cleanup removes redundant raw speech files, complete chapter cache versions that are no longer referenced by any saved chapter checkpoint, and abandoned chapter-assembly staging with a recognized writer layout. Obsolete chapter versions include their WAV and encoded M4A/MP3 files; current checkpoint-referenced chapter files stay intact. Interrupted composition, loudness-normalization, and encoding files are removable only inside the renderer's `.chapter-…/ready` staging layout; unknown layouts and invalid staging records are retained. Cleanup preserves accepted speech, normalized rejected takes, current chapter checkpoints, saved voices, and finished audiobook outputs. It loads no TTS or transcription model and refuses to run alongside a render or assembly for the same book or work directory. Use the same `--work-dir` as the render if you overrode it. Dry runs list the exact files and bytes eligible for removal.
 
 To remove the generated speech and chapter caches as well, use the explicit discard option:
 

@@ -322,6 +322,67 @@ def _chapter(directory, plan, *, staging=False):
     return record
 
 
+def _chapter_staging(directory, plan):
+    if re.fullmatch(r"\.chapter-[a-z0-9_]{8}", directory.name) is None:
+        return
+    children = {path.name: path for path in directory.iterdir()}
+    if "ready" not in children or set(children) - {"ready", ".DS_Store"}:
+        return
+    ready = children["ready"]
+    _directory(ready)
+    directories = [directory, ready]
+    files = [children[".DS_Store"]] if ".DS_Store" in children else []
+    for path in sorted(ready.iterdir()):
+        if re.fullmatch(r"\.(?:chapter|compose)-[a-z0-9_]{8}", path.name):
+            _directory(path)
+            directories.append(path)
+            files.extend(sorted(path.iterdir()))
+        else:
+            files.append(path)
+    stems = set()
+    for path in files:
+        match = re.fullmatch(r"chapter-([0-9]{4,})\.wav", path.name)
+        if match and (path.parent == ready or path.parent.name.startswith(".compose-")):
+            number = int(match[1])
+            if number < 1 or f"{number:04d}" != match[1]:
+                return
+            stems.add(path.stem)
+    if len(stems) != 1:
+        return
+    stem = stems.pop()
+    encoded = {stem + ".m4a", stem + ".mp3"}
+    formats = {path.suffix for path in files if path.name in encoded}
+    scratch = directories[2:]
+    if len(formats) > 1 or len(scratch) > 1:
+        return
+    if any(path.name == stem + "-loudness-normalized.wav" for path in files) and (scratch or formats):
+        return
+    if scratch and scratch[0].name.startswith(".compose-") and formats:
+        return
+    for path in files:
+        if path.name == ".DS_Store":
+            pass
+        elif path.parent == ready:
+            if path.name not in {stem + ".wav", stem + "-loudness-normalized.wav", "chapter.json"} | encoded:
+                return
+        elif path.parent.name.startswith(".compose-"):
+            if path.name != stem + ".wav" and re.fullmatch(r"(?:masked|effect)-(?:0|[1-9][0-9]*)\.wav", path.name) is None:
+                return
+        elif path.name not in encoded:
+            return
+        _file(path)
+    if _exists(ready / "chapter.json"):
+        try:
+            _chapter(ready, plan, staging=True)
+        except (ValueError, OSError):
+            return
+    for path in files:
+        plan.remove_file(path, "interrupted_chapters")
+    for path in directories:
+        plan.remove_directory(path)
+    return True
+
+
 def _chapters(work, plan):
     checkpoints, chapters = work / "completed-chapters", work / "chapters"
     referenced = {}
@@ -350,7 +411,7 @@ def _chapters(work, plan):
             continue
         _directory(directory)
         if _HASH.fullmatch(directory.name) is None:
-            # Interrupted staging directories are not complete chapter caches.
+            _chapter_staging(directory, plan)
             continue
         if not _exists(directory / "chapter.json"):
             continue
@@ -424,6 +485,8 @@ def _mixes_names(directory, plan):
 
 def _purge_cache(directory, plan, store, *, staging=False):
     _directory(directory)
+    if store == "chapters" and staging and _chapter_staging(directory, plan):
+        return
     names = ({"chapter.json", "chapter.wav", "chapter.m4a", "chapter.mp3", "normalized.wav"}
              if store == "chapters" else {"mix.json", "mix.wav"}) | {".DS_Store"}
     if store == "chapters" and _exists(directory / "chapter.json"):
