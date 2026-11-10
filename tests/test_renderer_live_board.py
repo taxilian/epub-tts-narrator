@@ -129,6 +129,25 @@ class ChapterBoardRowTests(unittest.TestCase):
                 chapter.refresh()
                 self.assertIn("#2 local", screen(self.stream.getvalue())[-1])
 
+    def test_queue_prefixes_keep_distinct_pinned_rows_for_overlapping_books(self):
+        from epub_tts_narrator.renderer.render_queue import _prefixed
+        first = _prefixed("[book-1] ", self.board.log)
+        second = _prefixed("[book-2] ", self.board.log)
+        with (ChapterProgress(1, 9, chunks(1), notify=first, heartbeat=False) as one,
+              ChapterProgress(1, 8, chunks(1), notify=second, heartbeat=False) as two):
+            with one.task(0) as task:
+                task.worker_activity("started", "worker-a")
+                one.refresh()
+                two.refresh()
+                visible = screen(self.stream.getvalue())
+                self.assertTrue(visible[-2].startswith("[book-1] Ch 1/9 |"), visible)
+                self.assertIn("worker-a", visible[-2])
+                self.assertTrue(visible[-1].startswith("[book-2] Ch 1/8 |"), visible)
+                first("an ordinary log message")
+                visible = screen(self.stream.getvalue())
+                self.assertTrue(visible[-2].startswith("[book-1] Ch 1/9 |"), visible)
+                self.assertTrue(visible[-1].startswith("[book-2] Ch 1/8 |"), visible)
+
     def test_redirected_output_keeps_plain_status_lines(self):
         stream = io.StringIO()
         with ChapterProgress(3, 9, chunks(1), stream=stream, heartbeat=False, clock=lambda: 0.0) as chapter:

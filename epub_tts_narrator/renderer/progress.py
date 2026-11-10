@@ -184,7 +184,28 @@ def live_board(notify, stream=None):
         board.close()
 
 
+class PrefixedBoardNotify:
+    """Keep a book's logs and status rows on the queue's shared board."""
+
+    def __init__(self, board, prefix):
+        self.board = board
+        self.prefix = prefix
+
+    def __call__(self, message):
+        self.board.log(self.prefix + str(message))
+
+    log = __call__
+
+    def set_row(self, key, order, text):
+        self.board.set_row(key, (self.prefix, *order), self.prefix + text)
+
+    def remove_row(self, key):
+        self.board.remove_row(key)
+
+
 def _board_of(notify):
+    if isinstance(notify, PrefixedBoardNotify):
+        return notify
     owner = getattr(notify, "__self__", None)
     return owner if isinstance(owner, TerminalBoard) else None
 

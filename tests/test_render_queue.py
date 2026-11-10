@@ -466,6 +466,35 @@ class RemoteAcquisitionTests(QueueFixtureTests):
 
 
 class LocalSequentialTests(QueueFixtureTests):
+    def test_queue_creates_one_live_board_for_prefixed_book_progress(self):
+        from epub_tts_narrator.renderer.progress import ChapterProgress
+        from test_renderer_live_board import TTY, screen
+        stream = TTY()
+        frames = []
+
+        def render_book(bundle, config, engine, verifier, **kwargs):
+            with ChapterProgress(1, 2, [{"spoken_text": "Fixture words."}],
+                                 notify=kwargs["notify"], heartbeat=False) as chapter:
+                with chapter.task(0) as task:
+                    task.worker_activity("started", "fixture-worker")
+                    chapter.refresh()
+                    kwargs["notify"]("ordinary log")
+                    frames.append(screen(stream.getvalue())[-1])
+            return {"chapters": []}
+
+        with (contextlib.redirect_stdout(stream),
+              patch("epub_tts_narrator.renderer.progress._scheduling_segment", return_value=""),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=render_book)):
+            code = render_queue_command(self.render_args(1, 2), self.config)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(frames), 2)
+        for number, row in enumerate(frames, 1):
+            self.assertTrue(row.startswith(f"[book-{number}] Ch 1/2 |"), row)
+            self.assertIn("fixture-worker", row)
+
     def test_books_render_in_order_through_one_engine_and_verifier(self):
         engine, verifier = Mock(name="engine"), Mock(name="verifier")
         with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),

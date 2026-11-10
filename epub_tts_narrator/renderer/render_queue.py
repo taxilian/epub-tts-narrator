@@ -58,6 +58,10 @@ def _prefixed(prefix, notify):
     """A notify that prefixes every line, so per-book output stays readable."""
     if not prefix:
         return notify
+    from .progress import PrefixedBoardNotify, TerminalBoard
+    board = getattr(notify, "__self__", None)
+    if isinstance(board, TerminalBoard):
+        return PrefixedBoardNotify(board, prefix)
 
     def line(message):
         _emit(notify, prefix + str(message))
@@ -560,6 +564,14 @@ def _run_local_queue(books, args, *, notify):
 
 def render_queue_command(args, config_path, *, notify=print,
                          poll_seconds=POLL_SECONDS, join_seconds=INTERRUPT_JOIN_SECONDS):
+    from .progress import live_board
+    with live_board(notify) as board_notify:
+        return _render_queue_command(args, config_path, notify=board_notify,
+                                     poll_seconds=poll_seconds, join_seconds=join_seconds)
+
+
+def _render_queue_command(args, config_path, *, notify,
+                          poll_seconds, join_seconds):
     """Render every requested book in order; returns the process exit code.
 
     Remote mode (a configured ``[remote_chapters].url`` used as-is, or the
