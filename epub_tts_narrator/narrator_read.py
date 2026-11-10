@@ -762,7 +762,7 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
                 errors.append(f"{qid}: {error}")
                 continue
             kind = row[2] if len(row) > 2 and _is(row[2], {"t", "l"}) else None
-            delivery = _clean(row[3], 40) if len(row) > 3 and isinstance(row[3], str) else ""
+            delivery = _clean(row[3], 80) if len(row) > 3 and isinstance(row[3], str) else ""
             quote = row[4] if len(row) > 4 and isinstance(row[4], str) and 0 < len(row[4]) <= 240 else ""
             labels[qid] = {"who": who, "kind": kind, "delivery": delivery, "quote": quote}
         missing = [qid for qid in expected if qid not in labels]
@@ -1386,8 +1386,9 @@ east west north south eastern western central midlands highland lowland gaelic h
 
 def book_terms(source, ledger):
     """Proper nouns of the book a voice designer could not know: words capitalized
-    mid-sentence at least twice (and every character name or alias word), minus
-    real-world accent, language and place words."""
+    mid-sentence at least twice and character name or alias words, minus ordinary
+    words the book mostly writes in lowercase and real-world accent, language and
+    place words."""
     counts, lower = Counter(), Counter()
     for block in source["blocks"]:
         for match in re.finditer(r"(?<=[a-z,;] )([A-Z][a-z]{2,}(?:[-'][A-Za-z]+)?)", block["text"]):
@@ -1398,7 +1399,9 @@ def book_terms(source, ledger):
     terms = {word for word, count in counts.items() if count >= 2 and lower[word] < count}
     for row in ledger["characters"]:
         for name in [row["name"], *row["aliases"]]:
-            terms.update(word.casefold() for word in re.findall(r"[A-Z][\w'-]{2,}", name))
+            # "Ancient One", "Old Sour", "King Anheg": the everyday words are not the book's own.
+            terms.update(word for word in (found.casefold() for found in re.findall(r"[A-Z][\w'-]{2,}", name))
+                         if lower[word] <= counts[word])
     return terms - _REAL_WORLD
 
 
@@ -1591,6 +1594,29 @@ def _segment(block_id, start, text, *, role, kind, basis, reason, evidence=None,
                             "candidates": candidates or [], "review_required": review_required}}
 
 
+_WORD = re.compile(r"[^\W_](?:[\w'’-]*[^\W_])?")
+
+
+def _anchor_event(note, row_text, block_text):
+    """Anchor a sound or pause the speech tag names ("she laughed") on the quotation itself.
+
+    Models cite the tag that says so, which lies outside the quotation. When that
+    cited text is in the paragraph but not in the quotation, a "before" event sits
+    on the quotation's first word and an "after" event on its last word.
+    """
+    raw = note["raw"]
+    if raw.get("kind") not in ("vocalization", "pause") or raw["original"] in row_text:
+        return
+    if raw["original"] not in block_text:
+        return
+    words = list(_WORD.finditer(row_text))
+    if not words:
+        return
+    word = words[0] if raw.get("position") == "before" else words[-1]
+    # The rest of the quotation as context makes the anchor unique.
+    raw.update(original=word.group(), left=row_text[:word.start()], right=row_text[word.end():])
+
+
 def _attach_notes(rows, notes, block_text, block_id, by_qid, stats):
     """Turn terse notes into each row's private ``inline_proposals`` (reviewed later).
 
@@ -1606,7 +1632,10 @@ def _attach_notes(rows, notes, block_text, block_id, by_qid, stats):
             candidates = [row] if row is not None else []
         else:
             candidates = rows
-        matches = [row for row in candidates if row["text"].count(note["raw"]["original"]) == 1]
+        if kind == "q" and candidates:
+            _anchor_event(note, candidates[0]["text"], block_text)
+        located = note["raw"].get("left", "") + note["raw"]["original"] + note["raw"].get("right", "")
+        matches = [row for row in candidates if row["text"].count(located) == 1]
         if len(matches) != 1:
             stats["dropped"] += 1
             continue
@@ -1785,7 +1814,7 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                    default_roles=None):
     """Exact-coverage segments; returns rows and fills ``stats`` with note/delivery counts."""
     stats = stats if stats is not None else {}
-    stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_dropped": 0,
+    stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_cited": 0,
                   "simultaneous": 0, "simultaneous_unproven": 0, "variant_lines": 0, "effect_lines": 0,
                   "voice_exceptions": 0})
     roles = {role["id"]: role for role in cast["roles"]}
@@ -1833,6 +1862,24 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
         def quoted(value):
             return [{"block_id": block["id"], "quote": value}] if value and value.strip() and value in text else []
 
+        def in_scene(value):
+            """This paragraph, else the nearest of the scene's paragraphs just before or after it."""
+            if not value or not value.strip():
+                return []
+            at = block_position[block["id"]]
+            for offset in (0, -1, -2, -3, 1):
+                if 0 <= at + offset < len(source["blocks"]):
+                    near = source["blocks"][at + offset]
+                    if near["chapter_id"] != block["chapter_id"]:
+                        continue
+                    # Models wrap a quote from the line in quotation marks, or shorten it.
+                    bare = value.strip(" \"'\u201c\u201d\u2018\u2019")
+                    found = (value if value in near["text"] else bare if bare and bare in near["text"]
+                             else exact_quote(value, near["text"]))
+                    if found:
+                        return [{"block_id": near["id"], "quote": found}]
+            return []
+
         narration_kind = "heading" if block["source"]["tag"] in HEADING_TAGS else "narration"
         pieces, cursor = [], 0
         for item in sorted(by_block.get(block["id"], []), key=lambda value: value["start"]):
@@ -1866,16 +1913,16 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                     # A direction is plain words; brackets are engine control syntax.
                     piece["delivery"] = " ".join(re.sub(r"[\[\]<>{}]", " ", piece["delivery"]).split())
                 if piece.get("delivery"):
-                    # The model's quote must support the delivery; an explicit tag only
-                    # counts when it contains the delivery word ("whispered" for "whisper").
+                    # A direction needs no citation when the line and its paragraph make the
+                    # feeling clear. A quote the model gives (a feeling from earlier in the scene)
+                    # is kept as evidence when it is found nearby, as is a tag that names it
+                    # ("whispered" for "whisper"); one that is not found is simply not kept.
                     stem = re.sub(r"[^a-z]", "", piece["delivery"].split()[0].casefold())[:5]
                     tag_supports = bool(stem) and any(stem in item["quote"].casefold() for item in tag_evidence)
-                    support = label_evidence or (tag_evidence if tag_supports else [])
-                    if support:
-                        delivery = {"direction": piece["delivery"], "evidence": support}
-                        stats["delivery"] += 1
-                    else:
-                        stats["delivery_dropped"] += 1
+                    support = in_scene(piece.get("quote", "")) or (tag_evidence if tag_supports else [])
+                    delivery = {"direction": piece["delivery"], "evidence": support}
+                    stats["delivery"] += 1
+                    stats["delivery_cited"] += bool(support)
                 if who[0] == "unresolved":
                     candidates = [f"role_{identifier}" for identifier in who[1] if f"role_{identifier}" in roles]
                     row = _segment(block["id"], piece["start"], piece_text, role=None, kind=kind,

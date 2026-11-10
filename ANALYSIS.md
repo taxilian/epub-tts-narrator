@@ -55,11 +55,11 @@ Fresh passage tagging uses the shared adaptive runner. Request-budget preflight,
    - `+Name` for a minor speaker missing from the ledger, resolved like a speech tag (exact name, or a first name unique in the cast);
    - `id&id` for the same words spoken together.
 
-   A row may add a thought or letter kind, and a 1–3 word delivery with the exact supporting quote from its paragraph. A delivery is kept only when that quote is in the paragraph, or when an explicit tag contains the delivery word. A unison line becomes `simultaneous_speakers` only with source evidence: the model's quote, or narration in the paragraph saying the speakers talk together (in unison, together, both…). Otherwise it stays unresolved for the speaker menu. Optional sparse performance notes are allowed for a quotation or paragraph:
+   A row may add a thought or letter kind, and a delivery: how a narrator performs the line, in 2–8 words of feeling and manner ("hushed and frightened", "sharp, irritated, clipped"), read from the scene rather than copied from the speech verb. It is given whenever the scene makes the feeling clear (a tag or adverb, the speaker's described state or action, what just happened, or the line's own words) and left empty for calm, ordinary lines. A delivery needs no citation when the line and its paragraph make the feeling clear, which is the usual case. The model quotes text only when the feeling comes from an earlier paragraph. That quote is kept as evidence when it is found in the line's paragraph, one of the three before it or the one after it in the same chapter (surrounding quotation marks are ignored), as is an explicit tag containing the delivery word. A quote that is not found is not kept, but the delivery stays. A unison line becomes `simultaneous_speakers` only with source evidence: the model's quote, or narration in the paragraph saying the speakers talk together (in unison, together, both…). Otherwise it stays unresolved for the speaker menu. Optional sparse performance notes are allowed for a quotation or paragraph:
    - stylized-spelling edits;
    - whisper, soft, emphasis, stress, forceful, fast, slow or style spans;
    - pauses;
-   - vocalizations.
+   - vocalizations. A sound or pause the model anchors on the speech tag that names it ("she laughed") goes on the quotation's first word (before) or last word (after).
 
    - a per-line voice exception: `["q12","as","normal"]` (a flashback, the helmet is off) or `["q12","as","helmet"]` (an effect for this line only).
 

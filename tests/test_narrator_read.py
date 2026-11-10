@@ -619,20 +619,70 @@ class NarratedAnalyzeTests(unittest.TestCase):
                     self.assertNotIn("simultaneous_speakers", row)
                     self.assertEqual(row["attribution"]["basis"], "unresolved")
 
-    def test_delivery_needs_a_supporting_quote_from_the_paragraph(self):
+    def test_a_direction_needs_no_citation_and_keeps_one_only_when_it_is_found(self):
         self.source = make_source([[('"Stay," Mara whispered hoarsely.', "p"), ('"Go," Jon said.', "p")]])
 
         def rewrite(qids, result):
             result["q"] = [[qids["Stay,"], "1", "", "whispered", "Mara whispered hoarsely"],
-                           [qids["Go,"], "2", "", "shouted", "invented support"]]
+                           [qids["Go,"], "2", "", "sharp, impatient", "invented support"]]
 
         document = self.markup_with(rewrite)
         rows = self.by_text(document)
         self.assertEqual(rows['"Stay,"']["delivery"],
                          {"direction": "whispered", "evidence": [{"block_id": "b000001", "quote": "Mara whispered hoarsely"}]})
-        self.assertEqual(rows['"Go,"']["delivery"]["direction"], "")
+        # The line makes the reading clear; a quote that is not in the scene is not kept.
+        self.assertEqual(rows['"Go,"']["delivery"], {"direction": "sharp, impatient", "evidence": []})
         stats = document["provenance"]["narrator_read"]["segments"]
-        self.assertEqual((stats["delivery"], stats["delivery_dropped"]), (1, 1))
+        self.assertEqual((stats["delivery"], stats["delivery_cited"]), (2, 1))
+        self.assertEqual(readiness(document)["errors"], [])
+
+    def test_a_feeling_from_earlier_in_the_scene_cites_the_text_that_shows_it(self):
+        self.source = make_source([[("Mara's hands shook as the footsteps came closer.", "p"),
+                                    ('"Is someone there?"', "p"), ('"Ah," Jon said.', "p")],
+                                   [('"Fine," Jon said.', "p"), ('"Mara!"', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Is someone there?"], "1", "", "hushed and frightened", "Mara's hands shook"],
+                           # A quote wrapped in quotation marks by the model.
+                           [qids["Ah,"], "2", "", "soft, pleased", '"Ah"'],
+                           # No quote: the direction stands on the line itself.
+                           [qids["Fine,"], "2", "", "weary, flat"],
+                           # Text from another chapter is not this scene.
+                           [qids["Mara!"], "1", "", "frantic", "footsteps came closer"]]
+
+        document = self.markup_with(rewrite)
+        rows = self.by_text(document)
+        self.assertEqual(rows['"Is someone there?"']["delivery"],
+                         {"direction": "hushed and frightened",
+                          "evidence": [{"block_id": "b000001", "quote": "Mara's hands shook"}]})
+        self.assertEqual(rows['"Ah,"']["delivery"],
+                         {"direction": "soft, pleased", "evidence": [{"block_id": "b000003", "quote": "Ah"}]})
+        self.assertEqual(rows['"Fine,"']["delivery"], {"direction": "weary, flat", "evidence": []})
+        self.assertEqual(rows['"Mara!"']["delivery"], {"direction": "frantic", "evidence": []})
+        stats = document["provenance"]["narrator_read"]["segments"]
+        self.assertEqual((stats["delivery"], stats["delivery_cited"]), (4, 2))
+        self.assertEqual(readiness(document)["errors"], [])
+
+    def test_a_sound_cited_by_its_speech_tag_is_placed_on_the_quotation(self):
+        self.source = make_source([[('Mara laughed. "Wait for me, wait," she said.', "p"),
+                                    ('"Never," Jon said, and sighed.', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Wait for me, wait,"], "1"], [qids["Never,"], "2"]]
+            result["p"] = [[qids["Wait for me, wait,"], "laugh", "laughed", "before"],
+                           [qids["Never,"], "sigh", "sighed", "after"],
+                           # Text found nowhere in the paragraph is still dropped.
+                           [qids["Never,"], "cough", "coughed", "after"]]
+
+        document = self.markup_with(rewrite, review_answer="keep")
+        stats = document["provenance"]["narrator_read"]["segments"]
+        self.assertEqual((stats["attached"], stats["dropped"]), (2, 1))
+        rows = self.by_text(document)
+        laugh = rows['"Wait for me, wait,"']["performance_controls"]["controls"]
+        sigh = rows['"Never,"']["performance_controls"]["controls"]
+        # Before the first "Wait" (not the second "wait"), and after the last word "Never".
+        self.assertEqual([(c["kind"], c["sound"], c["offset"]) for c in laugh], [("vocalization", "laugh", 1)])
+        self.assertEqual([(c["kind"], c["sound"], c["offset"]) for c in sigh], [("vocalization", "sigh", len('"Never'))])
 
     def test_tie_break_selection_is_published_with_existing_delivery_evidence(self):
         self.source = make_source([[('"Stay," Mara whispered.', "p"), ('"Go," Jon said.', "p")]])
@@ -810,12 +860,15 @@ class NarratedAnalyzeTests(unittest.TestCase):
         source = make_source([[('Mara rode back to Sendaria. "Wait," Mara said, in her Sendarian burr.', "p"),
                                ("The Sendarian farmers came from Sendaria, past the Guild hall. The Guild met.", "p"),
                                ("He bowed to His Majesty, and his sword hung at his side; his horse waited.", "p"),
-                               ("They spoke to His Majesty, and his voice was his own.", "p")]])
-        ledger = apply_delta(new_ledger(), {"new": [["Mara", "", "f", "", 1]]},
+                               ("They spoke to His Majesty, and his voice was his own.", "p"),
+                               ("The ancient king was sour, an ancient and sour old king.", "p")]])
+        ledger = apply_delta(new_ledger(), {"new": [["Mara", "", "f", "", 1],
+                                                    ["Belgarath", "Ancient One/Old Sour/King Wolf", "m", "", 1]]},
                              {block["id"]: block["text"] for block in source["blocks"]}, {1: "b000001"})
         terms = book_terms(source, ledger)
-        self.assertTrue({"mara", "sendaria", "sendarian", "guild"} <= terms)
-        self.assertFalse({"scottish", "american", "his"} & terms)
+        self.assertTrue({"mara", "sendaria", "sendarian", "guild", "belgarath", "wolf"} <= terms)
+        # Everyday words in an alias stay usable when the book mostly writes them in lowercase.
+        self.assertFalse({"scottish", "american", "his", "ancient", "sour", "king"} & terms)
 
         class BookWords(NarratorClient):
             def complete(self, system, payload):
