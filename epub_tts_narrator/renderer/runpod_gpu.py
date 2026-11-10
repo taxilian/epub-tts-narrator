@@ -67,10 +67,19 @@ def stock_in(gpu, data_center_id):
 
 
 def eligible(gpu, *, gpu_type_id="", min_memory_gb=MIN_GPU_MEMORY_GB):
-    """True for an NVIDIA GPU with enough known memory (and the pinned ID, if any)."""
+    """True for an NVIDIA GPU with enough known memory (and the pinned ID, if any).
+
+    SXM form factors are excluded: Runpod serves those Pods without a
+    host-local Pod disk, and this deployment keeps /workspace on one (network
+    volumes are never used), so their creation request is rejected. Runpod
+    marks the form factor in the catalog name ("H100 SXM", "A100 SXM") or in
+    the id ("A100-SXM4-80GB", "B300 SXM6 AC"), so both are checked.
+    """
     if not isinstance(gpu, dict) or not isinstance(gpu.get("id"), str):
         return False
     if gpu_type_id and gpu["id"] != gpu_type_id:
+        return False
+    if "SXM" in gpu["id"].upper() or "SXM" in str(gpu.get("name") or "").upper():
         return False
     memory = catalog_memory(gpu)
     return gpu.get("manufacturer") == "NVIDIA" and memory is not None and memory >= min_memory_gb
@@ -125,5 +134,6 @@ def select_placement(rows, *, max_hourly_price, cloud="SECURE", gpu_type_id="",
         wanted = (f"GPU {gpu_type_id} with at least {min_memory_gb} GB" if gpu_type_id
                   else f"NVIDIA GPU with at least {min_memory_gb} GB")
         raise ValueError(f"No US datacenter on Runpod {CLOUD_LABELS[cloud]} has an available {wanted} "
-                         "within runpod.max_hourly_price; no resources were created")
+                         "within runpod.max_hourly_price; no resources were created. SXM GPUs are "
+                         "excluded because Runpod serves them without a host-local Pod disk")
     return min(candidates, key=lambda candidate: candidate[0])[1]

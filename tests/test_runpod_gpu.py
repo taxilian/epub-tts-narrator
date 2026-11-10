@@ -12,11 +12,11 @@ DATACENTER = "US-CO-1"
 
 
 def catalog_row(gpu_id, price=2.0, *, memory=96, manufacturer="NVIDIA", availability="HIGH",
-                datacenters=(DATACENTER,), community=None):
+                datacenters=(DATACENTER,), community=None, name=None):
     prices = {"secure": price}
     if community is not None:
         prices["community"] = community
-    return {"id": gpu_id, "name": gpu_id, "manufacturer": manufacturer, "memory": memory,
+    return {"id": gpu_id, "name": name or gpu_id, "manufacturer": manufacturer, "memory": memory,
             "availability": availability, "price": prices,
             "dataCenters": [{"id": center, "availability": "HIGH"} for center in datacenters]}
 
@@ -29,9 +29,26 @@ def choose(rows, **overrides):
 
 class EligibilityTests(unittest.TestCase):
     def test_any_nvidia_gpu_with_enough_memory_is_eligible(self):
-        for gpu_id, memory in (("NVIDIA A100-SXM4-80GB", 80), ("NVIDIA H200", 141), (MEASURED, 96)):
+        for gpu_id, memory in (("NVIDIA A100 80GB PCIe", 80), ("NVIDIA H200 NVL", 143), (MEASURED, 96)):
             with self.subTest(gpu=gpu_id):
                 self.assertTrue(eligible(catalog_row(gpu_id, memory=memory)))
+
+    def test_sxm_gpus_are_never_eligible(self):
+        """Runpod serves SXM Pods without a host-local Pod disk."""
+        cases = (
+            ("id marked", catalog_row("NVIDIA A100-SXM4-80GB", memory=80)),
+            ("name marked", catalog_row("NVIDIA H100 80GB HBM3", memory=80, name="H100 SXM")),
+            ("sxm6 id", catalog_row("NVIDIA B300 SXM6 AC", memory=288)),
+        )
+        for label, row in cases:
+            with self.subTest(case=label):
+                self.assertFalse(eligible(row))
+
+    def test_a_pinned_sxm_gpu_reports_the_host_local_disk_reason(self):
+        rows = [catalog_row("NVIDIA A100-SXM4-80GB", memory=80)]
+        with self.assertRaises(ValueError) as raised:
+            choose(rows, gpu_type_id="NVIDIA A100-SXM4-80GB")
+        self.assertIn("host-local Pod disk", str(raised.exception))
 
     def test_too_little_memory_other_vendors_and_unknown_data_are_never_eligible(self):
         cases = (
@@ -51,7 +68,7 @@ class EligibilityTests(unittest.TestCase):
                 self.assertFalse(eligible(row))
 
     def test_the_memory_floor_is_configurable_and_inclusive(self):
-        row = catalog_row("NVIDIA A100-SXM4-80GB", memory=80)
+        row = catalog_row("NVIDIA A100 80GB PCIe", memory=80)
         self.assertTrue(eligible(row, min_memory_gb=80))
         self.assertFalse(eligible(row, min_memory_gb=81))
         self.assertEqual(MIN_GPU_MEMORY_GB, 56)
@@ -80,7 +97,7 @@ class EligibilityTests(unittest.TestCase):
 class RankingTests(unittest.TestCase):
     def test_a_measured_gpu_beats_cheaper_unmeasured_ones(self):
         # The catalog says nothing about speed, so a measured cost wins over a guess.
-        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80), catalog_row(MEASURED, 2.49)]
+        rows = [catalog_row("NVIDIA A100 80GB PCIe", 1.39, memory=80), catalog_row(MEASURED, 2.49)]
         self.assertEqual(choose(rows).gpu_type_id, MEASURED)
 
     def test_measured_gpus_rank_by_cost_per_generated_audio_hour(self):
@@ -94,11 +111,11 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(choose(rows).gpu_type_id, MEASURED)
 
     def test_without_a_measured_gpu_the_cheapest_eligible_one_wins(self):
-        rows = [catalog_row("NVIDIA H200", 2.40, memory=141), catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80),
+        rows = [catalog_row("NVIDIA H200", 2.40, memory=141), catalog_row("NVIDIA A100 80GB PCIe", 1.39, memory=80),
                 catalog_row("NVIDIA L40S", 0.79, memory=48)]
         result = choose(rows)
         self.assertEqual((result.gpu_type_id, result.hourly_price, result.memory_gb),
-                         ("NVIDIA A100-SXM4-80GB", 1.39, 80.0))
+                         ("NVIDIA A100 80GB PCIe", 1.39, 80.0))
 
     def test_price_cap_applies_to_every_gpu(self):
         rows = [catalog_row(MEASURED, 2.61), catalog_row("NVIDIA H200", 2.70, memory=141)]
@@ -110,12 +127,12 @@ class RankingTests(unittest.TestCase):
         bad_price = catalog_row(MEASURED, float("nan"))
         no_stock = catalog_row("NVIDIA H200", 1.00, memory=141, availability="NONE")
         elsewhere = catalog_row("NVIDIA H100 PCIe", 1.00, memory=80, datacenters=("CA-MTL-3",))
-        fine = catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80)
-        self.assertEqual(choose([bad_price, no_stock, elsewhere, fine]).gpu_type_id, "NVIDIA A100-SXM4-80GB")
+        fine = catalog_row("NVIDIA A100 80GB PCIe", 1.79, memory=80)
+        self.assertEqual(choose([bad_price, no_stock, elsewhere, fine]).gpu_type_id, "NVIDIA A100 80GB PCIe")
 
     def test_pinned_gpu_is_the_only_candidate(self):
-        rows = [catalog_row(MEASURED, 2.49), catalog_row("NVIDIA A100-SXM4-80GB", 1.39, memory=80)]
-        self.assertEqual(choose(rows, gpu_type_id="NVIDIA A100-SXM4-80GB").gpu_type_id, "NVIDIA A100-SXM4-80GB")
+        rows = [catalog_row(MEASURED, 2.49), catalog_row("NVIDIA A100 80GB PCIe", 1.39, memory=80)]
+        self.assertEqual(choose(rows, gpu_type_id="NVIDIA A100 80GB PCIe").gpu_type_id, "NVIDIA A100 80GB PCIe")
         with self.assertRaisesRegex(ValueError, "GPU NVIDIA H200 with at least 56 GB"):
             choose(rows, gpu_type_id="NVIDIA H200")
 
@@ -129,11 +146,11 @@ class USPlacementTests(unittest.TestCase):
         self.assertEqual(choose([row]).data_center_id, "US-CO-1")
 
     def test_cost_outranks_stock_and_location(self):
-        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80, datacenters=("US-NC-2",)),
+        rows = [catalog_row("NVIDIA A100 80GB PCIe", 1.79, memory=80, datacenters=("US-NC-2",)),
                 catalog_row("NVIDIA H100 PCIe", 1.99, memory=80, datacenters=("US-CO-1",))]
         rows[0]["dataCenters"][0]["availability"] = "LOW"
         result = choose(rows, preferred_data_center="US-CO-1")
-        self.assertEqual((result.gpu_type_id, result.data_center_id), ("NVIDIA A100-SXM4-80GB", "US-NC-2"))
+        self.assertEqual((result.gpu_type_id, result.data_center_id), ("NVIDIA A100 80GB PCIe", "US-NC-2"))
 
     def test_non_us_locations_are_never_selected(self):
         rows = [catalog_row("NVIDIA H200", 1.00, memory=141, datacenters=("CA-MTL-3", "EU-RO-1")),
@@ -161,9 +178,9 @@ class CloudPriceTests(unittest.TestCase):
         self.assertEqual((result.cloud, result.hourly_price), ("COMMUNITY", 1.25))
 
     def test_community_price_decides_the_ranking_and_cap(self):
-        rows = [catalog_row("NVIDIA A100-SXM4-80GB", 1.79, memory=80, community=1.39),
+        rows = [catalog_row("NVIDIA A100 80GB PCIe", 1.79, memory=80, community=1.39),
                 catalog_row("NVIDIA H100 PCIe", 2.89, memory=80, community=1.19)]
-        self.assertEqual(choose(rows).gpu_type_id, "NVIDIA A100-SXM4-80GB")
+        self.assertEqual(choose(rows).gpu_type_id, "NVIDIA A100 80GB PCIe")
         self.assertEqual(choose(rows, cloud="COMMUNITY").gpu_type_id, "NVIDIA H100 PCIe")
         with self.assertRaisesRegex(ValueError, "Community Cloud"):
             choose([catalog_row(MEASURED, 2.0, community=3.0)], cloud="COMMUNITY")

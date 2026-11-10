@@ -109,7 +109,11 @@ audio hour) rank first by measured cost per generated audio hour, and every
 other eligible GPU follows by hourly price. Add a GPU to that table only from a
 benchmark of the same corpus. Stock, then your `data_center_id` hint, break
 ties. If nothing qualifies the cloud is skipped, and nothing is created when no
-cloud qualifies. Set `gpu_type_id` to an exact catalog ID to pin one GPU (the
+cloud qualifies. SXM GPUs are never eligible: Runpod serves those Pods without
+a host-local Pod disk, and this deployment keeps `/workspace` on one, so their
+creation request is rejected by the provider (the form factor is read from the
+catalog name, such as "H100 SXM", or from the id, such as "A100-SXM4-80GB").
+Set `gpu_type_id` to an exact catalog ID to pin one GPU (the
 memory floor still applies). AMD GPUs, rows with unknown memory or vendor, and
 unreadable prices or stock are never chosen. An unmeasured GPU is proven only by
 the full bootstrap and smoke check on its first Pod. After creation the
