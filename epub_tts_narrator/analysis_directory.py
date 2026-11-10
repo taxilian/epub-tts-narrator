@@ -117,6 +117,26 @@ def _readiness_matches(saved, current):
     return saved == current or saved == legacy
 
 
+def _validate_script_rows(directory, manifest, document):
+    """Require chapter rows and sequence metadata to reproduce the analysis."""
+    cursor = 0
+    for chapter in manifest["files"]["scripts"]:
+        start = cursor
+        with _regular_file(directory, chapter["path"]).open(encoding="utf-8") as stream:
+            for line in stream:
+                row = json.loads(line)
+                if (cursor >= len(document["segments"]) or not isinstance(row, dict)
+                        or row.get("sequence") != cursor
+                        or any(row.get(key) != value for key, value in document["segments"][cursor].items())):
+                    raise ValueError("Prior chapter scripts and analysis disagree")
+                cursor += 1
+        if (chapter.get("sequence_start") != start or chapter.get("sequence_end") != cursor
+                or chapter.get("segment_count") != cursor - start):
+            raise ValueError("Prior chapter sequence inventory is inconsistent")
+    if cursor != len(document["segments"]):
+        raise ValueError("Prior chapter scripts do not cover the analysis")
+
+
 def _completed_directory(directory):
     """Validate the bundle and its matching cumulative series snapshot."""
     directory = Path(directory).resolve()
@@ -129,7 +149,7 @@ def _completed_directory(directory):
         for name in names:
             path = _regular_file(directory, name)
             if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["sha256"][name]:
-                raise ValueError(f"Analysis directory checksum mismatch: {name}")
+                raise ValueError(f"Analysis directory checksum mismatch: {name} in {directory}")
         metadata = manifest.get("analysis_directory")
         if (not isinstance(metadata, dict) or metadata.get("version") != 1
                 or not isinstance(metadata.get("sha256"), dict)
@@ -138,7 +158,7 @@ def _completed_directory(directory):
         for name, checksum in metadata["sha256"].items():
             path = _regular_file(directory, name)
             if hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
-                raise ValueError(f"Analysis directory checksum mismatch: {name}")
+                raise ValueError(f"Analysis directory checksum mismatch: {name} in {directory}")
         document = _read_json(_regular_file(directory, "analysis.json"))
         errors = validate_document(document)
         if errors:
@@ -155,22 +175,7 @@ def _completed_directory(directory):
                 or _read_json(directory / "cast.json") != document["cast"]
                 or _read_json(directory / "review.json") != review_items(document)):
             raise ValueError("Prior bundle and analysis disagree; use a complete analysis output")
-        cursor = 0
-        for chapter in manifest["files"]["scripts"]:
-            start = cursor
-            with (directory / chapter["path"]).open(encoding="utf-8") as stream:
-                for line in stream:
-                    row = json.loads(line)
-                    if (cursor >= len(document["segments"]) or not isinstance(row, dict)
-                            or row.get("sequence") != cursor
-                            or any(row.get(key) != value for key, value in document["segments"][cursor].items())):
-                        raise ValueError("Prior chapter scripts and analysis disagree")
-                    cursor += 1
-            if (chapter.get("sequence_start") != start or chapter.get("sequence_end") != cursor
-                    or chapter.get("segment_count") != cursor - start):
-                raise ValueError("Prior chapter sequence inventory is inconsistent")
-        if cursor != len(document["segments"]):
-            raise ValueError("Prior chapter scripts do not cover the analysis")
+        _validate_script_rows(directory, manifest, document)
         series = document["provenance"].get("series", {})
         if series.get("series_id") != registry["series_id"] or not registry["books"]:
             raise ValueError("Prior analysis and series registry have different identities")

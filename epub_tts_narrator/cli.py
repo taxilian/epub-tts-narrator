@@ -412,7 +412,28 @@ def main(argv=None):
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
-        original = _completed_directory(directory)[0]
+        if args.input.is_dir():
+            try:
+                original = _completed_directory(directory)[0]
+            except ValueError as error:
+                raise ValueError(f"Cannot load the saved analysis in {directory}; supply the authoritative EPUB "
+                                 f"so analyze can validate and recover it: {error}") from error
+        else:
+            source = source_from(args.input, config["extraction"]["include_auxiliary"]
+                                 if args.input.suffix.lower() == ".epub" else False)
+            from .analysis_recovery import recover_analysis_directory
+            recovery = recover_analysis_directory(directory, source)
+            if recovery is not None:
+                print(f"Recovered a verified analysis baseline for {directory}; preserved drifted files in "
+                      f"{recovery.backup_directory}.")
+                if recovery.source_matches_preserved_edit:
+                    print("The supplied source contains the preserved source edit; the normal source update will reapply it.")
+                else:
+                    print("The supplied source does not contain every preserved source edit; those bytes remain in the "
+                          "backup while the supplied source remains authoritative.")
+            if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
+                raise ValueError(f"Analysis recovery changed the saved manifest: {directory}")
+            original = _completed_directory(directory)[0]
         ancestors = continuation_directories(directory)
         if args.series is not None or config["analysis"]["series_registry"] is not None:
             raise ValueError("Existing book directories retain their saved series context; remove --series or analysis.series_registry")
@@ -420,8 +441,6 @@ def main(argv=None):
             if not ancestors or args.continue_from.resolve() != ancestors[0]:
                 raise ValueError("--continue-from differs from this book's saved continuation parent; resume with the recorded parent or omit the option")
         if not args.input.is_dir():
-            source = source_from(args.input, config["extraction"]["include_auxiliary"]
-                                 if args.input.suffix.lower() == ".epub" else False)
             from .book_update import (accepted_epub_digests, epub_digest, latest_epub_sha256,
                                       merged_source, update_book)
             same_chapters = (fingerprint(source) == fingerprint(original["source"])
