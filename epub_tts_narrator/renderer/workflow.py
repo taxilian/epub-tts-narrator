@@ -1588,6 +1588,38 @@ def _paragraph_request(chunk, voices, engine_identity, config):
                              for speaker in chunk_speakers(chunk)}}
 
 
+def _chapter_audio_plan(chapter):
+    """Return the chapter plan inputs that can change its rendered audio.
+
+    Attribution bookkeeping (reasons, evidence, candidate speakers, review
+    flags) and delivery evidence never reach synthesis, composition, or the
+    published synchronization, so an annotation-only revision must not
+    invalidate a completed chapter's verified audio. Spoken text, speakers,
+    delivery directions, pronunciation/performance controls, paragraph
+    structure, chunk identities, and the chapter's own metadata stay bound.
+    """
+    def bind_row(row):
+        if not isinstance(row, dict):
+            return row
+        row = dict(row)
+        row.pop("attribution", None)
+        delivery = row.get("delivery")
+        if isinstance(delivery, dict):
+            row["delivery"] = {key: value for key, value in delivery.items() if key != "evidence"}
+        return row
+
+    def bind_chunk(chunk):
+        chunk = dict(chunk)
+        if isinstance(chunk.get("segment"), dict):
+            chunk["segment"] = bind_row(chunk["segment"])
+        turns = chunk.get("paragraph_turns")
+        if isinstance(turns, list):
+            chunk["paragraph_turns"] = [bind_chunk(turn) for turn in turns]
+        return chunk
+
+    return dict(chapter, chunks=[bind_chunk(chunk) for chunk in chapter["chunks"]])
+
+
 def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity):
     from .quality import QUALITY_VERSION
     used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
@@ -1617,6 +1649,11 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
         # Appended chapters leave earlier chapters' source identity unchanged.
         "source_fingerprint": chunk_identity_fingerprint(bundle["manifest"]),
         "chapter_hash": digest(chapter), "total_chapters": len(bundle["chapters"]),
+        # Audio-scoped plan binding: unlike chapter_hash it ignores analysis
+        # bookkeeping that cannot change this chapter's audio (see
+        # _chapter_audio_plan). Checkpoints saved without it keep the strict
+        # chapter_hash comparison until a legitimate change re-renders them.
+        "plan_audio_hash": digest(_chapter_audio_plan(chapter)),
         "voice_assets": {key: voices[key]["asset_hash"] for key in sorted(used)},
         "engine": engine_identity, "verifier": verifier_identity,
         "engine_config_hash": digest(engine_config),
@@ -1636,6 +1673,14 @@ def _same_chapter_audio_context(saved, current):
     old_engine, new_engine = saved["engine"], current["engine"]
     if not engines_compatible(old_engine, new_engine):
         return False
+    # Once both contexts carry the audio-scoped plan digest it replaces the
+    # full-plan chapter_hash, so analysis bookkeeping that never reaches
+    # synthesis no longer rebuilds a completed chapter. A checkpoint saved
+    # before plan_audio_hash existed keeps the strict chapter_hash comparison.
+    if "plan_audio_hash" in saved and "plan_audio_hash" in current:
+        ignored.add("chapter_hash")
+    else:
+        ignored.add("plan_audio_hash")
     # Runtime metadata remains provenance, including for completed chapters.
     # Model content and synthesis settings are checked by engines_compatible.
     ignored.add("engine")

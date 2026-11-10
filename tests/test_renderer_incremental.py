@@ -16,6 +16,7 @@ from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.speech_text import trim_speech_text
+from epub_tts_narrator.renderer import workflow as render_module
 from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
 from audition_fixtures import prepare_document
 from test_chapter_export import chapter_document
@@ -88,6 +89,18 @@ class IncrementalRendererTests(unittest.TestCase):
 
     def model_counts(self):
         return len(self.engine.voice_calls), len(self.engine.speech_calls), len(self.verifier.calls)
+
+    def chapter_audio(self, number):
+        return Path(read_json(self.checkpoint(number))["audio_file"])
+
+    def recorded_chapters(self):
+        entered = []
+        real = render_module._render_chapter_with_recovery
+
+        def spy(bundle, chapter, *args, **kwargs):
+            entered.append(chapter["number"])
+            return real(bundle, chapter, *args, **kwargs)
+        return entered, spy
 
     def test_script_revision_replaces_book_and_only_generates_changed_passage(self):
         original = self.run_render()
@@ -229,6 +242,51 @@ class IncrementalRendererTests(unittest.TestCase):
                           if key not in {"bundle_hash"}},
                          {key: value for key, value in saved_context.items()
                           if key not in {"bundle_hash"}})
+
+    def test_attribution_metadata_edit_reuses_chapter_audio_without_rendering(self):
+        # Attribution prose and review flags never reach synthesis, composition,
+        # or the published synchronization, so they must not rebuild the chapter.
+        self.run_render()
+        saved = {number: self.chapter_audio(number) for number in (1, 2)}
+        before = {number: (saved[number].read_bytes(), saved[number].stat().st_mtime_ns)
+                  for number in (1, 2)}
+        checkpoints = {number: self.checkpoint(number).read_bytes() for number in (1, 2)}
+        counts = self.model_counts()
+        self.document["segments"][1]["attribution"]["reason"] = "A corrected explanation only."
+        self.document["segments"][3]["attribution"]["review_required"] = True
+        self.save_revision()
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery",
+                   side_effect=AssertionError("clip render entered")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take",
+                   side_effect=AssertionError("TTS/ASR entered")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter",
+                   side_effect=AssertionError("chapter encoding entered")):
+            current = self.run_render()
+
+        self.assertEqual(current["status"], "complete")
+        self.assertEqual(self.model_counts(), counts)
+        for number in (1, 2):
+            self.assertEqual(self.chapter_audio(number).read_bytes(), before[number][0])
+            self.assertEqual(self.chapter_audio(number).stat().st_mtime_ns, before[number][1])
+            self.assertEqual(self.checkpoint(number).read_bytes(), checkpoints[number])
+        self.assertTrue(any("Reusing completed chapter 1 / 2" in message
+                            for message in self.messages), self.messages)
+
+    def test_delivery_direction_change_rerenders_its_chapter(self):
+        self.run_render()
+        entered, spy = self.recorded_chapters()
+        counts = self.model_counts()
+        self.document["segments"][1].setdefault("delivery", {})["direction"] = "whisper"
+        self.save_revision()
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery", spy):
+            self.run_render()
+
+        self.assertEqual(entered, [1])
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 1, counts[2] + 1))
+        self.assertTrue(any("Reusing completed chapter 2 / 2" in message
+                            for message in self.messages), self.messages)
 
     def test_custom_recorded_filename_survives_title_change_and_repackaging(self):
         # Given an intact custom-named publication needing a publication-key refresh.

@@ -205,6 +205,77 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.fixtures), fixture_count)
         self.assertEqual(file_hash(wav), first["audio_sha256"])
 
+    def chapter_contexts(self):
+        from epub_tts_narrator.renderer.workflow import (_chapter_context, make_render_plan)
+        plan = make_render_plan(self.bundle, self.config)
+        chapter = plan["chapters"][0]
+        voices = {voice_id: {"asset_hash": f"asset-{voice_id}"} for voice_id in plan["voice_ids"]}
+        context = _chapter_context(self.bundle, chapter, self.config, voices,
+                                   self.engine.identity, self.verifier.identity)
+        return chapter, context
+
+    def recontext(self, chapter):
+        from epub_tts_narrator.renderer.bundle import chunk_speakers
+        from epub_tts_narrator.renderer.workflow import _chapter_context
+        voices = {voice_id: {"asset_hash": f"asset-{voice_id}"}
+                  for voice_id in sorted({speaker["voice_id"] for chunk in chapter["chunks"]
+                                          if not chunk["silent_control"]
+                                          for speaker in chunk_speakers(chunk)})}
+        return _chapter_context(self.bundle, chapter, self.config, voices,
+                                self.engine.identity, self.verifier.identity)
+
+    def test_attribution_bookkeeping_never_invalidates_a_completed_chapter(self):
+        from epub_tts_narrator.renderer.workflow import _same_chapter_audio_context
+        chapter, context = self.chapter_contexts()
+        row = chapter["chunks"][0]["segment"]
+        for mutation in ({"attribution": dict(row.get("attribution", {}),
+                                              reason="A different explanation.",
+                                              evidence=[{"block_id": "b1"}],
+                                              candidates=[{"role_id": "r", "voice_id": "v"}],
+                                              basis="context", review_required=True)},
+                         {"delivery": dict(row.get("delivery", {}), evidence=[{"note": "x"}])}):
+            revised = deepcopy(chapter)
+            revised["chunks"][0]["segment"] = dict(row, **mutation)
+            current = self.recontext(revised)
+            self.assertNotEqual(current["chapter_hash"], context["chapter_hash"])
+            self.assertEqual(current["plan_audio_hash"], context["plan_audio_hash"])
+            self.assertTrue(_same_chapter_audio_context(context, current))
+
+    def test_audio_affecting_plan_changes_invalidate_the_chapter_context(self):
+        from epub_tts_narrator.renderer.workflow import _same_chapter_audio_context
+        chapter, context = self.chapter_contexts()
+        row = chapter["chunks"][0]["segment"]
+        chunk = chapter["chunks"][0]
+        cases = [
+            ("spoken text", "segment", dict(row, text=row["text"] + " Listen.")),
+            ("speaker", "segment", dict(row, role_id="other", voice_id="voice_other")),
+            ("delivery direction", "segment",
+             dict(row, delivery=dict(row.get("delivery", {}), direction="whisper"))),
+            ("performance controls", "chunk", dict(
+                chunk, expressive_performance={"version": 1, "text_sha256": "x", "controls": [
+                    {"kind": "delivery", "tag": "style", "direction": "slowly",
+                     "start": 0, "end": 1, "text": chunk["spoken_text"][0]}]})),
+        ]
+        for label, field, mutation in cases:
+            with self.subTest(label):
+                revised = deepcopy(chapter)
+                revised["chunks"][0] = dict(chunk, **{field: mutation})
+                current = self.recontext(revised)
+                self.assertNotEqual(current["plan_audio_hash"], context["plan_audio_hash"])
+                self.assertFalse(_same_chapter_audio_context(context, current))
+
+    def test_checkpoints_saved_without_the_audio_scoped_digest_keep_the_strict_comparison(self):
+        from epub_tts_narrator.renderer.workflow import _same_chapter_audio_context
+        chapter, context = self.chapter_contexts()
+        saved = {key: value for key, value in context.items() if key != "plan_audio_hash"}
+        self.assertTrue(_same_chapter_audio_context(saved, context))
+        row = chapter["chunks"][0]["segment"]
+        revised = deepcopy(chapter)
+        revised["chunks"][0]["segment"] = dict(
+            row, attribution=dict(row.get("attribution", {}), reason="Changed prose."))
+        current = self.recontext(revised)
+        self.assertFalse(_same_chapter_audio_context(saved, current))
+
     def test_changed_verifier_reuses_accepted_audio_without_reverification(self):
         wav, first = self.take()
         verifier = FixtureVerifier(self.fixtures, version=2)
