@@ -1910,6 +1910,16 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
         if engines_compatible(previous.get("engine"), _cache_engine_identity(engine_identity, config)):
             unchanged = previous.get("publication_key") == publication_key(
                 bundle, config, plan, voices, rendered, acceptance, previous["engine"], verifier_identity)
+            if not unchanged and isinstance(previous.get("verifier"), dict):
+                # Verification provenance never enters the published audio:
+                # restored chapters keep their accepted takes and reports, and
+                # the acceptance records themselves are compared directly, so a
+                # verifier-side update (policy version, ASR package) need not
+                # re-encode the book. The reused publication keeps the verifier
+                # that produced its accepted evidence.
+                unchanged = previous.get("publication_key") == publication_key(
+                    bundle, config, plan, voices, rendered, acceptance,
+                    previous["engine"], previous["verifier"])
     if unchanged:
         from .publication import published_gaps
         missing, modified = published_gaps(output, previous)

@@ -278,6 +278,79 @@ class RecreatedPublicationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
+class VerifierProvenanceReuseTests(unittest.TestCase):
+    """A verifier update is provenance, not a package input: restored chapters
+    keep their accepted takes and reports, so verification-side changes must
+    not re-encode a completed book."""
+
+    def completed_book(self, root, verifier_version=1, title="Fixture"):
+        document = prepare_document(chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The lantern shone above the quiet harbor.", "narration", "p"),
+        ]))
+        document["source"]["book"]["title"] = title
+        export_bundle(document, root / "bundle")
+        return self.render_bundle(root, verifier_version)
+
+    def render_bundle(self, root, verifier_version=1):
+        bundle = load_bundle(root / "bundle")
+        config = renderer_config(root, series_id="verifier-provenance")
+        engine = FixtureEngine({})
+        verifier = FixtureVerifier(engine.fixture_transcripts, version=verifier_version)
+        render(bundle, config, engine, verifier, notify=lambda _: None)
+        return bundle, config, engine
+
+    def test_verifier_update_alone_reuses_the_completed_audiobook(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle, config, engine = self.completed_book(root, verifier_version=1)
+            output = root / "output"
+            audiobook = next(output.glob("*.m4b"))
+            saved_bytes = audiobook.read_bytes()
+            saved_mtime = audiobook.stat().st_mtime_ns
+            speech_calls = len(engine.speech_calls)
+            messages = []
+            verifier = FixtureVerifier(engine.fixture_transcripts, version=2)
+
+            with patch("epub_tts_narrator.renderer.workflow.package_audio", wraps=package_audio) as package:
+                result = render(bundle, config, engine, verifier, notify=messages.append)
+
+            # Then the completed publication is reused without repackaging.
+            self.assertEqual(package.call_count, 0)
+            self.assertEqual(len(engine.speech_calls), speech_calls)
+            self.assertEqual(audiobook.read_bytes(), saved_bytes)
+            self.assertEqual(audiobook.stat().st_mtime_ns, saved_mtime)
+            self.assertTrue(any("reusing" in message for message in messages))
+            self.assertEqual(result["verifier"], {"backend": "fixture-verifier", "version": 1})
+
+    def test_verifier_update_with_changed_bundle_still_repackages(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle, config, engine = self.completed_book(root, verifier_version=1)
+            output = root / "output"
+            audiobook = next(output.glob("*.m4b"))
+            saved_mtime = audiobook.stat().st_mtime_ns
+            # A real source change: export the renamed book and render it
+            # against the same work and output directories.
+            document = prepare_document(chapter_document([
+                ("CHAPTER ONE", "heading", "p"),
+                ("The lantern shone above the quiet harbor.", "narration", "p"),
+            ]))
+            document["source"]["book"]["title"] = "Renamed Title"
+            export_bundle(document, root / "bundle-renamed")
+            bundle = load_bundle(root / "bundle-renamed")
+            config = renderer_config(root, series_id="verifier-provenance")
+            engine = FixtureEngine({})
+            verifier = FixtureVerifier(engine.fixture_transcripts, version=2)
+
+            with patch("epub_tts_narrator.renderer.workflow.package_audio", wraps=package_audio) as package:
+                render(bundle, config, engine, verifier, notify=lambda _: None)
+
+            self.assertEqual(package.call_count, 1)
+            self.assertNotEqual(audiobook.stat().st_mtime_ns, saved_mtime)
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
 class LegacyPublicationTests(unittest.TestCase):
     def test_legacy_render_without_publication_key_refreshes_once_without_regeneration(self):
         with tempfile.TemporaryDirectory() as temporary:
