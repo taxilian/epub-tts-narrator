@@ -2,6 +2,7 @@
 
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
+import io
 import multiprocessing
 from pathlib import Path
 import stat
@@ -10,6 +11,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.renderer.config import DEFAULTS, load_config, validate_distributed_settings
 from epub_tts_narrator.renderer.server_config import ensure_server_api_key
 
 
@@ -143,6 +145,56 @@ checkpoint = "./models"
                 self.assertNotIn("sensitive", str(error.exception))
                 self.assertNotIn("invalid key", str(error.exception))
                 self.assertEqual(self.path.read_text(), text)
+
+
+class ServerIdleSettingsTests(unittest.TestCase):
+    """server.idle_timeout_seconds and server.auto_start validate at load."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.path = self.root / "settings.toml"
+        self.config = deepcopy(DEFAULTS)
+
+    def validate(self):
+        validate_distributed_settings(self.config)
+
+    def test_idle_timeout_accepts_disabled_and_one_through_86400(self):
+        for value in (0, 0.0, 1, 600, 86400, 86400.0):
+            with self.subTest(value=value):
+                self.config["server"]["idle_timeout_seconds"] = value
+                self.validate()
+
+    def test_idle_timeout_rejects_out_of_range_and_mistyped_values(self):
+        for value in (86401, -1, 0.5, "600", True, None, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.config["server"]["idle_timeout_seconds"] = value
+                with self.assertRaisesRegex(ValueError, "idle_timeout_seconds"):
+                    self.validate()
+
+    def test_auto_start_requires_boolean(self):
+        for value, ok in ((False, True), (True, True), ("true", False), (1, False), (None, False)):
+            with self.subTest(value=value, ok=ok):
+                self.config["server"]["auto_start"] = value
+                if ok:
+                    self.validate()
+                else:
+                    with self.assertRaisesRegex(ValueError, "auto_start"):
+                        self.validate()
+
+    def test_load_config_reads_the_new_server_keys_and_ignores_unknown_ones(self):
+        self.path.write_text('[server]\nidle_timeout_seconds = 600\nauto_start = true\n')
+        config = load_config(self.path, require_verifier=False, require_engine=False)
+        self.assertEqual(config["server"]["idle_timeout_seconds"], 600)
+        self.assertIs(config["server"]["auto_start"], True)
+        self.path.write_text('[server]\nidle_timeout_seconds = 600\nsurprise = 1\n')
+        stderr = io.StringIO()
+        with patch("sys.stderr", new=stderr):
+            config = load_config(self.path, require_verifier=False, require_engine=False)
+        self.assertEqual(config["server"]["idle_timeout_seconds"], 600)
+        self.assertNotIn("surprise", config["server"])
+        self.assertIn("server.surprise", stderr.getvalue())
 
 
 if __name__ == "__main__":

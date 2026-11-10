@@ -504,6 +504,58 @@ and return `generated_codes`; otherwise rendering stops before synthesis. Stock
 Fish and SGLang servers cannot accept history turns or return codes and are not
 supported as render workers.
 
+## Multi-book render queue
+
+`render` accepts several books; they render through one client process, in order:
+
+```sh
+.venv-renderer/bin/audiobook-render render runs/book-01 runs/book-02 runs/book-03
+just render runs/book-01 runs/book-02 runs/book-03
+```
+
+- **Remote when a service is available.** With `[remote_chapters].url` configured, the external service is used as-is. With `--remote`, the managed Runpod service is joined or bootstrapped through the same probe-and-ready flow as the managed commands, and the service's own idle monitor later stops the compute — the queue never stops it.
+- **Tail backfill.** Remote books open as independent client sessions. Book k+1 is admitted once the service's live synthesis work stays below its total slot capacity on two consecutive scheduling reads (about five seconds apart; a single dip never opens a book), or — on servers without scheduling data — after an admitted book's first completed chapter. A book, once admitted, runs to completion; books only open, never pause or preempt. Books normally finish in order because start order and whole-book sizes dominate, but a failed book does not idle the others' paid slots.
+- **Local fallback.** Without a remote service, books render strictly sequentially in one process through one shared engine and verifier, so the model stays warm between books.
+- **Failures never stop the queue.** A run-fatal failure in one book is recorded with its cause and the queue continues with the next book; the exit code is 0 only when every book rendered, otherwise 1 with a per-book summary. Ctrl-C stops admissions, gives running books a brief cleanup window (their sessions are deleted server-side), prints each book's status, and exits 130; verified chapters are retained for resume.
+- Duplicate book paths in one invocation are rejected up front, as is `--chapters` for a multi-book queue (run that book's selection as its own command). `--chapters-only`, `--censor`/`--no-censor`, and the chapter-format and performance-mode overrides apply to every book; `--output`, `--work-dir`, `--epub`, and `--performance-plan` remain single-book options.
+- Each book's output lines are prefixed with its directory name (`[book-2] …`) so interleaved progress stays readable, and one-off renders from other terminals can join the same running service as independent clients at any time.
+
+A single book without `--remote` renders exactly as before. `--remote` also works for a one-off single-book render, for example to redo a failed chapter on the managed service:
+
+```sh
+.venv-renderer/bin/audiobook-render render runs/book-03 --remote --chapters-only
+```
+
+## Local auto-serve
+
+Small interactive jobs — pronunciation previews and `pronounce-name` auditions —
+normally load a private Drama 3 engine per process, which can exhaust memory
+while a render is running. With `server.auto_start = true` in the global config,
+these jobs instead reuse a local `serve` worker on `server.port`:
+
+- The job probes `http://127.0.0.1:{server.port}/health` and, when a worker
+  with the expected protocol and model answers, sends its synthesis there as a
+  client. Saved voices keep working: the client reports the Drama 3 binding
+  the pronunciation tools check.
+- When nothing is listening, the job starts `audiobook-render serve` itself as
+  a detached child (under an exclusive lock, so concurrent jobs spawn one
+  worker), waits up to 300 seconds for readiness, and connects. A worker that
+  is still loading its model is waited for, never duplicated.
+- The spawned worker exits itself after `server.idle_timeout_seconds` without
+  requests, so it does not stay loaded forever. Set both keys together, for
+  example `auto_start = true` and `idle_timeout_seconds = 600`.
+- A port owned by any other process fails closed with a message; nothing is
+  ever killed. Engine identity is not advertised on `/health`, so protocol +
+  model is the accepted compatibility check.
+
+Both settings default off; with `auto_start = false` (or without them) the
+behavior is exactly as before. Diagnostics live in `~/.cache/epub-tts-narrator/`:
+`serve-{port}.log` (the spawned worker's output — check it when startup fails),
+`auto-serve-{port}.json` (pid, port, started-at of the last spawn) and
+`auto-serve-{port}.lock` (spawn serialization). `auto_start` requires
+`engine.type = "drama3_mlx"` with an existing `engine.checkpoint`; large render
+and voice-creation jobs never use it.
+
 ## Compare legacy and expressive chapter generation
 
 Expressive generation is opt-in. Existing render commands retain their legacy conditioning and cache identities. To compare a chapter, keep the same saved voices and global config and choose a separate output directory:

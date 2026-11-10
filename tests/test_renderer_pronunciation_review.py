@@ -830,6 +830,53 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertEqual(normalized.read_bytes(), b"changed")
         self.assertEqual(len(self.engine.calls), 1)
 
+    def test_auto_start_builds_the_default_engine_through_the_resolver(self):
+        self.config["server"]["auto_start"] = True
+        engine = Mock()
+        with patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine",
+                   return_value=engine) as resolve:
+            session = PronunciationReviewSession(self.bundle, self.config)
+            self.assertIs(session._default_engine(), engine)
+        resolve.assert_called_once()
+        self.assertIs(resolve.call_args.args[0], session.settings)
+        self.assertIs(resolve.call_args.kwargs["notify"], session.notify)
+
+    def test_without_auto_start_the_default_engine_builds_the_configured_engine_directly(self):
+        built = Mock()
+        with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=built) as create, \
+             patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine") as resolve:
+            session = PronunciationReviewSession(self.bundle, self.config)
+            self.assertIs(session._default_engine(), built)
+        create.assert_called_once_with(session.settings["engine"])
+        resolve.assert_not_called()
+
+    def test_an_explicit_engine_factory_wins_even_with_auto_start(self):
+        self.config["server"]["auto_start"] = True
+        built = Mock()
+        factory = Mock(return_value=built)
+        with patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine") as resolve, \
+             patch("epub_tts_narrator.renderer.engines.create_engine") as create:
+            session = PronunciationReviewSession(self.bundle, self.config, engine_factory=factory)
+            self.assertIs(session._default_engine(), built)
+        factory.assert_called_once_with(session.settings["engine"])
+        resolve.assert_not_called()
+        create.assert_not_called()
+
+    @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
+    def test_auto_start_routes_audition_previews_through_the_resolver(self):
+        self.config["server"]["auto_start"] = True
+        resolved_engine = PreviewEngine()
+        with patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine",
+                   return_value=resolved_engine) as resolve:
+            session = PronunciationReviewSession(self.bundle, self.config, store=self.store,
+                                                 notify=self.output.append)
+            preview = session.audition_isolated("Mara")
+        resolve.assert_called_once()
+        self.assertEqual(len(resolved_engine.calls), 1)
+        self.assertEqual(resolved_engine.calls[0]["text"], "Mara")
+        self.assertEqual(preview["purpose"], "unverified_pronunciation_isolated_preview")
+        self.assertEqual(Path(preview["path"]).suffix, ".flac")
+
 
 if __name__ == "__main__":
     unittest.main()

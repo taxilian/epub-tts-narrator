@@ -39,8 +39,13 @@ recovery. The managed commands supply the service URL and application bearer
 key automatically; you do not need the manual `[remote_chapters]` configuration
 below. Bootstrap and update default to `--source github`; use `--source local`
 to deploy committed-but-unpublished changes — uncommitted files and private
-configuration are never transferred. Every managed operation stops compute on
-completion, error, or interruption.
+configuration are never transferred. Failures and interruptions before the
+service is ready stop compute immediately; successful operations leave the
+worker warm for the idle timeout. An explicit `runpod stop` is
+live-session-aware: it refuses while another client session has live work on
+the running service (a connected owner, or queued/generating/assembling jobs),
+and `--force` overrides the refusal. An unreachable service has no live
+clients, so it stops without the flag.
 
 Operational notes specific to chapter rendering:
 
@@ -60,12 +65,57 @@ Operational notes specific to chapter rendering:
   while the chapter service's `[chapter_server].idle_timeout_seconds` governs
   idle shutdown while serving — see "Idle shutdown and independent downloads"
   below.
+- `runpod stop` is live-session-aware: before stopping it asks the running
+  chapter service whether any job still has a connected owner or is queued,
+  generating, or assembling, and refuses while another terminal's render
+  client would lose work (`runpod stop --force` overrides). A service that
+  cannot be reached has no live clients, so the stop proceeds; the managed
+  failure-path stop is unchanged because a never-ready service has no
+  clients to protect.
+- Library callers can join or start the shared worker without blocking on
+  the deployment lock. `runpod.probe_service(settings)` is a read-only,
+  lock-free check that returns a ready client config (`url`, `api_key`,
+  `timeout_seconds`) when a healthy service is already running, a
+  maintenance marker when the service needs activation, and `None`
+  otherwise; it never writes state or creates `operation.lock`, and it
+  applies the same bootstrapped and configuration-stamp gates as warm
+  reuse — the stamp is mtime-based, so saving a configuration file in an
+  editor defeats reuse until the next locked operation re-stamps it.
+  `runpod.ensure_service(settings)` returns a ready client config either by
+  joining a probed healthy service or, under the deployment lock, by driving
+  the same bootstrap-then-ready flow as the managed commands (a service in
+  maintenance is activated there); a worker that never became ready is
+  stopped again. The api_key is present in the returned config and is never
+  printed.
+- One-off and multi-book renders use `ensure_service` automatically:
+  `audiobook-render render BOOK --remote` (also for a single book) and
+  `render BOOK1 BOOK2 …` with `--remote` join the running managed service or
+  bootstrap one, then leave compute to the service's idle monitor — the client
+  never stops it. A configured `[remote_chapters].url` takes precedence and is
+  used as-is. See "Multi-book render queue" in RENDERER.md for the ordered
+  admission and failure policy.
 - Each worker's host-local Pod disk retains model files, environments,
   registered voices, and accepted checkpoints across stop and start, so
   unchanged models are not downloaded again. A new or replacement Pod starts
   with an empty disk and is fully reprovisioned; network volumes are not used.
   `[runpod].cloud_types` chooses Secure and/or Community Cloud in preference
   order. The Pod disk remains billed while compute is stopped.
+- Joining a running service from another terminal or a multi-book queue does
+  not need the deployment lock. The lock-free reuse probe (`probe_service` in
+  `renderer/runpod.py`) reads the deployment state and asks the running
+  service for its capabilities without taking the lock and without writing
+  anything — no state save, no `operation.lock`. It returns a ready
+  `[remote_chapters]` client configuration when a healthy service is running,
+  a maintenance marker when the service idles in maintenance (activation is a
+  mutation, so the caller takes the locked path for it), and nothing when
+  there is nothing to reuse. `ensure_service` builds on it: a healthy service
+  is joined lock-free; otherwise the deployment lock is taken and the
+  existing bootstrap-then-ready flow runs — a maintenance service is
+  activated in place, a stopped one is provisioned, started, and set up, and
+  compute is stopped again if the service never became ready. Reuse is gated
+  on the same configuration stamp the managed commands use; the stamp is
+  mtime-based, so saving either configuration file in an editor defeats reuse
+  until the next locked operation re-stamps it (accepted, documented).
 
 ## Manual client setup
 

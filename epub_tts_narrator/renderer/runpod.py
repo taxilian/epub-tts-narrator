@@ -42,6 +42,9 @@ def add_parser(commands):
         if action == "cleanup":
             command.add_argument("--yes", action="store_true",
                                  help="Delete without the interactive confirmation")
+        if action == "stop":
+            command.add_argument("--force", action="store_true",
+                                 help="Stop even when other client sessions have live work on the running service")
         command.add_argument("--config", type=Path, help="Normal local TOML configuration")
         command.add_argument("--override-config", type=Path, help="Remote overrides (default: runpod.local.toml beside local config)")
         if action in {"bootstrap", "update"}:
@@ -97,6 +100,110 @@ def deployment_lock(directory):
             yield
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def read_state(directory):
+    """Read deployment state.json directly, without constructing Deployment.
+
+    Deployment.__init__ mutates and saves state (seeding deployment and API
+    keys), so lock-free readers parse the file themselves and never write.
+    Returns None when no readable state object exists.
+    """
+    try:
+        state = json.loads((Path(directory) / "state.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def configuration_stamp(settings):
+    """mtime and size identity of the configuration files behind a deployment.
+
+    Deliberately mtime-based (the same stamp reuse_service compares): saving
+    a configuration file in an editor defeats warm reuse until the next
+    locked operation re-stamps it.
+    """
+    stamp = []
+    for key in ("config_path", "overrides_path"):
+        path = settings.get(key)
+        if path is None or not Path(path).is_file():
+            stamp.append(None)
+        else:
+            info = Path(path).stat()
+            stamp.append([str(path), info.st_mtime_ns, info.st_size])
+    return stamp
+
+
+SERVICE_MAINTENANCE = "maintenance"
+
+
+def probe_service(settings, *, timeout=5):
+    """Lock-free, read-only check for an already-running healthy chapter service.
+
+    Returns a ready-to-use remote-chapters client config {url, api_key,
+    timeout_seconds} when a healthy service is running, SERVICE_MAINTENANCE
+    when a running service exists but sits in maintenance mode (activating
+    it is a mutation, so the caller must take the deployment lock), and None
+    when no usable service is running.
+
+    Reads state.json directly (Deployment.__init__ mutates and saves state)
+    and never writes anything: no state save and no operation.lock. The same
+    bootstrapped and configuration-stamp gates as reuse_service apply; the
+    stamp is mtime-based, so saving a configuration file in an editor defeats
+    reuse until the next locked operation re-stamps it (accepted, documented).
+    """
+    cfg = settings["deployment"]
+    state = read_state(cfg["state_dir"])
+    if not state:
+        return None
+    pod_id, api_key = state.get("pod_id"), state.get("api_key")
+    if not pod_id or not api_key or not state.get("bootstrapped"):
+        return None
+    if state.get("configuration_stamp") != configuration_stamp(settings):
+        return None
+    from .chapter_client import ChapterClient, ChapterClientError
+    url = f"https://{pod_id}-{cfg['service_port']}.proxy.runpod.net"
+    client = ChapterClient({"url": url, "api_key": api_key, "timeout_seconds": timeout})
+    try:
+        capabilities = client.request("GET", "v1/capabilities")
+    except ChapterClientError:
+        return None
+    if capabilities.get("ephemeral_runs") != 1 or capabilities.get("warm_activation") != 1:
+        return None
+    if capabilities.get("maintenance") is True:
+        return SERVICE_MAINTENANCE
+    return {"url": url, "api_key": api_key,
+            "timeout_seconds": settings["renderer_config"]["remote_chapters"]["timeout_seconds"]}
+
+
+LIVE_JOB_STATES = frozenset({"queued", "generating", "assembling"})
+
+
+def _live_work_refusal(url, api_key, *, timeout=5):
+    """Probe the running chapter service for another session's live work.
+
+    Returns a refusal message when any job row is owned by a connected
+    client or still queued, generating, or assembling; None when the service
+    shows no live work. Probe failures — including an unreachable service —
+    return None: dead compute has no live clients to protect. The short
+    timeout keeps `runpod stop` responsive.
+    """
+    from .chapter_client import ChapterClient, ChapterClientError
+    client = ChapterClient({"url": url, "api_key": api_key, "timeout_seconds": timeout})
+    try:
+        response = client.request("GET", "v1/jobs?limit=256")
+    except ChapterClientError:
+        return None
+    jobs = response.get("jobs") if isinstance(response, dict) else None
+    if not isinstance(jobs, list):
+        return None
+    live = sum(1 for job in jobs if isinstance(job, dict)
+               and (job.get("owner_connected") is True or job.get("state") in LIVE_JOB_STATES))
+    if not live:
+        return None
+    return (f"Refusing to stop: {live} chapter job(s) have live work on the running service "
+            "(a connected owner or queued/generating/assembling state). Another client session "
+            "may be rendering. Rerun with --force to stop anyway.")
 
 
 def ssh_endpoint(pod):
@@ -891,6 +998,18 @@ class Deployment:
         if failures:
             raise RuntimeError("; ".join(failures))
 
+    def live_work_refusal(self, *, timeout=5):
+        """Refusal message when the running service has live client work, else None.
+
+        The explicit `runpod stop` gate: stopping compute under another
+        terminal's connected render client would destroy its work. An
+        unreachable service has no live clients, so probe failures allow the
+        stop. A deployment without a worker or key has nothing to protect.
+        """
+        if not self.pod_id or not self.state.get("api_key"):
+            return None
+        return _live_work_refusal(self.url, self.state["api_key"], timeout=timeout)
+
     def _stop_pod(self, pod_id):
         self.notify(f"Stopping worker {pod_id}…")
 
@@ -1097,15 +1216,7 @@ if pidfile.exists():
         self.save()
 
     def configuration_stamp(self):
-        stamp = []
-        for key in ("config_path", "overrides_path"):
-            path = self.settings.get(key)
-            if path is None or not Path(path).is_file():
-                stamp.append(None)
-            else:
-                info = Path(path).stat()
-                stamp.append([str(path), info.st_mtime_ns, info.st_size])
-        return stamp
+        return configuration_stamp(self.settings)
 
     def activate(self):
         from .chapter_client import ChapterClient
@@ -1130,6 +1241,30 @@ if pidfile.exists():
             return False
         self.notify("Reusing the running chapter service and its loaded inference model.")
         return True
+
+    def ensure_ready(self, *, source="local", update=True, update_notice=None):
+        """Bring the chapter service up ready for connected clients.
+
+        The shared readiness sequence of the managed bootstrap, update, and
+        encode flows: replace the old service supervisor, deploy the selected
+        source when updating, apply the private configuration, install
+        dependencies, launch the worker, and smoke-test plus activate a
+        changed setup. Returns whether code was (re)deployed.
+        """
+        self.stop_service()
+        updated = False
+        if update:
+            if update_notice:
+                self.notify(update_notice)
+            self.deploy_code(source)
+            updated = True
+        self.configure()
+        self.install(full=updated)
+        self.launch(prepare=updated)
+        if updated:
+            self.smoke()
+            self.activate()
+        return updated
 
     def install(self, *, full):
         self.notify("Installing persistent dependencies…" if full else "Checking the persistent runtime…")
@@ -1316,6 +1451,10 @@ def run_command(args):
             print(json.dumps(summary, indent=2))
             return 0
         if args.runpod_action == "stop":
+            if not args.force:
+                refusal = deployment.live_work_refusal()
+                if refusal:
+                    raise ValueError(refusal)
             deployment.stop()
             return 0
         if args.runpod_action == "cleanup":
@@ -1365,41 +1504,23 @@ def run_command(args):
             if forced_bootstrap and args.runpod_action == "encode" and args.no_update:
                 deployment.notify("--no-update ignored: this worker's Pod disk is new or was never "
                                   "bootstrapped; installing code, models, and the smoke check before encoding.")
-            updated = False
             needs_update = args.runpod_action in {"bootstrap", "update"} or forced_bootstrap
+            stale_notice = None
             if args.runpod_action == "encode" and not args.no_update and not needs_update:
-                needs_update = deployment.state.get("revision") != _local_head()
+                head = _local_head()
+                stale = deployment.state.get("revision") != head
+                needs_update = stale
+                if stale:
+                    stale_notice = f"Deployed code is not the committed HEAD ({head[:12]}); updating the worker first…"
             if args.runpod_action == "encode" and not needs_update and deployment.reuse_service() is True:
                 service_ready = True
                 deployment.encode(args)
                 return 0
-            deployment.stop_service()
-            if args.runpod_action in {"bootstrap", "update"}:
-                deployment.deploy_code(args.source)
-                updated = True
-            elif forced_bootstrap:
-                deployment.deploy_code("local")
-                updated = True
-            elif args.runpod_action == "encode" and not args.no_update:
-                head = _local_head()
-                if deployment.state.get("revision") != head:
-                    deployment.notify(f"Deployed code is not the committed HEAD ({head[:12]}); updating the worker first…")
-                    deployment.deploy_code("local")
-                    updated = True
-            deployment.configure()
-            deployment.install(full=args.runpod_action != "encode" or updated)
-            deployment.launch(prepare=args.runpod_action != "encode" or updated)
-            service_ready = args.runpod_action == "encode" and not updated
+            deployment.ensure_ready(source="local" if args.runpod_action == "encode" else args.source,
+                                    update=needs_update, update_notice=stale_notice)
+            service_ready = True
             if args.runpod_action == "encode":
-                if updated:
-                    deployment.smoke()
-                    deployment.activate()
-                    service_ready = True
                 deployment.encode(args)
-            else:
-                deployment.smoke()
-                deployment.activate()
-                service_ready = True
             return 0
         except KeyboardInterrupt:
             interrupted = True
@@ -1434,3 +1555,70 @@ def run_command(args):
                           f"{deployment.cfg['name']}-{deployment.state['deployment_id']}; no duplicate will be created automatically.", flush=True)
             finally:
                 signal.signal(signal.SIGTERM, previous)
+
+
+def ensure_service(settings, notify=print):
+    """Return a ready client config for a running chapter service, starting one if needed.
+
+    Tries the lock-free probe_service first: a healthy running service is
+    joined without the deployment lock and without writing any state.
+    Otherwise the deployment lock is taken and the existing
+    bootstrap-then-ready flow runs — the reuse fast path, else provision,
+    start, and ensure_ready deploying this checkout's committed HEAD — so
+    callers get a running service either way. A service that never became
+    ready is stopped again, exactly like the managed commands. The returned
+    config carries the application api_key; it is never printed.
+    """
+    from .runpod_config import build_client_config
+    probed = probe_service(settings)
+    if isinstance(probed, dict):
+        notify("Reusing the running chapter service and its loaded inference model.")
+        return build_client_config(settings["renderer_config"], probed["url"], probed["api_key"],
+                                   override_raw=settings["override_raw"])
+    directory = Path(settings["deployment"]["state_dir"])
+    with deployment_lock(directory):
+        deployment = Deployment(settings, notify=notify)
+        previous = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+        service_ready = False
+        operation_error = None
+        try:
+            if deployment.reuse_service() is True:
+                service_ready = True
+            else:
+                deployment.provision()
+                deployment.start()
+                deployment.ensure_ready(source="local", update=True)
+                service_ready = True
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            operation_error = exc
+            raise
+        finally:
+            try:
+                if deployment.pod_id and service_ready:
+                    notify(f"Worker left running; compute stops after {deployment.cfg['idle_timeout_seconds']} "
+                           "idle seconds. The next book can reuse the loaded service.")
+                elif deployment.pod_id:
+                    saved_interrupt = signal.getsignal(signal.SIGINT)
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    try:
+                        deployment.stop()
+                    except Exception as exc:
+                        message = ("Could not confirm shutdown of the Runpod deployment; GPU billing may continue. "
+                                   "Stop it in the Runpod console. " + safe_error_text(exc, deployment.secrets))
+                        if operation_error is not None:
+                            message += (f" Operation failure ({type(operation_error).__name__}): "
+                                        + safe_error_text(operation_error, deployment.secrets))
+                        raise RuntimeError(message) from None
+                    finally:
+                        signal.signal(signal.SIGINT, saved_interrupt)
+                elif deployment.state.get("pod_creation_pending"):
+                    print("POD CREATION UNCONFIRMED: GPU billing may continue. Inspect Runpod for "
+                          f"{deployment.cfg['name']}-{deployment.state['deployment_id']}; no duplicate will be created automatically.", flush=True)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+        return build_client_config(settings["renderer_config"], deployment.url,
+                                   deployment.state["api_key"], override_raw=settings["override_raw"])

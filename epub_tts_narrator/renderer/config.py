@@ -119,6 +119,10 @@ DEFAULTS = {
         "max_pending_requests": 4, "request_timeout_seconds": 300.0,
         # Requests decoded together per step by a batching engine (serve only).
         "batch_rows": 1,
+        # serve exits after this many idle seconds (0 = keep running until
+        # interrupted); small jobs may start serve themselves (auto_serve).
+        "idle_timeout_seconds": 0.0,
+        "auto_start": False,
     },
     "remote_chapters": {
         "url": "", "api_key": "", "timeout_seconds": 60.0,
@@ -368,6 +372,11 @@ def validate_distributed_settings(config):
     timeout = server["request_timeout_seconds"]
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:
         raise ValueError("server.request_timeout_seconds must be from 1 through 3600")
+    idle = server["idle_timeout_seconds"]
+    if type(idle) not in (int, float) or not math.isfinite(idle) or not (idle == 0 or 1 <= idle <= 86400):
+        raise ValueError("server.idle_timeout_seconds must be 0 (disabled) or from 1 through 86400")
+    if type(server["auto_start"]) is not bool:
+        raise ValueError("server.auto_start must be boolean")
 
 
 def load_config(path=None, *, require_verifier=True, require_engine=True):

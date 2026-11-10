@@ -54,6 +54,7 @@ just analyze "path/to/book.epub"
 just plan "path/to/book.epub"
 just cast runs/book-01
 just render runs/book-01 --chapters 3 --chapters-only
+just render runs/book-01 runs/book-02   # queue several books through one process
 just assemble runs/book-01
 just runpod-cleanup          # delete every Runpod Pod this deployment created (asks first)
 just test
@@ -125,6 +126,8 @@ audiobook-render cast book.audiobook        # create/audition voices
 audiobook-render render book.audiobook      # synthesize + verify chapters
 audiobook-render assemble book.audiobook    # package the .m4b
 ```
+
+`render` also queues several books through one process — `audiobook-render render runs/book-01 runs/book-02`, optionally `--remote` to reuse or bootstrap the managed Runpod chapter service (a configured `[remote_chapters].url` is used as-is instead). The next book is admitted once the service's live work cannot fill its slots, a failed book is recorded while the queue continues, and without any remote service the books render sequentially through one warm local model. See [multi-book render queue](RENDERER.md#multi-book-render-queue).
 
 `audiobook-render doctor` checks the local setup (models, FFmpeg, verification stack) before a long render.
 

@@ -24,7 +24,11 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name"):
         command = commands.add_parser(name)
-        command.add_argument("bundle", type=Path)
+        if name == "render":
+            command.add_argument("bundle", type=Path, nargs="+",
+                                 help="One book directory, or several books rendered in order through one queue")
+        else:
+            command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
         if name in {"prepare-performance", "compare-performance"}:
             command.set_defaults(work_dir=None, output=None, epub=None)
@@ -56,6 +60,10 @@ def parser():
                                  help="Override optional audio censorship for this output; saved speech and voices stay unchanged")
             command.add_argument("--chapters-only", action="store_true",
                                  help="Save chapter audio without packaging the M4B")
+        if name == "render":
+            command.add_argument("--remote", action="store_true",
+                                 help="Render through the managed Runpod chapter service: reuse the running "
+                                      "service or bootstrap one; its idle monitor stops the compute later")
         if name == "cache-report":
             command.add_argument("--max-examples", type=int, default=10,
                                  help="Maximum cache-miss examples in the read-only JSON report (default: 10)")
@@ -299,6 +307,11 @@ def main(argv=None):
             config = load_config(config_path, require_verifier=False)
         else:
             config = load_config(config_path)
+        if args.command in {"pronunciations", "pronounce", "pronounce-name"}:
+            # auto_serve spawns `serve --config` from this file; the config
+            # dict alone does not carry its own path.
+            from epub_tts_narrator.config import resolve_config_path
+            config["_config_path"] = str(resolve_config_path(config_path).resolve())
         if args.command == "compare-performance" and args.local:
             config["render_pool"]["workers"] = []
             config["remote_chapters"]["url"] = ""
@@ -337,7 +350,11 @@ def main(argv=None):
             report = doctor(config)
             print(json.dumps(report, indent=2))
             return 0 if report["ready"] else 2
-        bundle = load_bundle(args.bundle)
+        bundle_paths = args.bundle if args.command == "render" else [args.bundle]
+        if args.command == "render" and (len(bundle_paths) > 1 or getattr(args, "remote", False)):
+            from .render_queue import render_queue_command
+            return render_queue_command(args, config_path)
+        bundle = load_bundle(bundle_paths[0])
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
         if args.command in {"pronounce", "pronounce-name"}:

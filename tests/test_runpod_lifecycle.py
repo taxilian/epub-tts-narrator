@@ -105,7 +105,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake = self.fake_deployment()
         fake.reuse_service.return_value = False
         self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
-        fake.launch.assert_called_once()
+        fake.ensure_ready.assert_called_once()
         fake.stop.assert_not_called()
 
     def test_service_reuse_checks_capabilities_without_restarting_the_model(self):
@@ -139,24 +139,17 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.assertEqual(self.run_fake(fake, args), 0)
                 fake.stop.assert_not_called()
                 fake.start.assert_called_once()
-                fake.configure.assert_called_once()
-                fake.install.assert_called_once_with(full=action != "encode")
-                fake.launch.assert_called_once_with(prepare=action != "encode")
+                fake.ensure_ready.assert_called_once_with(
+                    source="local" if action == "encode" else "github",
+                    update=action != "encode", update_notice=None)
                 if action == "encode":
                     fake.encode.assert_called_once_with(args)
-                    fake.deploy_code.assert_not_called()
-                else:
-                    fake.smoke.assert_called_once()
-                    fake.deploy_code.assert_called_once_with("github")
 
     def test_encode_skips_the_update_when_the_worker_matches_head(self):
         fake = self.fake_deployment()
         self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
+        fake.ensure_ready.assert_called_once_with(source="local", update=False, update_notice=None)
         fake.deploy_code.assert_not_called()
-        fake.smoke.assert_not_called()
-        fake.install.assert_called_once_with(full=False)
-        fake.launch.assert_called_once_with(prepare=False)
-        self.assertEqual(fake.stop_service.call_count, 1)
         fake.encode.assert_called_once()
         fake.stop.assert_not_called()
 
@@ -164,26 +157,24 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake = self.fake_deployment()
         fake.state["revision"] = "stale-revision"
         self.assertEqual(self.run_fake(fake, self.args("encode", "book"), head="current-head"), 0)
-        fake.deploy_code.assert_called_once_with("local")
-        fake.install.assert_called_once_with(full=True)
-        fake.smoke.assert_called_once()
-        self.assertEqual([call.kwargs for call in fake.launch.call_args_list], [{"prepare": True}])
-        fake.activate.assert_called_once()
-        self.assertEqual(fake.stop_service.call_count, 1)
+        fake.ensure_ready.assert_called_once()
+        call = fake.ensure_ready.call_args
+        self.assertEqual(call.kwargs["source"], "local")
+        self.assertTrue(call.kwargs["update"])
+        self.assertIn("not the committed HEAD", call.kwargs["update_notice"])
         fake.encode.assert_called_once()
         fake.stop.assert_not_called()
         order = [name for name, _, _ in fake.mock_calls if name in
-                 {"deploy_code", "install", "smoke", "encode", "stop"}]
-        self.assertEqual(order, ["deploy_code", "install", "smoke", "encode"])
+                 {"ensure_ready", "encode", "stop"}]
+        self.assertEqual(order, ["ensure_ready", "encode"])
 
     def test_encode_no_update_uses_the_deployed_code_as_is(self):
         fake = self.fake_deployment()
         fake.state["revision"] = "stale-revision"
         args = self.args("encode", "book", "--no-update")
         self.assertEqual(self.run_fake(fake, args, head="current-head"), 0)
+        fake.ensure_ready.assert_called_once_with(source="local", update=False, update_notice=None)
         fake.deploy_code.assert_not_called()
-        fake.smoke.assert_not_called()
-        fake.install.assert_called_once_with(full=False)
         fake.encode.assert_called_once()
 
     def test_encode_no_update_recovers_an_unsmoked_worker_with_full_bootstrap(self):
@@ -192,9 +183,7 @@ class RunpodLifecycleTests(unittest.TestCase):
         args = self.args("encode", "book", "--no-update")
         self.assertEqual(self.run_fake(fake, args), 0)
         fake.provision.assert_called_once()
-        fake.deploy_code.assert_called_once_with("local")
-        fake.install.assert_called_once_with(full=True)
-        fake.smoke.assert_called_once()
+        fake.ensure_ready.assert_called_once_with(source="local", update=True, update_notice=None)
         fake.encode.assert_called_once()
         fake.stop.assert_not_called()
         notices = " ".join(call.args[0] for call in fake.notify.call_args_list)
@@ -206,19 +195,17 @@ class RunpodLifecycleTests(unittest.TestCase):
         fake.state["bootstrapped"] = False
         self.assertEqual(self.run_fake(fake, self.args("encode", "book")), 0)
         fake.provision.assert_called_once()
-        fake.deploy_code.assert_called_once_with("local")
-        fake.install.assert_called_once_with(full=True)
-        fake.smoke.assert_called_once()
+        fake.ensure_ready.assert_called_once_with(source="local", update=True, update_notice=None)
         fake.encode.assert_called_once()
         fake.stop.assert_not_called()
 
     def test_errors_stop_compute_only_before_the_idle_supervisor_is_ready(self):
         for action in ("bootstrap", "update", "encode"):
-            phases = ["start", "stop_service", "configure", "install", "launch", "encode" if action == "encode" else "smoke"]
-            if action == "bootstrap":
-                phases.append("deploy_code")
+            phases = ["start", "ensure_ready"]
             if action in {"bootstrap", "encode"}:
                 phases.append("provision")
+            if action == "encode":
+                phases.append("encode")
             for phase in phases:
                 with self.subTest(action=action, phase=phase):
                     fake = self.fake_deployment()
@@ -248,7 +235,7 @@ class RunpodLifecycleTests(unittest.TestCase):
 
     def test_shutdown_ignores_interrupt_signals_then_restores_handlers(self):
         fake = self.fake_deployment()
-        fake.install.side_effect = RuntimeError("failed before idle supervisor")
+        fake.ensure_ready.side_effect = RuntimeError("failed before idle supervisor")
         originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
         handlers = dict(originals)
         def check_cleanup_handlers():
@@ -265,12 +252,54 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(handlers, originals)
 
     def test_previous_service_is_stopped_before_updating_code_or_config(self):
-        fake = self.fake_deployment()
-        self.run_fake(fake, self.args("update"))
-        names = [entry[0] for entry in fake.method_calls]
+        deployment = self.deployment()
+        deployment.state.update(pod_id="pod_fixture", bootstrapped=True, revision="fixture-revision")
+        recorder = Mock()
+        for name in ("provision", "start", "stop_service", "deploy_code", "configure",
+                     "install", "launch", "smoke", "activate"):
+            setattr(deployment, name, getattr(recorder, name))
+        self.run_fake(deployment, self.args("update"))
+        names = [entry[0] for entry in recorder.method_calls]
         self.assertLess(names.index("stop_service"), names.index("deploy_code"))
         self.assertLess(names.index("stop_service"), names.index("configure"))
         self.assertLess(names.index("stop_service"), names.index("launch"))
+
+    def test_ensure_ready_runs_the_shared_ready_sequence_in_order(self):
+        deployment = self.deployment()
+        recorder = Mock()
+        for name in ("stop_service", "deploy_code", "configure", "install", "launch", "smoke", "activate"):
+            setattr(deployment, name, getattr(recorder, name))
+        self.assertTrue(deployment.ensure_ready(source="github", update=True))
+        names = [entry[0] for entry in recorder.method_calls]
+        self.assertEqual(names, ["stop_service", "deploy_code", "configure", "install",
+                                 "launch", "smoke", "activate"])
+        recorder.deploy_code.assert_called_once_with("github")
+        recorder.install.assert_called_once_with(full=True)
+        recorder.launch.assert_called_once_with(prepare=True)
+
+    def test_ensure_ready_without_update_skips_deploy_smoke_and_activation(self):
+        deployment = self.deployment()
+        recorder = Mock()
+        for name in ("stop_service", "deploy_code", "configure", "install", "launch", "smoke", "activate"):
+            setattr(deployment, name, getattr(recorder, name))
+        self.assertFalse(deployment.ensure_ready(source="local", update=False))
+        names = [entry[0] for entry in recorder.method_calls]
+        self.assertEqual(names, ["stop_service", "configure", "install", "launch"])
+        recorder.deploy_code.assert_not_called()
+        recorder.install.assert_called_once_with(full=False)
+        recorder.launch.assert_called_once_with(prepare=False)
+        recorder.smoke.assert_not_called()
+        recorder.activate.assert_not_called()
+
+    def test_ensure_ready_announces_a_supplied_update_notice_before_deploying(self):
+        deployment = self.deployment()
+        recorder = Mock()
+        for name in ("stop_service", "deploy_code", "configure", "install", "launch", "smoke", "activate"):
+            setattr(deployment, name, getattr(recorder, name))
+        deployment.ensure_ready(source="local", update=True, update_notice="fixture notice")
+        names = [entry[0] for entry in recorder.method_calls]
+        self.assertLess(names.index("stop_service"), names.index("deploy_code"))
+        self.notify.assert_called_once_with("fixture notice")
 
     def test_invalid_remote_configuration_fails_before_paid_operations(self):
         fake = self.fake_deployment()
@@ -351,7 +380,7 @@ class RunpodLifecycleTests(unittest.TestCase):
 
     def test_shutdown_failure_warns_about_billing_and_redacts_secrets(self):
         fake = self.fake_deployment()
-        fake.install.side_effect = RuntimeError("failed before idle supervisor")
+        fake.ensure_ready.side_effect = RuntimeError("failed before idle supervisor")
         fake.stop.side_effect = RuntimeError("fixture-provider-secret fixture-ceph-secret fixture-worker-secret")
         with self.assertRaisesRegex(RuntimeError, "billing may continue") as caught:
             self.run_fake(fake, self.args("update"))
@@ -368,7 +397,7 @@ class RunpodLifecycleTests(unittest.TestCase):
 
     def test_double_failure_retains_operation_and_stop_diagnostics(self):
         fake = self.fake_deployment()
-        fake.install.side_effect = RuntimeError("install fixture failure")
+        fake.ensure_ready.side_effect = RuntimeError("install fixture failure")
         fake.stop.side_effect = RuntimeError("stop fixture failure fixture-provider-secret")
         with self.assertRaises(RuntimeError) as caught:
             self.run_fake(fake, self.args("update", "--stop-delay", "300"))

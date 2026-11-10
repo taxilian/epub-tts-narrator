@@ -279,6 +279,22 @@ class PronunciationReviewSession:
             self._resolved = resolve_book_config(self.bundle, self.config)
         return self._resolved
 
+    def _default_engine(self):
+        """The session engine, built once per audition call site that needs it.
+
+        An explicit engine_factory (tests, tooling) always wins unchanged. With
+        ``server.auto_start`` the default path reuses a loopback ``serve``
+        through the auto-serve resolver instead of loading a second per-process
+        Drama 3 model beside a running render.
+        """
+        if self._engine_factory is not None:
+            return self._engine_factory(self.settings["engine"])
+        if (self.settings.get("server") or {}).get("auto_start"):
+            from .auto_serve import resolve_small_job_engine
+            return resolve_small_job_engine(self.settings, notify=self.notify)
+        from .engines import create_engine
+        return create_engine(self.settings["engine"])
+
     @property
     def directory(self):
         path = Path(self.settings["render"]["work_dir"]) / "pronunciations"
@@ -503,7 +519,6 @@ class PronunciationReviewSession:
         """
         from ..pronunciations import validate_pronunciation, validate_word
         from ..speech_traits import speech_traits
-        from .engines import create_engine
         from .speech_identity import voice_conditioning_identity
         validate_word(word)
         if pronunciation is not None:
@@ -512,7 +527,7 @@ class PronunciationReviewSession:
         if not candidates:
             return self.audition_isolated(word, pronunciation, cached_only=cached_only)
         if self._engine is None:
-            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+            self._engine = self._default_engine()
         engine = self._engine
         if pronunciation is not None and engine.capabilities.get("structured_performance") is not True:
             raise ValueError("This synthesis engine does not support structured pronunciation previews")
@@ -602,14 +617,13 @@ class PronunciationReviewSession:
         """
         from ..performance_plan import PERFORMANCE_VERSION, text_sha256, validate_performance
         from ..pronunciations import validate_pronunciation, validate_word
-        from .engines import create_engine
         from .speech_identity import voice_conditioning_identity
         validate_word(word)
         if pronunciation is not None:
             pronunciation = validate_pronunciation(pronunciation)
         sample = self._sample(word)
         if self._engine is None:
-            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+            self._engine = self._default_engine()
         engine, voice = self._engine, sample["voice"]
         binding = getattr(engine, "voice_binding_identity", engine.identity)
         if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):
@@ -653,7 +667,6 @@ class PronunciationReviewSession:
         from collections import Counter
         from ..performance_plan import PERFORMANCE_VERSION, text_sha256, validate_performance
         from ..pronunciations import validate_word
-        from .engines import create_engine
         from .speech_identity import voice_conditioning_identity
         validate_word(word)
         candidates = self._occurrences(word, case_insensitive=True)
@@ -665,7 +678,7 @@ class PronunciationReviewSession:
         counts = Counter(item["voice_id"] for item in candidates)
         sample = next(item for item in candidates if item["voice_id"] == counts.most_common(1)[0][0])
         if self._engine is None:
-            self._engine = (self._engine_factory or create_engine)(self.settings["engine"])
+            self._engine = self._default_engine()
         engine, voice = self._engine, sample["voice"]
         binding = getattr(engine, "voice_binding_identity", engine.identity)
         if any(voice.get("created_with", {}).get(key) != binding.get(key) for key in ("engine", "model")):

@@ -274,6 +274,8 @@ class _RenderServer(ThreadingHTTPServer):
         self.notify = notify
         self.references = ReferenceCache()
         self._activity_lock = threading.Lock()
+        self._last_activity = time.monotonic()
+        self._inflight_requests = 0
         self._request_sequence = 0
         self.model_id = get_drama3_model(
             config["engine"].get("model", DEFAULT_DRAMA3_MODEL)).repo
@@ -300,6 +302,7 @@ class _RenderServer(ThreadingHTTPServer):
         # Callers supply only metadata and fixed status messages. In particular,
         # exception text can contain book/reference text and is not logged here.
         with self._activity_lock:
+            self._last_activity = time.monotonic()
             timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
             try:
                 self.notify(f"[{timestamp}] {request_id}: {message}")
@@ -307,6 +310,18 @@ class _RenderServer(ThreadingHTTPServer):
                 # A closed terminal/pipe must not fail synthesis or prevent the
                 # request handler from releasing its admission slot.
                 pass
+
+    def note_activity(self):
+        """Mark the server as used right now (the idle watchdog's reset point)."""
+        with self._activity_lock:
+            self._last_activity = time.monotonic()
+
+    def idle_seconds(self):
+        """Seconds since the last activity while no request is in flight, else 0."""
+        with self._activity_lock:
+            if self._inflight_requests > 0:
+                return 0.0
+            return max(0.0, time.monotonic() - self._last_activity)
 
     def _infer(self, text, voices, history, output, seed, sampling, request_id=None, queued_at=None,
                layout="directing"):
@@ -427,8 +442,12 @@ class _RenderServer(ThreadingHTTPServer):
             self.shutdown_request(request)
             return
         try:
+            with self._activity_lock:
+                self._inflight_requests += 1
             super().process_request(request, client_address)
         except BaseException:
+            with self._activity_lock:
+                self._inflight_requests -= 1
             self.admission.release()
             raise
 
@@ -437,6 +456,8 @@ class _RenderServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.admission.release()
+            with self._activity_lock:
+                self._inflight_requests -= 1
 
     def server_close(self):
         try:
@@ -719,13 +740,41 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
                          recognizers=recognizers, notify=notify)
 
 
+def _idle_watchdog(server, timeout, notify):
+    """Exit ``serve_forever`` once the server has been idle past ``timeout``.
+
+    Runs as a daemon thread: an interrupted main thread never waits for it,
+    and ``shutdown()`` is documented to be called from another thread. A
+    request admitted between the idle check and ``shutdown()`` still finishes:
+    ``server_close()`` joins non-daemon handler threads before the model is
+    released.
+    """
+    poll = min(5.0, max(0.01, timeout / 10))
+    while True:
+        time.sleep(poll)
+        if server.idle_seconds() < timeout:
+            continue
+        notify(f"No requests for {timeout:g}s; stopping the renderer server (server.idle_timeout_seconds).")
+        server.shutdown()
+        return
+
+
 def serve(config, notify=_print_activity):
     server = make_server(config, notify=notify)
     host, port = server.server_address[:2]
     rendered_host = f"[{host}]" if ":" in host else host
+    idle_timeout = (config.get("server") or {}).get("idle_timeout_seconds", 0.0) or 0.0
+    watchdog = None
     try:
         notify("Loading Drama 3 before accepting rendering requests…")
         server.warmup()
+        if idle_timeout > 0:
+            # Warmup (the model load) counts as activity, not idle time.
+            server.note_activity()
+            watchdog = threading.Thread(target=_idle_watchdog, args=(server, idle_timeout, notify),
+                                        name="serve-idle-watch", daemon=True)
+            watchdog.start()
+            notify(f"Idle exit enabled: the server stops after {idle_timeout:g}s without a request.")
         notify(f"Drama 3 renderer listening at http://{rendered_host}:{port}/v1/tts")
         notify("One inference request runs at a time; the model stays loaded between requests.")
         if server.recognizers is not None:

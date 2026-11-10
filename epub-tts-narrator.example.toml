@@ -115,6 +115,14 @@ bracketed_text = "Give this bracketed text a slight, audible change in delivery 
 # roles = ["tts", "recognition"]   # default ["tts"]; ["recognition"] adds no TTS slots
 # recognition_concurrency = 1
 
+# Local auto-serve (optional, off by default): small jobs such as pronunciation
+# previews and pronounce-name auditions reuse a local serve worker on server.port
+# instead of loading a second Drama 3 model beside a running render. The spawned
+# worker exits itself after the idle timeout; see RENDERER.md "Local auto-serve".
+# [server]
+# auto_start = true
+# idle_timeout_seconds = 600  # 0 keeps the spawned server until interrupted
+
 # Gemini bulk casting overlaps remote voice jobs; local verification stays serial.
 # Merge into your existing casting table. Other designers remain sequential.
 # [casting]
