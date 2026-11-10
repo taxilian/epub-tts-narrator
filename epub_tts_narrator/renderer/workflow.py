@@ -2588,15 +2588,18 @@ def _publish_chapter_links(config, rendered, *, notify):
 
 
 def render(bundle, config, engine, verifier, *, notify=print, chapters_only=False,
-           voice_store_override=None):
+           voice_store_override=None, on_synthesis_ready=None,
+           chapter_coordinators=None, queue_position=0):
     """Render a book; on a terminal, chapters keep live rows below scrolling logs."""
     from .progress import live_board
     with live_board(notify) as notify:
         return _render(bundle, config, engine, verifier, notify=notify, chapters_only=chapters_only,
-                       voice_store_override=voice_store_override)
+                       voice_store_override=voice_store_override, on_synthesis_ready=on_synthesis_ready,
+                       chapter_coordinators=chapter_coordinators, queue_position=queue_position)
 
 
-def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_store_override):
+def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_store_override,
+            on_synthesis_ready=None, chapter_coordinators=None, queue_position=0):
     from .continuity import require_support
     require_support(engine)
     run_started = monotonic()
@@ -2640,6 +2643,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         voice_lock.rmdir()
         voice_lock = None
         stop_if_requested()
+        if on_synthesis_ready is not None and chapter_coordinators is None:
+            on_synthesis_ready()
         rendered, acceptance = [], []
         engine_identity, verifier_identity = engine.identity, verifier.identity
         from .speech_cache import SpeechCache
@@ -2761,7 +2766,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             else:
                 completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started)
 
-        if scheduler is None:
+        if scheduler is None and chapter_coordinators is None:
             for chapter_index in range(len(plan["chapters"])):
                 stop_if_requested()
                 finish_completed()
@@ -2772,7 +2777,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             # started chapters drain.
             from .render_chapter_flow import ChapterRunAdmission, run_units
             run_units([lambda index: process(index) for index in range(len(plan["chapters"]))],
-                      chapter_limit, ChapterRunAdmission())
+                      chapter_limit, ChapterRunAdmission(), coordinator_pool=chapter_coordinators,
+                      priority=queue_position,
+                      on_submitted=on_synthesis_ready if chapter_coordinators is not None else None)
         finish_completed(final=True)
         rendered = [composed_records[index][0] for index in sorted(composed_records)]
         acceptance = [record for index in sorted(composed_records)

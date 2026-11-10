@@ -113,6 +113,45 @@ class RendererWorkflowTests(unittest.TestCase):
         return render(bundle or self.bundle, config or self.config, self.engine,
                       self.verifier, notify=lambda _: None)
 
+    def test_queue_readiness_follows_voice_setup_and_precedes_speech(self):
+        from epub_tts_narrator.renderer.book_context import voice_store
+        ready = []
+        synthesize = self.engine.synthesize
+
+        def observe_ready():
+            lease = voice_store(self.bundle, self.config).lock()
+            lease.rmdir()
+            ready.append(True)
+
+        def speech(*args, **kwargs):
+            self.assertEqual(ready, [True], "queue readiness must precede synthesis")
+            return synthesize(*args, **kwargs)
+
+        with patch.object(self.engine, "synthesize", side_effect=speech):
+            render(self.bundle, self.config, self.engine, self.verifier,
+                   notify=lambda _: None, on_synthesis_ready=observe_ready)
+        self.assertEqual(ready, [True])
+        self.assertTrue(self.engine.speech_calls)
+
+    def test_queued_book_uses_the_shared_chapter_coordinators(self):
+        import threading
+        from epub_tts_narrator.renderer.queue_chapters import QueueChapterCoordinators
+        from epub_tts_narrator.renderer.workflow import _render_chapter_with_recovery
+        pool = QueueChapterCoordinators(1)
+        self.addCleanup(pool.close)
+        workers = []
+
+        def chapter(*args, **kwargs):
+            workers.append(threading.current_thread().name)
+            return _render_chapter_with_recovery(*args, **kwargs)
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery",
+                   side_effect=chapter):
+            render(self.bundle, self.config, self.engine, self.verifier, chapters_only=True,
+                   notify=lambda _: None, chapter_coordinators=pool, queue_position=3)
+        self.assertTrue(workers)
+        self.assertEqual(set(workers), {"queue-chapter-1"})
+
     def test_take_audio_uses_request_context_and_legacy_recorded_path_resumes(self):
         # Given a request with stable content and voice identifiers.
         request = {"kind": "fixture", "text": "Hello there.", "engine": self.engine.identity,

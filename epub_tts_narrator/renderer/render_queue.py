@@ -5,9 +5,9 @@ client process, in order. Remote books (a configured chapter service, or the
 managed Runpod service via ``--remote``) run as independent threads: book k+1
 is admitted as soon as the books before it cannot fill the service's total
 slot capacity (tail backfill), and a book, once admitted, runs to completion —
-books only ever open, never preempt. Without any remote service the books
-render strictly sequentially in one process, reusing one engine and verifier
-instance (and its warm model) across books.
+books only ever open, never preempt. Without a chapter service, local books
+use the same ordered backfill onto one shared configured worker pool,
+reusing one engine and verifier across books.
 
 Every book loop owns a fresh configuration dict (workflow preflight and
 render_remote write per-book keys onto the config they receive) and a notify
@@ -247,8 +247,9 @@ class _BookRun:
         self.index = index
         self.book = book
         self.name = _book_name(book)
-        self.thread = None
-        self.status = None  # ("ok", None) or ("failed", message)
+        self.thread: threading.Thread | None = None
+        self.status: tuple[str, str | None] | None = None
+        self.synthesis_ready = threading.Event()
         self.config = None
         self.finished = False
 
@@ -508,58 +509,100 @@ def _run_remote_queue(books, args, config, *, notify, poll_seconds, join_seconds
     return _summary([(run.name, run.status[0], run.status[1]) for run in runs], notify)
 
 
-def _run_local_queue(books, args, *, notify):
-    """Render books strictly sequentially, reusing one engine and verifier."""
+def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
     from .interrupts import RenderInterrupts, stop_if_requested
+    from .render_metrics import METRICS
     from .workflow import render as render_book
-    total = len(books)
+
     engine = verifier = None
-    results = []
-    interrupts = RenderInterrupts()
-    interrupts.__enter__()
-    try:
-        for index, book in enumerate(books):
-            name = _book_name(book)
-            prefix = f"[{name}] "
-            book_notify = _prefixed(prefix, notify)
-            _emit(notify, f"{prefix}Rendering book {index + 1} of {total}: {book}")
-            config = None
-            try:
-                bundle, config, plan = _prepare_book(book, args)
-                bundle = _ensure_missing_voices(bundle, config, plan, args)
-                if engine is None:
-                    # Built once from the first successfully prepared book's
-                    # config; the warm model then serves every later book.
-                    _ensure_models(config)
-                    engine, verifier = _build_render_components(config)
-                result = render_book(bundle, config, engine, verifier, notify=book_notify,
-                                     chapters_only=args.chapters_only)
-                _report_local_completion(result, config, bundle,
-                                         chapters_only=args.chapters_only, notify=book_notify)
-                results.append((name, "ok", None))
-                _emit(notify, f"{prefix}ok")
-            except Exception as error:
-                message = _failure_message(error, config)
-                results.append((name, "failed", message))
-                _emit(notify, f"{prefix}failed: {message}")
-            stop_if_requested()
-    except KeyboardInterrupt:
-        _emit(notify, "Render queue interrupted:")
-        for name, status, message in results:
-            _emit(notify, f"  {name}: " + ("rendered" if status == "ok" else f"failed: {message}"))
-        for index in range(len(results), total):
-            _emit(notify, f"  {_book_name(books[index])}: not started")
-        raise
-    finally:
-        interrupts.__exit__(None, None, None)
-        for component in (verifier, engine):
-            close = getattr(component, "close", None)
-            if callable(close):
+    coordinators = None
+    runs = []
+    changed = threading.Event()
+    with RenderInterrupts():
+        try:
+            for index, book in enumerate(books):
+                stop_if_requested()
+                if runs:
+                    previous = runs[-1]
+                    spare_polls = 0
+                    while previous.thread is not None and previous.thread.is_alive():
+                        stop_if_requested()
+                        slots = getattr(engine, "max_parallel", None)
+                        if previous.synthesis_ready.is_set() and type(slots) is int:
+                            stage = METRICS.snapshot().get("synthesis")
+                            if isinstance(stage, dict):
+                                busy = _count(stage.get("queued_now")) + _count(stage.get("active_now"))
+                            else:
+                                busy = 0
+                            spare_polls = spare_polls + 1 if busy < slots else 0
+                            if spare_polls >= GATE_OPEN_POLLS:
+                                _emit(notify, f"Admitting book {index + 1} of {len(books)}: "
+                                             f"spare capacity ({busy} of {slots} slots).")
+                                break
+                        changed.wait(poll_seconds)
+                        changed.clear()
+
+                run = _BookRun(index, book)
+                book_notify = _prefixed(f"[{run.name}] ", notify)
                 try:
+                    bundle, config, plan = _prepare_book(book, args)
+                    run.config = config
+                    bundle = _ensure_missing_voices(bundle, config, plan, args)
+                    if engine is None:
+                        _ensure_models(config)
+                        engine, verifier = _build_render_components(config)
+                        slots = getattr(engine, "max_parallel", None)
+                        if type(slots) is int and getattr(engine, "logical", None) is not None:
+                            from .queue_chapters import QueueChapterCoordinators
+                            coordinators = QueueChapterCoordinators(slots)
+                except Exception as error:
+                    message = _failure_message(error, run.config)
+                    run.status = ("failed", message)
+                    run.finished = True
+                    runs.append(run)
+                    _emit(notify, f"[{run.name}] failed: {message}")
+                    continue
+
+                def render_one(run=run, bundle=bundle, config=config, book_notify=book_notify):
+                    try:
+                        result = render_book(
+                            bundle, config, engine, verifier, notify=book_notify,
+                            chapters_only=args.chapters_only,
+                            on_synthesis_ready=run.synthesis_ready.set,
+                            chapter_coordinators=coordinators, queue_position=run.index)
+                        _report_local_completion(result, config, bundle,
+                                                 chapters_only=args.chapters_only, notify=book_notify)
+                    except KeyboardInterrupt:
+                        status = ("failed", "Rendering interrupted; accepted work is retained")
+                    except Exception as error:
+                        status = ("failed", _failure_message(error, config))
+                    else:
+                        status = ("ok", None)
+                    run.status = status
+                    run.finished = True
+                    _emit(notify, f"[{run.name}] {status[0]}" + (f": {status[1]}" if status[1] else ""))
+                    changed.set()
+
+                run.thread = threading.Thread(target=render_one,
+                                              name=f"render-queue-book-{index + 1}")
+                runs.append(run)
+                _emit(notify, f"[{run.name}] Rendering book {index + 1} of {len(books)}: {book}")
+                run.thread.start()
+            for run in runs:
+                while run.thread is not None and run.thread.is_alive():
+                    run.thread.join(timeout=poll_seconds)
+                    stop_if_requested()
+        finally:
+            for run in runs:
+                if run.thread is not None:
+                    run.thread.join()
+            if coordinators is not None:
+                coordinators.close()
+            for component in (verifier, engine):
+                close = getattr(component, "close", None)
+                if callable(close):
                     close()
-                except (ValueError, RuntimeError, OSError) as exc:
-                    _emit(notify, f"Renderer cleanup warning: {exc}")
-    return _summary(results, notify)
+    return _summary([(run.name, *run.status) for run in runs if run.status is not None], notify)
 
 
 def render_queue_command(args, config_path, *, notify=print,
@@ -576,7 +619,7 @@ def _render_queue_command(args, config_path, *, notify,
 
     Remote mode (a configured ``[remote_chapters].url`` used as-is, or the
     managed Runpod service via ``--remote``) admits books with tail backfill;
-    otherwise books render sequentially in one process with a shared engine.
+    otherwise books backfill the configured worker pool through a shared engine.
     Each book loads its own fresh configuration from ``args.config``.
     """
     from .config import load_config
@@ -587,4 +630,4 @@ def _render_queue_command(args, config_path, *, notify,
     if remote:
         return _run_remote_queue(books, args, config, notify=notify,
                                  poll_seconds=poll_seconds, join_seconds=join_seconds)
-    return _run_local_queue(books, args, notify=notify)
+    return _run_local_queue(books, args, notify=notify, poll_seconds=poll_seconds)

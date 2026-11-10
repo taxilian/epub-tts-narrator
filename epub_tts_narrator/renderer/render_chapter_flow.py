@@ -159,7 +159,7 @@ def retire_owner(scheduler, owner):
     return scheduler.retire_owner(owner)
 
 
-def run_units(units, limit, admission):
+def run_units(units, limit, admission, *, coordinator_pool=None, priority=0, on_submitted=None):
     """Run chapter units on bounded coordinator threads, in order.
 
     ``units`` are index-callables in manifest order. At most ``limit``
@@ -170,6 +170,8 @@ def run_units(units, limit, admission):
     """
     if type(limit) is not int or limit < 1:
         raise ValueError("Coordinator limit must be a positive integer")
+    if coordinator_pool is not None:
+        return coordinator_pool.run(units, admission, priority=priority, on_submitted=on_submitted)
     results = [None] * len(units)
     if limit == 1 or len(units) <= 1:
         for index, unit in enumerate(units):

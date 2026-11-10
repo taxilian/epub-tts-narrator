@@ -495,6 +495,87 @@ class LocalSequentialTests(QueueFixtureTests):
             self.assertTrue(row.startswith(f"[book-{number}] Ch 1/2 |"), row)
             self.assertIn("fixture-worker", row)
 
+    def test_full_pool_keeps_next_book_pending_until_slots_are_free(self):
+        from types import SimpleNamespace
+        from epub_tts_narrator.renderer.render_metrics import METRICS
+        full_seen = threading.Event()
+        drain = threading.Event()
+        second_started = threading.Event()
+        outcome = []
+        engine = SimpleNamespace(max_parallel=16, close=lambda: None)
+        verifier = SimpleNamespace(close=lambda: None)
+        snapshot = METRICS.snapshot
+
+        def observe():
+            result = snapshot()
+            if result.get("synthesis", {}).get("active_now") == 16:
+                full_seen.set()
+            return result
+
+        def render_book(bundle, config, shared_engine, shared_verifier, **kwargs):
+            if Path(bundle["directory"]).name == "book-1":
+                with contextlib.ExitStack() as stack:
+                    for _ in range(16):
+                        stack.enter_context(METRICS.active("synthesis"))
+                    kwargs["on_synthesis_ready"]()
+                    if not drain.wait(3):
+                        raise RuntimeError("test did not release the full pool")
+                if not second_started.wait(3):
+                    raise RuntimeError("next book did not fill the drained pool")
+            else:
+                kwargs["on_synthesis_ready"]()
+                second_started.set()
+            return {"chapters": []}
+
+        def run():
+            outcome.append(render_queue_command(self.render_args(1, 2), self.config,
+                                                poll_seconds=0.01, notify=lambda message: None))
+
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=render_book),
+              patch.object(METRICS, "snapshot", side_effect=observe)):
+            worker = threading.Thread(target=run)
+            worker.start()
+            try:
+                self.assertTrue(full_seen.wait(3), "gate must observe the saturated pool")
+                self.assertFalse(second_started.is_set(), "a full pool must hold the next book")
+            finally:
+                drain.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(second_started.is_set())
+        self.assertEqual(outcome, [0])
+
+    def test_next_book_starts_while_previous_book_is_assembling_on_shared_pool(self):
+        from types import SimpleNamespace
+        second_started = threading.Event()
+        overlapped = []
+        engine = SimpleNamespace(max_parallel=16, close=lambda: None)
+        verifier = SimpleNamespace(close=lambda: None)
+
+        def render_book(bundle, config, shared_engine, shared_verifier, **kwargs):
+            ready = kwargs.get("on_synthesis_ready")
+            if ready is not None:
+                ready()
+            if Path(bundle["directory"]).name == "book-1":
+                overlapped.append(second_started.wait(2))
+            else:
+                second_started.set()
+            self.assertIs(shared_engine, engine)
+            self.assertIs(shared_verifier, verifier)
+            return {"chapters": []}
+
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=render_book)):
+            code = render_queue_command(self.render_args(1, 2), self.config,
+                                        poll_seconds=0.01, notify=lambda message: None)
+        self.assertEqual(overlapped, [True], "book 2 must backfill while book 1 assembles")
+        self.assertEqual(code, 0)
+
     def test_books_render_in_order_through_one_engine_and_verifier(self):
         engine, verifier = Mock(name="engine"), Mock(name="verifier")
         with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),

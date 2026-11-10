@@ -127,7 +127,7 @@ audiobook-render render book.audiobook      # synthesize + verify chapters
 audiobook-render assemble book.audiobook    # package the .m4b
 ```
 
-`render` also queues several books through one process — `audiobook-render render runs/book-01 runs/book-02`, optionally `--remote` to reuse or bootstrap the managed Runpod chapter service (a configured `[remote_chapters].url` is used as-is instead). The next book is admitted once the service's live work cannot fill its slots, a failed book is recorded while the queue continues, and without any remote service the books render sequentially through one warm local model. See [multi-book render queue](RENDERER.md#multi-book-render-queue).
+`render` also queues several books through one process — `audiobook-render render runs/book-01 runs/book-02`. Books use the configured worker pool, admitting the next book when earlier books leave synthesis slots free, including during final assembly. One shared pool bounds concurrency and loads models once. A configured `[remote_chapters].url` instead uses that chapter service with the same ordered admission policy. See [multi-book render queue](RENDERER.md#multi-book-render-queue).
 
 `audiobook-render doctor` checks the local setup (models, FFmpeg, verification stack) before a long render.
 
