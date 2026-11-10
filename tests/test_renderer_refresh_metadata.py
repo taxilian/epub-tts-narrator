@@ -114,7 +114,9 @@ class RefreshMetadataTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), self.output / "chapters" / f"chapter-{number:04d}.m4a")
             self.assertNotIn(link.relative_to(self.output).as_posix(), result["files_sha256"])
-        self.assertNotIn("publication_key", result)
+        # The recorded publication key survives the refresh: only derived
+        # outputs changed, so an unchanged later render reuses the publication.
+        self.assertEqual(result.get("publication_key"), "previous-publication-key")
         checksum = file_hash(book_path)
         self.assertEqual(read_json(self.output / "sync.json"),
                          dict(original_sync, audio_sha256=checksum))

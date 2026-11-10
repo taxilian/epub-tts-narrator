@@ -85,8 +85,11 @@ def refresh_metadata(bundle, config, *, notify=print):
             audio["sync"]["sha256"] = file_hash(stage / "sync.json")
             write_json(stage / "audio-manifest.json", audio)
             result = deepcopy(previous)
-            # Rendering can subsequently recompute the normal package identity.
-            result.pop("publication_key", None)
+            # The refresh changes only derived publication outputs (artwork,
+            # tags, checksums), never a package input, so the recorded
+            # publication key stays valid: an unchanged later render reuses
+            # this publication instead of re-encoding the audiobook, while a
+            # changed cover EPUB or asset version recomputes a different key.
             result["audio"] = audio
             result["files_sha256"] = {p.relative_to(stage).as_posix(): file_hash(p)
                                       for p in sorted(stage.rglob("*")) if p.is_file()}
