@@ -369,10 +369,14 @@ def _safe_render(settings):
 
 
 def _selection(bundle, chapter, config, bindings):
+    from .bundle import chunk_identity_fingerprint
     used = {speaker["voice_id"] for chunk in chapter["chunks"] if not chunk["silent_control"]
             for speaker in chunk_speakers(chunk)}
     result = {"version": 1, "book": bundle["source"]["book"],
-            "source_fingerprint": bundle["manifest"]["source_fingerprint"],
+            # The same pinned source identity the local chunk IDs and chapter
+            # contexts bind, so a serial update that edits one chapter keeps
+            # every other chapter's completed remote cache valid.
+            "source_fingerprint": chunk_identity_fingerprint(bundle["manifest"]),
             "chapter": chapter, "total_chapters": len(bundle["chapters"]),
             "voice_bindings": {key: bindings[key] for key in sorted(used)},
             "render": _safe_render(config["render"])}

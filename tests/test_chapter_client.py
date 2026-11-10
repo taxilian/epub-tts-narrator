@@ -27,6 +27,7 @@ from epub_tts_narrator.renderer.workflow import make_render_plan
 from audition_fixtures import prepare_document
 from shared_fixtures import rebind_audiobook_filename
 from test_contracts import valid_document
+from test_chapter_export import chapter_document
 from test_renderer_workflow import write_tone, FFMPEG, FFPROBE
 
 
@@ -1441,6 +1442,154 @@ class RemotePublicationReuseTests(unittest.TestCase):
         self.assertEqual(calls, [], "a verifier-side update must not re-encode the remotely published book")
         self.assertEqual(result, first)
         self.assertTrue(any("reusing" in message for message in messages))
+
+
+class RemoteChapterUpdateReuseTests(unittest.TestCase):
+    """A book update that edits one chapter must not resubmit unchanged chapters.
+
+    The remote selection identity binds the same pinned chunk-identity source
+    fingerprint the local chunk IDs and chapter contexts use, so an unchanged
+    chapter's completed remote cache stays valid across serial updates."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config = deepcopy(DEFAULTS)
+        self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False)
+        self.config["quality"] = validate_policy({})
+        self.config["remote_chapters"].update(url="https://worker.example", websocket=False, poll_seconds=.1)
+        self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")
+        self.document = prepare_document(chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("Let us leave before the morning bell.", "narration", "p"),
+            ("The boat is already waiting for us.", "dialogue", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("At dawn the boat returned safely to shore.", "narration", "p"),
+        ]))
+        self.document["segments"][2].update(role_id="mara", voice_id="v1")
+        self.save_revision()
+        reference = self.root / "reference.wav"
+        write_tone(reference)
+        self.voice = {"reference_audio": str(reference), "reference_text": "A saved voice reference.",
+                      "asset_hash": "a" * 64}
+        self.store = Mock()
+        self.store.load.return_value = self.voice
+        self.messages = []
+
+    def save_revision(self):
+        replacement = self.root / "next-bundle"
+        export_bundle(self.document, replacement)
+        if (self.root / "book").exists():
+            shutil.rmtree(self.root / "book")
+        replacement.rename(self.root / "book")
+        self.bundle = load_bundle(self.root / "book")
+        self.plan = make_render_plan(self.bundle, self.config)
+
+    def render_remote(self, client):
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            return _render_remote_locked(self.bundle, self.config, self.plan, self.store,
+                                         notify=self.messages.append, chapters_only=True)
+
+    def fake_client(self):
+        owner = self
+        class FakeClient:
+            settings = owner.config["remote_chapters"]
+            def __init__(self, settings):
+                self.calls, self.jobs, self.artifacts, self.uploads = [], {}, {}, []
+            def websocket(self, *args):
+                return None
+            def request(self, method, path, payload=None, timeout=None):
+                self.calls.append((method, path, payload))
+                if path == "v1/capabilities":
+                    return {"protocol": PROTOCOL, "multi_speaker": True, "renderer_fingerprint": "f" * 64,
+                            "client_sessions": 1, "session_ttl_seconds": 30, "ephemeral_runs": 1}
+                if path == "v1/sessions":
+                    return {"opened": True}
+                if path.startswith("v1/sessions/"):
+                    return {"revoked": True}
+                if path == "v1/voices/ensure":
+                    return {"missing": payload["voices"]}
+                if method == "PUT":
+                    self.uploads.append(payload)
+                    return {"registered": True}
+                if path == "v1/jobs":
+                    spec = payload["spec"]
+                    job_id = digest(spec)
+                    files = fixture_artifacts(spec, descriptive=True)
+                    artifacts = []
+                    for name, data in files.items():
+                        url = f"/{job_id}/{name}"
+                        self.artifacts[url] = data
+                        artifacts.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(),
+                                          "size": len(data), "url": url})
+                    self.jobs[job_id] = {"id": job_id, "state": "completed", "artifacts": artifacts, "last_event": 1}
+                    return {"id": job_id, "state": "queued"}
+                if "/events?" in path:
+                    job_id = path.split("/")[2]
+                    return {"events": [{"sequence": 1, "message": "Ready"}], "job": self.jobs[job_id]}
+                if path.endswith("/ack"):
+                    return {"acknowledged": True}
+                raise AssertionError((method, path))
+            def download(self, artifact, target):
+                target.write_bytes(self.artifacts[artifact["url"]])
+        return FakeClient
+
+    def submitted_chapters(self, client):
+        return [payload["spec"]["chapter"]["number"] for _, path, payload in client.calls
+                if path == "v1/jobs"]
+
+    def test_book_update_resubmits_only_the_edited_chapter(self):
+        client = self.fake_client()(self.config["remote_chapters"])
+        self.render_remote(client)
+        self.assertEqual(self.submitted_chapters(client), [1, 2])
+        cached = {path.parent.name for path in (self.root / "work" / "remote-chapters").glob("*/cache.json")}
+        saved_artifacts = {folder: {path.name: file_hash(path)
+                                    for path in (self.root / "work" / "remote-chapters" / folder).iterdir()}
+                           for folder in cached}
+        self.messages.clear()
+
+        # A serial update pins the pre-update source fingerprint, then edits
+        # only chapter two's text; chapter one's plan is unchanged.
+        from epub_tts_narrator.pipeline import fingerprint
+        self.document["provenance"].setdefault(
+            "chunk_identity_source_fingerprint", fingerprint(self.document["source"]))
+        new_text = "At dawn the boat returned safely to the harbor."
+        self.document["source"]["blocks"][4]["text"] = new_text
+        self.document["segments"][4]["text"] = new_text
+        self.document["segments"][4]["end"] = len(new_text)
+        self.save_revision()
+
+        resumed = self.fake_client()(self.config["remote_chapters"])
+        self.render_remote(resumed)
+
+        self.assertEqual(self.submitted_chapters(resumed), [2],
+                         "an unchanged chapter's completed remote cache must be reused")
+        self.assertTrue(any("Reusing downloaded chapter 1 / 2" in message for message in self.messages),
+                        self.messages)
+        for folder, hashes in saved_artifacts.items():
+            current = {path.name: file_hash(path)
+                       for path in (self.root / "work" / "remote-chapters" / folder).iterdir()}
+            self.assertEqual(current, hashes, f"cached chapter {folder[:12]} artifacts changed")
+
+    def test_selection_binds_the_pinned_chunk_identity_fingerprint(self):
+        from epub_tts_narrator.renderer.bundle import chunk_identity_fingerprint
+        from epub_tts_narrator.pipeline import fingerprint
+        bindings = {key: "a" * 64 for key in self.plan["voice_ids"]}
+        selection = _selection(self.bundle, self.plan["chapters"][0], self.config, bindings)
+        self.assertEqual(selection["source_fingerprint"],
+                         chunk_identity_fingerprint(self.bundle["manifest"]))
+        self.document["provenance"].setdefault(
+            "chunk_identity_source_fingerprint", fingerprint(self.document["source"]))
+        new_text = "At dawn the boat returned safely to the harbor."
+        self.document["source"]["blocks"][4]["text"] = new_text
+        self.document["segments"][4]["text"] = new_text
+        self.document["segments"][4]["end"] = len(new_text)
+        self.save_revision()
+        rebound = {key: "a" * 64 for key in self.plan["voice_ids"]}
+        self.assertEqual(_selection(self.bundle, self.plan["chapters"][0], self.config, rebound),
+                         selection, "an unchanged chapter's remote selection must survive a book update")
 
 
 class ChapterCLITests(unittest.TestCase):
