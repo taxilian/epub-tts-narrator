@@ -41,6 +41,7 @@ class CloudFakeAPI(FakeRunpodAPI):
         self.catalog_clouds = []
         self.refusals = {}
         self.clouds_without_public_ip = set()
+        self.pods_without_public_ip = set()
         self.pod_specs = []
 
     def catalog_gpus(self, **query):
@@ -60,7 +61,7 @@ class CloudFakeAPI(FakeRunpodAPI):
 
     def get_pod(self, pod_id, **expansions):
         result = super().get_pod(pod_id, **expansions)
-        if self.pods[pod_id]["cloud"] in self.clouds_without_public_ip:
+        if pod_id in self.pods_without_public_ip or self.pods[pod_id]["cloud"] in self.clouds_without_public_ip:
             result.pop("publicIp")
             result["portMappings"] = {}
         return result
@@ -290,14 +291,29 @@ class CloudPlacementTests(unittest.TestCase):
         self.assertEqual(len(self.api.pod_specs), 1)
         self.assertEqual(self.api.pods["pod_new1"]["status"], "EXITED")
 
-    def test_secure_worker_without_ssh_times_out_without_replacement(self):
+    def test_secure_worker_without_ssh_gets_one_replacement_and_then_fails(self):
         self.settings["deployment"]["cloud_types"] = ["secure"]
         self.api.clouds_without_public_ip.add("SECURE")
         deployment = self.deployment()
         deployment.provision()
-        with self.assertRaisesRegex(RuntimeError, "startup_timeout_seconds"):
+        with self.assertRaisesRegex(RunpodAPIError, "only one replacement"):
             deployment.start()
-        self.assertEqual(len(self.api.pod_specs), 1)
+        self.assertEqual(len(self.api.pod_specs), 2)
+        self.assertEqual(self.api.pods["pod_new1"]["status"], "EXITED")
+        self.assertEqual(self.api.pods["pod_new2"]["status"], "EXITED")
+
+    def test_secure_worker_without_ssh_is_replaced_by_a_worker_that_comes_up(self):
+        self.settings["deployment"]["cloud_types"] = ["secure"]
+        deployment = self.deployment()
+        deployment.provision()
+        self.api.pods_without_public_ip.add("pod_new1")
+        deployment.start()
+        self.assertEqual([spec["cloud"] for spec in self.api.pod_specs], ["SECURE", "SECURE"])
+        self.assertEqual(self.api.pods["pod_new1"]["status"], "EXITED")
+        self.assertEqual(self.api.pods["pod_new2"]["status"], "RUNNING")
+        self.assertEqual(self.state()["pod_id"], "pod_new2")
+        self.assertEqual(self.state()["previous_pod_ids"], ["pod_new1"])
+        self.assertIn("never published a direct SSH port", self.notices())
 
 
 if __name__ == "__main__":

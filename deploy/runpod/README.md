@@ -89,6 +89,11 @@ and creates one replacement, on the next cloud in the list when there is one.
 That counts as the operation's single replacement. A Community worker's public
 IP and SSH port may change after a restart; the client reads them on each start.
 
+The same rule covers a Secure worker that never publishes an endpoint: such a
+Pod never got a host with a free GPU, so the client confirms it stopped and
+creates one replacement in the same cloud before giving up. A second worker
+without an endpoint ends the operation.
+
 A healthy existing worker is never replaced merely because the preference
 changed; the new order applies to the next Pod that is created.
 

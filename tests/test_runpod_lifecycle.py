@@ -1250,13 +1250,13 @@ class RunpodLifecycleTests(unittest.TestCase):
             with self.subTest(pod=pod):
                 self.assertIsNone(ssh_endpoint(pod))
 
-    UNMEASURED = "NVIDIA H100 80GB HBM3"
+    UNMEASURED = "NVIDIA H100 PCIe"
 
     def isolated_state(self, label):
         self.settings["deployment"]["state_dir"] = str(self.directory / f"state-{label}")
 
     def unmeasured_row(self, **overrides):
-        row = {"id": self.UNMEASURED, "name": "H100 SXM", "manufacturer": "NVIDIA", "memory": 80,
+        row = {"id": self.UNMEASURED, "name": "H100 PCIe", "manufacturer": "NVIDIA", "memory": 80,
                "availability": "HIGH", "price": {"secure": 1.50},
                "dataCenters": [{"id": self.settings["deployment"]["data_center_id"], "availability": "HIGH"}]}
         row.update(overrides)

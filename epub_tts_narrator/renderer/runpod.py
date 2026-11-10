@@ -962,15 +962,21 @@ class Deployment:
                 self.ssh("python3 -c " + shlex.quote(check), timeout=30)
                 return
             time.sleep(5)
-        if self.cloud == "COMMUNITY" and not endpoint_seen:
-            # Community hosts may lack a public IP; Runpod's proxy SSH carries
-            # only an interactive shell, which cannot run this deployment.
-            # Stop the worker (confirmed) before one replacement, preferring
-            # the next configured cloud.
-            self.notify(f"Community Cloud worker {self.pod_id} never published a direct SSH port "
-                        "(22/tcp on a public IP); stopping it.")
+        if not endpoint_seen:
+            if self.cloud == "COMMUNITY":
+                # Community hosts may lack a public IP; Runpod's proxy SSH
+                # carries only an interactive shell, which cannot run this
+                # deployment. Stop the worker (confirmed) before one
+                # replacement, preferring the next configured cloud.
+                reason, clouds = "no_direct_ssh", self._later_clouds() or (self.cloud,)
+            else:
+                # A worker without an endpoint never got a host with a free
+                # GPU; one replacement in the same cloud is allowed, and a
+                # second failure is final.
+                reason, clouds = "host_capacity", (self.cloud,)
+            self.notify(f"Worker {self.pod_id} never published a direct SSH port; stopping it.")
             self._stop_pod(self.pod_id)
-            self._replace_capacity_blocked_pod(reason="no_direct_ssh", clouds=self._later_clouds() or (self.cloud,))
+            self._replace_capacity_blocked_pod(reason=reason, clouds=clouds)
             return self.start()
         raise RuntimeError("Worker did not become ready before startup_timeout_seconds; GPU capacity may be unavailable")
 
