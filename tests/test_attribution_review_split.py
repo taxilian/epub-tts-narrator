@@ -51,7 +51,7 @@ class ScanSubdivisionTests(unittest.TestCase):
             self.assertEqual(jury["target_units"], scans[0]["target_units"])
             self.assertEqual(jury["context_units"], scans[0]["context_units"])
             self.assertEqual(len(jury["proposals"]), 8)
-            self.assertNotIn("review_notes", jury)
+            self.assertEqual(jury["review_notes"], "Scanner-only lead.")
             self.assertNotIn("subscans", jury)
         self.assertEqual(document, original)
         self.assertEqual(result["source"], original["source"])

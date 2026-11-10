@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from threading import Event, Lock
 
-from .attribution_review_prompts import LENSES, REVIEW_VERSION, SCAN, VOTE
+from .attribution_review_prompts import LENSES, REVIEW_VERSION, SCAN, SCAN_WITH_NOTES, VOTE, VOTE_WITH_NOTES
 from .contracts import has_assigned_speakers, readiness, validate_document
 from .inline_performance import project_segments
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
@@ -26,6 +26,9 @@ from .provider import ProviderError
 
 CONTEXT_CHARS = 12000
 MAX_SCAN_SPLIT_DEPTH = 2
+# Blocks on each side of a writable block whose current assignments accompany
+# operator notes, so a notes rule such as turn-taking can follow its neighbors.
+CONTEXT_ASSIGNMENT_BLOCKS = 4
 _TRUNCATED_OUTPUT = "The model output was truncated. Increase the output token limit or reduce the input."
 
 
@@ -174,14 +177,24 @@ def _restrict_batch(batch, target_ids, positions):
             "context_units": sorted(context.values(), key=lambda unit: (positions[unit["block_id"]], unit["start"]))}
 
 
+def _has_notes(review_notes):
+    return isinstance(review_notes, str) and bool(review_notes.strip())
+
+
+def _scan_prompt(payload):
+    """Notes-bearing scans use the operator-notes prompt; others keep SCAN bytes."""
+    return SCAN_WITH_NOTES if _has_notes(payload.get("review_notes")) else SCAN
+
+
 def _scan_split_marker(requests, payload):
     """Separate resume metadata, never a fabricated cached model response."""
     cache_dir = getattr(requests, "cache_dir", None)
     client = getattr(requests, "client", None)
     if cache_dir is None or client is None:
         return None, None, False
-    shared = request_cache_key(SCAN, payload)
-    legacy = legacy_request_cache_keys(client.identity, SCAN, payload)
+    prompt = _scan_prompt(payload)
+    shared = request_cache_key(prompt, payload)
+    legacy = legacy_request_cache_keys(client.identity, prompt, payload)
     paths = []
     for key in dict.fromkeys((shared, *legacy)):
         marker = {"version": 1, "reason": "model_output_truncated",
@@ -244,6 +257,25 @@ def _compact_segments(segments):
              "delivery": item["delivery"],
              **({"simultaneous_role_ids": [p["role_id"] for p in item["simultaneous_speakers"]]}
                 if "simultaneous_speakers" in item else {})} for item in segments]
+
+
+def _context_assignments(batch, originals, positions):
+    """Current speakers of spoken context lines near writable blocks, in source order."""
+    targets = [positions[unit["block_id"]] for unit in batch["target_units"]]
+    context = dict.fromkeys(unit["block_id"] for unit in batch["context_units"])
+    near = [block_id for block_id in context
+            if any(abs(positions[block_id] - target) <= CONTEXT_ASSIGNMENT_BLOCKS for target in targets)]
+    rows = []
+    for block_id in sorted(near, key=positions.__getitem__):
+        for item in originals[block_id]:
+            if item["kind"] not in {"dialogue", "thought", "letter"}:
+                continue
+            row = {"block_id": block_id, "start": item["start"], "end": item["end"], "kind": item["kind"],
+                   "role_id": item["role_id"], "basis": item["attribution"]["basis"]}
+            if "simultaneous_speakers" in item:
+                row["simultaneous_role_ids"] = [p["role_id"] for p in item["simultaneous_speakers"]]
+            rows.append(row)
+    return rows
 
 
 def _assignment_signature(segments):
@@ -361,6 +393,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
     with children processed sequentially inside the same worker.
     Optional target_block_ids limits writable blocks while retaining the other
     blocks in their normal review batches as read-only context.
+    Nonblank review_notes are operator guidance: scanner and jurors receive them
+    with nearby context assignments under the notes prompts, and they may decide
+    choices the source leaves open among existing roles (never override it).
     """
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("workers must be an integer from 1 to 5")
@@ -408,15 +443,23 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
     def report(message):
         with progress_lock:
             progress(message)
+    notes = _has_notes(review_notes)
     def shared(index, batch=None):
         batch = batches[index] if batch is None else batch
         ids = {unit["block_id"] for unit in batch["target_units"]}
-        return {"target_units": batch["target_units"], "context_units": batch["context_units"],
-                "final_cast": compact_cast, "performance_policy": policy,
-                "original_segments": _compact_segments([item for item in original["segments"] if item["block_id"] in ids]),
-                "review_version": REVIEW_VERSION, "source_fingerprint": source_hash,
-                "input_script_fingerprint": script_hash, "cast_fingerprint": cast_hash,
-                "batch_index": index}
+        payload = {"target_units": batch["target_units"], "context_units": batch["context_units"],
+                   "final_cast": compact_cast, "performance_policy": policy,
+                   "original_segments": _compact_segments([item for item in original["segments"] if item["block_id"] in ids]),
+                   "review_version": REVIEW_VERSION, "source_fingerprint": source_hash,
+                   "input_script_fingerprint": script_hash, "cast_fingerprint": cast_hash,
+                   "batch_index": index}
+        if notes:
+            # Operator notes may decide speakers the source leaves open; scanner
+            # and every juror see the same notes and neighboring assignments.
+            # Without notes the payload stays byte-identical to earlier runs.
+            payload.update(review_notes=review_notes,
+                           context_assignments=_context_assignments(batch, originals, positions))
+        return payload
     def scan(index, cancelled):
         def scan_part(batch, depth):
             if cancelled.is_set():
@@ -434,7 +477,7 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
             replayed_hint = split
             if not split:
                 try:
-                    found = requests.run(SCAN, payload, lambda response: _accept_scan(response, original, batch, originals),
+                    found = requests.run(_scan_prompt(payload), payload, lambda response: _accept_scan(response, original, batch, originals),
                                          cancelled=cancelled)
                 except ProviderError as error:
                     if (not can_split or error.status_code is not None or error.code is not None
@@ -475,7 +518,8 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
         scan_result, reviewer, lens = task
         index, proposals = scan_result["batch_index"], scan_result["corrections"]
         # Shared source/cast prefix precedes reviewer-specific fields for KV reuse.
-        # Scanner notes and other reviewers' answers are never sent to a juror.
+        # Scanner reasons and other reviewers' answers are never sent to a juror;
+        # operator review_notes, when present, are part of the shared prefix.
         payload = dict(shared(index), mode="attribution_review_vote",
                        proposals=[{"block_id": row["block_id"], "proposed_segments": row["proposed_segments"]} for row in proposals],
                        reviewer_id=reviewer, lens=lens)
@@ -499,7 +543,7 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                                    request_fingerprint=payload_hash, proposed_segments_fingerprint=fingerprint(proposal["proposed_segments"])))
             return result
         try:
-            votes = requests.run(VOTE, payload, accept, cancelled=cancelled)
+            votes = requests.run(VOTE_WITH_NOTES if notes else VOTE, payload, accept, cancelled=cancelled)
         except ValueError as exc:
             votes = [{"block_id": row["block_id"], "reviewer_id": reviewer, "lens": lens,
                       "verdict": "error", "reason": str(exc), "evidence": [],
@@ -589,7 +633,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                   "reviewed_blocks": len(selected) if selected is not None else len(source["blocks"]),
                   "total_source_blocks": len(source["blocks"]),
                   "source_batch_count": source_batch_count, "reviewed_batch_count": len(batches)},
-        "review_notes_fingerprint": fingerprint(review_notes), "acceptance": "three independent approve votes; exact source/cast validation",
+        "review_notes_fingerprint": fingerprint(review_notes),
+        **({"review_notes_policy": "operator notes decide speakers the source leaves open"} if notes else {}),
+        "acceptance": "three independent approve votes; exact source/cast validation",
         "scans": [{key: value for key, value in row.items() if key != "corrections"} | {"proposed_count": len(row["corrections"])} for row in scans],
         "changes": changes, "proposed_blocks": len(changes), "applied_blocks": len(replacements),
         "unresolved_blocks": len(changes) - len(replacements),

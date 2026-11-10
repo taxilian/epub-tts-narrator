@@ -92,7 +92,10 @@ class AttributionReviewTests(unittest.TestCase):
         juries = [row for row in requests.calls if row["mode"] == "attribution_review_vote"]
         self.assertEqual(len(juries), 3)
         self.assertEqual({row["reviewer_id"] for row in juries}, {row[0] for row in LENSES})
-        self.assertTrue(all("review_notes" not in row and "votes" not in row for row in juries))
+        # Jurors share the operator notes (they may decide open choices), never
+        # scanner reasons or peer votes.
+        self.assertTrue(all(row["review_notes"] == "Untrusted suggestion about b1" and "votes" not in row
+                            and "corrections" not in row and "reason" not in row["proposals"][0] for row in juries))
         for change in audit["changes"]:
             self.assertEqual(len(change["votes"]), 3)
             self.assertEqual(len({vote["request_fingerprint"] for vote in change["votes"]}), 3)
@@ -285,7 +288,7 @@ class AttributionReviewTests(unittest.TestCase):
                                  [f"b{i}" for i in range(1, 31) if i != 15])
                 self.assertEqual({row["block_id"] for row in scan["original_segments"]}, {"b15"})
                 self.assertEqual(len(juries), 3)
-                self.assertTrue(all("review_notes" not in row for row in juries))
+                self.assertTrue(all(row["review_notes"] == "Check this target independently." for row in juries))
                 audit = result["provenance"]["attribution_review"]
                 self.assertEqual(audit["applied_blocks"], 1)
                 self.assertEqual(audit["scope"], {"mode": "target_blocks", "target_block_ids": ["b15"],
