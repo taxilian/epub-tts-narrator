@@ -244,7 +244,8 @@ class PronunciationPlanTests(unittest.TestCase):
         chunk = chapter["chunks"][0]
         request = _paragraph_request(chunk, voices, identity, config)
         failure = RemoteChapterFailed("split", job_id="job", record={"selection": {"chapter": chapter}},
-                                      paragraph={"request_hash": digest(request), "chunk_id": chunk["chunk_id"]})
+                                      paragraph={"request_hash": digest(request), "chunk_id": chunk["chunk_id"],
+                                                 "chunk_hash": digest(chunk)})
         self.entries = [entry(value="MAR-ah")]
         _, replacement = _recover_failed_paragraph(
             self.bundle, config, plan, voices, {"engine": {"engine": identity}}, failure, lambda _: None)
