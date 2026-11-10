@@ -20,6 +20,8 @@ Ordinary capitalization variants share review and confirmed runtime choices via 
 `serve-chapters` runs the resumable job server in `chapter_server.py`.
 Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publish. `render` also accepts several books: `render_queue.py` dispatches ordered admission onto a chapter service or the configured worker pool. Local books share one engine/verifier and admit the next book when synthesis stays below total pool capacity on two reads, including while earlier books assemble; `workflow.render(on_synthesis_ready=...)` gates admission until voice setup releases its lease. Engines without declared parallel capacity stay sequential.
 
+`render` prepares missing or outdated pronunciation labels before `make_plan`, through `name_pronunciation_tags.prepare_name_pronunciations` in the single-book CLI and queue prologue. It loads analysis settings only when confirmed/inherited words have pending uses, reuses `tag_defined_names(document=bundle)` and its batch checkpoints, preserves person decisions, and leaves unsure uses blocked. `plan` stays read-only; no pronunciation guesses or new definitions run implicitly.
+
 ## STRUCTURE
 
 1. Orchestration/config: `workflow.py`, `cli.py`, `config.py`, `book_context.py`, `book_aliases.py`, `common.py`, diagnostics, locks, progress, payload-free render metrics, recovery identity.

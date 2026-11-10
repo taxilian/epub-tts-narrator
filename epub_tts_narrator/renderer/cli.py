@@ -525,6 +525,9 @@ def main(argv=None):
             report["renderer_source"] = str(Path(__file__).resolve())
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "render":
+            from .name_pronunciation_tags import prepare_name_pronunciations
+            prepare_name_pronunciations(bundle, config_path)
         plan = make_plan(bundle, config)
         if args.command == "plan":
             from .workflow import make_render_plan

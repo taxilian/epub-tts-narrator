@@ -184,10 +184,11 @@ def directory_document(directory):
     return _completed_directory(Path(directory).resolve())[0]
 
 
-def tag_defined_names(directory, config, *, client_factory=None, progress=print, requests=None):
+def tag_defined_names(directory, config, *, client_factory=None, progress=print, requests=None, document=None):
     """Label and tag every new use of each confirmed or inherited word in a published book.
 
-    Runs after ``analyze`` publishes, resumes, or updates a book. Labels bound
+    Runs after ``analyze`` publishes, resumes, or updates a book, or before
+    rendering with a validated bundle supplied as ``document``. Labels bound
     to unchanged block text and the current labelling version are kept; only
     new, edited or outdated uses reach the model, and each batch is
     checkpointed. A word with no possible homonym (not in the dictionary, every
@@ -199,7 +200,8 @@ def tag_defined_names(directory, config, *, client_factory=None, progress=print,
     definitions = effective_definitions(directory)
     if not definitions:
         return {}
-    document = directory_document(directory)
+    if document is None:
+        document = directory_document(directory)
     source = document["source"]
     parts = {definition["name"]: definition["parts_of_speech"] for _, definition in sorted(definitions.items())}
     states = {name: tagging_state(directory, source, name, parts[name]) for name in parts}

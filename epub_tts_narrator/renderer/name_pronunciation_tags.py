@@ -12,6 +12,16 @@ import re
 from ..pronunciations import WORD_PATTERN
 
 
+def prepare_name_pronunciations(bundle, config_path, *, notify=print):
+    from ..name_pronunciations import pending_tagging
+    pending = pending_tagging(bundle["directory"], bundle["source"])
+    if not any(state["pending"] for _, state in pending):
+        return
+    from ..config import load_config
+    from ..name_pronunciation_model import tag_defined_names
+    tag_defined_names(bundle["directory"], load_config(config_path), progress=notify, document=bundle)
+
+
 def named_pronunciation_snapshot(bundle):
     from ..name_pronunciations import render_snapshot
     return render_snapshot(bundle["directory"], bundle["source"])

@@ -281,7 +281,7 @@ def _validate_queue_invocation(books, args):
                                  "books, or render one book at a time")
 
 
-def _prepare_book(book, args):
+def _prepare_book(book, args, *, notify=print):
     """One book's fresh configuration dict, bundle, and plan.
 
     Mirrors the single-book render command's prologue. workflow preflight and
@@ -316,6 +316,8 @@ def _prepare_book(book, args):
     if not getattr(args, "chapters_only", False):
         from .book_metadata import check_publication_source
         check_publication_source(bundle, config)
+    from .name_pronunciation_tags import prepare_name_pronunciations
+    prepare_name_pronunciations(bundle, args.config, notify=notify)
     plan = make_plan(bundle, config)
     expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if expected_series and expected_series != config["voices"]["series_id"]:
@@ -470,7 +472,7 @@ def _run_remote_queue(books, args, config, *, notify, poll_seconds, join_seconds
 
         def thread_main():
             try:
-                bundle, book_config, plan = _prepare_book(run.book, args)
+                bundle, book_config, plan = _prepare_book(run.book, args, notify=book_notify)
                 run.config = book_config
                 if managed is not None:
                     # The managed service produces M4A chapters, exactly like
@@ -547,7 +549,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                 run = _BookRun(index, book)
                 book_notify = _prefixed(f"[{run.name}] ", notify)
                 try:
-                    bundle, config, plan = _prepare_book(book, args)
+                    bundle, config, plan = _prepare_book(book, args, notify=book_notify)
                     run.config = config
                     bundle = _ensure_missing_voices(bundle, config, plan, args)
                     if engine is None:
