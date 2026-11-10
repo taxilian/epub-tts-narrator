@@ -301,6 +301,7 @@ python3.11 -m epub_tts_narrator analyze book-two.epub \
 EPUB reading order follows the package spine. XHTML is parsed without scripts or network fetches. EPUB 2 and EPUB 3 package and spine structures are supported when their content is parseable XHTML.
 
 - Canonical text collapses display whitespace while retaining inline text and punctuation. Offsets refer to canonical text, not XML bytes.
+- Some conversions drop the space on one side of every italic or bold run ("They<i>do</i> need"). When a book glues at least 20 runs to a neighbouring word on one side and keeps a space at no more than 1 in 20 of them, extraction restores a space at every such glued edge on that side and warns with the count. Books that keep their spaces extract unchanged. In a repaired book, genuine mid-word emphasis is split too. An already analyzed book picks up the repair with `analyze EPUB -o BOOK`, which updates only the affected paragraphs.
 - Optional `inline_spans` preserve emphasis cues from semantic tags, explicit inline styles, and simple local stylesheet classes. Complex CSS is not inferred. Empty paragraphs mark the next block with `break_before: "blank_paragraph"`.
 - Navigation and non-linear spine items are excluded by default and recorded. `extraction.include_auxiliary = true` includes them when present in the spine. Other non-spine content is audited, not appended automatically.
 - Footnotes inside selected documents remain in DOM order. Separate footnote documents require deliberate inclusion. Notes are not relocated to references.

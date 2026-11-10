@@ -67,6 +67,33 @@ class EpubExtractionTests(unittest.TestCase):
         self.assertEqual({index for index in covered if not text[index].isspace()}, expected)
         return covered
 
+    def test_a_book_that_drops_every_space_before_its_italics_gets_them_back(self):
+        # The converter glued each italic word to the word before it, everywhere in the book.
+        glued = "".join(f'<p>"They<i>do</i> need line {n}," Anna said.</p>' for n in range(20))
+        self.make_book(documents={"OPS/one.xhtml": xhtml(
+            "<h1>Not<i>this</i> Time</h1>" + glued + "<p>An un<i>believ</i>able word.</p>")})
+        result = extract_epub(self.path)
+        texts = [block["text"] for block in result["blocks"]]
+        self.assertEqual(texts[1], '"They do need line 0," Anna said.')
+        self.assertEqual(result["chapters"][0]["title"], "Not this Time")
+        # The italic span still covers exactly the italic word.
+        block = result["blocks"][1]
+        self.assertEqual([block["text"][s["start"]:s["end"]] for s in block["inline_spans"]], ["do"])
+        # The rule is the book's, not the word's: mid-word emphasis in such a book is split too.
+        self.assertEqual(texts[-1], "An un believable word.")
+        self.assertTrue(any("restored 22 missing space" in warning for warning in result["warnings"]))
+
+    def test_a_book_that_keeps_its_spaces_is_extracted_unchanged(self):
+        spaced = "".join(f'<p>"They <i>do</i> need line {n}," Anna said.</p>' for n in range(40))
+        # A few glued runs (real mid-word emphasis, or stray typos) are never touched.
+        self.make_book(documents={"OPS/one.xhtml": xhtml(spaced + "<p>An un<i>believ</i>able word.</p>"
+                                                         + "<p>Too<i>few</i> to repair.</p>")})
+        result = extract_epub(self.path)
+        self.assertEqual(result["blocks"][-2]["text"], "An unbelievable word.")
+        self.assertEqual(result["blocks"][-1]["text"], "Toofew to repair.")
+        self.assertFalse(any("restored" in warning for warning in result["warnings"]))
+        self.assertNotIn("_chunks", result["blocks"][0])
+
     def test_spine_order_and_metadata_are_preserved(self):
         path = self.make_book(
             documents={"OPS/one.xhtml": xhtml("<h1>First</h1><p>One.</p>"),

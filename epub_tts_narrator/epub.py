@@ -208,6 +208,76 @@ def _normalized_spans(chunks: list[tuple[str, frozenset]]) -> tuple[str, list[di
     return text, sorted(spans, key=lambda span: (span["start"], span["end"], span["kind"], span["origin"]))
 
 
+_STYLED = {"emphasis", "strong"}
+# A side is repaired only when the book glues at least this many runs to a
+# neighbouring word and keeps a space at no more than 1 in 20 of them.
+_GLUED_MINIMUM, _GLUED_RATIO = 20, 20
+
+
+def _style_runs(chunks: list[tuple[str, frozenset]]) -> list[list]:
+    """Consecutive nonempty pieces grouped by whether they are italic or bold: [styled, text, first index]."""
+    runs: list[list] = []
+    for index, (text, cues) in enumerate(chunks):
+        if not text:
+            continue
+        styled = any(kind in _STYLED for kind, _ in cues)
+        if runs and runs[-1][0] == styled:
+            runs[-1][1] += text
+        else:
+            runs.append([styled, text, index])
+    return runs
+
+
+def _boundaries(chunks):
+    """(side, kind, insert index) for each italic/bold run edge: kind glued, spaced or other."""
+    runs = _style_runs(chunks)
+    for left, right in zip(runs, runs[1:]):
+        side = "before" if right[0] else "after"
+        a, b = left[1][-1], right[1][0]
+        kind = ("spaced" if a.isspace() or b.isspace() else
+                "glued" if a.isalnum() and b.isalnum() else "other")
+        yield side, kind, right[2]
+
+
+def _restore_boundary_spaces(rows: list[dict], warn) -> None:
+    """Restore the space a converter dropped at every italic/bold run edge on one side.
+
+    Some EPUB conversions drop the space before (or after) every italic run, so
+    "They <i>do</i> need" becomes "They<i>do</i> need" and the words run together.
+    Mid-word emphasis is rare in real books, so a side is repaired only when the
+    book as a whole glues runs to a word on that side and almost never keeps a
+    space there; a book that keeps its spaces is left exactly as it is.
+    """
+    counts = {(side, kind): 0 for side in ("before", "after") for kind in ("glued", "spaced", "other")}
+    for row in rows:
+        for side, kind, _ in _boundaries(row["_chunks"]):
+            counts[side, kind] += 1
+    sides = {side for side in ("before", "after")
+             if counts[side, "glued"] >= _GLUED_MINIMUM
+             and counts[side, "spaced"] * _GLUED_RATIO <= counts[side, "glued"]}
+    restored = 0
+    for row in rows:
+        chunks = row.pop("_chunks")
+        inserts = [index for side, kind, index in _boundaries(chunks) if side in sides and kind == "glued"]
+        if not inserts:
+            continue
+        for index in reversed(inserts):
+            # The space takes the unstyled side's cues, so emphasis spans keep their words only.
+            cues = chunks[index][1] if not any(kind in _STYLED for kind, _ in chunks[index][1]) else next(
+                (cues for text, cues in reversed(chunks[:index]) if text), frozenset())
+            chunks.insert(index, (" ", cues))
+        restored += len(inserts)
+        text, spans = _normalized_spans(chunks)
+        row["text"] = text
+        if spans:
+            row["inline_spans"] = spans
+        else:
+            row.pop("inline_spans", None)
+    if restored:
+        warn(f"The EPUB leaves out the space {' and '.join(sorted(sides))} its italic or bold runs; "
+             f"restored {restored} missing space(s) between words.")
+
+
 def _tag(element: ET.Element) -> str:
     return element.tag.rsplit("}", 1)[-1].lower() if isinstance(element.tag, str) else ""
 
@@ -337,6 +407,7 @@ def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[
     def flush(owner: ET.Element) -> None:
         nonlocal pending_blank
         text, spans = _normalized_spans(chunks)
+        chunks_copy = list(chunks)
         chunks.clear()
         if text:
             row = {"text": text, "source": {
@@ -346,6 +417,8 @@ def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[
             }}
             if spans:
                 row["inline_spans"] = spans
+            # Raw pieces, for the book-wide boundary-space repair in extract_epub.
+            row["_chunks"] = list(chunks_copy)
             if pending_blank:
                 row["break_before"] = "blank_paragraph"
                 pending_blank = False
@@ -520,6 +593,7 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
 
         chapters: list[dict] = []
         blocks: list[dict] = []
+        heading_ids: dict[str, str] = {}
         used_paths: set[str] = set()
         referenced_ids: set[str] = set()
         spine_entries = [node for node in spine if _tag(node) == "itemref"]
@@ -558,7 +632,8 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
             class_styles = _class_emphasis(root, href, read_stylesheet, warn)
             rows = _body_blocks(root, href, warn, class_styles)
             chapter_id = f"ch{len(chapters) + 1:04d}"
-            heading = next((row["text"] for row in rows if row["source"]["tag"] in _HEADINGS), None)
+            heading_row = next((row for row in rows if row["source"]["tag"] in _HEADINGS), None)
+            heading = heading_row["text"] if heading_row else None
             document_title = next((_normalize("".join(node.itertext())) for node in root.iter()
                                    if _tag(node) == "title"), "")
             chapter = {"id": chapter_id, "title": heading or document_title or PurePosixPath(href).stem,
@@ -567,6 +642,8 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
                 block_id = f"b{len(blocks) + 1:06d}"
                 blocks.append({"id": block_id, "chapter_id": chapter_id, **row})
                 chapter["block_ids"].append(block_id)
+                if row is heading_row:
+                    heading_ids[chapter_id] = block_id
             chapters.append(chapter)
             if not rows:
                 warn(f"{href}: spine document contains no extractable body text.")
@@ -574,6 +651,11 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
         for item_id, item in items.items():
             if item_id not in referenced_ids and item["path"] not in used_paths and item["type"] == _XHTML:
                 exclude(item["path"] or item["href"], "navigation document outside spine" if "nav" in item["properties"] else "document outside reading-order spine")
+        _restore_boundary_spaces(blocks, warn)
+        by_id = {block["id"]: block for block in blocks}
+        for chapter in chapters:
+            if chapter["id"] in heading_ids:
+                chapter["title"] = by_id[heading_ids[chapter["id"]]]["text"]
         if not blocks:
             raise ValueError("EPUB has no extractable text in the selected spine documents")
         warn("Text follows XHTML DOM order with normalized whitespace; CSS, scripts, and visual layout are not rendered.")
