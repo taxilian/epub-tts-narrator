@@ -241,11 +241,12 @@ class ClientHeartbeat:
     session identifier is a hash and never enters logs or notifications.
     """
 
-    def __init__(self, client, session_id, interval, *, timeout=5.0):
+    def __init__(self, client, session_id, interval, *, timeout=5.0, ttl=0.0):
         self.client = client
         self.session_id = session_id
         self.interval = interval
         self.timeout = timeout
+        self.ttl = float(ttl) if type(ttl) in (int, float) and ttl > 0 else 0.0
         self._stop = threading.Event()
         self._thread = None
         self.failure = None
@@ -255,17 +256,22 @@ class ClientHeartbeat:
         self._thread.start()
 
     def _beat(self):
-        consecutive_failures = 0
+        last_success = time.monotonic()
         while not self._stop.wait(self.interval):
             try:
                 self.client.request("POST", f"v1/sessions/{self.session_id}/heartbeat", timeout=self.timeout)
             except ChapterClientError as exc:
-                consecutive_failures += 1
-                if consecutive_failures < 2 and exc.status in {None, 502, 503, 504}:
-                    continue
-                self.failure = str(exc)
-                return
-            consecutive_failures = 0
+                if exc.status not in {None, 502, 503, 504}:
+                    self.failure = str(exc)
+                    return
+                # A transient failure only ends the session once the server
+                # could have expired it: the server keeps the session alive
+                # until its TTL passes without a beat.
+                if self.ttl and time.monotonic() - last_success >= self.ttl:
+                    self.failure = str(exc)
+                    return
+                continue
+            last_success = time.monotonic()
 
     def check(self):
         """Raise promptly in the foreground once the heartbeat thread died."""
@@ -1107,7 +1113,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
         client.request("POST", "v1/sessions", {"id": session_id})
         ttl = capabilities.get("session_ttl_seconds")
         interval = max(1.0, min(10.0, ttl / 6)) if type(ttl) in (int, float) and ttl > 0 else 5.0
-        heartbeat = ClientHeartbeat(client, session_id, interval)
+        heartbeat = ClientHeartbeat(client, session_id, interval, ttl=ttl if type(ttl) in (int, float) else 0)
         heartbeat.start()
         pending = {}
 

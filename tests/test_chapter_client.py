@@ -179,6 +179,37 @@ class DownloadTests(unittest.TestCase):
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
 class ChapterOrchestrationTests(unittest.TestCase):
+    def test_a_transient_heartbeat_failure_keeps_the_session_alive(self):
+        """One failed beat must not end a session the server still holds."""
+        from itertools import count
+        from epub_tts_narrator.renderer.chapter_client import ClientHeartbeat
+        client = Mock()
+        client.request.side_effect = [ChapterClientError("busy", status=503),
+                                      ChapterClientError("busy", status=503), None]
+        clock = count(step=0.5)
+        with patch("epub_tts_narrator.renderer.chapter_client.time.monotonic",
+                   side_effect=lambda: next(clock)):
+            heartbeat = ClientHeartbeat(client, "a" * 64, 0.01, ttl=30.0)
+            heartbeat.start()
+            heartbeat._thread.join(timeout=2)
+        self.assertIsNone(heartbeat.failure)
+        heartbeat.check()
+
+    def test_a_heartbeat_failure_past_the_session_ttl_ends_the_run(self):
+        from itertools import count
+        from epub_tts_narrator.renderer.chapter_client import ClientHeartbeat
+        client = Mock()
+        client.request.side_effect = ChapterClientError("busy", status=503)
+        clock = count(step=20.0)
+        with patch("epub_tts_narrator.renderer.chapter_client.time.monotonic",
+                   side_effect=lambda: next(clock)):
+            heartbeat = ClientHeartbeat(client, "a" * 64, 0.01, ttl=30.0)
+            heartbeat.start()
+            heartbeat._thread.join(timeout=2)
+        self.assertIsNotNone(heartbeat.failure)
+        with self.assertRaisesRegex(ChapterClientError, "heartbeat failed"):
+            heartbeat.check()
+
     def test_observing_another_clients_paused_job_does_not_wait_forever(self):
         client = Mock()
         client.settings = {"poll_seconds": 0}
