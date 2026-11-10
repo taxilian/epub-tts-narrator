@@ -9,7 +9,7 @@ import tempfile
 from .assembly import _check_encoded, _run
 from .book_metadata import check_book_tags, check_publication_source, metadata_arguments, publication_assets
 from .book_output import resolve_audiobook_filename
-from .common import digest, file_hash, read_json, write_json
+from .common import digest, file_hash, read_json, regular_file, write_json
 from .publication import published_book, publish
 
 
@@ -51,9 +51,12 @@ def refresh_metadata(bundle, config, *, notify=print):
             for name in previous["files_sha256"]:
                 if name in replaced or name.startswith("artwork/"):
                     continue
+                source = output / name
+                if source.is_symlink() or not source.is_file():
+                    continue
                 target = stage / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(output / name, target)
+                shutil.copyfile(source, target)
             book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
             notify(f"Updating {filename} cover and metadata; copying encoded audio unchanged.")
             _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
@@ -69,7 +72,11 @@ def refresh_metadata(bundle, config, *, notify=print):
             if _audio_payload_hash(book_path, ffmpeg) != _audio_payload_hash(staged_book, ffmpeg):
                 raise ValueError("Metadata refresh changed the encoded audio; previous audiobook preserved.")
             checksum = file_hash(staged_book)
-            sync = read_json(output / "sync.json")
+            try:
+                sync = read_json(regular_file(output / "sync.json"))
+            except (OSError, ValueError) as exc:
+                raise ValueError("The published sync.json is missing or unreadable; render the book to "
+                                 "recreate its timing before refreshing metadata.") from exc
             sync["audio_file"] = filename
             sync["audio_sha256"] = checksum
             write_json(stage / "sync.json", sync)

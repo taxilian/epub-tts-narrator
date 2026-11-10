@@ -1,4 +1,4 @@
-"""Replace only intact, renderer-owned books after their replacement is ready."""
+"""Replace only renderer-owned books after their replacement is ready."""
 
 from __future__ import annotations
 
@@ -8,13 +8,21 @@ import re
 import shutil
 import tempfile
 
-from .book_output import resolve_audiobook_filename
+from .book_output import (LEGACY_AUDIOBOOK_FILENAME, adopted_audiobook_filename,
+                           recorded_audiobook_filename)
 from .common import digest, file_hash, read_json, regular_file
 from .run_locks import acquire_directory_lock
 
 
 def published_book(directory, book_id):
-    """Validate ownership and the entire published inventory before any replacement."""
+    """Validate that a directory is this book's completed, renderer-owned publication.
+
+    Published files are a derived artifact: the bundle, the render work, and
+    the current configuration decide their contents, and the next publication
+    recreates every one of them. A deleted, renamed, or modified published
+    file therefore never blocks a render. Only ownership and foreign files the
+    renderer does not own are refused.
+    """
     directory = Path(directory)
     if not directory.exists() and not directory.is_symlink():
         return None
@@ -29,9 +37,9 @@ def published_book(directory, book_id):
         audio = record.get("audio")
         if not isinstance(audio, dict):
             raise ValueError("published audio manifest is invalid")
-        filename = resolve_audiobook_filename(previous_audio=audio, output_dir=directory)
+        recorded = recorded_audiobook_filename(audio) or LEGACY_AUDIOBOOK_FILENAME
         required = {"source.json", "cast.json", "verification.json", "audio-manifest.json",
-                    "sync.json", filename}
+                    "sync.json", recorded}
         if not isinstance(files, dict) or not required.issubset(files):
             raise ValueError("published file inventory is incomplete")
         expected_dirs = set()
@@ -42,6 +50,11 @@ def published_book(directory, book_id):
                     or not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum)):
                 raise ValueError("invalid published file inventory")
             expected_dirs.update(parent.as_posix() for parent in path.parents if parent != PurePosixPath("."))
+        expected = set(files)
+        adopted = adopted_audiobook_filename(directory, audio)
+        if adopted is not None:
+            expected.discard(recorded)
+            expected.add(adopted)
         found = set()
         for path in directory.rglob("*"):
             name = path.relative_to(directory).as_posix()
@@ -58,14 +71,12 @@ def published_book(directory, book_id):
                 found.add(name)
             else:
                 raise ValueError(f"output contains a nonregular file: {name}")
-        if found != set(files) | {"render.json"}:
-            raise ValueError("published files are missing or untracked files were added")
-        for name, checksum in files.items():
-            if file_hash(regular_file(directory / name)) != checksum:
-                raise ValueError(f"published file was modified: {name}")
+        untracked = found - expected - {"render.json"}
+        if untracked:
+            raise ValueError(f"output contains untracked files: {sorted(untracked)[0]}")
         sync = read_json(regular_file(directory / "sync.json"))
         if (not isinstance(sync, dict)
-                or sync.get("audio_file") is not None and sync["audio_file"] != filename):
+                or sync.get("audio_file") is not None and sync["audio_file"] != recorded):
             raise ValueError("published audiobook filename differs between audio-manifest.json and sync.json")
         source = read_json(regular_file(directory / "source.json"))
         if (not isinstance(source, dict) or not isinstance(source.get("book"), dict)
@@ -84,7 +95,27 @@ def published_book(directory, book_id):
         return record
     except (ValueError, OSError, TypeError) as exc:
         raise ValueError(f"Output already exists and cannot be safely updated: {directory}: {exc}. "
-                         "Restore the published files or choose another output directory.") from exc
+                         "Fix the reported problem or choose another output directory.") from exc
+
+
+def published_gaps(directory, record):
+    """Return the published files that no longer satisfy their publication.
+
+    Missing and modified files are recreated by the next publication, so a
+    published book is reused only when nothing is missing or changed.
+    """
+    directory = Path(directory)
+    files = record.get("files_sha256") if isinstance(record, dict) else None
+    missing, modified = [], []
+    if not isinstance(files, dict):
+        return missing, modified
+    for name, checksum in sorted(files.items()):
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            missing.append(name)
+        elif file_hash(path) != checksum:
+            modified.append(name)
+    return missing, modified
 
 
 def check_selection(previous, chapter_ids, *, partial):

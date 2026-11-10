@@ -479,17 +479,16 @@ class IncrementalRendererTests(unittest.TestCase):
         for number in (1, 2, 3):
             self.assertEqual(self.chapter_record(number)[1]["identity"]["total_chapters"], 3)
 
-    def test_modified_published_audio_is_not_silently_overwritten(self):
+    def test_modified_published_audio_is_recreated_by_the_next_render(self):
         self.run_render()
         book = self.book_path()
         book.write_bytes(book.read_bytes() + b"User changes")
-        before = self.output_bytes()
-        counts = self.model_counts()
         self.correct_speaker()
-        with self.assertRaises(RenderBlocked):
-            self.run_render()
-        self.assertEqual(counts, self.model_counts())
-        self.assertEqual(before, self.output_bytes())
+        result = self.run_render()
+        # Then the edited file does not block the render and the publication is recreated.
+        self.assertEqual(result["status"], "complete")
+        self.assertNotIn(b"User changes", book.read_bytes())
+        self.assertEqual(file_hash(book), result["files_sha256"][book.name])
 
 
 if __name__ == "__main__":

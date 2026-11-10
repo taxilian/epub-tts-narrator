@@ -8,6 +8,8 @@ from pathlib import Path
 import unicodedata
 from typing import Final, TypeAlias
 
+from .common import file_hash
+
 
 JsonValue: TypeAlias = str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 LEGACY_AUDIOBOOK_FILENAME: Final = "book.m4b"
@@ -71,6 +73,51 @@ def default_audiobook_filename(book: Mapping[str, JsonValue]) -> str:
     return validate_audiobook_filename(stem + _SUFFIX)
 
 
+def recorded_audiobook_filename(previous_audio: Mapping[str, JsonValue] | None) -> str | None:
+    """Return the exact basename a previous publication recorded, without touching the disk."""
+    if not isinstance(previous_audio, Mapping):
+        raise ValueError("The previous audio manifest must be an object with audio.audiobook.path")
+    audiobook = previous_audio.get("audiobook", {})
+    if not isinstance(audiobook, Mapping):
+        raise _filename_error()
+    recorded = audiobook.get("path")
+    if recorded is None:
+        return None
+    return validate_audiobook_filename(recorded)
+
+
+def adopted_audiobook_filename(output_dir: str | Path,
+                               previous_audio: Mapping[str, JsonValue] | None) -> str | None:
+    """Return the on-disk basename of the recorded audiobook when it was renamed.
+
+    A published audiobook can be renamed outside the renderer. When the
+    recorded file is gone and exactly one other audiobook file carries the
+    recorded bytes, that file is the same publication under a new name, so the
+    publication follows the file instead of renaming it back.
+    """
+    if not isinstance(previous_audio, Mapping):
+        return None
+    audiobook = previous_audio.get("audiobook")
+    if not isinstance(audiobook, Mapping):
+        return None
+    recorded = audiobook.get("path")
+    checksum = audiobook.get("sha256")
+    if not isinstance(recorded, str) or not isinstance(checksum, str):
+        return None
+    directory = Path(output_dir)
+    recorded_path = directory / recorded
+    if recorded_path.is_file() and not recorded_path.is_symlink():
+        return None
+    matches = [path for path in sorted(directory.glob("*.m4b"))
+               if path.is_file() and not path.is_symlink() and file_hash(path) == checksum]
+    if len(matches) != 1:
+        return None
+    try:
+        return validate_audiobook_filename(matches[0].name)
+    except ValueError:
+        return None
+
+
 def resolve_audiobook_filename(book: Mapping[str, JsonValue] | None = None,
                                previous_audio: Mapping[str, JsonValue] | None = None,
                                output_dir: str | Path | None = None) -> str:
@@ -79,18 +126,21 @@ def resolve_audiobook_filename(book: Mapping[str, JsonValue] | None = None,
         if book is None:
             raise ValueError("Book metadata is required when no previous audio manifest exists")
         return default_audiobook_filename(book)
-    if not isinstance(previous_audio, dict):
-        raise ValueError("The previous audio manifest must be an object with audio.audiobook.path")
-    audiobook = previous_audio.get("audiobook", {})
-    if not isinstance(audiobook, dict):
-        raise _filename_error()
-    recorded = audiobook.get("path")
+    recorded = recorded_audiobook_filename(previous_audio)
     if recorded is not None:
-        return validate_audiobook_filename(recorded)
+        if output_dir is not None:
+            adopted = adopted_audiobook_filename(output_dir, previous_audio)
+            if adopted is not None:
+                return adopted
+        return recorded
     if output_dir is not None:
         legacy = Path(output_dir) / LEGACY_AUDIOBOOK_FILENAME
         if legacy.is_symlink():
             raise ValueError("Legacy audiobook must be a regular, nonsymlink file: book.m4b")
         if legacy.is_file():
             return LEGACY_AUDIOBOOK_FILENAME
+        # A deleted legacy book is recreated under a descriptive name.
+        book_metadata = previous_audio.get("book")
+        if isinstance(book_metadata, Mapping):
+            return default_audiobook_filename(book_metadata)
     raise ValueError("audio.audiobook.path is missing and no intact legacy book.m4b exists; restore the recorded output name or the legacy file before updating this book.")

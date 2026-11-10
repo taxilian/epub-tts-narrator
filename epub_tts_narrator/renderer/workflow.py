@@ -1911,10 +1911,15 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
             unchanged = previous.get("publication_key") == publication_key(
                 bundle, config, plan, voices, rendered, acceptance, previous["engine"], verifier_identity)
     if unchanged:
-        filename = resolve_audiobook_filename(previous_audio=previous["audio"], output_dir=output)
-        notify(f"Audiobook unchanged; reusing {output / filename}")
-        _publish_chapter_links(config, rendered, notify=notify)
-        return previous
+        from .publication import published_gaps
+        missing, modified = published_gaps(output, previous)
+        if not missing and not modified:
+            filename = resolve_audiobook_filename(previous_audio=previous["audio"], output_dir=output)
+            notify(f"Audiobook unchanged; reusing {output / filename}")
+            _publish_chapter_links(config, rendered, notify=notify)
+            return previous
+        notify(f"Published audiobook files are missing or changed ({len(missing)} missing, "
+               f"{len(modified)} changed); recreating the audiobook.")
     with tempfile.TemporaryDirectory(prefix=".audiobook-", dir=output.parent) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()

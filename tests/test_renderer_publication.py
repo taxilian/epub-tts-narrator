@@ -11,9 +11,11 @@ from unittest.mock import patch
 
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.assembly import package_audio
+from epub_tts_narrator.renderer.book_output import resolve_audiobook_filename
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
-from epub_tts_narrator.renderer.publication import check_selection, published_book, publish
+from epub_tts_narrator.renderer.publication import (check_selection, published_book, published_gaps,
+                                                   publish)
 from epub_tts_narrator.renderer.workflow import render
 from audition_fixtures import prepare_document
 from shared_fixtures import rebind_audiobook_filename, renderer_config
@@ -29,9 +31,10 @@ def managed_output(directory, *, chapter_ids=("chapter-0001", "chapter-0002"), p
     write_json(directory / "source.json", {"book": book})
     write_json(directory / "cast.json", {})
     write_json(directory / "verification.json", [])
+    (directory / "book.m4b").write_bytes(b"A publication test fixture, not audio.")
+    audio["audiobook"] = {"path": "book.m4b", "sha256": file_hash(directory / "book.m4b")}
     write_json(directory / "audio-manifest.json", audio)
     write_json(directory / "sync.json", {})
-    (directory / "book.m4b").write_bytes(b"A publication test fixture, not audio.")
     result = {
         "format": "audiobook-render", "version": 1, "status": "complete",
         "partial_book": partial, "audio": audio,
@@ -190,6 +193,88 @@ class PublicationSafetyTests(unittest.TestCase):
                 write_json(self.output / "render.json", malformed)
                 with self.assertRaises(ValueError):
                     published_book(self.output, "fixture-book")
+
+    def test_deleted_published_files_are_recreated_instead_of_blocking_the_render(self):
+        # Given a publication whose published files were deleted.
+        (self.output / "book.m4b").unlink()
+        (self.output / "cast.json").unlink()
+
+        # When validating publication ownership.
+        published = published_book(self.output, "fixture-book")
+
+        # Then the deleted files are reported for recreation instead of refused.
+        self.assertEqual(published, self.previous)
+        missing, modified = published_gaps(self.output, published)
+        self.assertEqual(missing, ["book.m4b", "cast.json"])
+        self.assertEqual(modified, [])
+
+    def test_modified_published_file_is_recreated_instead_of_blocking_the_render(self):
+        # Given a published file whose content changed after publication.
+        (self.output / "cast.json").write_text("{}")
+
+        # When validating publication ownership.
+        published = published_book(self.output, "fixture-book")
+
+        # Then the changed file is reported for recreation instead of refused.
+        missing, modified = published_gaps(self.output, published)
+        self.assertEqual(missing, [])
+        self.assertEqual(modified, ["cast.json"])
+
+    def test_renamed_published_audiobook_keeps_its_name_and_is_not_untracked(self):
+        # Given a published audiobook that was renamed outside the renderer.
+        renamed = self.output / "Quest Academy.m4b"
+        (self.output / "book.m4b").rename(renamed)
+
+        # When validating publication ownership and resolving the output name.
+        published = published_book(self.output, "fixture-book")
+
+        # Then the renamed file is the owned audiobook and keeps its name.
+        self.assertEqual(published, self.previous)
+        self.assertEqual(resolve_audiobook_filename(previous_audio=published["audio"],
+                                                     output_dir=self.output), "Quest Academy.m4b")
+
+    def test_foreign_audiobook_file_is_not_adopted_as_the_published_book(self):
+        # Given an unrelated audiobook file beside the published one.
+        (self.output / "other.m4b").write_bytes(b"Not the published audiobook.")
+
+        # When validating publication ownership, then the foreign file still blocks replacement.
+        with self.assertRaisesRegex(ValueError, "untracked"):
+            published_book(self.output, "fixture-book")
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
+class RecreatedPublicationTests(unittest.TestCase):
+    def test_missing_published_audiobook_is_recreated_instead_of_reused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = prepare_document(chapter_document([
+                ("CHAPTER ONE", "heading", "p"),
+                ("The lantern shone above the quiet harbor.", "narration", "p"),
+            ]))
+            export_bundle(document, root / "bundle")
+            bundle = load_bundle(root / "bundle")
+            config = renderer_config(root, series_id="recreate-fixture")
+            engine = FixtureEngine({})
+            verifier = FixtureVerifier(engine.fixture_transcripts)
+
+            def run():
+                return render(bundle, config, engine, verifier, notify=lambda _: None)
+
+            run()
+            output = root / "output"
+            record = read_json(output / "render.json")
+            audiobook = next(name for name in record["files_sha256"] if name.endswith(".m4b"))
+            (output / audiobook).unlink()
+            speech_calls = len(engine.speech_calls)
+
+            with patch("epub_tts_narrator.renderer.workflow.package_audio", wraps=package_audio) as package:
+                run()
+
+            # Then the audiobook is packaged again and the deleted file exists.
+            self.assertEqual(package.call_count, 1)
+            self.assertTrue((output / audiobook).is_file())
+            # And the verified speech is reused instead of synthesized again.
+            self.assertEqual(len(engine.speech_calls), speech_calls)
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
