@@ -293,6 +293,30 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(preview["bytes_removed"], result["bytes_removed"])
         self.assertEqual(cleanup_work(self.work)["files_removed"], 0)
 
+    def test_space_estimate_excludes_audio_with_a_retained_hard_link(self):
+        directory, accepted = self.take()
+        raw = directory / "attempt-001-raw.wav"
+        raw.unlink()
+        normalized = directory / accepted["audio_file"]
+        raw.hardlink_to(normalized)
+        preview = cleanup_work(self.work, dry_run=True)
+        self.assertEqual(preview["bytes_removed"], normalized.stat().st_size)
+        self.assertEqual(preview["estimated_bytes_freed"], 0)
+        result = cleanup_work(self.work)
+        self.assertEqual(result["estimated_bytes_freed"], 0)
+        self.assertEqual(file_hash(normalized), accepted["audio_sha256"])
+
+    def test_space_estimate_counts_all_removed_hard_links_only_once(self):
+        directory, _ = self.take()
+        raw = directory / "attempt-001-raw.wav"
+        (directory / "attempt-001-recovery-raw.wav").hardlink_to(raw)
+        allocation = raw.stat().st_blocks * 512
+        preview = cleanup_work(self.work, dry_run=True)
+        self.assertEqual(preview["bytes_removed"], 2 * raw.stat().st_size)
+        self.assertEqual(preview["estimated_bytes_freed"], allocation)
+        result = cleanup_work(self.work)
+        self.assertEqual(result["estimated_bytes_freed"], allocation)
+
     def test_never_rendered_work_is_noop_without_creating_it(self):
         missing = self.work / "not-yet-rendered"
         for discard in (False, True):

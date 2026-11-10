@@ -444,7 +444,9 @@ def main(argv=None):
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             action = "Would remove" if args.dry_run else "Removed"
             print(f"{action} {result['files_removed']} file(s), "
-                  f"{result['bytes_removed'] / (1024 * 1024):.1f} MiB.")
+                  f"{result['bytes_removed'] / (1024 * 1024):.1f} MiB of file data.")
+            estimate = "reclaimable" if args.dry_run else "freed"
+            print(f"Estimated {estimate} disk space: {result['estimated_bytes_freed'] / (1024 * 1024):.1f} MiB.")
             print("Voice samples, casting candidates, and published audiobooks are preserved.")
             if args.discard_render_cache:
                 print("Discarding the render cache removes speech resumability; future rendering will generate speech again.")

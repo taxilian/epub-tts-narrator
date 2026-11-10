@@ -57,7 +57,7 @@ Normal flow: plan, cast or bind voices, render chapters, verify, assemble, publi
 | Overlap Gemini bulk casting jobs | `casting_batch.py`; `CastingSession.ensure_ready_many` / `regenerate_many` | One outer store lease, isolated canonical workers, one verifier thread; `casting.gemini_concurrency` defaults to 4 (1–8) |
 | Run or debug remote chapter jobs | `chapter_client.py`, `chapter_server.py`, `chapter_protocol.py` |
 | Cache, lock, or diagnose a run | `common.py`, `chapter_cache.py`, `run_locks.py`, `diagnostics.py` |
-| Clean obsolete render audio | `cleanup.py`, `workflow.cleanup_render_work`, `cli.py` | Two render locks; remove unreferenced complete chapter versions, verified raw duplicates, and strictly recognized orphan `.chapter-…/ready` assembly staging; retain unknown layouts/invalid staging records, voices, current checkpoint chapters, and publications; dry-run exact inventory |
+| Clean obsolete render audio | `cleanup.py`, `workflow.cleanup_render_work`, `cli.py` | Two render locks; remove unreferenced complete chapter versions, verified raw duplicates, and strictly recognized orphan `.chapter-…/ready` assembly staging; retain unknown layouts/invalid staging records, voices, current checkpoint chapters, and publications; dry-run exact inventory plus hard-link-aware `estimated_bytes_freed` |
 | Assemble and publish an audiobook | `assembly.py`, `publication.py`, `loudness.py`, `pacing.py` |
 | Optional output censorship | `censorship.py`, `censorship_runtime.py`, `censorship_alignment.py`; source-selected masks, original-audio alignment, reusable chapter assembly |
 | Operate Runpod workers | `runpod.py`, `runpod_api.py`, `runpod_config.py`; GPU selection policy in `runpod_gpu.py` |

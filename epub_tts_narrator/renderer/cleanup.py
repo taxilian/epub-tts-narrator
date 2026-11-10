@@ -82,10 +82,16 @@ class _Plan:
     def finish(self, *, dry_run, preserves_resumability=True):
         # Preflight the entire operation before deleting anything. The caller's
         # locks prevent normal writers; stat checks also catch unexpected edits.
+        allocations = {}
         for path, expected in self.checked.items():
             actual = _file(path)
             if (actual.st_dev, actual.st_ino, actual.st_size, actual.st_mtime_ns) != expected:
                 raise ValueError(f"A cleanup input changed during inspection: {path}")
+            if path in self.files:
+                entry = allocations.setdefault((actual.st_dev, actual.st_ino),
+                                               {"removed_links": 0, "links": actual.st_nlink,
+                                                "bytes": actual.st_blocks * 512})
+                entry["removed_links"] += 1
         for path in self.directories:
             _directory(path)
         categories = {}
@@ -96,6 +102,8 @@ class _Plan:
         result = {"dry_run": dry_run, "preserves_resumability": preserves_resumability,
                   "files_removed": len(self.files),
                   "bytes_removed": sum(item["bytes"] for item in self.files.values()),
+                  "estimated_bytes_freed": sum(entry["bytes"] for entry in allocations.values()
+                                              if entry["removed_links"] == entry["links"]),
                   "directories_removed": len(self.directories), "categories": categories,
                   "files": sorted(self.files.values(), key=lambda item: item["path"])}
         if not dry_run:
