@@ -77,6 +77,23 @@ def make_epub(path, title, identifier, body):
     return path
 
 
+def repack_epub(epub, path):
+    """Rewrite an EPUB with different archive bytes and identical documents.
+
+    A rebuilt or re-exported edition of the same book changes container bytes
+    (and with them the EPUB's SHA-256) without changing its extracted content.
+    """
+    with zipfile.ZipFile(epub) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in entries:
+            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, data)
+    return path
+
+
 def make_serial_epub(path, title, identifier, chapters):
     """An EPUB with one spine document per (heading, paragraphs) chapter.
 

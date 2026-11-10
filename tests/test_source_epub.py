@@ -18,6 +18,7 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.source_epub import SOURCE_EPUB_HINT, remember_source_epub, source_epub_hint
+from shared_fixtures import make_serial_epub, repack_epub
 from test_series import fixture
 
 
@@ -86,6 +87,31 @@ class SourceEpubTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.publish()
         self.assertFalse(self.directory.exists())
+
+    def test_remember_accepts_repacked_or_corrected_revisions_of_the_saved_source(self):
+        from epub_tts_narrator.epub import extract_epub
+        self.directory.mkdir()
+        original = make_serial_epub(self.root / "serial.epub", "The Serial", "download-1",
+                                    [("One", ["Mara said, “Hello.”", "They left."]),
+                                     ("Two", ["The lamp was lit.", "Mara watched the water."])])
+        source = extract_epub(original)
+        book_id = source["book"]["id"]
+        repacked = repack_epub(original, self.root / "serial-repacked.epub")
+        self.assertNotEqual(hashlib.sha256(repacked.read_bytes()).hexdigest(), book_id)
+        remember_source_epub(self.directory, repacked, book_id, saved_source=source)
+        self.assertEqual(source_epub_hint(self.directory, book_id), repacked.resolve())
+        corrected = make_serial_epub(self.root / "serial-corrected.epub", "The Serial", "download-1",
+                                     [("One", ["Mara said, “Hello.”", "They left."]),
+                                      ("Two", ["The lamp was lit.", "Mara watched the shore."])])
+        remember_source_epub(self.directory, corrected, book_id, saved_source=source)
+        self.assertEqual(source_epub_hint(self.directory, book_id), corrected.resolve())
+        unrelated = make_serial_epub(self.root / "unrelated.epub", "Other", "other",
+                                     [("One", ["Something entirely different.", "Nothing matches."]),
+                                      ("Two", ["Still nothing.", "The end."])])
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            remember_source_epub(self.directory, unrelated, book_id, saved_source=source)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            remember_source_epub(self.directory, unrelated, book_id)
 
     def test_hint_symlink_and_nonregular_file_are_rejected(self):
         self.publish(hint=False)

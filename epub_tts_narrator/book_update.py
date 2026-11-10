@@ -932,6 +932,27 @@ def accepted_epub_digests(document_or_manifest):
     return accepted
 
 
+def same_book_epub(saved_source, epub):
+    """True when ``epub`` extracts to the same book as the saved source.
+
+    Uses the updater's own comparison: the same extraction settings, no
+    removed, inserted or reordered chapters, and not a wholesale rewrite.
+    A repacked or typo-corrected revision of the analyzed book qualifies;
+    a genuinely different book does not, and neither does an unreadable one.
+    The candidate is re-extracted with the saved source's supported
+    auxiliary-spine setting; any other policy difference still refuses.
+    """
+    from .epub import extract_epub
+    policy = saved_source.get("extraction_policy")
+    include_auxiliary = isinstance(policy, str) and any(
+        part.strip() == "auxiliary-spine=include" for part in policy.split(";"))
+    try:
+        compare_sources(saved_source, extract_epub(epub, include_auxiliary=include_auxiliary))
+    except (ValueError, OSError, KeyError):
+        return False
+    return True
+
+
 def epub_digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()

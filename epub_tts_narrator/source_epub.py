@@ -43,13 +43,15 @@ def source_epub_hint(directory, book_id) -> Path | None:
     return Path(record["path"])
 
 
-def remember_source_epub(directory, epub, book_id, *, epub_sha256=None) -> None:
+def remember_source_epub(directory, epub, book_id, *, epub_sha256=None, saved_source=None) -> None:
     """Atomically remember an explicitly supplied, checksum-matching EPUB.
 
     The hint is local metadata, deliberately excluded from the portable source
     fingerprint, analyzer caches, and chapter/voice generation identities. A
     book updated with appended chapters keeps its original ``book_id``; its
-    latest EPUB is accepted by the SHA-256 recorded for that update.
+    latest EPUB is accepted by the SHA-256 recorded for that update. An EPUB
+    that extracts to the same book as ``saved_source`` is accepted too, so a
+    repacked or corrected revision can be remembered at its current location.
     """
     epub = Path(epub).expanduser().resolve()
     info = epub.stat()
@@ -57,9 +59,17 @@ def remember_source_epub(directory, epub, book_id, *, epub_sha256=None) -> None:
         raise ValueError("Source EPUB must be a regular file within the archive size limit")
     with epub.open("rb") as stream:
         checksum = hashlib.file_digest(stream, "sha256").hexdigest()
-    if checksum not in {book_id, epub_sha256}:
+    if (checksum not in {book_id, epub_sha256}
+            and not _extracts_saved_book(saved_source, epub, book_id)):
         raise ValueError("Source EPUB does not match the analyzed book ID")
     _write_source_epub_hint(directory, epub, book_id)
+
+
+def _extracts_saved_book(saved_source, epub, book_id) -> bool:
+    from .book_update import same_book_epub
+    return (isinstance(saved_source, dict)
+            and saved_source.get("book", {}).get("id") == book_id
+            and same_book_epub(saved_source, epub))
 
 
 def copy_source_epub_hint(source_directory, destination_directory, book_id) -> bool:

@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from epub_tts_narrator.book_update import compare_sources
 from epub_tts_narrator.cli import main, read_json, source_from
@@ -23,11 +24,39 @@ CHAPTER_ONE = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.”",
 CHAPTER_TWO = ("Two", ["Mara said, “The lamp is lit.”"])
 CHAPTER_THREE = ("Three", ["Tobin the ferryman called out, “Wait for me.”",
                            "Mara, the lighthouse keeper, answered, “Hurry.”"])
+# A later download of the same chapter with one typo corrected in place.
+CORRECTED_THREE = ("Three", ["Tobin the ferryman called out, “Wait for me, please.”",
+                             "Mara, the lighthouse keeper, answered, “Hurry.”"])
 LONG_ONE = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.”", "They left.", "The night was cold.",
                     "Waves broke on the rocks.", "Mara said, “Bring the oil.”", "Morning came.",
                     "The tide turned.", "Boats came home."])
 # Source context, beyond the shared name, that links a returning character.
 CONTEXT = {"Mara": "Mara, the lighthouse keeper", "Tobin": "Tobin the ferryman"}
+
+
+def with_auxiliary_chapter(epub):
+    """Rewrite a serial fixture with one non-linear spine chapter appended.
+
+    The chapter belongs to the book only under extraction.include_auxiliary,
+    which is exactly the saved policy content acceptance must mirror.
+    """
+    with zipfile.ZipFile(epub) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(epub, "w") as archive:
+        for name, data in entries:
+            if name == "content.opf":
+                text = data.decode("utf-8")
+                text = text.replace(
+                    "</manifest>",
+                    '<item id="aux" href="auxiliary.xhtml" media-type="application/xhtml+xml"/></manifest>')
+                text = text.replace("</spine>", '<itemref idref="aux" linear="no"/></spine>')
+                data = text.encode("utf-8")
+            archive.writestr(name, data)
+        archive.writestr(
+            "auxiliary.xhtml",
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Notes</title></head>'
+            "<body><h1>Notes</h1><p>The keeper's log recorded the night.</p></body></html>")
+    return epub
 
 
 class SerialClient(FakeClient):
@@ -416,6 +445,150 @@ class BookUpdateTests(unittest.TestCase):
         unrelated = self.epub("unrelated", [CHAPTER_THREE], "other")
         self.assertEqual(source_epub_digest(bundle, unrelated), bundle["source"]["book"]["id"])
         self.assertEqual(source_epub_hint(self.book, bundle["source"]["book"]["id"]), updated.resolve())
+
+    def test_repacked_or_corrected_update_epub_still_supplies_cover_and_metadata(self):
+        from epub_tts_narrator.renderer.book_metadata import publication_assets, source_epub_digest
+        from epub_tts_narrator.renderer.config import DEFAULTS
+        from shared_fixtures import repack_epub
+        self.seed_long()
+        updated = self.epub("serial-v2", [LONG_ONE, CHAPTER_TWO, CHAPTER_THREE], "download-2")
+        self.assertEqual(self.analyze(updated)[0], 0)
+        bundle = load_bundle(self.book)
+        book_id = bundle["source"]["book"]["id"]
+        updated_digest = hashlib.sha256(updated.read_bytes()).hexdigest()
+
+        # A rebuilt edition of the updated download: different archive bytes,
+        # identical extracted book.
+        repacked = repack_epub(updated, self.root / "serial-v2-repacked.epub")
+        repacked_digest = hashlib.sha256(repacked.read_bytes()).hexdigest()
+        self.assertNotEqual(repacked_digest, updated_digest)
+        self.assertEqual(source_epub_digest(bundle, repacked), repacked_digest)
+
+        # A typo-corrected revision at the remembered location is the same book:
+        # one edited paragraph inside an otherwise unchanged chapter.
+        paragraphs = list(LONG_ONE[1])
+        paragraphs[4] = "Mara said, “Bring the lamp oil.”"
+        corrected = self.epub("serial-v2-corrected",
+                              [("One", paragraphs), CHAPTER_TWO, CHAPTER_THREE], "download-2")
+        corrected_digest = hashlib.sha256(corrected.read_bytes()).hexdigest()
+        self.assertNotIn(corrected_digest, {book_id, updated_digest})
+        self.assertEqual(source_epub_digest(bundle, corrected), corrected_digest)
+
+        # Publication uses the revision's metadata under the saved book identity.
+        config = deepcopy(DEFAULTS)
+        config["render"].update(epub=str(corrected), require_cover=False)
+        notes = []
+        book, cover, artwork = publication_assets(bundle, config, self.root / "artwork",
+                                                  notify=notes.append)
+        self.assertIsNone(cover)
+        self.assertIsNone(artwork)
+        self.assertEqual(book["id"], book_id)
+        self.assertTrue(any("newer revision" in note for note in notes))
+
+        # A genuinely different book, and a reordered download, still fail closed.
+        unrelated = self.epub("unrelated", [CHAPTER_THREE], "other")
+        self.assertEqual(source_epub_digest(bundle, unrelated), book_id)
+        reordered = self.epub("reordered", [CHAPTER_TWO, LONG_ONE, CHAPTER_THREE], "download-2")
+        self.assertEqual(source_epub_digest(bundle, reordered), book_id)
+
+    def test_auxiliary_spine_book_accepts_repacked_and_corrected_cover_sources(self):
+        from epub_tts_narrator.renderer.book_metadata import source_epub_digest
+        from shared_fixtures import repack_epub
+        # Analyzed with extraction.include_auxiliary = true: the saved book
+        # keeps its non-linear spine chapter, so only an extraction with the
+        # same policy can match it.
+        self.config.write_text(self.config.read_text(encoding="utf-8")
+                               + "[extraction]\ninclude_auxiliary = true\n", encoding="utf-8")
+        analyzed = with_auxiliary_chapter(self.epub("auxiliary-v1", [CHAPTER_ONE, CHAPTER_TWO], "download-1"))
+        status, _, stderr = self.analyze(analyzed)
+        self.assertEqual(status, 0, stderr)
+        bundle = load_bundle(self.book)
+        saved = bundle["source"]
+        book_id = saved["book"]["id"]
+        self.assertIn("auxiliary-spine=include", saved["extraction_policy"])
+        self.assertEqual([chapter["title"] for chapter in saved["chapters"]], ["One", "Two", "Notes"])
+
+        repacked = repack_epub(analyzed, self.root / "auxiliary-v1-repacked.epub")
+        self.assertEqual(source_epub_digest(bundle, repacked),
+                         hashlib.sha256(repacked.read_bytes()).hexdigest())
+        corrected = with_auxiliary_chapter(
+            self.epub("auxiliary-v2", [CHAPTER_ONE, ("Two", ["Mara said, “The lamp is lit tonight.”"])],
+                      "download-2"))
+        self.assertEqual(source_epub_digest(bundle, corrected),
+                         hashlib.sha256(corrected.read_bytes()).hexdigest())
+
+        # An unsupported saved policy stays fail-closed, and another book is refused.
+        unknown = deepcopy(bundle)
+        unknown["source"]["extraction_policy"] = saved["extraction_policy"].replace(
+            "auxiliary-spine=include", "auxiliary-spine=auto")
+        self.assertEqual(source_epub_digest(unknown, repacked), book_id)
+        unrelated = with_auxiliary_chapter(self.epub("auxiliary-other", [CHAPTER_THREE], "other"))
+        self.assertEqual(source_epub_digest(bundle, unrelated), book_id)
+
+    def test_corrected_revision_of_the_updated_epub_supplies_cover_and_metadata(self):
+        from epub_tts_narrator.renderer.book_metadata import (
+            accepted_source_epubs, check_publication_source, publication_assets, source_epub_digest)
+        from epub_tts_narrator.source_epub import remember_source_epub, source_epub_hint
+        from shared_fixtures import renderer_config
+        self.seed()
+        updated = self.epub("serial-v2", [CHAPTER_ONE, CHAPTER_TWO, CHAPTER_THREE], "download-2")
+        self.assertEqual(self.analyze(updated)[0], 0)
+        bundle = load_bundle(self.book)
+        fingerprint_before = fingerprint(bundle["source"])
+        corrected = self.epub("serial-v3", [CHAPTER_ONE, CHAPTER_TWO, CORRECTED_THREE], "download-2")
+        digest = hashlib.sha256(corrected.read_bytes()).hexdigest()
+        self.assertNotIn(digest, accepted_source_epubs(bundle))
+        # The revision was never analyzed, but it extracts to the same book.
+        self.assertEqual(source_epub_digest(bundle, corrected), digest)
+        config = renderer_config(epub=str(corrected))
+        messages = []
+        book, cover, artwork = publication_assets(bundle, config, self.root / "artwork",
+                                                  notify=messages.append)
+        self.assertIsNone(cover)
+        self.assertIsNone(artwork)
+        self.assertEqual(book["id"], bundle["source"]["book"]["id"])
+        self.assertTrue(any("newer revision" in message for message in messages))
+        check_publication_source(bundle, config)
+        self.assertEqual(fingerprint(load_bundle(self.book)["source"]), fingerprint_before)
+        remember_source_epub(self.book, corrected, bundle["source"]["book"]["id"],
+                             saved_source=bundle["source"])
+        self.assertEqual(source_epub_hint(self.book, bundle["source"]["book"]["id"]), corrected.resolve())
+
+    def test_repacked_identical_epub_is_accepted_by_content_for_fresh_and_updated_books(self):
+        from epub_tts_narrator.renderer.book_metadata import source_epub_digest
+        self.seed()
+        bundle = load_bundle(self.book)
+        repacked = self.epub("serial-v1-repacked", [CHAPTER_ONE, CHAPTER_TWO], "download-1-repacked")
+        self.assertNotEqual(hashlib.sha256(repacked.read_bytes()).hexdigest(),
+                            bundle["source"]["book"]["id"])
+        self.assertEqual(source_epub_digest(bundle, repacked),
+                         hashlib.sha256(repacked.read_bytes()).hexdigest())
+        updated = self.epub("serial-v2", [CHAPTER_ONE, CHAPTER_TWO, CHAPTER_THREE], "download-2")
+        self.assertEqual(self.analyze(updated)[0], 0)
+        bundle = load_bundle(self.book)
+        repacked = self.epub("serial-v2-repacked", [CHAPTER_ONE, CHAPTER_TWO, CHAPTER_THREE],
+                             "download-2-repacked")
+        self.assertEqual(source_epub_digest(bundle, repacked),
+                         hashlib.sha256(repacked.read_bytes()).hexdigest())
+
+    def test_unrelated_and_rewritten_epubs_still_stop_publication(self):
+        from epub_tts_narrator.renderer.book_metadata import check_publication_source, source_epub_digest
+        from epub_tts_narrator.source_epub import remember_source_epub
+        from shared_fixtures import renderer_config
+        self.seed()
+        updated = self.epub("serial-v2", [CHAPTER_ONE, CHAPTER_TWO, CHAPTER_THREE], "download-2")
+        self.assertEqual(self.analyze(updated)[0], 0)
+        bundle = load_bundle(self.book)
+        book_id = bundle["source"]["book"]["id"]
+        unrelated = self.epub("unrelated", [CHAPTER_THREE], "other")
+        rewritten = self.epub("rewritten", [("One", ["Completely different words appear here."]),
+                                            ("Two", ["Nothing in common with the saved text."])], "other-2")
+        for stranger in (unrelated, rewritten):
+            self.assertEqual(source_epub_digest(bundle, stranger), book_id)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                check_publication_source(bundle, renderer_config(epub=str(stranger)))
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                remember_source_epub(self.book, stranger, book_id, saved_source=bundle["source"])
 
     def test_character_from_an_earlier_book_returns_with_that_books_voice(self):
         earlier = self.root / "book-one"

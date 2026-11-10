@@ -1509,9 +1509,9 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         config["_publication_expected"] = digest(previous) if previous is not None else None
     epub = config["render"]["epub"]
     if epub and not chapters_only:
-        from .book_metadata import accepted_source_epubs
-        # The original EPUB, or the latest download that appended chapters.
-        if file_hash(epub) not in accepted_source_epubs(bundle):
+        from .book_metadata import source_epub_digest
+        # The original EPUB, the latest update's EPUB, or the same book by content.
+        if source_epub_digest(bundle, epub) != file_hash(epub):
             raise RenderBlocked("Configured EPUB does not match the analyzed book")
     return config, plan, (voice_store(bundle, config) if voice_store_override is None else voice_store_override)
 

@@ -20,10 +20,23 @@ def accepted_source_epubs(bundle):
 
 
 def source_epub_digest(bundle, epub):
-    """The digest to check ``epub`` against: its own when it belongs to this book."""
+    """The digest to check ``epub`` against: its own when it belongs to this book.
+
+    The original EPUB (the book ID) and the latest update's EPUB pass by bytes.
+    Otherwise the EPUB is accepted by content when the updater's own comparison
+    proves it extracts to the same book as the saved analysis, so a repacked or
+    typo-corrected revision at the remembered location can still supply the
+    cover and metadata. The saved source, book ID, and every render identity
+    stay unchanged; anything else keeps the book ID and publication fails closed.
+    """
     from .common import file_hash
     actual = file_hash(epub)
-    return actual if actual in accepted_source_epubs(bundle) else bundle["source"]["book"]["id"]
+    if actual in accepted_source_epubs(bundle):
+        return actual
+    from ..book_update import same_book_epub
+    if same_book_epub(bundle["source"], epub):
+        return actual
+    return bundle["source"]["book"]["id"]
 
 
 def check_publication_source(bundle, config):
@@ -62,7 +75,12 @@ def publication_assets(bundle, config, output_dir, *, notify=lambda message: Non
         return book, None, None
     # An explicit opt-out is only for genuinely absent/unsupported artwork;
     # corrupt archives, wrong books, or conversion failures still stop publication.
+    from .common import file_hash
     expected = source_epub_digest(bundle, epub)
+    if expected == file_hash(epub) and expected not in accepted_source_epubs(bundle):
+        notify("The EPUB is a newer revision of the analyzed book; its cover and metadata are "
+               "used and the saved analysis is unchanged. Run `epub-tts-narrator analyze EPUB "
+               "-o BOOK_DIRECTORY` to absorb its text changes into the audiobook.")
     if not config["render"].get("require_cover", True):
         from .assembly import extract_cover
         with tempfile.TemporaryDirectory(prefix="epub-cover-check-") as temporary:

@@ -91,7 +91,8 @@ def refresh_metadata(bundle, config, *, notify=print):
                     "track_number": chapter.get("number", chapter["ordinal"]),
                     "encoded_path": str(output / chapter["path"]),
                 }, notify=notify)
-        remember_source_epub(bundle["directory"], config["render"]["epub"], book["id"])
+        remember_source_epub(bundle["directory"], config["render"]["epub"], book["id"],
+                             saved_source=bundle["source"])
         notify(f"Updated audiobook: {book_path} (audio and chapter timing unchanged)")
         return result
     finally:
