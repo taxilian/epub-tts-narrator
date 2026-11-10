@@ -21,6 +21,7 @@ stays unresolved for the human speaker menu; nothing falls back to the narrator.
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import json
 import re
 import threading
 import time
@@ -742,6 +743,7 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
         if not isinstance(rows, list):
             raise ValueError('"q" must be an array of [qid, who, kind?, delivery?] arrays')
         labels, errors = {}, []
+        line_notes = [[], 0]
         for row in rows:
             if not isinstance(row, list) or len(row) < 2 or type(row[0]) not in {str, int}:
                 errors.append("each q entry must be [qid, who, ...]")
@@ -765,6 +767,14 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
             delivery = _clean(row[3], 80) if len(row) > 3 and isinstance(row[3], str) else ""
             quote = row[4] if len(row) > 4 and isinstance(row[4], str) and 0 < len(row[4]) <= 240 else ""
             labels[qid] = {"who": who, "kind": kind, "delivery": delivery, "quote": quote}
+            # Optional changes partway through the line: [[first words, delivery], ...].
+            for change in _changes(row[5]) if len(row) > 5 else ():
+                note = (_parse_note([qid, "then", change[0], change[1]], expected_set, blocks_by_number)
+                        if isinstance(change, list) and len(change) == 2 and isinstance(change[0], str) else None)
+                if note is None:
+                    line_notes[1] += 1
+                else:
+                    line_notes[0].append(note)
         missing = [qid for qid in expected if qid not in labels]
         if missing:
             errors.append(f"missing labels for {len(missing)} quotation id(s): {', '.join(missing[:30])}")
@@ -788,7 +798,7 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
                                "who": parsed, "kind": kind, "delivery": ""})
             except (ValueError, TypeError, KeyError, IndexError):
                 dropped += 1
-        notes, dropped_notes = [], 0
+        notes, dropped_notes = line_notes
         raw_notes = _unwrap(response.get("p", []))
         for row in raw_notes if isinstance(raw_notes, list) else []:
             note = _parse_note(row, expected_set, blocks_by_number)
@@ -802,7 +812,32 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
     return validate
 
 
+def _changes(value):
+    """A line's mid-line changes as [[words, delivery], ...], also from one pair or its JSON text."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if isinstance(value, list) and len(value) == 2 and all(isinstance(item, str) for item in value):
+        value = [value]
+    return value if isinstance(value, list) else []
+
+
 NOTE_REASON = "The source text explicitly supports this performance note."
+# Directions with the standing of a line's delivery: no remove-only review.
+SHIFT_REASON = "The scene changes how the line is performed from these words."
+ITALIC_REASON = "The book sets these words in italics."
+
+
+def _direction(value, limit=80):
+    """A plain direction: brackets are engine control syntax."""
+    return " ".join(re.sub(r"[\[\]<>{}]", " ", value).split())[:limit].strip() if isinstance(value, str) else ""
+
+
+def prekept_direction(kind, spec):
+    """Scene-read delivery changes and the book's own italics skip the inline review."""
+    return kind == "delivery" and spec.get("reason") in (SHIFT_REASON, ITALIC_REASON)
 
 
 def _parse_note(row, qids, blocks_by_number):
@@ -825,6 +860,16 @@ def _parse_note(row, qids, blocks_by_number):
         target = ("n", blocks_by_number[number]["id"])
     if not original:
         return None
+    if op == "read":
+        # A direction for the narration of paragraph N: ["N","read","tense, hushed"].
+        direction = _direction(original)
+        return {"target": target, "kind": "read", "raw": {"direction": direction}} if target[0] == "n" and direction else None
+    if op == "then":
+        # The line's delivery changes from these words on: ["q12","then","But it means","uncertain"].
+        direction = _direction(row[3]) if len(row) > 3 else ""
+        if target[0] != "q" or not direction:
+            return None
+        return {"target": target, "kind": "shift", "raw": {"original": original, "direction": direction}}
     if op == "as":
         # A per-line exception to the voice changes in effect: "normal", or one effect preset.
         value = original.strip().casefold()
@@ -1617,16 +1662,69 @@ def _anchor_event(note, row_text, block_text):
     raw.update(original=word.group(), left=row_text[:word.start()], right=row_text[word.end():])
 
 
-def _attach_notes(rows, notes, block_text, block_id, by_qid, stats):
+def _italic_emphasis(rows, block):
+    """Short italic runs inside spoken lines -> emphasis controls (the book's own stress).
+
+    Whole-line or long italics (thoughts, letters, titles) are left alone.
+    """
+    found = {}
+    for span in block.get("inline_spans", ()):
+        if span.get("kind") != "emphasis":
+            continue
+        for row in rows:
+            if row["kind"] != "dialogue" or row["role_id"] == "narrator_main":
+                continue
+            a, b = max(span["start"], row["start"]) - row["start"], min(span["end"], row["end"]) - row["start"]
+            text = row["text"]
+            words = list(_WORD.finditer(text, max(a, 0), max(b, 0))) if a < b else []
+            if not words or len(words) > 3 or len(words) * 2 > len(_WORD.findall(text)) or len(text) > 2000:
+                continue
+            a, b = words[0].start(), words[-1].end()
+            found.setdefault(id(row), []).append({"kind": "delivery", "tag": "emphasis", "original": text[a:b],
+                                                  "left": text[:a], "right": text[b:], "reason": ITALIC_REASON})
+    return found
+
+
+def _shift_controls(row, shifts, stats):
+    """Turn "from these words on" changes into style spans that run to the next change or the end."""
+    text, controls = row["text"], []
+    words = list(_WORD.finditer(text))
+    points = sorted({start: direction for start, direction in shifts}.items())
+    for index, (start, direction) in enumerate(points):
+        if words and start <= words[0].start():
+            # A change at the first word is the line's own delivery.
+            if not row["delivery"]["direction"]:
+                row["delivery"] = {"direction": direction, "evidence": []}
+                stats["delivery"] += 1
+            continue
+        end = points[index + 1][0] if index + 1 < len(points) else len(text)
+        if len(text) > 2000:
+            continue
+        controls.append({"kind": "delivery", "tag": "style", "original": text[start:end], "left": text[:start],
+                         "right": text[end:], "direction": direction, "reason": SHIFT_REASON})
+    return controls
+
+
+def _attach_notes(rows, notes, block, by_qid, stats):
     """Turn terse notes into each row's private ``inline_proposals`` (reviewed later).
 
     Each note must locate a unique exact span in its target row. Invalid notes are
-    dropped and counted; the remove-only review still decides every survivor.
+    dropped and counted. A note that cannot combine with the row's earlier notes is
+    dropped alone. The remove-only review decides every survivor except scene-read
+    delivery changes and italics (``prekept_direction``).
     """
     from .attribution_compact import parse_proposals
-    pending = {}
+    block_text, block_id = block["text"], block["id"]
+    pending, shifts = {}, {}
     for note in notes:
         kind, value = note["target"]
+        if note["kind"] == "read":
+            narration = [row for row in rows if row["kind"] == "narration" and not row["delivery"]["direction"]]
+            for row in narration:
+                row["delivery"] = {"direction": note["raw"]["direction"], "evidence": []}
+            stats["narration_reads"] += bool(narration)
+            stats["dropped"] += not narration
+            continue
         if kind == "q":
             row = by_qid.get(value)
             candidates = [row] if row is not None else []
@@ -1640,24 +1738,39 @@ def _attach_notes(rows, notes, block_text, block_id, by_qid, stats):
             stats["dropped"] += 1
             continue
         row = matches[0]
-        key = "edits" if note["kind"] == "edit" else "controls"
-        base = row["delivery"]["direction"]
-        try:
-            parse_proposals({key: [note["raw"]]}, row["text"], f"{block_id} note", base_direction=base)
-        except ValueError:
-            stats["dropped"] += 1
+        if note["kind"] == "shift":
+            shifts.setdefault(id(row), (row, []))[1].append((row["text"].index(located), note["raw"]["direction"]))
             continue
-        pending.setdefault(id(row), (row, {"edits": [], "controls": []}))[1][key].append(note["raw"])
-    for row, payload in pending.values():
-        try:
-            cleaned = parse_proposals(payload, row["text"], f"{block_id} notes",
-                                      base_direction=row["delivery"]["direction"])
-        except ValueError:
-            stats["dropped"] += len(payload["edits"]) + len(payload["controls"])
-            continue
+        pending.setdefault(id(row), (row, []))[1].append(("edits" if note["kind"] == "edit" else "controls", note["raw"]))
+    for row, items in shifts.values():
+        controls = _shift_controls(row, items, stats)
+        stats["shifts"] += len(controls)
+        pending.setdefault(id(row), (row, []))[1].extend(("controls", raw) for raw in controls)
+    italics = _italic_emphasis(rows, block)
+    for row in rows:
+        if id(row) in italics:
+            pending.setdefault(id(row), (row, []))[1].extend(("controls", raw) for raw in italics[id(row)])
+    for row, items in pending.values():
+        # Keep each note that still combines with the ones kept before it.
+        payload, cleaned = {"edits": [], "controls": []}, None
+        for key, raw in items:
+            trial = {name: list(values) for name, values in payload.items()}
+            trial[key].append(raw)
+            try:
+                result = parse_proposals(trial, row["text"], f"{block_id} notes", base_direction=row["delivery"]["direction"])
+            except ValueError:
+                if raw.get("reason") != ITALIC_REASON:
+                    stats["dropped"] += 1
+                if raw.get("reason") == SHIFT_REASON:
+                    stats["shifts"] -= 1
+                continue
+            payload, cleaned = trial, result
+            if raw.get("reason") == ITALIC_REASON:
+                stats["italic_emphasis"] += 1
         if cleaned is not None:
             row["inline_proposals"] = cleaned
-            stats["attached"] += len(cleaned["edits"]) + len(cleaned["controls"])
+            stats["attached"] += sum(1 for _, raw in items if raw in payload["edits"] or raw in payload["controls"]
+                                     if raw.get("reason") not in (SHIFT_REASON, ITALIC_REASON))
 
 
 _JOINT = re.compile(r"\b(?:in unison|together|simultaneously|at the same time|at once|in chorus|both)\b", re.IGNORECASE)
@@ -1814,7 +1927,8 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
                    default_roles=None):
     """Exact-coverage segments; returns rows and fills ``stats`` with note/delivery counts."""
     stats = stats if stats is not None else {}
-    stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_cited": 0,
+    stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_cited": 0, "shifts": 0,
+                  "narration_reads": 0, "italic_emphasis": 0,
                   "simultaneous": 0, "simultaneous_unproven": 0, "variant_lines": 0, "effect_lines": 0,
                   "voice_exceptions": 0})
     roles = {role["id"]: role for role in cast["roles"]}
@@ -1968,8 +2082,8 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
             rows.append(row)
             if piece.get("qid"):
                 by_qid[piece["qid"]] = row
-        if block["id"] in notes_by_block:
-            _attach_notes(rows, notes_by_block[block["id"]], text, block["id"], by_qid, stats)
+        if block["id"] in notes_by_block or block.get("inline_spans"):
+            _attach_notes(rows, notes_by_block.get(block["id"], []), block, by_qid, stats)
         segments.extend(rows)
     return segments
 
@@ -2124,7 +2238,8 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
             meter.default_stage = "performance"
             started = time.monotonic()
             try:
-                document = review_inline_performance(document, requests, workers=min(5, workers), progress=progress)
+                document = review_inline_performance(document, requests, workers=min(5, workers), progress=progress,
+                                                     prekept=prekept_direction)
             finally:
                 meter.default_stage = None
                 meter.timed("performance", time.monotonic() - started)

@@ -103,6 +103,26 @@ def _span(item, text, label):
         raise ValueError(f"{label} must identify an exact nonempty spoken-text span")
 
 
+def delivery_overlap_error(spans):
+    """Why these delivery spans (``(start, end, tag)``) cannot combine, or None.
+
+    A style span is a direction that holds from its start; a paired tag
+    (whisper, emphasis, ...) changes only its own words. A paired tag may sit
+    wholly inside a style span ("[voice breaking] It is going to
+    <emphasis>blow</emphasis>"). Styles never overlap styles, and paired tags
+    never overlap paired tags.
+    """
+    for group in ([s for s in spans if s[2] == "style"], [s for s in spans if s[2] != "style"]):
+        group = sorted(group)
+        if any(left[1] > right[0] for left, right in zip(group, group[1:])):
+            return "delivery spans of the same kind must not overlap"
+    for style in (s for s in spans if s[2] == "style"):
+        for paired in (s for s in spans if s[2] != "style"):
+            if paired[0] < style[1] and style[0] < paired[1] and not style[0] <= paired[0] < paired[1] <= style[1]:
+                return "a paired delivery tag may be inside a style span, but must not cross its boundary"
+    return None
+
+
 def _sort_key(item):
     return (item.get("start", item.get("offset")),
             {"pause": 0, "vocalization": 1, "delivery": 2, "pronunciation": 3}[item["kind"]],
@@ -112,9 +132,11 @@ def _sort_key(item):
 def validate_performance(record, text):
     """Return canonical effective controls; reject stale text and ambiguous scope.
 
-Delivery ranges cannot overlap each other. Pronunciation ranges cannot overlap
-each other, but may be wholly contained by a delivery range. This allows a
-whispered name without inventing a general conflicting-style nesting policy.
+Style ranges cannot overlap each other, and paired-tag ranges cannot overlap
+each other; a paired tag may be wholly inside a style range. Pronunciation
+ranges cannot overlap each other, but may be wholly contained by a delivery
+range. This allows a whispered name, or an emphasized word in a line whose
+delivery changes partway, without a general conflicting-style policy.
 """
     expected_hash = text_sha256(text)
     if (not isinstance(record, dict)
@@ -178,9 +200,10 @@ whispered name without inventing a general conflicting-style nesting policy.
     controls.sort(key=_sort_key)
     deliveries = [c for c in controls if c["kind"] == "delivery"]
     phones = [c for c in controls if c["kind"] == "pronunciation"]
-    for spans in (deliveries, phones):
-        if any(left["end"] > right["start"] for left, right in zip(spans, spans[1:])):
-            raise ValueError("Performance spans of the same kind must not overlap")
+    if any(left["end"] > right["start"] for left, right in zip(phones, phones[1:])):
+        raise ValueError("Performance spans of the same kind must not overlap")
+    if (problem := delivery_overlap_error([(c["start"], c["end"], c["tag"]) for c in deliveries])):
+        raise ValueError(f"Performance {problem}")
     for phone in phones:
         for delivery in deliveries:
             if (phone["start"] < delivery["end"] and delivery["start"] < phone["end"]

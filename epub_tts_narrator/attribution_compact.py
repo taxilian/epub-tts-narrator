@@ -13,7 +13,7 @@ separate remove-only review stage owns approval.
 from copy import deepcopy
 import unicodedata
 
-from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
+from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS, delivery_overlap_error
 from .pipeline import align_attribution_response, align_units
 from .spoken_text import MAX_DELIVERY_CHARACTERS
 
@@ -179,13 +179,12 @@ def parse_proposals(payload, piece_text, where, base_direction=""):
                 for index, raw in enumerate(controls_raw)]
     deliveries = sorted((control for control in controls if control["kind"] == "delivery"),
                         key=lambda control: control["span"][0])
-    for left, right in zip(deliveries, deliveries[1:]):
-        if left["span"][1] > right["span"][0]:
-            raise ValueError(f"{where}: delivery control spans must not overlap")
+    if (problem := delivery_overlap_error([(*control["span"], control["tag"]) for control in deliveries])):
+        raise ValueError(f"{where}: {problem}")
     for edit in edits:
         covered = [control for control in deliveries
                    if control["span"][0] < edit["span"][1] and edit["span"][0] < control["span"][1]]
-        if len(covered) > 1:
+        if len([c for c in covered if c["tag"] == "style"]) > 1 or len([c for c in covered if c["tag"] != "style"]) > 1:
             raise ValueError(f"{where}: at most one delivery control may target a single edit span")
     events = [(control["span"][0 if control["position"] == "before" else 1],
                control["kind"], control.get("duration_ms"), control.get("sound"))

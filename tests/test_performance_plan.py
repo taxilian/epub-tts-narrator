@@ -103,6 +103,16 @@ class PerformancePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap"):
             validate_performance(record(text, delivery(text), delivery(text, 0, 3, tag="emphasis")), text)
 
+    def test_a_paired_tag_may_sit_inside_a_style_span_but_not_cross_it(self):
+        text = "You never listen."
+        style = delivery(text, 4, len(text), tag="style", direction="exasperated")
+        inside = delivery(text, 4, 9, tag="emphasis")
+        self.assertEqual(len(validate_performance(record(text, style, inside), text)["controls"]), 2)
+        for other in (delivery(text, 0, 9, tag="emphasis"),                                   # crosses the start
+                      delivery(text, 6, len(text), tag="style", direction="loud")):           # two styles overlap
+            with self.subTest(other=other["text"]), self.assertRaisesRegex(ValueError, "overlap|cross"):
+                validate_performance(record(text, style, other), text)
+
     def test_event_inside_pronunciation_rejected_but_at_boundary_allowed(self):
         text = "Jas spoke."
         for offset, valid in ((0, True), (2, False), (3, True)):

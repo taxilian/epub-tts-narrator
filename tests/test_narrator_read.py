@@ -588,6 +588,10 @@ class NarratedAnalyzeTests(unittest.TestCase):
                 if payload.get("mode") == "narrator_markup":
                     qids = {}
                     for line in payload["text"].splitlines():
+                        number, _, rest = line.partition("|")
+                        if number.isdigit():
+                            # "#<paragraph text>" -> its paragraph number, for narration notes.
+                            qids["#" + rest] = number
                         for match in re.finditer(r"\u2039(q\d+)\u203a", line):
                             qids[line[match.end():].split('"')[1]] = match.group(1)
                     rewrite(qids, result)
@@ -683,6 +687,48 @@ class NarratedAnalyzeTests(unittest.TestCase):
         # Before the first "Wait" (not the second "wait"), and after the last word "Never".
         self.assertEqual([(c["kind"], c["sound"], c["offset"]) for c in laugh], [("vocalization", "laugh", 1)])
         self.assertEqual([(c["kind"], c["sound"], c["offset"]) for c in sigh], [("vocalization", "sigh", len('"Never'))])
+
+    def test_delivery_changes_mid_line_narration_reads_and_italics_skip_the_review(self):
+        self.source = make_source([[("The cellar door creaked open in the dark.", "p"),
+                                    ('"I got the job! But it means moving away," Mara said.', "p"),
+                                    ('"You never listen," Jon said.', "p"),
+                                    ('"Fine," Jon said.', "p"), ('"Is it far?" Mara asked.', "p")]])
+        never = self.source["blocks"][2]["text"].index("never")
+        self.source["blocks"][2]["inline_spans"] = [{"start": never, "end": never + 5, "kind": "emphasis", "origin": "tag"}]
+        # A whole italic line (a thought, a title) is not stress.
+        self.source["blocks"][3]["inline_spans"] = [{"start": 0, "end": 7, "kind": "emphasis", "origin": "tag"}]
+
+        def rewrite(qids, result):
+            job, never_q = qids["I got the job! But it means moving away,"], qids["You never listen,"]
+            # A change can ride on the line's own row, or come as a separate note.
+            result["q"] = [[job, "1", "", "thrilled, breathless", "", [["But it means", "uncertain, deflating"],
+                                                                       ["not in the line", "dropped"]]],
+                           [never_q, "2", "", "tired, flat"], [qids["Fine,"], "2"],
+                           # One pair written as JSON text is still a change.
+                           [qids["Is it far?"], "1", "", "curious", "", '["far?", "worried"]']]
+            result["p"] = [[never_q, "then", "never listen", "voice rising, exasperated"],
+                           # A change at the first word is the line's own delivery.
+                           [qids["Fine,"], "then", "Fine", "clipped, final"],
+                           [qids["#The cellar door creaked open in the dark."], "read", "tense, hushed"]]
+
+        # The review would remove anything it saw; scene-read directions never reach it.
+        document = self.markup_with(rewrite, review_answer="remove")
+        rows = self.by_text(document)
+        self.assertEqual(rows["The cellar door creaked open in the dark."]["delivery"]["direction"], "tense, hushed")
+        job = rows['"I got the job! But it means moving away,"']
+        self.assertEqual(job["delivery"]["direction"], "thrilled, breathless")
+        self.assertEqual([(c["tag"], c["text"], c["direction"]) for c in job["performance_controls"]["controls"]],
+                         [("style", 'But it means moving away,"', "uncertain, deflating")])
+        line = rows['"You never listen,"']
+        self.assertEqual(sorted((c["tag"], c["text"], c["direction"]) for c in line["performance_controls"]["controls"]),
+                         [("emphasis", "never", ""), ("style", 'never listen,"', "voice rising, exasperated")])
+        self.assertEqual(rows['"Fine,"']["delivery"]["direction"], "clipped, final")
+        self.assertNotIn("performance_controls", rows['"Fine,"'])
+        stats = document["provenance"]["narrator_read"]["segments"]
+        self.assertEqual([(c["text"], c["direction"]) for c in rows['"Is it far?"']["performance_controls"]["controls"]],
+                         [('far?"', "worried")])
+        self.assertEqual((stats["shifts"], stats["narration_reads"], stats["italic_emphasis"]), (3, 1, 1))
+        self.assertEqual(readiness(document)["errors"], [])
 
     def test_tie_break_selection_is_published_with_existing_delivery_evidence(self):
         self.source = make_source([[('"Stay," Mara whispered.', "p"), ('"Go," Jon said.', "p")]])

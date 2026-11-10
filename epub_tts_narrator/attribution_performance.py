@@ -153,8 +153,12 @@ def _resolve(spec, row, block_text):
     return a - row["start"], b - row["start"]
 
 
-def _collect(rows, blocks, names):
-    """Resolve every private proposal and strip the private field from every row."""
+def _collect(rows, blocks, names, prekept=None):
+    """Resolve every private proposal and strip the private field from every row.
+
+    ``prekept(kind, spec)`` marks a control the caller already approved, with the
+    standing of a line's delivery direction; it skips the remove-only review.
+    """
     records = []
     for row in rows:
         payload = row.pop("inline_proposals", None)
@@ -183,6 +187,8 @@ def _collect(rows, blocks, names):
                              or b < len(row["text"]) and word_character(row["text"][b - 1])
                              and word_character(row["text"][b]))):
                     record["outcome"] = "uncovered"
+            elif prekept is not None and prekept(kind, spec):
+                record["outcome"] = "direction"
             records.append(record)
     return records
 
@@ -191,7 +197,7 @@ def _drop_dependents(records):
     dropped = [record for record in records if record["kind"] == "edit"
                and record["outcome"] not in (None, "kept", "mechanical")]
     for record in records:
-        if (record["kind"] != "edit" and record["outcome"] in (None, "kept")
+        if (record["kind"] != "edit" and record["outcome"] in (None, "kept", "direction")
                 and any(record["row"] is other["row"] and record["start"] < other["end"]
                         and other["start"] < record["end"] for other in dropped)):
             record["outcome"] = "dependent_drop"
@@ -378,7 +384,7 @@ def _publish(rows, records):
         edits = [record for record in row_records if record["kind"] == "edit"
                  and record["outcome"] in ("mechanical", "kept")]
         controls = [record for record in row_records
-                    if record["kind"] != "edit" and record["outcome"] == "kept"]
+                    if record["kind"] != "edit" and record["outcome"] in ("kept", "direction")]
         if not edits and not controls:
             continue
         if edits:
@@ -411,8 +417,11 @@ def _provenance(records, batches):
                          for record in records]}
 
 
-def review_inline_performance(document, requests, *, workers=1, progress=lambda message: None):
-    """Review independent batches under a bounded cap, then publish all outcomes."""
+def review_inline_performance(document, requests, *, workers=1, progress=lambda message: None, prekept=None):
+    """Review independent batches under a bounded cap, then publish all outcomes.
+
+    ``prekept(kind, spec)`` names controls that need no review (see ``_collect``).
+    """
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("workers must be an integer from 1 to 5")
     rows = document.get("segments")
@@ -421,7 +430,7 @@ def review_inline_performance(document, requests, *, workers=1, progress=lambda 
     blocks = {block["id"]: block["text"] for block in document["source"]["blocks"]}
     names = [name for character in document.get("cast", {}).get("characters", [])
              for name in ([character.get("name", ""), *character.get("aliases", [])]) if name]
-    records = _collect(rows, blocks, names)
+    records = _collect(rows, blocks, names, prekept)
     if not records:
         return document
     _drop_dependents(records)

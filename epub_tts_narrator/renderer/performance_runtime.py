@@ -4,7 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import json
 
-from ..performance_plan import slice_performance, text_sha256, validate_performance
+from ..performance_plan import delivery_overlap_error, slice_performance, text_sha256, validate_performance
 from ..spoken_text import build_spoken, effective_delivery
 
 
@@ -94,12 +94,15 @@ silently preferred or dropped.
             if key not in seen:
                 seen.add(key)
                 controls.append(control)
-    for kind in ("delivery", "pronunciation"):
-        spans = sorted((c for c in controls if c["kind"] == kind), key=lambda c: (c["start"], c["end"]))
-        for left, right in zip(spans, spans[1:]):
-            if left["end"] > right["start"]:
-                raise ValueError(f"Segment {row['id']} has conflicting {kind} controls between "
-                                 "inline attribution and the performance plan")
+    deliveries = [(c["start"], c["end"], c["tag"]) for c in controls if c["kind"] == "delivery"]
+    if delivery_overlap_error(deliveries):
+        raise ValueError(f"Segment {row['id']} has conflicting delivery controls between "
+                         "inline attribution and the performance plan")
+    spans = sorted((c for c in controls if c["kind"] == "pronunciation"), key=lambda c: (c["start"], c["end"]))
+    for left, right in zip(spans, spans[1:]):
+        if left["end"] > right["start"]:
+            raise ValueError(f"Segment {row['id']} has conflicting pronunciation controls between "
+                             "inline attribution and the performance plan")
     positions = {}
     for control in controls:
         if "offset" not in control:

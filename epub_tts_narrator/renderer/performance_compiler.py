@@ -154,21 +154,28 @@ The plain backend explicitly reports every unsupported requested control.
     controls = canonical["controls"]
     starts, closes, replacements, events = {}, {}, {}, {}
     baseline = "; ".join(value for value in (traits, direction) if value) or "return to ordinary speaking delivery"
+    style_starts = {c["start"] for c in controls if c["kind"] == "delivery" and c["tag"] == "style"}
     for control in controls:
         item = deepcopy(control)
         kind = control["kind"]
         if kind == "delivery":
             a, b, tag = control["start"], control["end"], control["tag"]
+            # At one position a paired tag closes before a style resets, and a
+            # style starts before a paired tag opens inside it.
             if tag == "style":
-                starts[a] = f"[{control['direction']}] "
-                if b < len(text):
-                    closes[b] = f" [{baseline}] "
+                starts.setdefault(a, []).append((0, f"[{control['direction']}] "))
+                if b in style_starts:
+                    # The next style takes over here; a reset in between is noise.
+                    item["scope_accuracy"] = "until_next_style"
+                elif b < len(text):
+                    closes.setdefault(b, []).append((1, f" [{baseline}] "))
                     result["warnings"].append("scoped_style_reset_is_approximate")
                     item["scope_accuracy"] = "approximate_reset"
                 else:
                     item["scope_accuracy"] = "starts_at_span"
             else:
-                starts[a], closes[b] = f"<{tag}>", f"</{tag}>"
+                starts.setdefault(a, []).append((1, f"<{tag}>"))
+                closes.setdefault(b, []).append((0, f"</{tag}>"))
             result["applied_controls"].append(item)
         elif kind == "pronunciation":
             # A grouped reading ("M AY1 L | K IY1") is one tag per group, read as consecutive parts.
@@ -196,9 +203,9 @@ The plain backend explicitly reports every unsupported requested control.
     while index <= len(text):
         # End the preceding scope, emit boundary events once, then start the
         # following scope. Events inside an open paired scope stay inside it.
-        parts.append(closes.get(index, ""))
+        parts.extend(markup for _, markup in sorted(closes.get(index, [])))
         parts.extend(events.get(index, []))
-        parts.append(starts.get(index, ""))
+        parts.extend(markup for _, markup in sorted(starts.get(index, [])))
         if index == len(text):
             break
         if index in replacements:

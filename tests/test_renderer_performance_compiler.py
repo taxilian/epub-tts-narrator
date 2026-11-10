@@ -34,6 +34,19 @@ class PerformanceCompilerTests(unittest.TestCase):
         self.assertIn("scoped_style_reset_is_approximate", result["warnings"])
         self.assertEqual(result["expected_text"], text)
 
+    def test_a_mid_line_change_holds_to_the_end_and_keeps_stressed_words_inside_it(self):
+        text = '"Fine. But you never listen."'
+        but, never = text.index("But"), text.index("never")
+        result = compile_performance(text, record(text,
+            delivery(text, but, never, tag="style", direction="hurt"),
+            delivery(text, never, len(text), tag="style", direction="voice rising, exasperated"),
+            delivery(text, never, never + 5, tag="emphasis")), direction="calm")
+        # The next change takes over without a reset, and the stressed word opens inside it.
+        self.assertEqual(result["text"], '[calm] "Fine. [hurt] But you [voice rising, exasperated] '
+                                         '<emphasis>never</emphasis> listen."')
+        self.assertEqual(result["expected_text"], text)
+        self.assertEqual(result["warnings"], [])
+
     def test_phonemes_replace_only_bound_word_inside_paired_delivery(self):
         text = "Jas, come here."
         result = compile_performance(text, record(text, delivery(text), pronunciation(text, 0, 3)))
