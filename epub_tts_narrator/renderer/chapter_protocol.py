@@ -59,7 +59,10 @@ def failed_paragraph_detail(exc):
     """Hash-only identity of a failed paragraph synthesis, safe for wire errors.
 
     Book text never enters job records or logs; the client matches these
-    identifiers against its own plan to recover the paragraph remotely.
+    identifiers against its own plan to recover the paragraph remotely. The
+    chunk hash is the client's own: the request hash also covers server-side
+    state (continuity, synthesis identity, registered voice assets) that the
+    client cannot reproduce, so only the chunk can be compared across the wire.
     """
     request = getattr(exc, "request", None)
     if not isinstance(request, dict) or request.get("kind") != "paragraph_speech":
@@ -70,7 +73,7 @@ def failed_paragraph_detail(exc):
     identifier = chunk.get("chunk_id")
     if not isinstance(identifier, str) or not _CHUNK_ID.fullmatch(identifier):
         return None
-    return {"request_hash": digest(request), "chunk_id": identifier}
+    return {"request_hash": digest(request), "chunk_id": identifier, "chunk_hash": digest(chunk)}
 
 
 def failed_paragraph_suffix(exc):

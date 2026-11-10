@@ -1013,11 +1013,13 @@ class ChapterOrchestrationTests(unittest.TestCase):
         paragraph = next(chunk for chunk in plan["chapters"][0]["chunks"] if "paragraph_turns" in chunk)
         return bundle, config, plan, paragraph
 
-    def splitting_client(self, paragraph, voices, config, *, include_detail=True, request_hash=None):
+    def splitting_client(self, paragraph, voices, config, *, include_detail=True, request_hash=None,
+                         chunk_hash=None):
         from epub_tts_narrator.renderer.chapter_protocol import FAILED_PARAGRAPH_FIELD
         from epub_tts_narrator.renderer.workflow import _paragraph_request
         request = _paragraph_request(paragraph, voices, {"engine": "fixture"}, config)
-        detail = {"request_hash": request_hash or digest(request), "chunk_id": paragraph["chunk_id"]}
+        detail = {"request_hash": request_hash or digest(request), "chunk_id": paragraph["chunk_id"],
+                  "chunk_hash": chunk_hash or digest(paragraph)}
         base = self.fake_client()
 
         class SplittingClient(base):
@@ -1087,16 +1089,27 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(client.specs), 1)
         self.assertEqual(list((Path(config["render"]["work_dir"]) / "paragraph-fallbacks").glob("*.json")), [])
 
-    def test_paragraph_failure_with_a_mismatched_request_stops_without_recording(self):
+    def test_paragraph_failure_with_a_mismatched_chunk_stops_without_recording(self):
         bundle, config, plan, paragraph = self.paragraph_plan()
         voices = {voice_id: self.voice for voice_id in plan["voice_ids"]}
-        client = self.splitting_client(paragraph, voices, config, request_hash="0" * 64)
+        client = self.splitting_client(paragraph, voices, config, chunk_hash="0" * 64)
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
             with self.assertRaisesRegex(ChapterClientError, "does not match the service's"):
                 _render_remote_locked(bundle, config, plan, self.store,
                                       notify=lambda _: None, chapters_only=True)
         self.assertEqual(len(client.specs), 1)
         self.assertEqual(list((Path(config["render"]["work_dir"]) / "paragraph-fallbacks").glob("*.json")), [])
+
+    def test_a_server_side_request_hash_difference_still_recovers_the_paragraph(self):
+        """The service's request hash covers state the client cannot rebuild."""
+        bundle, config, plan, paragraph = self.paragraph_plan()
+        voices = {voice_id: self.voice for voice_id in plan["voice_ids"]}
+        client = self.splitting_client(paragraph, voices, config, request_hash="1" * 64)
+        with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient", return_value=client):
+            result = _render_remote_locked(bundle, config, plan, self.store,
+                                           notify=lambda _: None, chapters_only=True)
+        self.assertEqual(len(client.specs), 2)
+        self.assertEqual(len(result["chapters"]), len(plan["chapters"]))
 
     def test_submission_is_sent_only_when_the_service_advertises_budget_support(self):
         client = self.fake_client()(self.config["remote_chapters"])

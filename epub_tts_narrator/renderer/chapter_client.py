@@ -80,8 +80,10 @@ def _failed_paragraph(error):
         detail = json.loads(error.rsplit(marker, 1)[1].splitlines()[0].strip())
     except (ValueError, IndexError):
         return None
-    if (not isinstance(detail, dict) or set(detail) != {"request_hash", "chunk_id"}
+    if (not isinstance(detail, dict)
+            or not {"request_hash", "chunk_id", "chunk_hash"} <= set(detail)
             or not isinstance(detail["request_hash"], str) or not _HASH.fullmatch(detail["request_hash"])
+            or not isinstance(detail["chunk_hash"], str) or not _HASH.fullmatch(detail["chunk_hash"])
             or not isinstance(detail["chunk_id"], str) or not _CHUNK.fullmatch(detail["chunk_id"])):
         return None
     return detail
@@ -968,8 +970,10 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
     The chapter protocol already validates pre-split paragraph turns, so the
     resubmitted spec expresses the failed paragraph as its source turns and the
     server needs no splitting behavior. Only hash identities crossed the wire;
-    the client matches them against its own plan and confirms the exact
-    synthesis request before recording the immutable fallback marker.
+    the client matches the reported chunk against its own plan and confirms the
+    exact paragraph before recording the immutable fallback marker. The
+    service's request hash covers server-side state the client cannot rebuild,
+    so the chunk hash is the comparable identity.
     """
     detail = failure.paragraph
     if detail is None:
@@ -981,17 +985,17 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
     chunk = next((item for item in chapter["chunks"] if item["chunk_id"] == detail["chunk_id"]), None)
     if chunk is None or "paragraph_turns" not in chunk:
         return None
+    if digest(chunk) != detail["chunk_hash"]:
+        raise ChapterClientError(
+            f"Chapter {chapter['number']} paragraph {chunk['chunk_id']} does not match the service's "
+            "failed paragraph; the paragraph fallback was not recorded. Rerun with the same renderer "
+            "configuration the service used, then rerun")
+    from .paragraph_recovery import record_paragraph_fallback
+    from .workflow import _paragraph_request, make_render_plan
     identity = capabilities.get("engine")
     if not isinstance(identity, dict) or not isinstance(identity.get("engine"), dict):
         return None
-    from .workflow import _paragraph_request, make_render_plan
     request = _paragraph_request(chunk, voices, identity["engine"], config)
-    if digest(request) != detail["request_hash"]:
-        raise ChapterClientError(
-            f"Chapter {chapter['number']} paragraph {chunk['chunk_id']} does not match the service's "
-            "synthesis request; the paragraph fallback was not recorded. Reconcile renderer "
-            "configuration between this client and the chapter service, then rerun")
-    from .paragraph_recovery import record_paragraph_fallback
     try:
         record_paragraph_fallback(config["render"]["work_dir"], request)
     except (ValueError, OSError) as exc:

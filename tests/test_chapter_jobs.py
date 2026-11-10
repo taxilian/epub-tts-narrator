@@ -355,7 +355,8 @@ class ChapterJobsTests(unittest.TestCase):
                 error = self.service.status(job["id"])["error"]
                 self.assertIn(FAILED_PARAGRAPH_FIELD, error)
                 detail = json.loads(error.rsplit(FAILED_PARAGRAPH_FIELD, 1)[1])
-                self.assertEqual(detail, {"request_hash": digest(request), "chunk_id": "c" * 32})
+                self.assertEqual(detail, {"request_hash": digest(request), "chunk_id": "c" * 32,
+                                          "chunk_hash": digest(request["chunk"])})
                 self.assertNotIn("paragraph_turns", error)
                 if label == "truncated":
                     self.assertEqual(len(error), 2000)
