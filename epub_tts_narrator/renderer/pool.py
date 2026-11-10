@@ -137,7 +137,7 @@ def pool_sampling(config):
 
 def _text_review_method(name, method):
     """Recognize our text-only adapters, never infer safety from a plugin name."""
-    if name not in {"judge_reference", "review_phonetics"}:
+    if name not in {"judge_reference", "judge_skipped_word", "review_phonetics"}:
         return False
     from epub_tts_narrator.jev import JevTranscriptJudge
     from .phonetic_review import PronunciationReviewer
@@ -147,8 +147,8 @@ def _text_review_method(name, method):
     owner, function = getattr(method, "__self__", None), getattr(method, "__func__", None)
     if type(owner) is not ReferenceTextJudgingVerifier:
         return False
-    if name == "judge_reference":
-        return (function is ReferenceTextJudgingVerifier.judge_reference
+    if name in {"judge_reference", "judge_skipped_word"}:
+        return (function is getattr(ReferenceTextJudgingVerifier, name)
                 and type(owner.judge) is JevTranscriptJudge)
     if name == "review_phonetics":
         reviewer = owner.phonetic_reviewer

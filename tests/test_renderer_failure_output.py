@@ -37,6 +37,21 @@ class FailureOutputTests(unittest.TestCase):
         self.assertEqual(
             detail, "expected → heard: one → first; two → second; three → third; +1 more")
 
+    def test_the_word_that_failed_leads_and_sound_alike_spellings_are_marked_accepted(self):
+        # The dropped source typo is the real failure; regional spellings and
+        # a recognizer's spelling of an invented name already match by sound.
+        detail = self.detail("Atrox built a realised train, a labour of love, when it he could.",
+                             "Atroc's built a realized train, a labor of love, when he could.")
+        self.assertEqual(detail, "expected → heard: when it he → when he; "
+                                 "sound-alike spellings, accepted: atrox → atroc's; "
+                                 "realised → realized; labour → labor")
+
+    def test_only_sound_alike_or_only_real_differences_keep_the_plain_summary(self):
+        self.assertEqual(self.detail("A labour of love.", "A labor of love."),
+                         "expected → heard: labour → labor")
+        self.assertEqual(self.detail("He ran home.", "He walked home."),
+                         "expected → heard: ran → walked")
+
     def test_long_spans_are_truncated(self):
         detail = self.detail(" ".join(["expected"] * 100), " ".join(["actual"] * 100))
         self.assertLess(len(detail), 150)

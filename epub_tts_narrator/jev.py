@@ -13,7 +13,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .jev_prompts import QUESTIONS
+from .jev_prompts import QUESTIONS, SKIPPED_WORD_QUESTIONS
 from .provider import _transient_transport
 
 
@@ -216,6 +216,7 @@ class JevClient:
         return result
 
 
+SKIPPED_WORD_VERSION = 1
 _STRATEGY = "coverage_gated_whole_spoken_passages"
 _POLICY_IDENTITY = {"name": "transcript_spoken_passages", "version": POLICY_VERSION, "strategy": _STRATEGY,
                     "questions_sha256": sha256(json.dumps(QUESTIONS, sort_keys=True).encode("utf-8")).hexdigest(),
@@ -317,3 +318,32 @@ class JevTranscriptJudge:
             # A verifier failure must never approve speech or surface private
             # transport/SDK diagnostics. KeyboardInterrupt is not swallowed.
             return dict(record, error_code="internal_error")
+
+    def judge_skipped_word(self, expected_text, transcript, word, context):
+        """Ask whether one word every take left out is an error in the source text.
+
+        A score at or above the transcript threshold is ``"source_error"``; at or
+        below its complement ``"belongs"``; otherwise ``"uncertain"``. Failures
+        are ``"unavailable"`` and never approve audio.
+        """
+        record = {"decision": "unavailable", "probability": None, "model": None, "identity": self.identity,
+                  "version": SKIPPED_WORD_VERSION, "threshold": self.threshold,
+                  "questions": deepcopy(SKIPPED_WORD_QUESTIONS)}
+        if not self.enabled:
+            return dict(record, error_code="disabled")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 100000
+               for value in (expected_text, transcript, word, context)):
+            return dict(record, error_code="invalid_request")
+        state = {"requested_passage": expected_text, "skipped_word": word,
+                 "skipped_context": context, "recognized_passage": transcript}
+        try:
+            result = self._client.evaluate(state, record["questions"])
+        except JevError as error:
+            return dict(record, error_code=error.error_code)
+        except Exception:
+            return dict(record, error_code="internal_error")
+        probability = result["answers"]["source_error"]["noul"]
+        decision = ("source_error" if probability >= self.threshold
+                    else "belongs" if probability <= 1 - self.threshold else "uncertain")
+        return dict(record, decision=decision, probability=probability, model=result["model"],
+                    usage=result["usage"])

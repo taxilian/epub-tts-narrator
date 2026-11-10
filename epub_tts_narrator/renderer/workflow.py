@@ -131,16 +131,34 @@ def _diagnostic_text(value, limit=60):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _verification_failure_detail(report):
-    """Summarize a few contiguous lexical edits without dumping the script."""
-    alignment = report.get("metrics", {}).get("alignment", [])
-    groups, expected, actual = [], [], []
+def _sound_alike(expected, actual):
+    """Whether one difference is a spelling the direct matchers already accept."""
+    if not expected or not actual:
+        return False
+    from .phonetic_match import phonetic_equivalence
+    from .quality import word_spacing_equivalence
+    left, right = " ".join(expected), " ".join(actual)
+    try:
+        return (word_spacing_equivalence(left, right) is not None
+                or phonetic_equivalence(left, right) is not None)
+    except (RuntimeError, ValueError):
+        return False
 
-    def finish_group():
+
+def _verification_failure_detail(report):
+    """Summarize a few contiguous lexical edits without dumping the script.
+
+    When some differences are spellings that sound the same (labour/labor) and
+    others are not, the ones that actually failed come first, with a word of
+    context on each side, so a dropped word is not hidden behind "+N more".
+    """
+    alignment = report.get("metrics", {}).get("alignment", [])
+    groups, expected, actual, previous = [], [], [], [None]
+
+    def finish_group(following=None):
         if expected or actual:
-            left = _diagnostic_text(" ".join(expected)) or "(nothing)"
-            right = _diagnostic_text(" ".join(actual)) or "(nothing)"
-            groups.append(f"{left} → {right}")
+            groups.append({"expected": list(expected), "actual": list(actual),
+                           "before": previous[0], "after": following})
             expected.clear()
             actual.clear()
 
@@ -148,19 +166,38 @@ def _verification_failure_detail(report):
         if not isinstance(edit, dict):
             continue
         if edit.get("operation") == "equal":
-            finish_group()
+            words = [word for word in edit.get("expected", []) if isinstance(word, str)] \
+                if isinstance(edit.get("expected"), list) else []
+            finish_group(words[0] if words else None)
+            previous[0] = words[-1] if words else None
         elif edit.get("operation") in {"insert", "delete", "substitute"}:
             for key, target in (("expected", expected), ("actual", actual)):
                 words = edit.get(key, [])
                 if isinstance(words, list):
                     target.extend(word for word in words if isinstance(word, str))
     finish_group()
+
+    def shown(group, context=False):
+        around = ([group["before"]] if context and group["before"] else [],
+                  [group["after"]] if context and group["after"] else [])
+        left = " ".join(around[0] + group["expected"] + around[1])
+        right = " ".join(around[0] + group["actual"] + around[1])
+        return (f"{_diagnostic_text(left) or '(nothing)'} → "
+                f"{_diagnostic_text(right) or '(nothing)'}")
+
+    def listed(rows, context=False):
+        text = "; ".join(shown(row, context) for row in rows[:3])
+        return text + (f"; +{len(rows) - 3} more" if len(rows) > 3 else "")
+
     details = []
-    if groups:
-        changes = "; ".join(groups[:3])
-        if len(groups) > 3:
-            changes += f"; +{len(groups) - 3} more"
-        details.append("expected → heard: " + changes)
+    alike = [_sound_alike(group["expected"], group["actual"]) for group in groups]
+    if any(alike) and not all(alike):
+        failed = [group for group, ok in zip(groups, alike) if not ok]
+        fine = [group for group, ok in zip(groups, alike) if ok]
+        details.append("expected → heard: " + listed(failed, context=True))
+        details.append("sound-alike spellings, accepted: " + listed(fine))
+    elif groups:
+        details.append("expected → heard: " + listed(groups))
     corroboration = report.get("corroboration", {})
     decision = corroboration.get("decision") if isinstance(corroboration, dict) else None
     explanation = {
@@ -259,6 +296,37 @@ def _heard_variant_check(report, config, verifier, request_hash, wav, purpose, n
                           + f" (heard this way in {row['takes']} of {POLICY['repeat_takes']} takes)"
                           for row in outcome["rows"] if row["basis"] is None)
         notify("  Heard variant noted: " + _diagnostic_text(pairs, 240))
+    return report
+
+
+def _skipped_word_check(report, verifier, request_hash, wav, directory, purpose, notify, metadata=None):
+    """Accept a take whose one left-out word every take left out, when JEV calls it a source error.
+
+    Runs after the heard-variant check on a failed take (``skipped_word.py``);
+    never part of any identity. Needs the JEV text judge; otherwise inert.
+    """
+    if purpose != "speech" or not isinstance(report, dict) or report.get("passed") is True:
+        return report
+    from .skipped_word import POLICY, apply
+    try:
+        audio = file_hash(regular_file(wav))
+        report, outcome = apply(report, directory=directory, verifier=verifier,
+                                request_hash=request_hash, audio_sha256=audio, engine_metadata=metadata)
+    except (ValueError, OSError):
+        return report
+    if not outcome:
+        return report
+    state, audit = next(iter(outcome.items()))
+    where = _diagnostic_text(audit["context"], 120)
+    if state == "accepted":
+        notify(f"  Accepted with one source word left out ({where}): all {len(audit['takes'])} takes skipped it "
+               "and JEV judged it an error in the source text; not a verbatim match.")
+    elif state == "pending":
+        notify(f"  Left-out source word noted ({where}): {len(audit['takes'])} of {POLICY['min_takes']} takes "
+               "needed before JEV is asked whether it is a source error.")
+    else:
+        notify(f"  Every take left out one source word ({where}); JEV did not judge it a source error "
+               f"({audit['judgment'].get('decision')}).")
     return report
 
 
@@ -584,6 +652,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # A take replaying a history turn never teaches or uses a variant.
                 latest["report"] = _heard_variant_check(latest["report"], config, verifier, request_hash,
                                                         directory / name, purpose, notify)
+                latest["report"] = _skipped_word_check(latest["report"], verifier, request_hash,
+                                                       directory / name, directory, purpose, notify,
+                                                       latest.get("engine_metadata"))
             if latest["report"].get("passed"):
                 latest["validation_key"] = validation_key
                 write_json(accepted_path, latest)
@@ -849,6 +920,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 report = {**report, "history_echo": echo}
         if wav.exists():
             report = _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify)
+            if "history_echo" not in report:
+                report = _skipped_word_check(report, verifier, request_hash, wav, directory, purpose, notify, metadata)
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,

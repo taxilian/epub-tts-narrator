@@ -51,6 +51,12 @@ class ReferenceTextJudgingVerifier:
     def judge_reference(self, expected_text, primary_transcript, secondary_transcript=None):
         return self.judge.judge(expected_text, primary_transcript, secondary_transcript)
 
+    def judge_skipped_word(self, expected_text, transcript, word, context):
+        judge = getattr(self.judge, "judge_skipped_word", None)
+        if not callable(judge):
+            return None
+        return judge(expected_text, transcript, word, context)
+
     def review_phonetics(self, expected_text, transcript):
         if self.phonetic_reviewer is None:
             return None
