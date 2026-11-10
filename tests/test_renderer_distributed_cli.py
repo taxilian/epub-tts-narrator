@@ -54,7 +54,7 @@ class DistributedCLITests(unittest.TestCase):
         setup.assert_called_once_with("engine")
         serve.assert_called_once()
         self.assertIsNone(serve.call_args.args[0]["verification"]["model"])
-        self.assertEqual(serve.call_args.args[0]["server"]["host"], "127.0.0.1")
+        self.assertEqual(serve.call_args.args[0]["server"]["host"], "0.0.0.0")
         self.assertEqual(serve.call_args.args[0]["server"]["port"], 8080)
         bundle.assert_not_called()
         store.assert_not_called()

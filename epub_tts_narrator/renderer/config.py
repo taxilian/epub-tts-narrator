@@ -77,6 +77,9 @@ def default_multi_speaker(protocol):
     return protocol != "fish_sglang_drama3"
 
 
+# Single source of the default serve port (config template, serve CLI, auto-serve fallback).
+DEFAULT_SERVE_PORT = 8080
+
 DEFAULTS = {
     "censorship": deepcopy(CENSORSHIP_DEFAULTS),
     "engine": {
@@ -114,7 +117,9 @@ DEFAULTS = {
         **PIPELINE_RENDER_POOL_DEFAULTS,
     },
     "server": {
-        "host": "127.0.0.1", "port": 8080, "api_key": "",
+        # Bind-everything default for explicit `serve` (an api_key is then
+        # required); auto-serve always spawns and probes loopback instead.
+        "host": "0.0.0.0", "port": DEFAULT_SERVE_PORT, "api_key": "",
         "max_request_bytes": 100 * 1024 * 1024,
         "max_pending_requests": 4, "request_timeout_seconds": 300.0,
         # Requests decoded together per step by a batching engine (serve only).

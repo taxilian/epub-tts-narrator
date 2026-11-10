@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.config import load_config as load_analyzer_config
-from epub_tts_narrator.renderer.config import load_config
+from epub_tts_narrator.renderer.config import DEFAULT_SERVE_PORT, load_config
 
 
 def worker_table(name="remote", kind="fish_http", **settings):
@@ -39,7 +39,8 @@ class DistributedConfigTests(unittest.TestCase):
             config = load_config(self.path)
         self.assertEqual(config["render_pool"]["workers"], [])
         self.assertEqual(config["engine"]["checkpoint"], str(self.root / "drama-3"))
-        self.assertEqual(config["server"]["host"], "127.0.0.1")
+        self.assertEqual(config["server"]["host"], "0.0.0.0")
+        self.assertEqual(config["server"]["port"], DEFAULT_SERVE_PORT)
         self.assertEqual(config["server"]["api_key"], "")
         self.assertNotIn("environment-secret", str(config))
 

@@ -32,6 +32,7 @@ import time
 
 from .audio_naming import descriptive_audio_filename
 from .chapter_protocol import require_hash
+from .config import DEFAULT_SERVE_PORT
 from .engines import EngineError, _text, create_engine
 from .drama3_models import DEFAULT_DRAMA3_MODEL, get_drama3_model
 from .fish_http import MAX_AUDIO_BYTES, PROTOCOL, SPEAKER_TAG, inspect_wav, redact, validate_wire_text
@@ -736,7 +737,7 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
         except (ValueError, OSError, EngineError, ImportError) as exc:
             recognizers = None
             notify(f"Speech recognition is not offered: {exc}")
-    return _RenderServer((host, settings.get("port", 8080)), config, engine,
+    return _RenderServer((host, settings.get("port", DEFAULT_SERVE_PORT)), config, engine,
                          recognizers=recognizers, notify=notify)
 
 

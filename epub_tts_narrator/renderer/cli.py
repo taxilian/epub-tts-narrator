@@ -142,7 +142,7 @@ def parser():
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
     serve.add_argument("--config", type=Path, help="Global TOML settings; a missing server.api_key is generated and saved here")
-    serve.add_argument("--host", help="Listen address; use 0.0.0.0 for LAN access (default: server.host, normally 127.0.0.1)")
+    serve.add_argument("--host", help="Listen address (default: server.host, normally 0.0.0.0; use 127.0.0.1 for loopback only)")
     serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")

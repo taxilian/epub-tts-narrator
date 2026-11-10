@@ -118,8 +118,12 @@ bracketed_text = "Give this bracketed text a slight, audible change in delivery 
 # Local auto-serve (optional, off by default): small jobs such as pronunciation
 # previews and pronounce-name auditions reuse a local serve worker on server.port
 # instead of loading a second Drama 3 model beside a running render. The spawned
-# worker exits itself after the idle timeout; see RENDERER.md "Local auto-serve".
+# worker always binds loopback and exits itself after the idle timeout; see
+# RENDERER.md "Local auto-serve". An explicit `audiobook-render serve` binds
+# server.host instead (0.0.0.0 by default, which requires the generated api_key).
 # [server]
+# host = "0.0.0.0"
+# port = 8080
 # auto_start = true
 # idle_timeout_seconds = 600  # 0 keeps the spawned server until interrupted
 

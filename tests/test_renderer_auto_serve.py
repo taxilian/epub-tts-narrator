@@ -159,7 +159,7 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(engine.url, "http://127.0.0.1:8080/v1/tts")
         command = spawn.call_args.args[0]
         self.assertEqual(command, [sys.executable, "-m", "epub_tts_narrator.renderer", "serve",
-                                   "--config", str(self.config_path), "--port", "8080"])
+                                   "--config", str(self.config_path), "--host", "127.0.0.1", "--port", "8080"])
         kwargs = spawn.call_args.kwargs
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertIs(kwargs["start_new_session"], True)

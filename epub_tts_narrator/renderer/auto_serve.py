@@ -4,8 +4,10 @@ Pronunciation previews and ``pronounce-name`` auditions synthesize a few short
 clips. Loading a private Drama 3 MLX engine per process can exhaust memory
 while a render is already running, so with ``server.auto_start`` these jobs
 reuse a running local ``serve`` worker on ``server.port`` and, when none is
-running, start one as a detached child that exits itself after
-``server.idle_timeout_seconds`` (see ``server._idle_watchdog``).
+running, start one as a detached loopback child (``--host 127.0.0.1``, so a
+config whose ``server.host`` is broader never widens the auto-spawned bind)
+that exits itself after ``server.idle_timeout_seconds`` (see
+``server._idle_watchdog``).
 
 Caveat: ``/health`` advertises the wire protocol and the model family but not
 the full engine identity, so protocol + model is the accepted compatibility
@@ -206,9 +208,9 @@ def _spawn_and_connect(config, port, notify=None):
         raise AutoServeError(f"Could not prepare server.api_key for the local serve worker "
                              f"({type(exc).__name__}); start the server manually with audiobook-render serve") from exc
     command = [sys.executable, "-m", "epub_tts_narrator.renderer", "serve",
-               "--config", str(config_path), "--port", str(port)]
+               "--config", str(config_path), "--host", "127.0.0.1", "--port", str(port)]
     if notify is not None:
-        notify(f"No local serve worker on port {port}; starting one (log: {log_path}).")
+        notify(f"No local serve worker on port {port}; starting one on loopback (log: {log_path}).")
     try:
         with open(log_path, "ab") as log:
             child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -241,7 +243,8 @@ def resolve_small_job_engine(config, notify=None):
         raise AutoServeError("server.auto_start reuses the local Drama 3 serve worker, so it requires "
                              "engine.type = drama3_mlx")
     server = config.get("server") or {}
-    port = int(server.get("port", 8080))
+    from .config import DEFAULT_SERVE_PORT
+    port = int(server.get("port", DEFAULT_SERVE_PORT))
     api_key = server.get("api_key", "")
     health = _probe(port, api_key=api_key)
     if isinstance(health, dict):

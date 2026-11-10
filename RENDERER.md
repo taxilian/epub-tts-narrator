@@ -272,7 +272,7 @@ checkpoint = "./models/drama-3"
 experts = "q8"
 
 [server]
-host = "127.0.0.1" # Default; --host overrides it for a particular run.
+host = "0.0.0.0" # Default; binds every interface, so a generated api_key is required.
 port = 8080
 api_key = "" # serve generates and saves a random key if missing or empty.
 ```
@@ -283,7 +283,7 @@ These settings belong in each machine's existing global config; no book-specific
 .venv-renderer/bin/audiobook-render serve --host 0.0.0.0 --port 8080
 ```
 
-`--host` and `--port` override the configuration for this invocation without saving those overrides. Omitted flags use `[server]` defaults, falling back to `127.0.0.1:8080`. To make LAN listening permanent, set `server.host = "0.0.0.0"` instead.
+`--host` and `--port` override the configuration for this invocation without saving those overrides. Omitted flags use `[server]` defaults (`0.0.0.0:8080`; use `server.host = "127.0.0.1"` or `--host 127.0.0.1` for loopback-only listening). The auto-serve worker that small jobs start themselves always binds loopback regardless of `server.host`.
 
 When `server.api_key` is missing or empty, `serve` generates a random key and saves it in the config it loaded (including a file selected with `--config`). Copy that saved value into the client's worker `api_key` below. Subsequent starts reuse it; existing keys are never rotated automatically. The key is not printed. The update preserves other settings and comments, writes the file with owner-only permissions, and must succeed before the server starts.
 
