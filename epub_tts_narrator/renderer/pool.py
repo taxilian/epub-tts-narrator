@@ -775,6 +775,8 @@ def create_render_engine(config, *, shared_inference=True):
         workers = config["render_pool"]["workers"]
     if not workers:
         return create_engine(config["engine"])
+    from .auto_serve import shared_worker_config
+    config = shared_worker_config(config)
     return RenderPool(config)
 
 

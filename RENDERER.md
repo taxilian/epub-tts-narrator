@@ -529,10 +529,9 @@ A single book without `--remote` renders exactly as before. `--remote` also work
 
 ## Local auto-serve
 
-Small interactive jobs — pronunciation previews and `pronounce-name` auditions —
-normally load a private Drama 3 engine per process, which can exhaust memory
-while a render is running. With `server.auto_start = true` in the global config,
-these jobs instead reuse a local `serve` worker on `server.port`:
+Configured local render workers and interactive pronunciation jobs reuse a
+local `serve` worker on `server.port` by default (`server.auto_start = true`).
+They share the TTS model rather than loading competing copies.
 
 - The job probes `http://127.0.0.1:{server.port}/health` and, when a worker
   with the expected protocol and model answers, sends its synthesis there as a
@@ -542,20 +541,21 @@ these jobs instead reuse a local `serve` worker on `server.port`:
   a detached child (under an exclusive lock, so concurrent jobs spawn one
   worker), waits up to 300 seconds for readiness, and connects. A worker that
   is still loading its model is waited for, never duplicated.
-- The spawned worker exits itself after `server.idle_timeout_seconds` without
-  requests, so it does not stay loaded forever. Set both keys together, for
-  example `auto_start = true` and `idle_timeout_seconds = 600`.
+- The spawned worker binds loopback and uses the local worker's configured
+  batch width. It exits after `server.idle_timeout_seconds` without requests,
+  using 600 seconds when that setting is zero. Explicit `serve` invocations
+  retain their configured bind and idle settings.
 - A port owned by any other process fails closed with a message; nothing is
   ever killed. Engine identity is not advertised on `/health`, so protocol +
   model is the accepted compatibility check.
 
-Both settings default off; with `auto_start = false` (or without them) the
-behavior is exactly as before. Diagnostics live in `~/.cache/epub-tts-narrator/`:
+Set `auto_start = false` to explicitly retain direct in-process inference.
+Diagnostics live in `~/.cache/epub-tts-narrator/`:
 `serve-{port}.log` (the spawned worker's output — check it when startup fails),
 `auto-serve-{port}.json` (pid, port, started-at of the last spawn) and
 `auto-serve-{port}.lock` (spawn serialization). `auto_start` requires
-`engine.type = "drama3_mlx"` with an existing `engine.checkpoint`; large render
-and voice-creation jobs never use it.
+`engine.type = "drama3_mlx"` with an existing `engine.checkpoint`.
+Voice-creation jobs retain their separate designer path.
 
 ## Compare legacy and expressive chapter generation
 

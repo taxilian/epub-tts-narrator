@@ -292,6 +292,8 @@ def _prepare_book(book, args):
     from .book_context import resolve_book_config
     from .config import load_config
     config = load_config(args.config)
+    from epub_tts_narrator.config import resolve_config_path
+    config["_config_path"] = str(resolve_config_path(args.config).resolve())
     bundle = load_bundle(book)
     config = resolve_book_config(bundle, config, output=getattr(args, "output", None),
                                  work_dir=getattr(args, "work_dir", None), epub=getattr(args, "epub", None))

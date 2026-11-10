@@ -106,6 +106,31 @@ class BatchedServingTests(unittest.TestCase):
             with self.subTest(expected=expected), urlopen(url.replace("/v1/tts", "/health"), timeout=5) as response:
                 self.assertEqual(json.loads(response.read())["concurrent_requests"], expected)
 
+    def test_eight_decode_rows_are_all_admitted_with_a_small_pending_queue(self):
+        engine = BatchingFakeEngine()
+        engine.together = threading.Barrier(8, timeout=5)
+        url = self.serve(engine, batch_rows=8, max_pending_requests=1)
+        errors = []
+
+        def speak(index):
+            try:
+                client = FishHTTPEngine({"url": url, "timeout_seconds": 10})
+                client.synthesize("A passage.", self.voice,
+                                  self.root / f"concurrent-passage-{index}.wav", seed=index)
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=speak, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(15)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(engine.seen), 8)
+        self.assertTrue(all((self.root / f"concurrent-passage-{index}.wav").is_file()
+                            for index in range(8)))
+
     def test_serve_logs_how_each_batched_request_shared_the_batch(self):
         from epub_tts_narrator.renderer.server import batch_summary
         stats = {"rows": 8, "joined_active": 5, "waited_seconds": 0.4, "steps": 120, "mean_rows": 6.5,
@@ -189,14 +214,11 @@ class BatchedServingTests(unittest.TestCase):
         self.assertEqual(engine.calls[0]["temperature"], 0.4)
         self.assertEqual(engine.temperature, 1.0)
 
-    def test_batch_rows_need_a_batching_engine_and_enough_pending_slots(self):
+    def test_batch_rows_need_a_batching_engine(self):
         config = {"server": {"host": "127.0.0.1", "port": 0, "api_key": "", "max_pending_requests": 4,
                              "batch_rows": 2}, "engine": {"type": "drama3_mlx"}}
         with self.assertRaisesRegex(EngineError, "decodes batches"):
             make_server(config, FakeEngine())
-        config["server"].update(batch_rows=8, max_pending_requests=4)
-        with self.assertRaisesRegex(EngineError, "max_pending_requests"):
-            make_server(config, BatchingFakeEngine())
 
     def test_server_batch_rows_is_validated(self):
         path = self.root / "config.toml"

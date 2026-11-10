@@ -127,7 +127,7 @@ DEFAULTS = {
         # serve exits after this many idle seconds (0 = keep running until
         # interrupted); small jobs may start serve themselves (auto_serve).
         "idle_timeout_seconds": 0.0,
-        "auto_start": False,
+        "auto_start": True,
     },
     "remote_chapters": {
         "url": "", "api_key": "", "timeout_seconds": 60.0,

@@ -207,8 +207,13 @@ def _spawn_and_connect(config, port, notify=None):
     except (OSError, ValueError) as exc:
         raise AutoServeError(f"Could not prepare server.api_key for the local serve worker "
                              f"({type(exc).__name__}); start the server manually with audiobook-render serve") from exc
+    rows = max([config["server"].get("batch_rows", 1)]
+               + [worker.get("concurrency", 1) for worker in config.get("render_pool", {}).get("workers", [])
+                  if worker["type"] == "local"])
     command = [sys.executable, "-m", "epub_tts_narrator.renderer", "serve",
-               "--config", str(config_path), "--host", "127.0.0.1", "--port", str(port)]
+               "--config", str(config_path), "--host", "127.0.0.1", "--port", str(port),
+               "--batch-rows", str(rows),
+               "--idle-timeout", str(config["server"].get("idle_timeout_seconds") or 600)]
     if notify is not None:
         notify(f"No local serve worker on port {port}; starting one on loopback (log: {log_path}).")
     try:
@@ -246,6 +251,10 @@ def resolve_small_job_engine(config, notify=None):
     from .config import DEFAULT_SERVE_PORT
     port = int(server.get("port", DEFAULT_SERVE_PORT))
     api_key = server.get("api_key", "")
+    if not api_key and config.get("_config_path"):
+        import tomllib
+        with open(config["_config_path"], "rb") as source:
+            api_key = (tomllib.load(source).get("server") or {}).get("api_key", "")
     health = _probe(port, api_key=api_key)
     if isinstance(health, dict):
         return _verified_client(config, port, health, api_key=api_key)
@@ -263,3 +272,26 @@ def resolve_small_job_engine(config, notify=None):
                                  f"{SPAWN_READY_SECONDS:g}s; start it manually with audiobook-render serve "
                                  "to see its startup error")
         return _spawn_and_connect(config, port, notify=notify)
+
+
+def shared_worker_config(config):
+    """Route configured local slots to the same server interactive clients use."""
+    workers = config.get("render_pool", {}).get("workers", [])
+    if (not config.get("_config_path") or not config.get("server", {}).get("auto_start", True)
+            or config.get("engine", {}).get("type") != "drama3_mlx"
+            or not any(worker["type"] == "local" for worker in workers)):
+        return config
+    settings = {**config, "server": dict(config["server"])}
+    settings["server"]["batch_rows"] = max(worker.get("concurrency", 1) for worker in workers
+                                           if worker["type"] == "local")
+    client = resolve_small_job_engine(settings)
+    routed = []
+    for worker in workers:
+        if worker["type"] == "local":
+            routed.append({**worker, "type": "fish_http", "url": client.url,
+                           "api_key": client.api_key, "protocol": client.protocol,
+                           "model": client.model, "multi_speaker": True,
+                           "timeout_seconds": client.timeout})
+        else:
+            routed.append(worker)
+    return {**config, "render_pool": {**config["render_pool"], "workers": routed}}

@@ -144,6 +144,8 @@ def parser():
     serve.add_argument("--config", type=Path, help="Global TOML settings; a missing server.api_key is generated and saved here")
     serve.add_argument("--host", help="Listen address (default: server.host, normally 0.0.0.0; use 127.0.0.1 for loopback only)")
     serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
+    serve.add_argument("--batch-rows", type=int, help="Concurrent decode rows for this server invocation")
+    serve.add_argument("--idle-timeout", type=float, help="Idle seconds before this server invocation exits")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
     chapters.add_argument("--maintenance", action="store_true",
@@ -307,7 +309,7 @@ def main(argv=None):
             config = load_config(config_path, require_verifier=False)
         else:
             config = load_config(config_path)
-        if args.command in {"pronunciations", "pronounce", "pronounce-name"}:
+        if args.command in {"render", "compare-performance", "pronunciations", "pronounce", "pronounce-name"}:
             # auto_serve spawns `serve --config` from this file; the config
             # dict alone does not carry its own path.
             from epub_tts_narrator.config import resolve_config_path
@@ -318,8 +320,9 @@ def main(argv=None):
         if args.command == "serve":
             from .config import validate_distributed_settings
             from .server_config import ensure_server_api_key
-            for key in ("host", "port"):
-                value = getattr(args, key)
+            for argument, key in (("host", "host"), ("port", "port"),
+                                  ("batch_rows", "batch_rows"), ("idle_timeout", "idle_timeout_seconds")):
+                value = getattr(args, argument)
                 if value is not None:
                     config["server"][key] = value
             validate_distributed_settings(config)

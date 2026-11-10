@@ -29,11 +29,11 @@ class ServerAutoServeConfigTests(unittest.TestCase):
     def config(self):
         return deepcopy(DEFAULTS)
 
-    def test_defaults_keep_idle_exit_and_auto_start_off(self):
+    def test_defaults_enable_automatic_server_sharing(self):
         config = self.config()
         validate_distributed_settings(config)
         self.assertEqual(config["server"]["idle_timeout_seconds"], 0.0)
-        self.assertIs(config["server"]["auto_start"], False)
+        self.assertIs(config["server"]["auto_start"], True)
 
     def test_idle_timeout_accepts_disabled_zero_and_the_full_day_bound(self):
         for value in (0, 0.0, 1, 1.5, 300, 86400):
@@ -87,6 +87,31 @@ class ResolverTests(unittest.TestCase):
     def health(self, **overrides):
         return {"status": "ready", "model": "drama-3", "protocol": PROTOCOL,
                 "reference_reuse": True, "roles": ["tts"], "concurrent_requests": 1, **overrides}
+
+    def test_renderer_and_pronunciation_reuse_the_same_server_and_keep_pool_capacity(self):
+        from epub_tts_narrator.renderer.auto_serve import shared_worker_config
+        from epub_tts_narrator.renderer.pool import RenderPool
+        config = deepcopy(DEFAULTS)
+        config.update(self.config())
+        config["render_pool"]["workers"] = [
+            {"name": "local", "type": "local", "concurrency": 8},
+            {"name": "other", "type": "fish_http", "concurrency": 8,
+             "url": "http://fixture.example:8080/v1/tts", "protocol": "fish_inline",
+             "model": "drama-3", "multi_speaker": True}]
+        with (patch(f"{AUTO_SERVE}._probe", return_value=self.health(concurrent_requests=8)),
+              patch(f"{AUTO_SERVE}.subprocess.Popen") as spawn):
+            routed = shared_worker_config(config)
+            preview = resolve_small_job_engine(config)
+        pool = RenderPool(routed)
+        self.addCleanup(pool.close)
+        self.assertEqual(pool.max_parallel, 16)
+        local = next(worker for worker in routed["render_pool"]["workers"] if worker["name"] == "local")
+        self.assertEqual(local["type"], "fish_http")
+        self.assertEqual(local["url"], preview.url)
+        self.assertEqual(local["concurrency"], 8)
+        self.assertEqual(routed["render_pool"]["workers"][1], config["render_pool"]["workers"][1])
+        self.assertEqual(config["render_pool"]["workers"][0]["type"], "local")
+        spawn.assert_not_called()
 
     def test_a_healthy_local_serve_returns_a_client_without_spawning(self):
         with patch(f"{AUTO_SERVE}._probe", return_value=self.health()) as probe, \
@@ -149,17 +174,20 @@ class ResolverTests(unittest.TestCase):
                 spawn.assert_not_called()
 
     def test_spawn_runs_serve_detached_with_the_config_path_and_port(self):
+        config = self.config()
+        config["render_pool"] = {"workers": [{"name": "local", "type": "local", "concurrency": 8}]}
         process = Mock(pid=4242)
         answers = iter([_ABSENT, _ABSENT, self.health()])
         with patch(f"{AUTO_SERVE}._probe", side_effect=lambda port, **kwargs: next(answers)), \
              patch(f"{AUTO_SERVE}._wait_ready", return_value=self.health()) as wait, \
              patch(f"{AUTO_SERVE}.subprocess.Popen", return_value=process) as spawn, \
              patch(f"{AUTO_SERVE}._cache_root", return_value=self.cache):
-            engine = resolve_small_job_engine(self.config())
+             engine = resolve_small_job_engine(config)
         self.assertEqual(engine.url, "http://127.0.0.1:8080/v1/tts")
         command = spawn.call_args.args[0]
         self.assertEqual(command, [sys.executable, "-m", "epub_tts_narrator.renderer", "serve",
-                                   "--config", str(self.config_path), "--host", "127.0.0.1", "--port", "8080"])
+                                   "--config", str(self.config_path), "--host", "127.0.0.1", "--port", "8080",
+                                   "--batch-rows", "8", "--idle-timeout", "600"])
         kwargs = spawn.call_args.kwargs
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertIs(kwargs["start_new_session"], True)

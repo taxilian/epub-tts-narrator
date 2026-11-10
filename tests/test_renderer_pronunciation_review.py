@@ -842,6 +842,7 @@ class PronunciationReviewTests(unittest.TestCase):
         self.assertIs(resolve.call_args.kwargs["notify"], session.notify)
 
     def test_without_auto_start_the_default_engine_builds_the_configured_engine_directly(self):
+        self.config["server"]["auto_start"] = False
         built = Mock()
         with patch("epub_tts_narrator.renderer.engines.create_engine", return_value=built) as create, \
              patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine") as resolve:

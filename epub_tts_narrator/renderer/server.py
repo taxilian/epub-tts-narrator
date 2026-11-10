@@ -285,7 +285,8 @@ class _RenderServer(ThreadingHTTPServer):
         self.inference_runtime = LocalRuntime(name="drama3-inference")
         self._inference_closed = False
         self._close_lock = threading.Lock()
-        self.admission = threading.BoundedSemaphore(self.settings.get("max_pending_requests", 4) + 1)
+        self.admission = threading.BoundedSemaphore(
+            self.settings.get("max_pending_requests", 4) + getattr(engine, "concurrent_requests", 1))
         if ":" in address[0]:
             self.address_family = socket.AF_INET6
         try:
@@ -725,8 +726,6 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
     if rows > 1:
         if not callable(getattr(engine, "set_batch_rows", None)):
             raise EngineError("server.batch_rows above 1 requires an engine that decodes batches (drama3_mlx or fish_speech_cuda)")
-        if settings.get("max_pending_requests", 4) < rows:
-            raise EngineError("server.max_pending_requests must be at least server.batch_rows")
         engine.set_batch_rows(rows)
     if recognizers is None:
         # A configured [verification] model makes this a recognition worker too.

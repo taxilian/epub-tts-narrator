@@ -86,6 +86,19 @@ class DistributedCLITests(unittest.TestCase):
                 self.assertNotIn("fixture-server-key", output + error)
                 self.assertEqual(self.config.read_bytes(), before)
 
+    def test_auto_started_server_can_override_rows_and_idle_without_changing_the_file(self):
+        self.configure('[server]\napi_key="fixture-server-key"\n', verifier=False)
+        before = self.config.read_bytes()
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.server.serve") as serve):
+            status, _, error = self.run_cli("serve", "--host", "127.0.0.1",
+                                             "--batch-rows", "8", "--idle-timeout", "600")
+        self.assertEqual(status, 0, error)
+        settings = serve.call_args.args[0]["server"]
+        self.assertEqual((settings["batch_rows"], settings["idle_timeout_seconds"]), (8, 600))
+        self.assertEqual(settings["host"], "127.0.0.1")
+        self.assertEqual(self.config.read_bytes(), before)
+
     def test_serve_creates_missing_key_and_reuses_it_on_subsequent_starts(self):
         for server_text in (
             "",
