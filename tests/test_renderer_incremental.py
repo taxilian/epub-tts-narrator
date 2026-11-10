@@ -139,6 +139,97 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(before, self.output_bytes())
         self.assertEqual(counts, self.model_counts())
 
+    def completed_chapter_audio(self):
+        return {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (self.work / "chapters").rglob("*.m4a")}
+
+    def test_unchanged_rerender_never_enters_clip_execution_asr_or_encoding(self):
+        self.run_render()
+        audio = self.completed_chapter_audio()
+        counts = self.model_counts()
+        self.messages.clear()
+
+        with patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery",
+                   side_effect=AssertionError("No clip execution")), \
+             patch("epub_tts_narrator.renderer.workflow._render_chunk",
+                   side_effect=AssertionError("No chunk synthesis")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take",
+                   side_effect=AssertionError("No TTS/ASR take")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter",
+                   side_effect=AssertionError("No chapter encoding")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio",
+                   side_effect=AssertionError("No book encoding")):
+            current = self.run_render()
+
+        self.assertEqual(current["status"], "complete")
+        self.assertEqual(self.completed_chapter_audio(), audio,
+                         "an unchanged rerender must not rewrite any chapter M4A")
+        self.assertEqual(self.model_counts(), counts)
+        for number in (1, 2):
+            self.assertTrue(any(f"Reusing completed chapter {number} / 2" in message
+                                for message in self.messages), self.messages)
+
+    def test_edited_chapter_alone_rerenders_while_other_chapters_keep_their_audio(self):
+        self.run_render()
+        counts = self.model_counts()
+        audio = self.completed_chapter_audio()
+        saved_context = read_json(self.checkpoint(1))["context"]
+        self.messages.clear()
+
+        # A serial update pins the pre-update source fingerprint, then edits
+        # only chapter two's text; chapter one's plan is unchanged.
+        from epub_tts_narrator.pipeline import fingerprint
+        self.document["provenance"].setdefault(
+            "chunk_identity_source_fingerprint", fingerprint(self.document["source"]))
+        new_text = "At dawn the boat returned safely to the harbor."
+        self.document["source"]["blocks"][4]["text"] = new_text
+        self.document["segments"][4]["text"] = new_text
+        self.document["segments"][4]["end"] = len(new_text)
+        self.save_revision()
+
+        import epub_tts_narrator.renderer.workflow as workflow
+        entered = []
+        real_recovery = workflow._render_chapter_with_recovery
+        real_prepare = workflow.prepare_chapter
+        transcribe = self.verifier.transcribe
+        asr_calls = []
+
+        def recovery(bundle, chapter, *args, **kwargs):
+            entered.append(("render", chapter["number"]))
+            return real_recovery(bundle, chapter, *args, **kwargs)
+
+        def prepare(chapter, *args, **kwargs):
+            entered.append(("encode", chapter["number"]))
+            return real_prepare(chapter, *args, **kwargs)
+
+        def asr(path):
+            asr_calls.append(path)
+            return transcribe(path)
+
+        with patch.object(workflow, "_render_chapter_with_recovery", side_effect=recovery), \
+             patch.object(workflow, "prepare_chapter", side_effect=prepare), \
+             patch.object(self.verifier, "transcribe", side_effect=asr):
+            self.run_render()
+
+        self.assertEqual([kind for kind, _ in entered], ["render", "encode"],
+                         "only the edited chapter may enter clip execution and encoding")
+        self.assertEqual({number for _, number in entered}, {2})
+        self.assertEqual(len(asr_calls), 1, "only the edited chapter's new take is transcribed")
+        self.assertEqual(self.model_counts(), (counts[0], counts[1] + 1, counts[2] + 1))
+        for name, (saved_bytes, saved_mtime) in audio.items():
+            if "chapter-0001" in name:
+                current = self.completed_chapter_audio()[name]
+                self.assertEqual(current[0], saved_bytes, f"{name} bytes changed")
+                self.assertEqual(current[1], saved_mtime, f"{name} mtime changed")
+        self.assertTrue(any("Reusing completed chapter 1 / 2" in message for message in self.messages),
+                        self.messages)
+        current_context = read_json(self.checkpoint(1))["context"]
+        self.assertEqual({key: value for key, value in current_context.items()
+                          if key not in {"bundle_hash"}},
+                         {key: value for key, value in saved_context.items()
+                          if key not in {"bundle_hash"}})
+
     def test_custom_recorded_filename_survives_title_change_and_repackaging(self):
         # Given an intact custom-named publication needing a publication-key refresh.
         original = self.run_render()
