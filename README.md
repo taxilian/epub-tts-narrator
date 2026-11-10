@@ -83,14 +83,22 @@ epub-tts-narrator refresh-voice-profiles runs/book-01 --workers 1
 ```
 
 Re-check a finished book's riskiest speaker assignments (context-based dialogue in
-multi-speaker scenes) with the semantic review engine, then apply what you confirm:
+multi-speaker scenes) with the semantic review engine, then decide what to save:
 
 ```sh
-epub-tts-narrator verify-attribution runs/book-01                     # report only
+# Fresh audit; a terminal offers Accept all, Edit-review, or Leave unchanged.
+epub-tts-narrator verify-attribution runs/book-01
+
+# Explicit noninteractive modes: report only, apply all, or select each finding.
 epub-tts-narrator verify-attribution runs/book-01 --chapter 5 \
   --instructions "the twins finish each other's sentences: alternate them, tags win" \
   --interactive
+epub-tts-narrator verify-attribution runs/book-01 --apply
 ```
+
+Every ordinary invocation performs a fresh audit in a new run-local request cache; a completed earlier audit is never silently replayed. After an interruption, the printed `Fresh verification run: RUN_ID` can be used as `--resume RUN_ID` to reuse compatible validated responses from that explicitly selected run. Without `--resume`, even an unchanged book is checked again. Non-TTY invocation without `--apply` or `--interactive` remains report-only and never applies findings.
+
+Edit-review redisplays each finding's text, original/proposed speakers, and evidence at its decision point. You can accept the proposal, leave it unchanged, finish, or open a staged manual edit. Manual editing can choose any existing-cast speaker (including one outside both proposals), change the delivery direction within 240 characters, and set the review flag; explicit confirmation is required, and cancel or EOF discards the unconfirmed staged edit. Publication preserves source text, performance controls, cast/voice assets, and descendant bindings. The final summary distinguishes applied findings from those left unchanged, breaks down accepted proposals versus manual edits, and names the backup/revision journal whenever publication occurs.
 
 Browse and correct a finished book by hand with `review-ui` (or `just review-ui`):
 

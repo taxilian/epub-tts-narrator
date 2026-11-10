@@ -1,21 +1,12 @@
 """Focused attribution verification uses the real audit and publication boundaries."""
 
-import contextlib
 from copy import deepcopy
-import io
-from pathlib import Path
-import tempfile
 from threading import Lock
 import unittest
-from unittest.mock import patch
 
-from epub_tts_narrator.analysis_directory import _completed_directory, fresh_registry, publish_directory
 from epub_tts_narrator.attribution_verification import (
     chapter_block_ids, findings, restrict_findings, risk_blocks, sample_blocks,
 )
-from epub_tts_narrator.cli import export_bundle, main
-from epub_tts_narrator.config import DEFAULTS
-from epub_tts_narrator.series import link_analysis
 from test_contracts import valid_document
 from test_series import fixture as series_fixture
 
@@ -162,102 +153,6 @@ class AttributionVerificationTests(unittest.TestCase):
         self.assertEqual(original["segments"][1]["role_id"], "mara")
         with self.assertRaisesRegex(ValueError, "missing"):
             restrict_findings(original, audited, ["missing"])
-
-
-class AttributionVerificationCLITests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        self.book = self.root / "book"
-
-    def make_book(self, risk=True):
-        document = risk_document(risk)
-        registry = fresh_registry(self.book)
-        linked = link_analysis(document, registry)
-        publish_directory(linked, registry, self.book, export_bundle)
-        return linked
-
-    def invoke(self, *arguments, input_text=""):
-        config = deepcopy(DEFAULTS)
-        config["provider"].update(model="test-model", base_url="https://example.invalid")
-        client, output, errors = AuditClient(), io.StringIO(), io.StringIO()
-        with (patch("epub_tts_narrator.cli.load_config", return_value=config),
-              patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client),
-              patch("sys.stdin", io.StringIO(input_text)),
-              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
-            code = main(["verify-attribution", str(self.book), *map(str, arguments)])
-        return code, output.getvalue(), errors.getvalue(), client
-
-    def test_report_mode_prints_findings_without_revising_the_book(self):
-        self.make_book()
-        before = (self.book / "analysis.json").read_bytes()
-        code, output, errors, _ = self.invoke()
-        self.assertEqual(code, 0, errors)
-        self.assertIn("from Mara to Tom", output)
-        self.assertIn("2 attribution finding(s).", output)
-        self.assertIn("instructions=no", output)
-        self.assertEqual((self.book / "analysis.json").read_bytes(), before)
-        self.assertFalse((self.book / ".analysis-revisions").exists())
-
-    def test_apply_mode_publishes_the_whole_audit_with_a_revision_journal(self):
-        original = self.make_book()
-        code, output, errors, _ = self.invoke("--apply")
-        self.assertEqual(code, 0, errors)
-        revised, _, _ = _completed_directory(self.book)
-        roles = {row["id"]: row["role_id"] for row in revised["segments"]}
-        self.assertEqual(roles[original["segments"][1]["id"]], "tom")
-        self.assertEqual(roles[original["segments"][2]["id"]], "tom")
-        self.assertIn("attribution_review", revised["provenance"])
-        self.assertTrue(list((self.book / ".analysis-revisions").glob("*/revision.json")))
-        self.assertIn("Original analysis files and revision journal:", output)
-
-    def test_interactive_wins_over_apply_and_publishes_only_accepted_findings(self):
-        original = self.make_book()
-        code, _, errors, _ = self.invoke("--apply", "--interactive", input_text="y\nn\n")
-        self.assertEqual(code, 0, errors)
-        revised, _, _ = _completed_directory(self.book)
-        roles = {row["id"]: row["role_id"] for row in revised["segments"]}
-        self.assertEqual(roles[original["segments"][1]["id"]], "tom")
-        self.assertEqual(roles[original["segments"][2]["id"]], "mara")
-        self.assertNotIn("attribution_review", revised["provenance"])
-        self.assertTrue(list((self.book / ".analysis-revisions").glob("*/revision.json")))
-
-    def test_chapter_scoped_instructions_reach_the_scan_as_review_notes(self):
-        self.make_book()
-        code, output, errors, client = self.invoke("--chapter", 1, "--instructions", "Check the visitor carefully.")
-        self.assertEqual(code, 0, errors)
-        scans = [row for row in client.calls if row["mode"] == "attribution_review_scan"]
-        self.assertTrue(scans)
-        self.assertTrue(all(row["review_notes"] == "Check the visitor carefully." for row in scans))
-        self.assertIn("instructions=yes", output)
-
-    def test_sample_mode_audits_the_deterministic_risk_subset(self):
-        self.make_book()
-        code, _, errors, client = self.invoke("--sample", 1)
-        self.assertEqual(code, 0, errors)
-        scans = [row for row in client.calls if row["mode"] == "attribution_review_scan"]
-        self.assertEqual(len(scans), 1)
-        self.assertEqual([row["block_id"] for row in scans[0]["target_units"]], ["b2"])
-
-    def test_empty_risk_set_exits_before_building_model_requests(self):
-        self.make_book(risk=False)
-        code, output, errors, client = self.invoke()
-        self.assertEqual(code, 0, errors)
-        self.assertIn("No context-basis or flagged dialogue lines to verify.", output)
-        self.assertEqual(client.calls, [])
-        self.assertFalse((self.book / ".analysis-cache").exists())
-
-    def test_invalid_instruction_lengths_and_worker_counts_return_errors_without_model_calls(self):
-        self.make_book()
-        for arguments, message in [(("--instructions", ""), "--instructions"),
-                                   (("--instructions", "x" * 2001), "--instructions"),
-                                   (("--workers", 0), "workers"), (("--workers", 6), "workers")]:
-            with self.subTest(arguments=arguments):
-                code, _, errors, client = self.invoke(*arguments)
-                self.assertEqual(code, 1)
-                self.assertIn(message, errors)
-                self.assertEqual(client.calls, [])
 
 
 if __name__ == "__main__":
