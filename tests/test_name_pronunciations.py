@@ -30,7 +30,7 @@ from epub_tts_narrator.renderer.book_context import resolve_book_config, voice_s
 from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
 from epub_tts_narrator.renderer.engines import EngineError, prepare_synthesis
 from epub_tts_narrator.renderer.name_pronunciation_tool import (book_sentences, run_pronounce_name, sentence_controls,
-                                                                test_sentence)
+                                                                test_sentence, with_plural_audition)
 from epub_tts_narrator.series import link_analysis
 from shared_fixtures import renderer_config
 from test_contracts import valid_document
@@ -125,6 +125,23 @@ class FormsAndOccurrencesTests(unittest.TestCase):
             "version": 1, "text_sha256": text_sha256(sentence), "controls": controls})[1]
         self.assertEqual(compiled.count("<|phoneme_start|>"), 4)
         self.assertNotIn("Salvatore", compiled)
+
+    def test_test_sentence_always_auditions_the_plural_even_without_a_book_plural(self):
+        found = occurrences("Salvatore met Sal.", "Salvatore")
+        sentence = test_sentence("Salvatore", found)
+        self.assertIn("Salvatores are here", sentence)
+        controls = sentence_controls("Salvatore", sentence, "S AE2 L V AH0 T AO1 R IY0")
+        self.assertEqual([control["phonemes"] for control in controls if control["text"] == "Salvatores"],
+                         ["S AE2 L V AH0 T AO1 R IY0 Z"])
+
+    def test_auditions_append_the_derived_plural_when_the_sentence_lacks_one(self):
+        sentence, spans = with_plural_audition("Mara", "My name is Mara.", [(11, 15, "Mara")])
+        self.assertEqual(sentence, "My name is Mara. The Maras are here.")
+        self.assertEqual(spans, [(11, 15, "Mara"), (21, 26, "Maras")])
+        controls = sentence_controls("Mara", sentence, "M AA1 R AH0", spans)
+        self.assertEqual([control["phonemes"] for control in controls], ["M AA1 R AH0", "M AA1 R AH0 Z"])
+        # A sentence that already auditions the plural is kept verbatim.
+        self.assertEqual(with_plural_audition("Mara", "The Maras are here.", None), ("The Maras are here.", None))
 
 
 class StorageTaggingAndRenderTests(unittest.TestCase):
@@ -378,14 +395,14 @@ class SeriesInheritanceTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
 
-    def book(self, name, previous=None):
+    def book(self, name, previous=None, sequel_text="Mara’s lamp lit the bay while Mara watched."):
         directory = self.root / name
         document = fixture(sequel=previous is not None)
         if previous is None:
             registry = fresh_registry(directory)
         else:
             document["source"]["book"].update(id=name, title=name)
-            text = "Mara’s lamp lit the bay while Mara watched."
+            text = sequel_text
             document["source"]["blocks"][1]["text"] = text
             document["segments"][1].update(text=text, end=len(text))
             registry = continuation_registry(previous, document["source"])
@@ -418,6 +435,24 @@ class SeriesInheritanceTests(unittest.TestCase):
         save_definition(second, "Mara", "M EH1 R AH0", status="confirmed", source="manual")
         self.assertEqual(effective_definitions(second)["mara"]["phonemes"], "M EH1 R AH0")
         self.assertEqual(effective_definitions(first)["mara"]["phonemes"], "M AA1 R AH0")
+
+    def test_a_plural_first_used_in_a_later_book_inherits_the_saved_reading(self):
+        first = self.book("first")  # Only the singular occurs here.
+        save_definition(first, "Mara", "M AA1 R AH0", status="confirmed", source="manual")
+        second = self.book("second", previous=first, sequel_text="Mara’s lamp lit the bay while the Maras watched.")
+        inherited = effective_definitions(second)["mara"]
+        self.assertTrue(inherited["inherited"])
+        self.assertEqual(inherited["phonemes"], "M AA1 R AH0")
+        model = FakeModel()
+        status, output, _ = self.analyze_again(second, model)
+        self.assertEqual(status, 0, output)
+        self.assertEqual({payload["mode"] for payload in model.payloads}, {"word_part_of_speech"})  # No new guess.
+        self.assertIn("Pronunciation of Mara: every use is decided (3 use(s) get the reading)", output)
+        words = [(chunk["spoken_text"][control["start"]:control["end"]], control["phonemes"])
+                 for chapter in make_plan(load_bundle(second), renderer_config(paragraph_synthesis=False))["chapters"]
+                 for chunk in chapter["chunks"] for control in chunk.get("expressive_performance", {}).get("controls", [])
+                 if control["kind"] == "pronunciation"]
+        self.assertEqual(words, [("Mara", "M AA1 R AH0"), ("Mara’s", "M AA1 R AH0 Z"), ("Maras", "M AA1 R AH0 Z")])
 
     def remove(self, directory, name="Mara"):
         output = []
@@ -611,12 +646,14 @@ class InteractiveToolTests(unittest.TestCase):
                                    {"phonemes": "M AA1 R AH0", "respelling": "MAH-ruh"}])
         self.assertEqual(self.run_tool(["I more like MAH-ruh", "B", "E m aa1 r ah0 z", "A"], model), 0)
         texts = [call["text"] for call in self.engine.calls]
-        self.assertEqual(set(texts), {"My name is Mara."})  # The book's own sentence.
+        self.assertEqual(set(texts), {"My name is Mara. The Maras are here."})  # The book's sentence plus the derived plural.
         compiled = [call["compiled"] for call in self.engine.calls]
         self.assertIn("<|phoneme_start|>M AE1 R AH0<|phoneme_end|>", compiled[0])
-        self.assertEqual(compiled[1], "My name is <|phoneme_start|>M AA1 R AH0<|phoneme_end|>.")
+        self.assertEqual(compiled[1], "My name is <|phoneme_start|>M AA1 R AH0<|phoneme_end|>. "
+                         "The <|phoneme_start|>M AA1 R AH0 Z<|phoneme_end|> are here.")
         self.assertEqual(compiled[2].count("<|phoneme_start|>"), 0)  # B: the default reading
-        self.assertEqual(compiled[3], "My name is <|phoneme_start|>M AA1 R AH0 Z<|phoneme_end|>.")
+        self.assertEqual(compiled[3], "My name is <|phoneme_start|>M AA1 R AH0 Z<|phoneme_end|>. "
+                         "The <|phoneme_start|>M AA1 R AH0 Z IH0 Z<|phoneme_end|> are here.")
         self.assertEqual(len(self.played), 4)
         self.assertTrue(all(Path(path).is_file() and "name-pronunciation-test" in Path(path).name
                             for path in self.played))
@@ -663,8 +700,10 @@ class InteractiveToolTests(unittest.TestCase):
         model = FakeModel(guesses=[{"phonemes": "M AE1 R AH0"}])
         self.assertEqual(self.run_tool(["R mar ah", "E m aa1 r | ah0", "R mar-ah", "A"], model), 0)
         texts = [call["compiled"] for call in self.engine.calls]
-        self.assertIn("My name is mar-ah.", texts)
-        self.assertIn("My name is <|phoneme_start|>M AA1 R<|phoneme_end|> <|phoneme_start|>AH0<|phoneme_end|>.", texts)
+        self.assertIn("My name is mar-ah. The mar-ahs are here.", texts)
+        self.assertIn("My name is <|phoneme_start|>M AA1 R<|phoneme_end|> <|phoneme_start|>AH0<|phoneme_end|>."
+                      " The <|phoneme_start|>M AA1 R<|phoneme_end|> <|phoneme_start|>AH0 Z<|phoneme_end|> are here.",
+                      texts)
         definition = effective_definitions(self.directory)["mara"]
         self.assertEqual(definition["say_as"], "mar-ah")
         self.assertTrue(any("said as mar-ah" in line for line in self.output))

@@ -10,8 +10,10 @@ Flow for ``pronounce BOOK WORD``:
 2. When an ordinary word could share the spelling, or only some parts of
    speech apply, the model labels each use's part of speech first, in
    checkpointed batches, and the counts are shown.
-3. Render and play up to three short sentences from the book with uses that
-   get the reading (a built-in sentence when none is short enough).
+3. Render and play up to three short sentences from the book with uses that get
+   the reading (a built-in sentence when none is short enough), always ending
+   with the derived plural so a later series book can use it even when this
+   book never does.
 4. Accept, ask the model to revise from your description, ask for a different
    guess, edit the phonemes yourself, or change the parts of speech; repeat
    until accepted. Each step is checkpointed as a draft. On accept, the
@@ -50,14 +52,35 @@ _SENTENCE_END = re.compile(r"[.!?…]+[\"'”’)\]]*(?=\s|$)")
 
 
 def test_sentence(name, source_occurrences, source_text_sample=""):
-    """Several uses of the name, including the book's possessive style."""
+    """Several uses of the name, including the book's possessive style and the plural.
+
+    The plural is always auditioned: a later series book may need it even
+    when this book never uses it.
+    """
     possessives = [item["word"] for item in source_occurrences if item["form"] == "possessive"]
     apostrophe = ("’" if "’" in possessives[0] else "'") if possessives else (
         "’" if source_text_sample.count("’") >= source_text_sample.count("'") else "'")
-    sentence = f"The name is {name}. It is {name}{apostrophe}s name. Give it to {name}."
-    if any(item["form"] == "plural" for item in source_occurrences):
-        sentence += f" The {plural_spelling(name)} are here."
-    return sentence
+    return (f"The name is {name}. It is {name}{apostrophe}s name. Give it to {name}."
+            f" The {plural_spelling(name)} are here.")
+
+
+def with_plural_audition(name, sentence, spans):
+    """An audition sentence that ends with the derived plural when it lacks one.
+
+    A later series book may need the plural even when this book never uses
+    it, so every audition lets the listener hear the derived plural reading
+    (and correct the base reading) before accepting the definition. ``spans``
+    are the sentence's tagged (start, end, word) uses that get the reading,
+    or None to let ``sentence_controls`` find them.
+    """
+    plural = plural_spelling(name)
+    covered = (any(word.casefold() == plural.casefold() for _, _, word in spans) if spans is not None
+               else any(item["form"] == "plural" for item in occurrences(sentence, name)))
+    if covered:
+        return sentence, spans
+    start = len(sentence) + 5  # after " The "
+    sentence += f" The {plural} are here."
+    return sentence, (None if spans is None else [*spans, (start, start + len(plural), plural)])
 
 
 def _sentence_span(text, start, end):
@@ -196,6 +219,7 @@ class NameTool:
                 sentence = test_sentence(name, book_occurrences(self.source, name),
                                          " ".join(block["text"] for block in self.source["blocks"][:200]))
                 spans = None
+            sentence, spans = with_plural_audition(name, sentence, spans)
             self._samples[key] = (sentence, spans)
         return self._samples[key]
 
@@ -301,10 +325,12 @@ class NameTool:
         while True:
             hint = f" (say it like {respelling})" if respelling and "phonemes" in current else ""
             self.say(f"Current reading of {name}: {describe_reading(current)}{hint}; applies to {describe_parts(parts)}")
-            possessive = name + chr(39) + "s"
-            derived = word_pronunciation(name, current, possessive)["value"]
-            self.say(f"Possessive/plural derive from it: {possessive} → "
-                     + (derived if "phonemes" in current else f"said as {derived}"))
+            possessive, plural = name + chr(39) + "s", plural_spelling(name)
+            possessive_reading = word_pronunciation(name, current, possessive)["value"]
+            plural_reading = word_pronunciation(name, current, plural)["value"]
+            prefix = "" if "phonemes" in current else "said as "
+            self.say(f"Possessive/plural derive from it: {possessive} → {prefix}{possessive_reading}; "
+                     f"{plural} → {prefix}{plural_reading}")
             if play_next:
                 play_next = False
                 try:

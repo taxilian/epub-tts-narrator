@@ -268,10 +268,10 @@ class PronounceNameHeardVariantTests(unittest.TestCase):
             interactive=False, verifier_factory=lambda: self.recognizer)
 
     def test_an_accepted_test_sentence_teaches_how_the_recognizer_hears_the_name(self):
-        self.run_tool(["A"], "My name is Marla.")  # The book's own sentence with the name.
+        self.run_tool(["A"], "My name is Marla. The Marlas are here.")  # The book's sentence plus the derived plural.
         self.assertEqual(self.recognizer.calls, 1)
         learned = effective_variants(self.directory, recognizer_key(self.recognizer))
-        self.assertEqual(set(learned), {("mara", "marla")})
+        self.assertEqual(set(learned), {("mara", "marla"), ("maras", "marlas")})
         self.assertTrue(all(heard_variants.trust_basis(variant) == "listened" for variant in learned.values()))
         self.assertTrue(any("hears Mara as" in line for line in self.output), self.output)
         # The first render take heard that way is accepted.
