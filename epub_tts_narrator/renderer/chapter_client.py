@@ -1179,7 +1179,7 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
                 audio = str(folder / metadata["audio_file"]) if metadata["frames"] else None
             completed.append({"number": chapter["number"], "audio_file": audio})
         return {"chapters": completed}
-    return _assemble_downloads(bundle, config, plan, cached, local, notify=notify)
+    return _assemble_downloads(bundle, config, plan, cached, local, notify=notify, voices=voices)
 
 
 def has_remote_chapters(config):
@@ -1226,29 +1226,38 @@ def assemble_remote(bundle, config, *, notify=print):
                         "live service. Existing verified files are retained; new runs download masters "
                         "before acknowledging delivery.") from None
             cached[chapter["id"]] = (folder, descriptor)
-        return _assemble_downloads(bundle, config, plan, cached, local, notify=notify)
+        return _assemble_downloads(bundle, config, plan, cached, local, notify=notify, voices=voices)
     finally:
         lock.rmdir()
 
 
-def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
+def _assemble_downloads(bundle, config, plan, cached, local, *, notify, voices):
     from .assembly import package_audio
     from .book_metadata import publication_assets
     from .book_output import resolve_audiobook_filename
-    from .publication import published_book
-    from .workflow import _publish
+    from .publication import published_book, published_gaps, publication_key
+    from .workflow import RenderBlocked, _publish
     output = Path(config["render"]["output_dir"])
     output.parent.mkdir(parents=True, exist_ok=True)
     previous = published_book(output, bundle["source"]["book"]["id"])
+    expected = config.get("_publication_expected", digest(previous) if previous is not None else None)
+    if (digest(previous) if previous is not None else None) != expected:
+        raise RenderBlocked("Published output changed during rendering; rerun to use its current state")
     with tempfile.TemporaryDirectory(prefix=".remote-audiobook-", dir=output.parent) as temporary:
         scratch = Path(temporary)
         stage = scratch / "ready"
         stage.mkdir()
         chapters, acceptance = [], []
+        engine_identity = verifier_identity = None
         for chapter in plan["chapters"]:
             if chapter["id"] in local:
                 composed = dict(local[chapter["id"]]["composed"])
                 acceptance.extend(local[chapter["id"]]["acceptance"])
+                context = composed.get("context")
+                if isinstance(context, dict):
+                    # The chapter's own saved synthesis and verification provenance.
+                    engine_identity = context.get("engine")
+                    verifier_identity = context.get("verifier")
             else:
                 folder, record = cached[chapter["id"]]
                 metadata = _validate_metadata(folder, record)
@@ -1280,10 +1289,23 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
                 if encoded is not None and encoded.exists():
                     composed["encoded_path"] = str(encoded)
                     composed["encoded_sha256"] = file_hash(encoded)
-                acceptance.append(read_json(regular_file(folder / "verification.json")))
+                verification = read_json(regular_file(folder / "verification.json"))
+                acceptance.append(verification)
+                engine_identity = verification.get("engine")
+                verifier_identity = verification.get("verifier")
             composed.update(number=chapter["number"], title=chapter["title"], script_path=chapter["script_path"],
                             total_chapters=len(bundle["chapters"]))
             chapters.append(composed)
+        packaged_key = publication_key(bundle, config, plan, voices, chapters, acceptance,
+                                       engine_identity, verifier_identity)
+        if previous is not None and previous.get("publication_key") == packaged_key:
+            missing, modified = published_gaps(output, previous)
+            if not missing and not modified:
+                filename = resolve_audiobook_filename(previous_audio=previous["audio"], output_dir=output)
+                notify(f"Audiobook unchanged; reusing {output / filename}")
+                return previous
+            notify(f"Published audiobook files are missing or changed ({len(missing)} missing, "
+                   f"{len(modified)} changed); recreating the audiobook.")
         book, cover, artwork = publication_assets(bundle, config, stage / "artwork", notify=notify)
         filename = resolve_audiobook_filename(
             book, previous["audio"] if previous is not None else None, output)
@@ -1299,9 +1321,13 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify):
         write_json(stage / "cast.json", bundle["cast"])
         write_json(stage / "verification.json", acceptance)
         result = {"format": "audiobook-render", "version": 1, "status": "complete",
+                  "publication_key": packaged_key,
                   "bundle_hash": bundle["bundle_hash"], "source_fingerprint": plan["source_fingerprint"],
                   "partial_book": plan["partial_book"], "series_id": plan["series_id"], "audio": audio,
-                  "chapter_identities": {key: digest(value[1]["spec"]) for key, value in cached.items()},
+                  "voice_assets": {name: value["asset_hash"] for name, value in voices.items()},
+                  "engine": engine_identity, "verifier": verifier_identity, "quality": config["quality"],
+                  "review_items": plan["review_items"], "allow_review": config["render"]["allow_review"],
+                  "chapter_identities": {name: digest(entry[1]["spec"]) for name, entry in cached.items()},
                   "verification_policy": "preserve_successful_acceptance",
                   "files_sha256": {path.relative_to(stage).as_posix(): file_hash(path)
                                    for path in sorted(stage.rglob("*")) if path.is_file()}}

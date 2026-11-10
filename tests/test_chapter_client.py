@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.chapter_client import (
-    ChapterClient, ChapterClientError, PROTOCOL, _cached_artifacts_present,
+    ChapterClient, ChapterClientError, PROTOCOL, _assemble_downloads, _cached_artifacts_present,
     _migrate_legacy_job, _read_cache, _read_job, _render_remote_locked, _selection, _submit_chapter,
     _voice_assets, _wait_jobs, _validate_metadata, assemble_remote,
 )
@@ -1326,6 +1326,121 @@ class ChapterOrchestrationTests(unittest.TestCase):
         factory.assert_not_called()
         self.assertEqual(preserved, {path: path.read_bytes() for path in preserved})
         self.assertEqual(list(self.root.glob(".remote-audiobook-*")), [])
+
+
+class RemotePublicationReuseTests(unittest.TestCase):
+    """The remote packaging path honors the publication reuse contract: an
+    intact completed publication whose packaged chapters, acceptance, voices,
+    and configuration are unchanged is reused without repackaging, and its
+    recorded provenance lets a later local rerun reuse the book too."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config = deepcopy(DEFAULTS)
+        self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False)
+        self.config["quality"] = validate_policy({})
+        self.config["remote_chapters"].update(url="https://worker.example", websocket=False, poll_seconds=.1)
+        self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")
+        document = prepare_document(valid_document())
+        export_bundle(document, self.root / "book")
+        self.bundle = load_bundle(self.root / "book")
+        self.plan = make_render_plan(self.bundle, self.config)
+        second = deepcopy(self.plan["chapters"][0])
+        second.update(number=2, id="chapter-0002", title="Second chapter")
+        self.plan["chapters"].append(second)
+        self.bundle["chapters"].append(deepcopy(self.bundle["chapters"][0]))
+        self.voice = {"reference_audio": str(self.root / "reference.wav"),
+                      "reference_text": "A saved voice reference.", "asset_hash": "a" * 64}
+        self.voices = {"voice": self.voice}
+
+    def local_chapters(self, verifier_version=1):
+        context = {"engine": {"engine": "fixture-pool"},
+                   "verifier": {"backend": "fixture-whisper", "version": verifier_version}}
+        local = {}
+        for chapter in self.plan["chapters"]:
+            composed = {"id": chapter["id"], "number": chapter["number"], "title": chapter["title"],
+                        "script_path": chapter["script_path"], "total_chapters": len(self.bundle["chapters"]),
+                        "frames": 0, "sample_rate": 44100, "segments": [],
+                        "context": context, "settings": {}, "encoded_path": None}
+            local[chapter["id"]] = {"composed": composed, "acceptance": [{"chunk_id": "fixture-accepted"}]}
+        return local
+
+    def fake_package_audio(self, calls):
+        def package(chapters, output_dir, *, book, audiobook_name, **kwargs):
+            target = Path(output_dir)
+            audio = {"book": deepcopy(book), "chapters": [{"id": chapter["id"]} for chapter in chapters],
+                     "audiobook": {"path": audiobook_name, "sha256": "b" * 64}}
+            write_json(target / "audio-manifest.json", audio)
+            write_json(target / "sync.json", {"audio_file": audiobook_name})
+            (target / audiobook_name).write_bytes(b"fixture audiobook bytes")
+            calls.append(audiobook_name)
+            return audio
+        return package
+
+    def assemble(self, local, *, notify=None):
+        calls, messages = [], [] if notify is None else notify
+        sink = messages.append if notify is None else notify
+        with patch("epub_tts_narrator.renderer.assembly.package_audio",
+                   side_effect=self.fake_package_audio(calls)):
+            result = _assemble_downloads(self.bundle, self.config, self.plan, {}, local,
+                                         notify=sink, voices=self.voices)
+        return result, calls, messages
+
+    def test_completed_unchanged_publication_is_reused_without_repackaging(self):
+        local = self.local_chapters()
+        first, calls, _ = self.assemble(local)
+        self.assertEqual(len(calls), 1)
+        record = read_json(self.root / "output" / "render.json")
+        self.assertIn("publication_key", record)
+        self.assertEqual(record["engine"], {"engine": "fixture-pool"})
+        self.assertEqual(record["verifier"], {"backend": "fixture-whisper", "version": 1})
+        self.assertEqual(record["voice_assets"], {"voice": "a" * 64})
+        audiobook = self.root / "output" / record["audio"]["audiobook"]["path"]
+        saved_bytes, saved_mtime = audiobook.read_bytes(), audiobook.stat().st_mtime_ns
+
+        second, calls, messages = self.assemble(local)
+
+        self.assertEqual(second, first)
+        self.assertEqual(calls, [], "an unchanged completed book must not repackage its audio")
+        self.assertEqual(audiobook.read_bytes(), saved_bytes)
+        self.assertEqual(audiobook.stat().st_mtime_ns, saved_mtime)
+        self.assertTrue(any("reusing" in message for message in messages))
+
+    def test_changed_published_file_is_recreated_instead_of_reused(self):
+        local = self.local_chapters()
+        self.assemble(local)
+        audiobook = next((self.root / "output").glob("*.m4b"))
+        saved_mtime = audiobook.stat().st_mtime_ns
+        (self.root / "output" / "verification.json").write_text("[]\n")
+
+        _, calls, messages = self.assemble(local)
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(any("missing or changed" in message for message in messages))
+        self.assertGreater(audiobook.stat().st_mtime_ns, saved_mtime)
+
+    def test_local_rerun_of_a_remotely_published_book_reuses_with_drifted_verifier(self):
+        local = self.local_chapters(verifier_version=1)
+        first, _, _ = self.assemble(local)
+        from epub_tts_narrator.renderer.workflow import _package
+        store = Mock()
+        store.series_id = "fixture-series"
+        rendered = [entry["composed"] for entry in local.values()]
+        acceptance = [record for entry in local.values() for record in entry["acceptance"]]
+        calls, messages = [], []
+
+        with patch("epub_tts_narrator.renderer.workflow.package_audio",
+                   side_effect=self.fake_package_audio(calls)):
+            result = _package(self.bundle, self.config, self.plan, store, self.voices, rendered, acceptance,
+                              {"engine": "fixture-pool"}, {"backend": "fixture-whisper", "version": 2},
+                              notify=messages.append)
+
+        self.assertEqual(calls, [], "a verifier-side update must not re-encode the remotely published book")
+        self.assertEqual(result, first)
+        self.assertTrue(any("reusing" in message for message in messages))
 
 
 class ChapterCLITests(unittest.TestCase):
