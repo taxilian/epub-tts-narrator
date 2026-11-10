@@ -140,15 +140,18 @@ class RendererWorkflowTests(unittest.TestCase):
         pool = QueueChapterCoordinators(1)
         self.addCleanup(pool.close)
         workers = []
+        ready = threading.Event()
 
         def chapter(*args, **kwargs):
+            self.assertTrue(ready.is_set(), "Shared coordinators must signal readiness so later books can backfill")
             workers.append(threading.current_thread().name)
             return _render_chapter_with_recovery(*args, **kwargs)
 
         with patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery",
                    side_effect=chapter):
             render(self.bundle, self.config, self.engine, self.verifier, chapters_only=True,
-                   notify=lambda _: None, chapter_coordinators=pool, queue_position=3)
+                   notify=lambda _: None, chapter_coordinators=pool, queue_position=3,
+                   on_synthesis_ready=ready.set)
         self.assertTrue(workers)
         self.assertEqual(set(workers), {"queue-chapter-1"})
 
