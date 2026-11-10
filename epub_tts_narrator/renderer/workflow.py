@@ -2527,7 +2527,6 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
             chunk = request.get("chunk", {})
             drama3_split = (report.get("resolution_action") == "split"
                             and reasons == ["generation_or_verification_error"]
-                            and report.get("retry_on_resume") is not True
                             and _drama3_truncation(report))
             if (request.get("kind") != "paragraph_speech"
                     or report.get("resolution_action") == "stop"

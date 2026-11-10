@@ -9,6 +9,7 @@ from unittest.mock import patch
 from epub_tts_narrator.performance_plan import text_sha256
 from epub_tts_narrator.renderer.common import file_hash, read_json
 from epub_tts_narrator.renderer.engines import EngineError, format_dialogue, prepare_synthesis
+from epub_tts_narrator.renderer.fish_http import FishHTTPError
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.voices import VoiceStore
 from epub_tts_narrator.renderer.workflow import (
@@ -184,6 +185,12 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assert_individual_plan(original)
 
     def test_repeated_drama3_truncation_splits_expressive_paragraph_and_resumes_fallback(self):
+        self.assert_truncation_fallback(EngineError)
+
+    def test_http_model_truncation_splits_expressive_paragraph_and_resumes_fallback(self):
+        self.assert_truncation_fallback(FishHTTPError)
+
+    def assert_truncation_fallback(self, error_type):
         row = next(row for row in self.bundle["chapters"][0]["rows"]
                    if row["block_id"] == "b000004")
         spoken = build_spoken(row)[0]
@@ -208,7 +215,7 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
                 if not failed_turns:
                     accepted_before_failure.update(self.snapshot_accepted())
                 failed_turns.append(deepcopy(turns))
-                raise EngineError("Drama 3 did not finish the text: 'silence'")
+                raise error_type("Drama 3 did not finish the text: 'silence'")
             return dialogue(turns, path, seed=seed)
 
         synthesize = self.engine.synthesize
@@ -237,8 +244,10 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
                            if read_json(path)["request"]["chunk"]["chunk_id"] == original["chunk_id"]]
         self.assertEqual(len(failed_attempts), 2)
         self.assertTrue(all(record["report"]["reasons"] == ["generation_or_verification_error"]
-                            and record["report"]["error_type"] == "EngineError"
-                            and record["audio_file"] is None for record in failed_attempts))
+                             and record["report"]["error_type"] == error_type.__name__
+                             and record["audio_file"] is None for record in failed_attempts))
+        if error_type is FishHTTPError:
+            self.assertTrue(all(record["report"]["retry_on_resume"] for record in failed_attempts))
 
         before = self.snapshot_accepted()
         completed = self.chapters()
@@ -329,6 +338,14 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
             self.assertEqual(self.package()["status"], "complete")
 
     def test_transport_failure_does_not_split_a_paragraph(self):
+        self.assert_transport_failure(TransportFailure)
+
+    def test_http_transport_failure_does_not_split_a_paragraph(self):
+        self.assert_transport_failure(FishHTTPError)
+
+    def assert_transport_failure(self, error_type):
+        client = PlanClient([{"action": "retry", "edits": [], "reason": "Try another complete take."}])
+        self.verifier = RecurringSpeechVerifier(self.verifier, SpeechResolver(client))
         original = deepcopy(self.target())
         dialogue = self.engine.synthesize_dialogue
         failures = []
@@ -336,13 +353,14 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         def unavailable(turns, path, *, seed):
             if "".join(turn["text"] for turn in turns) == original["spoken_text"]:
                 failures.append(seed)
-                raise TransportFailure("fixture renderer disconnected")
+                raise error_type("fixture renderer disconnected")
             return dialogue(turns, path, seed=seed)
 
         with patch.object(self.engine, "synthesize_dialogue", side_effect=unavailable):
             with self.assertRaisesRegex(RenderBlocked, "renderer disconnected"):
                 self.chapters()
         self.assertEqual(len(failures), 2)
+        self.assertEqual(client.plans, [])
         self.assertEqual(self.target(), original)
         self.assertEqual(len(self.engine.speech_calls), 2)
         self.assertEqual(self.chapters()["status"], "chapters_complete")
