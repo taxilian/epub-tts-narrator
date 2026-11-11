@@ -59,7 +59,7 @@ _PART_ALIASES = {"proper": "proper_noun", "proper_noun": "proper_noun", "name": 
                  "noun": "common_noun", "improper": "common_noun", "improper_noun": "common_noun",
                  "adjective": "adjective", "adj": "adjective", "verb": "verb", "adverb": "adverb", "adv": "adverb",
                  "interjection": "interjection"}
-HISTORY_SOURCES = frozenset({"model", "model_revision", "manual", "inherited", "command_line"})
+HISTORY_SOURCES = frozenset({"model", "model_revision", "manual", "inherited", "command_line", "imported"})
 MAX_HISTORY = 64
 VOWELS = frozenset("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW".split())
 _VOICELESS = frozenset({"P", "T", "K", "F", "TH"})
@@ -491,6 +491,52 @@ def save_definition(directory, name, phonemes, *, status, source, respelling=Non
             record["definitions"][key] = value
             record["drafts"].pop(key, None)
         return deepcopy(value)
+    return _mutate(directory, update)
+
+
+def import_definitions(directory, entries, *, replace=False):
+    """Confirm imported choices here in one write; returns {outcome: [words]}.
+
+    ``entries`` are ``{"name", "reading", "respelling", "parts"}`` (already
+    validated, e.g. by ``name_pronunciation_yaml``). A word whose effective
+    choice here is already the same is ``unchanged``. A different choice this
+    book made itself is kept as a ``conflict`` unless ``replace``; one inherited
+    from an earlier book is overridden here (``overrode_inherited``), as a
+    choice made in this book would be. Each imported step joins the history.
+    Uses are tagged later, as for any confirmed word (render or analyze).
+    """
+    keys = [name_key(entry["name"]) for entry in entries]
+    if len(set(keys)) != len(keys):
+        raise ValueError("The import names one word more than once")
+    effective = effective_definitions(directory)
+    outcome = {"added": [], "overrode_inherited": [], "replaced": [], "unchanged": [], "conflict": []}
+
+    def same(value, entry):
+        return (reading_of(value) == entry["reading"] and value["parts_of_speech"] == entry["parts"]
+                and value.get("respelling") == entry["respelling"])
+
+    def update(record):
+        for key, entry in zip(keys, entries):
+            local, seen = record["definitions"].get(key), effective.get(key)
+            if seen is not None and same(seen, entry):
+                outcome["unchanged"].append(entry["name"])
+                continue
+            if local is not None and not replace:
+                outcome["conflict"].append(entry["name"])
+                continue
+            kind = "replaced" if local is not None else "overrode_inherited" if seen is not None else "added"
+            previous = local or record["drafts"].get(key)
+            step = {**entry["reading"], "source": "imported",
+                    **({"respelling": entry["respelling"]} if entry["respelling"] is not None else {})}
+            history = [*(previous["history"] if previous else []), step][-MAX_HISTORY:]
+            say_as = entry["reading"].get("say_as")
+            record["definitions"][key] = {"name": entry["name"], "phonemes": entry["reading"].get("phonemes"),
+                                          "respelling": entry["respelling"], "parts_of_speech": list(entry["parts"]),
+                                          "history": history, **({"say_as": say_as} if say_as is not None else {})}
+            _validate_definition(key, record["definitions"][key])
+            record["drafts"].pop(key, None)
+            outcome[kind].append(entry["name"])
+        return outcome
     return _mutate(directory, update)
 
 

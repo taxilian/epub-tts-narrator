@@ -108,6 +108,18 @@ def parser():
                                       "spelling, proper noun for an ordinary English word")
             command.add_argument("--phonemes", help="Start from these CMU Arpabet phonemes, e.g. 'S AE2 L V AH0 T AO1 R'; "
                                                     "' | ' splits consecutive groups, e.g. 'M AY1 L | K IY1'")
+            transfer = command.add_mutually_exclusive_group()
+            transfer.add_argument("--export", type=Path, metavar="FILE",
+                                  help="Write this book's confirmed pronunciations (including inherited ones) to a "
+                                       "YAML file, then stop")
+            transfer.add_argument("--import", dest="import_file", type=Path, metavar="FILE",
+                                  help="Confirm the pronunciations in a YAML file (from --export) in this book, then "
+                                       "tag their uses; a word this book already chose differently is kept unless "
+                                       "--replace")
+            command.add_argument("--replace", action="store_true",
+                                 help="With --import: replace this book's own different choices")
+            command.add_argument("--local-only", action="store_true",
+                                 help="With --export: only this book's own choices, not inherited ones")
             command.add_argument("--say-as", dest="say_as", metavar="SPELLING",
                                  help="Say the word as this spelling instead of phonemes, e.g. mile-key")
             command.add_argument("--voice-id", help="Saved voice for the test sentence (default: the voice that says the name most)")
@@ -360,6 +372,14 @@ def main(argv=None):
         bundle = load_bundle(bundle_paths[0])
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command in {"pronounce", "pronounce-name"} and (args.replace or args.local_only) \
+                and not (args.export or args.import_file):
+            raise ValueError("--replace needs --import, and --local-only needs --export")
+        if args.command in {"pronounce", "pronounce-name"} and (args.export or args.import_file):
+            from .name_pronunciation_transfer import transfer_command
+            outcome = transfer_command(bundle, args)
+            if outcome is not None:
+                return outcome
         if args.command in {"pronounce", "pronounce-name"}:
             from epub_tts_narrator.config import load_config as load_analysis_config
             from .name_pronunciation_tool import run_pronounce_name

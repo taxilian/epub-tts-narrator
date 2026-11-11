@@ -671,6 +671,17 @@ just pronounce runs/quest-academy-08 Salvatore --remove
 
 This deletes that book's confirmed reading and any draft for the word, and prints the removed phonemes and parts of speech so you can enter them elsewhere with `--phonemes` and `--as`. Books continued from it stop inheriting the choice. They fall back to a choice from an earlier book if one exists, or to the engine's default reading. Removing an inherited choice from a later book is refused, and the message names the book that owns it. Each book keeps its labels and decisions, because they record what each use is, not how it sounds. If the word is defined again, they are reused without new requests. Re-render the affected chapters to hear the change.
 
+To move your choices to another book (for example a re-analysis from a cleaner EPUB, which has new paragraphs but the same names), export them to a YAML file and import it there:
+
+```sh
+just export-pronunciations runs/eddings-belgariad-2 belgariad.yaml
+just import-pronunciations runs/belgariad-1-v2 belgariad.yaml
+# or: audiobook-render pronounce BOOK --export FILE [--local-only]
+#     audiobook-render pronounce BOOK --import FILE [--replace]
+```
+
+The export holds every confirmed choice the book uses, inherited ones included (`--local-only` writes only the book's own). Each entry has the word, its `phonemes` or `say_as` reading, any respelling hint, and its parts of speech (`[all]` or labels such as `[proper noun, adjective]`), so it can be edited by hand. Drafts and per-use decisions are not exported, because uses belong to one book's paragraphs. Import confirms the file's choices in the target book in one write, with an `imported` history step. A word whose choice there is already the same is left alone. A different choice the book made itself is kept unless you pass `--replace`, and one it only inherits is overridden in that book. Import then tags every confirmed word's uses in the book, as `just pronounce BOOK` does. The file is a small, strict subset of YAML (plain or quoted values, `[a, b]` or one `- item` per line, `#` comments), and anything else is refused with its line number.
+
 ### Manual commands
 
 ```sh

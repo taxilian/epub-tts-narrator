@@ -40,3 +40,11 @@ pronounce *args:
 
 pronounce-name *args:
     @"{{ python }}" -m epub_tts_narrator.renderer pronounce "$@"
+
+# BOOK FILE: write BOOK's confirmed pronunciations to a YAML file.
+export-pronunciations book file *args:
+    @book="$1"; file="$2"; shift 2; "{{ python }}" -m epub_tts_narrator.renderer pronounce "$book" --export "$file" "$@"
+
+# BOOK FILE: confirm a YAML file's pronunciations in BOOK, then tag their uses.
+import-pronunciations book file *args:
+    @book="$1"; file="$2"; shift 2; "{{ python }}" -m epub_tts_narrator.renderer pronounce "$book" --import "$file" "$@"
