@@ -9,6 +9,7 @@ as a fraction of a second so no wait exceeds a fraction of a second.
 import contextlib
 from io import StringIO
 from pathlib import Path
+import re
 import tempfile
 import threading
 import unittest
@@ -473,13 +474,16 @@ class LocalSequentialTests(QueueFixtureTests):
         frames = []
 
         def render_book(bundle, config, engine, verifier, **kwargs):
+            name = Path(bundle["directory"]).name
             with ChapterProgress(1, 2, [{"spoken_text": "Fixture words."}],
                                  notify=kwargs["notify"], heartbeat=False) as chapter:
                 with chapter.task(0) as task:
                     task.worker_activity("started", "fixture-worker")
                     chapter.refresh()
                     kwargs["notify"]("ordinary log")
-                    frames.append(screen(stream.getvalue())[-1])
+                    rows = [line for line in screen(stream.getvalue())
+                            if line.startswith(f"[{name}] Ch")]
+                    frames.append(rows[-1])
             return {"chapters": []}
 
         with (contextlib.redirect_stdout(stream),
@@ -622,6 +626,97 @@ class LocalSequentialTests(QueueFixtureTests):
         self.assertIn("local book one failed fixture", joined)
         self.assertIn("1 of 2 book(s) failed", joined)
         self.assertIn("book-2", joined)
+
+
+class BookOutcomeBoardTests(QueueFixtureTests):
+    """Each final book outcome reaches the shared board's pinned books line."""
+
+    def plain(self, stream):
+        return re.sub(r"\033\[[0-9;]*m", "", stream.getvalue())
+
+    def last_visible_line(self, stream):
+        from test_renderer_live_board import screen
+        return re.sub(r"\033\[[0-9;]*m", "", screen(stream.getvalue())[-1])
+
+    def test_local_outcomes_reach_the_board_as_colored_counts(self):
+        from test_renderer_live_board import TTY
+        stream = TTY()
+        while_book_two_worked = []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            if Path(config["render"]["work_dir"]).parent.name == "book-1":
+                raise RuntimeError("local book one failed fixture")
+            while_book_two_worked.append(self.last_visible_line(stream))
+            return {"chapters": []}
+
+        with (contextlib.redirect_stdout(stream),
+              patch("epub_tts_narrator.renderer.progress._scheduling_segment", return_value=""),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
+            code = render_queue_command(self.render_args(1, 2), self.config)
+        self.assertEqual(code, 1)
+        self.assertEqual(while_book_two_worked, ["Books: 1 failed"])
+        self.assertIn("Books: 1 succeeded | 1 failed", self.plain(stream))
+        self.assertIn("Books: \033[32m1\033[0m succeeded | \033[31m1\033[0m failed",
+                      stream.getvalue())
+
+    def test_each_final_outcome_is_reported_exactly_once(self):
+        reported = []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            if Path(config["render"]["work_dir"]).parent.name == "book-1":
+                raise RuntimeError("local book one failed fixture")
+            return {"chapters": []}
+
+        with (patch("epub_tts_narrator.renderer.progress.report_book_outcome",
+                    side_effect=lambda notify, key, ok: reported.append((key, ok))),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
+            code = render_queue_command(self.render_args(1, 2), self.config,
+                                        notify=lambda message: None)
+        self.assertEqual(code, 1)
+        self.assertEqual(reported, [(str(self.books[0]), False), (str(self.books[1]), True)])
+
+    def test_a_preparation_failure_counts_as_a_failed_book(self):
+        from test_renderer_live_board import TTY
+        stream = TTY()
+        with (contextlib.redirect_stdout(stream),
+              patch("epub_tts_narrator.renderer.progress._scheduling_segment", return_value=""),
+              patch("epub_tts_narrator.renderer.render_queue._prepare_book",
+                    side_effect=RuntimeError("fixture preparation failure"))):
+            code = render_queue_command(self.render_args(1), self.config)
+        self.assertEqual(code, 1)
+        plain = self.plain(stream)
+        self.assertIn("Books: 1 failed", plain)
+        self.assertNotIn(" succeeded", plain)
+        self.assertIn("Books: \033[31m1\033[0m failed", stream.getvalue())
+
+    def test_remote_failure_reaches_the_board_counts(self):
+        from test_renderer_live_board import TTY
+        self.enable_remote_service()
+        server = FakeChapterService(unreachable=True)
+        stream = TTY()
+        while_book_two_worked = []
+
+        def behavior(index, bundle, config, notify):
+            if index == 0:
+                raise RuntimeError("book one failed fixture")
+            while_book_two_worked.append(self.last_visible_line(stream))
+            return {"chapters": []}
+
+        fake, _ = self.fake_remote(behavior)
+        with fake, server.serve(), contextlib.redirect_stdout(stream), \
+                patch("epub_tts_narrator.renderer.progress._scheduling_segment", return_value=""):
+            code = render_queue_command(self.render_args(1, 2), self.config, poll_seconds=0.01)
+        self.assertEqual(code, 1)
+        self.assertEqual(while_book_two_worked, ["Books: 1 failed"])
+        self.assertIn("Books: 1 succeeded | 1 failed", self.plain(stream))
+        self.assertIn("Books: \033[32m1\033[0m succeeded | \033[31m1\033[0m failed",
+                      stream.getvalue())
 
 
 class QueueCliWiringTests(QueueFixtureTests):

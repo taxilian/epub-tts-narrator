@@ -1,11 +1,14 @@
 """Live terminal board: one persistent row per active chapter, logs scroll above."""
 
 import io
+import re
 import types
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.renderer.progress import ChapterProgress, TerminalBoard, live_board
+from epub_tts_narrator.renderer.progress import (ChapterProgress, PrefixedBoardNotify,
+                                                 TerminalBoard, live_board,
+                                                 report_book_outcome)
 
 
 class TTY(io.StringIO):
@@ -86,6 +89,89 @@ class TerminalBoardTests(unittest.TestCase):
         custom = []
         with live_board(custom.append, stream=TTY()) as notify:
             self.assertEqual(notify, custom.append)
+
+
+class BookOutcomeLineTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("epub_tts_narrator.renderer.progress._scheduling_segment", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.stream = TTY()
+        self.board = TerminalBoard(self.stream, width=80)
+
+    def visible(self):
+        return [re.sub(r"\033\[[0-9;]*m", "", line) for line in screen(self.stream.getvalue())]
+
+    def test_no_books_line_appears_before_any_book_finishes(self):
+        self.board.set_row("a", (1, 1), "Ch 1/9 | gen")
+        self.assertNotIn("Books:", " ".join(self.visible()))
+
+    def test_finished_books_show_colored_counts_and_both_parts_together(self):
+        self.board.book_outcome("book-1", True)
+        self.board.book_outcome("book-2", False)
+        self.assertEqual(self.visible()[-1], "Books: 1 succeeded | 1 failed")
+        self.assertIn("Books: \033[32m1\033[0m succeeded | \033[31m1\033[0m failed",
+                      self.stream.getvalue())
+
+    def test_counts_survive_completed_chapter_rows_disappearing(self):
+        self.board.set_row("a", (1, 1), "Ch 1/9 | gen")
+        self.board.book_outcome("book-1", True)
+        self.board.remove_row("a")
+        self.assertEqual(self.visible(), ["Books: 1 succeeded"])
+
+    def test_only_success_shows_a_green_count_without_a_failed_part(self):
+        self.board.book_outcome("book-1", True)
+        self.board.book_outcome("book-2", True)
+        self.assertEqual(self.visible()[-1], "Books: 2 succeeded")
+        self.assertNotIn("\033[31m", self.stream.getvalue())
+
+    def test_only_failure_shows_a_red_count_without_a_succeeded_part(self):
+        self.board.book_outcome("book-1", False)
+        self.assertEqual(self.visible()[-1], "Books: 1 failed")
+        self.assertNotIn("\033[32m", self.stream.getvalue())
+
+    def test_rereporting_the_same_book_never_double_counts(self):
+        self.board.book_outcome("book-1", True)
+        self.board.book_outcome("book-1", True)
+        self.assertEqual(self.visible()[-1], "Books: 1 succeeded")
+
+    def test_a_narrow_width_switches_to_a_compact_tally_keeping_both_counts(self):
+        board = TerminalBoard(self.stream, width=24)
+        board.book_outcome("book-1", True)
+        board.book_outcome("book-2", False)
+        self.assertEqual(self.visible()[-1], "OK 1 | FAIL 1")
+        self.assertIn("OK \033[32m1\033[0m | FAIL \033[31m1\033[0m", self.stream.getvalue())
+
+    def test_a_minimum_width_keeps_both_counts_in_the_tightest_tally(self):
+        board = TerminalBoard(self.stream, width=12)
+        board.book_outcome("book-1", True)
+        board.book_outcome("book-2", False)
+        self.assertEqual(self.visible()[-1], "OK1 FAIL1")
+        self.assertIn("OK\033[32m1\033[0m FAIL\033[31m1\033[0m", self.stream.getvalue())
+
+    def test_log_lines_around_the_books_line_stay_plain(self):
+        self.board.book_outcome("book-1", True)
+        self.board.log("an ordinary log line")
+        self.assertEqual(self.visible()[-2:], ["an ordinary log line", "Books: 1 succeeded"])
+        self.assertIn("an ordinary log line\nBooks: \033[32m1\033[0m succeeded",
+                      self.stream.getvalue())
+
+    def test_outcomes_after_close_write_nothing(self):
+        self.board.close()
+        before = self.stream.getvalue()
+        self.board.book_outcome("book-1", True)
+        self.assertEqual(self.stream.getvalue(), before)
+
+    def test_report_book_outcome_without_a_board_is_a_noop(self):
+        messages = []
+        report_book_outcome(messages.append, "book-1", True)
+        report_book_outcome(print, "book-1", True)
+        self.assertEqual(messages, [])
+
+    def test_report_book_outcome_reaches_the_board_through_the_queue_prefix(self):
+        prefixed = PrefixedBoardNotify(self.board, "[book-1] ")
+        report_book_outcome(prefixed, "book-1", True)
+        self.assertEqual(self.visible()[-1], "Books: 1 succeeded")
 
 
 class ChapterBoardRowTests(unittest.TestCase):

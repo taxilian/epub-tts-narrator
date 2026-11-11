@@ -259,6 +259,16 @@ def _failure_message(error, config):
     return format_fatal(error, secrets)
 
 
+def _record_book_outcome(notify, book, succeeded):
+    """Pin one book's final outcome onto the shared board's books line.
+
+    Called exactly once per book, at the moment the queue records its final
+    status; notify callbacks without a board (plain or custom) are unchanged.
+    """
+    from .progress import report_book_outcome
+    report_book_outcome(notify, str(book), succeeded)
+
+
 def _validate_queue_invocation(books, args):
     """Reject duplicate books and book-specific options before any work starts."""
     seen, duplicates = set(), []
@@ -485,9 +495,11 @@ def _run_remote_queue(books, args, config, *, notify, poll_seconds, join_seconds
                                           chapters_only=args.chapters_only, notify=book_notify)
             except Exception as error:
                 run.status = ("failed", _failure_message(error, run.config))
+                _record_book_outcome(notify, run.book, False)
                 _emit(notify, f"{prefix_for(run)}failed: {run.status[1]}")
             else:
                 run.status = ("ok", None)
+                _record_book_outcome(notify, run.book, True)
                 _emit(notify, f"{prefix_for(run)}ok")
             finally:
                 run.finished = True
@@ -564,6 +576,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                     run.status = ("failed", message)
                     run.finished = True
                     runs.append(run)
+                    _record_book_outcome(notify, run.book, False)
                     _emit(notify, f"[{run.name}] failed: {message}")
                     continue
 
@@ -584,6 +597,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         status = ("ok", None)
                     run.status = status
                     run.finished = True
+                    _record_book_outcome(notify, run.book, status[0] == "ok")
                     _emit(notify, f"[{run.name}] {status[0]}" + (f": {status[1]}" if status[1] else ""))
                     changed.set()
 

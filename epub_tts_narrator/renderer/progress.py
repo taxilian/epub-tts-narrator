@@ -84,6 +84,7 @@ class TerminalBoard:
         self._stream = stream
         self._width = width
         self._rows = {}
+        self._book_outcomes = {}
         self._drawn = 0
         self._lock = threading.RLock()
         self._failed = False
@@ -111,6 +112,19 @@ class TerminalBoard:
             if self._rows.pop(key, None) is not None:
                 self._write(self._erase() + self._render())
 
+    def book_outcome(self, key, succeeded):
+        """Record one book's final outcome for the pinned books line.
+
+        The queue reports each book's final status exactly once, keyed by an
+        identity unique within the run, so re-reporting a key never double
+        counts. Thread-safe like every other board mutation.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._book_outcomes[key] = bool(succeeded)
+            self._write(self._erase() + self._render())
+
     def close(self):
         with self._lock:
             self._closed = True
@@ -130,14 +144,21 @@ class TerminalBoard:
         return erase
 
     def _render(self):
-        if self._closed or not self._rows:
+        if self._closed or (not self._rows and not self._book_outcomes):
             return ""
         width = max(10, self._columns() - 1)
         lines = [text for _, text in sorted(self._rows.values(), key=lambda row: row[0])]
         segment = _scheduling_segment()
         if segment:
             lines.append(segment)
+        books = _books_line(self._book_outcomes, width)
+        if books:
+            lines.append(books)
         lines = [_fit(line, width) for line in lines]
+        if books:
+            # Color after fitting: _fit counts printable cells, and the
+            # escapes add none.
+            lines[-1] = _colorize_books(lines[-1])
         self._drawn = len(lines)
         return "\n".join(lines)
 
@@ -154,6 +175,63 @@ class TerminalBoard:
 def _fit(text, width):
     text = text.replace("\n", " ").replace("\r", " ")
     return text if len(text) <= width else text[:max(0, width - 1)] + "…"
+
+
+_GREEN, _RED, _RESET = "\033[32m", "\033[31m", "\033[0m"
+
+
+def _books_line(outcomes, width):
+    """Plain books tally at the widest tier that fits ``width`` printable cells.
+
+    Sufficient width keeps ``Books: N succeeded | N failed``; a narrower
+    terminal switches to ``OK N | FAIL N`` and then to ``OKN FAILN``, so both
+    nonzero counts keep their outcome labels at any width (a failure must
+    never clip away). Zero counts are omitted, so the line appears once a
+    book finishes and then keeps every finished book's outcome while chapter
+    rows come and go. The returned text is always plain; only the tightest
+    tier is ever handed to ``_fit`` for clipping.
+    """
+    succeeded = sum(1 for ok in outcomes.values() if ok)
+    failed = len(outcomes) - succeeded
+    if not succeeded and not failed:
+        return ""
+    tiers = (
+        ("Books: ", " | ", "{} succeeded", "{} failed"),
+        ("", " | ", "OK {}", "FAIL {}"),
+        ("", " ", "OK{}", "FAIL{}"),
+    )
+    lines = []
+    for prefix, separator, success_format, failure_format in tiers:
+        parts = []
+        if succeeded:
+            parts.append(success_format.format(succeeded))
+        if failed:
+            parts.append(failure_format.format(failed))
+        lines.append(prefix + separator.join(parts))
+    for line in lines:
+        if len(line) <= width:
+            return line
+    return lines[-1]
+
+
+def _colorize_books(line):
+    """Color the counts of an already fitted plain books line.
+
+    Every tier's count token takes its color (green succeeded, red failed);
+    the labels stay plain so the outcome reads without color, and every
+    escape is closed so adjacent text never inherits it. A line clipped
+    mid-part simply stays plain.
+    """
+
+    def compact(match):
+        color = _GREEN if match.group(1).startswith("OK") else _RED
+        return f"{match.group(1)}{color}{match.group(2)}{_RESET}"
+
+    line = re.sub(r"(\d+) succeeded",
+                  lambda match: f"{_GREEN}{match.group(1)}{_RESET} succeeded", line)
+    line = re.sub(r"(\d+) failed",
+                  lambda match: f"{_RED}{match.group(1)}{_RESET} failed", line)
+    return re.sub(r"(OK ?|FAIL ?)(\d+)", compact, line)
 
 
 _BOARD = None
@@ -202,12 +280,26 @@ class PrefixedBoardNotify:
     def remove_row(self, key):
         self.board.remove_row(key)
 
+    def book_outcome(self, key, succeeded):
+        self.board.book_outcome(key, succeeded)
+
 
 def _board_of(notify):
     if isinstance(notify, PrefixedBoardNotify):
         return notify
     owner = getattr(notify, "__self__", None)
     return owner if isinstance(owner, TerminalBoard) else None
+
+
+def report_book_outcome(notify, key, succeeded):
+    """Record one finished book's outcome on the queue's shared board, if any.
+
+    Plain and custom notify callbacks have no board: non-TTY output and test
+    notifies stay exactly as they were, with no colors and no extra lines.
+    """
+    owner = _board_of(notify)
+    if owner is not None:
+        owner.book_outcome(key, succeeded)
 
 
 _SHORT_PHASES = (
