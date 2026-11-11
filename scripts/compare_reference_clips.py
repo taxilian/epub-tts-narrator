@@ -9,10 +9,12 @@ casting selections:
 2. Has one hosted Gemini voice, made from the voice's saved description, speak
    every excerpt. Each clip is verified like a casting reference. The hosted
    voice is deleted once all clips are verified, or when one fails.
-3. Renders the test lines and one shared sentence with local Drama 3 under three
-   conditions: ``saved`` (the book's selected reference), ``one`` (new clip 1)
-   and ``all`` (every new clip, one speaker). There is no chapter history, and
-   each line uses one seed in every condition, so only the references differ.
+3. Renders the test lines and one shared sentence through the local ``serve``
+   worker on ``server.port`` (the one renders and pronunciation previews share,
+   started if none is running) under three conditions: ``saved`` (the book's
+   selected reference), ``one`` (new clip 1) and ``all`` (every new clip joined
+   into one reference with half-second pauses). There is no chapter history,
+   and each line uses one seed in every condition, so only the references differ.
 4. Writes ``index.html`` beside the audio for side-by-side listening.
 
 ``score`` optionally adds speaker-verification similarity from a local WavLM
@@ -24,7 +26,7 @@ voices' renders of the shared sentence means they are easier to tell apart.
 Rerun the same command to resume. Verified clips and finished renders are
 reused, and a hosted voice from an interrupted run is reused. The run makes
 paid Gemini calls and briefly stores hosted voices in your Google project.
-It needs a local ``drama3_mlx`` engine and never uses Runpod or remote workers.
+It needs ``engine.type = "drama3_mlx"`` and never uses Runpod or remote workers.
 """
 
 from __future__ import annotations
@@ -32,7 +34,6 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import replace
 import html
 import json
 import os
@@ -51,11 +52,12 @@ from epub_tts_narrator.renderer.samples import _WORDS, _candidate_data, _choose
 
 VERSION = 1
 CONDITIONS = ("saved", "one", "all")
-CONDITION_LABELS = {"saved": "Saved reference (1 clip)", "one": "New clip 1 only", "all": "All new clips"}
+CONDITION_LABELS = {"saved": "Saved reference (1 clip)", "one": "New clip 1 only", "all": "All new clips, joined"}
 SHARED_TEXT = ("I told you before, and I'll tell you again: we leave at first light, "
                "whether the others are ready or not.")
 LINE_MIN_WORDS, LINE_MAX_WORDS, LINE_TARGET_WORDS = 6, 30, 14
 RENDER_ATTEMPTS = 3
+JOIN_PAUSE_SECONDS = 0.5
 
 
 # ---------------------------------------------------------------- selection
@@ -233,30 +235,50 @@ def reference_voice(binding):
             "reference_text": binding["reference_text"], "reference_sha256": binding["reference_sha256"]}
 
 
-def condition_references(saved, clips):
-    return {"saved": [reference_voice(saved)], "one": [reference_voice(clips[0])],
-            "all": [reference_voice(clip) for clip in clips]}
+def join_clips(clips, folder, name, *, pause_seconds=JOIN_PAUSE_SECONDS):
+    """Every clip in order as one reference, with a short pause between them.
+
+    Drama 3 was trained both on several clips joined into one reference and on
+    separate reference blocks (technical report, Appendix A, Figure 8). One
+    joined reference works with a running ``serve`` worker as it is.
+    """
+    import numpy as np
+    import soundfile
+    output = Path(folder) / descriptive_audio_filename("joined-reference", name, f"{len(clips)}-clips", suffix=".wav")
+    text = " ".join(clip["reference_text"].strip() for clip in clips)
+    record_path = output.with_suffix(".json")
+    binding = digest([clip["reference_sha256"] for clip in clips] + [pause_seconds])
+    if output.is_file() and record_path.is_file() and read_json(record_path).get("binding_sha256") == binding:
+        return {"reference_audio": str(output.resolve()), "reference_text": text, "reference_sha256": file_hash(output)}
+    parts, rate, subtype = [], None, None
+    for clip in clips:
+        info = soundfile.info(clip["reference_audio"])
+        if rate is not None and (info.samplerate, info.channels) != (rate, 1):
+            raise ValueError("Experiment clips must share one sample rate and be mono to be joined")
+        rate, subtype = info.samplerate, info.subtype
+        audio, _ = soundfile.read(clip["reference_audio"], dtype="float32", always_2d=True)
+        if parts:
+            parts.append(np.zeros(round(rate * pause_seconds), dtype=np.float32))
+        parts.append(audio.mean(axis=1))
+    staged = output.with_name("." + output.name + ".partial")
+    soundfile.write(staged, np.concatenate(parts), rate, subtype=subtype, format="WAV")
+    os.replace(staged, output)
+    write_json(record_path, {"binding_sha256": binding, "audio_sha256": file_hash(output)})
+    return {"reference_audio": str(output.resolve()), "reference_text": text, "reference_sha256": file_hash(output)}
+
+
+def condition_references(saved, clips, joined):
+    return {"saved": reference_voice(saved), "one": reference_voice(clips[0]), "all": reference_voice(joined)}
 
 
 def render_name(plan, condition, number):
     return descriptive_audio_filename(f"{condition}-line-{number:02d}", plan["name"], suffix=".wav")
 
 
-def render_line(engine, references, text, output, seed):
-    """One take of ``text`` from these references as speaker 0, without chapter history."""
-    from epub_tts_narrator.renderer.engines import EngineError, prepare_synthesis
-    _prepared, directed, _delivery = prepare_synthesis(text)
-    wire = f"<|speaker:0|> {directed}"
-    model = engine._load()
-    encoded = []
-    for voice in references:
-        reference = engine._reference(voice)
-        encoded.append(replace(reference, text=f"<|speaker:0|> {reference.text}"))
-    segment = engine._directing_segment(model, wire, encoded, [], seed)
-    if segment is None:
-        raise EngineError("Drama 3 returned no audio frames")
-    engine._save_segment(segment, model, wire, Path(output))
-    return {"finish_reason": segment.finish_reason, "prompt_rows": segment.prompt_rows}
+def render_line(engine, voice, text, output, seed):
+    """One take of ``text`` from this reference outside any chapter, so without history."""
+    metadata = engine.synthesize(text, voice, output, seed=seed)
+    return {key: value for key, value in metadata.items() if isinstance(value, (str, int, float, bool))}
 
 
 def render_voice(engine, plan, folder, references, *, seed_base, sampling, notify=print):
@@ -269,7 +291,7 @@ def render_voice(engine, plan, folder, references, *, seed_base, sampling, notif
         for number, line in enumerate(plan["lines"], 1):
             wav = out / render_name(plan, condition, number)
             record_path = wav.with_suffix(".json")
-            binding = {"text": line["text"], "references": [item["reference_sha256"] for item in references[condition]],
+            binding = {"text": line["text"], "reference": references[condition]["reference_sha256"],
                        "sampling": sampling, "engine": engine.identity}
             if record_path.is_file() and wav.is_file():
                 record = read_json(record_path)
@@ -453,9 +475,12 @@ def run(args):
     from epub_tts_narrator.renderer.config import load_config
     from epub_tts_narrator.renderer.role_sampling import dialogue_overrides
     bundle = load_bundle(args.book)
+    from epub_tts_narrator.config import resolve_config_path
     config = load_config(args.config)
+    # Lets the loopback serve worker be started from this configuration when none is running.
+    config["_config_path"] = str(resolve_config_path(args.config).resolve())
     if config["engine"].get("type", "drama3_mlx") != "drama3_mlx":
-        raise ValueError("This experiment renders with a local drama3_mlx [engine]; remote workers are not used")
+        raise ValueError("This experiment renders on the local serve worker, which needs engine.type = drama3_mlx")
     session = CastingSession(bundle, config)
     try:
         store = session.store
@@ -495,14 +520,17 @@ def run(args):
         clips = {}
         for plan, _saved in selected:
             clips[plan["voice_id"]] = prepare_clips(session, plan, voice_directory(root, plan))
-        print("Rendering with local Drama 3")
-        engine = session._get_engine()
+        print("Rendering with the local serve worker")
+        from epub_tts_narrator.renderer.auto_serve import resolve_small_job_engine
+        engine = resolve_small_job_engine(session.config, notify=print)
+        engine.check_continuity()
         overrides = dialogue_overrides(session.config)
         narrators = {role["voice_id"] for role in bundle["cast"]["roles"] if role["kind"] == "narration"}
         for plan, saved in selected:
+            folder = voice_directory(root, plan)
+            joined = join_clips(clips[plan["voice_id"]], folder, plan["name"])
             sampling = {} if plan["voice_id"] in narrators else overrides
-            render_voice(engine, plan, voice_directory(root, plan),
-                         condition_references(saved, clips[plan["voice_id"]]),
+            render_voice(engine, plan, folder, condition_references(saved, clips[plan["voice_id"]], joined),
                          seed_base=session.config["render"]["seed"], sampling=sampling)
         scores_path = root / "scores.json"
         page = write_index(root, load_voices(root), read_json(scores_path) if scores_path.is_file() else None)

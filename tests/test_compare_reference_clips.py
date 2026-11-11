@@ -1,6 +1,5 @@
 """The one-vs-several reference clip experiment keeps its controls honest offline."""
 
-from dataclasses import dataclass
 from pathlib import Path
 import sys
 import tempfile
@@ -18,6 +17,7 @@ finally:
     sys.path.remove(str(SCRIPTS))
 
 from epub_tts_narrator.renderer.common import file_hash, read_json
+from epub_tts_narrator.renderer.engines import EngineError
 from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
 
 
@@ -167,38 +167,52 @@ class ClipTests(unittest.TestCase):
         self.assertEqual(self.designer.folders, [])
 
 
-@dataclass(frozen=True)
-class FakeReference:
-    """The vendored ``Reference`` shape: a dataclass of transcript and codes."""
+class FakeServeClient:
+    """The serve client's boundary: records each request's reference and seed."""
 
-    text: str
-    codes: str
-
-
-class FakeEngine:
-    """Drama 3's boundary: records each request's references and seed."""
-
-    identity = {"engine": "drama3_mlx", "fake": True}
+    identity = {"engine": "fish_http", "fake": True}
 
     def __init__(self, fail_first=0):
         self.calls, self.fail_first = [], fail_first
 
-    def _load(self):
-        return SimpleNamespace(sample_rate=44100)
-
-    def _reference(self, voice):
-        return FakeReference(text=voice["reference_text"], codes=voice["reference_sha256"])
-
-    def _directing_segment(self, model, text, references, previous, seed):
-        self.calls.append({"text": text, "references": [item.text for item in references],
-                           "previous": previous, "seed": seed})
+    def synthesize(self, text, voice, output_path, *, seed):
+        self.calls.append({"text": text, "reference": voice["reference_sha256"], "seed": seed})
         if self.fail_first:
             self.fail_first -= 1
-            return None
-        return SimpleNamespace(finish_reason="eos", prompt_rows=100 * len(references), text=text)
+            raise EngineError("Drama 3 returned no audio frames")
+        Path(output_path).write_bytes(text.encode())
+        return {"finish_reason": "eos", "codes": [[1, 2]], "history_turns": 0}
 
-    def _save_segment(self, segment, model, expected, output):
-        output.write_bytes(expected.encode())
+
+def write_tone(path, seconds, rate=24000, value=0.25):
+    import numpy as np
+    import soundfile
+    soundfile.write(path, np.full(int(rate * seconds), value, dtype=np.float32), rate, subtype="PCM_16")
+    return {"reference_audio": str(path), "reference_text": f" words of {Path(path).stem} ",
+            "reference_sha256": file_hash(path)}
+
+
+class JoinTests(unittest.TestCase):
+    def test_clips_join_in_order_with_half_second_pauses_and_their_transcripts_in_order(self):
+        import soundfile
+        with tempfile.TemporaryDirectory() as temp:
+            clips = [write_tone(Path(temp) / f"clip-{index}.wav", index, value=0.1 * index) for index in (1, 2, 3)]
+            joined = experiment.join_clips(clips, temp, "Mara")
+            audio, rate = soundfile.read(joined["reference_audio"], dtype="float32")
+            self.assertEqual(len(audio), rate * (1 + 2 + 3) + 2 * rate // 2)
+            self.assertAlmostEqual(float(audio[rate + rate // 4]), 0.0)
+            self.assertAlmostEqual(float(audio[-1]), 0.3, places=3)
+            self.assertEqual(joined["reference_text"], "words of clip-1 words of clip-2 words of clip-3")
+            self.assertIn("Mara", Path(joined["reference_audio"]).name)
+            self.assertEqual(soundfile.info(joined["reference_audio"]).subtype, "PCM_16")
+            again = experiment.join_clips(clips, temp, "Mara")
+            self.assertEqual(again, joined)
+
+    def test_clips_of_different_sample_rates_are_refused_instead_of_joined(self):
+        with tempfile.TemporaryDirectory() as temp:
+            clips = [write_tone(Path(temp) / "clip-1.wav", 1), write_tone(Path(temp) / "clip-2.wav", 1, rate=44100)]
+            with self.assertRaisesRegex(ValueError, "one sample rate"):
+                experiment.join_clips(clips, temp, "Mara")
 
 
 class RenderTests(unittest.TestCase):
@@ -209,47 +223,46 @@ class RenderTests(unittest.TestCase):
         self.plan = experiment.make_plan(speech_bundle(), "v1", same, clips=3, lines=2,
                                          shared_text="Hello there, friend.", description="Female.")
         voice = {"kind": "reference", "reference_audio": "/a.wav"}
+        self.clips = [dict(voice, index=index, reference_text=f"clip {index}", reference_sha256=str(index))
+                      for index in (1, 2, 3)]
         self.references = experiment.condition_references(
-            dict(voice, reference_text="saved", reference_sha256="s"),
-            [dict(voice, index=index, reference_text=f"clip {index}", reference_sha256=str(index))
-             for index in (1, 2, 3)])
+            dict(voice, reference_text="saved", reference_sha256="s"), self.clips,
+            dict(voice, reference_text="clip 1 clip 2 clip 3", reference_sha256="joined"))
 
     def render(self, engine):
         return experiment.render_voice(engine, self.plan, self.folder, self.references, seed_base=5,
                                        sampling={}, notify=lambda message: None)
 
-    def test_each_line_uses_one_seed_in_every_condition_with_only_the_references_changing(self):
-        engine = FakeEngine()
-        self.render(engine)
+    def test_each_line_uses_one_seed_in_every_condition_with_only_the_reference_changing(self):
+        engine = FakeServeClient()
+        results = self.render(engine)
         self.assertEqual(len(engine.calls), 3 * len(self.plan["lines"]))
         by_text = {}
         for call in engine.calls:
             by_text.setdefault(call["text"], []).append(call)
-            self.assertEqual(call["previous"], [])
-            self.assertTrue(call["text"].startswith("<|speaker:0|> "))
-            self.assertTrue(all(item.startswith("<|speaker:0|> ") for item in call["references"]))
         for calls in by_text.values():
             self.assertEqual(len({call["seed"] for call in calls}), 1)
-            self.assertEqual([len(call["references"]) for call in calls], [1, 1, 3])
+            self.assertEqual([call["reference"] for call in calls], ["s", "1", "joined"])
+        # Codes and other bulky metadata are not kept in the render record.
+        self.assertNotIn("codes", results[("all", 1)])
+        self.assertEqual(results[("all", 1)]["finish_reason"], "eos")
         page = experiment.write_index(self.folder, [{"plan": self.plan, "folder": str(self.folder),
-                                                     "saved": self.references["saved"][0], "clips": [
-                                                         dict(item, index=i) for i, item in
-                                                         enumerate(self.references["all"], 1)]}])
+                                                     "saved": self.references["saved"], "clips": self.clips}])
         text = page.read_text()
         self.assertIn("renders/all/", text)
         self.assertNotIn(str(self.folder), text)
 
     def test_finished_renders_are_reused_and_renders_from_other_inputs_are_refused(self):
-        self.render(FakeEngine())
-        resumed = FakeEngine()
+        self.render(FakeServeClient())
+        resumed = FakeServeClient()
         self.render(resumed)
         self.assertEqual(resumed.calls, [])
-        self.references["all"] = self.references["all"][:2]
+        self.references["all"] = dict(self.references["all"], reference_sha256="other")
         with self.assertRaisesRegex(ValueError, "made from other inputs"):
-            self.render(FakeEngine())
+            self.render(FakeServeClient())
 
-    def test_a_take_without_audio_retries_with_the_next_seed_and_records_it(self):
-        engine = FakeEngine(fail_first=1)
+    def test_a_failed_take_retries_with_the_next_seed_and_records_it(self):
+        engine = FakeServeClient(fail_first=1)
         results = self.render(engine)
         self.assertEqual(engine.calls[1]["seed"], engine.calls[0]["seed"] + 1)
         record = read_json(next((self.folder / "renders" / "saved").glob("*line-01*.json")))
