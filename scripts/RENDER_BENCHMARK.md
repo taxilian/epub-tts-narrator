@@ -23,6 +23,19 @@ python scripts/benchmark_rendering.py generate /path/to/benchmark/corpus/corpus.
   --output /path/to/benchmark/m5-first
 ```
 
+`--worker local` routes its slots the way `audiobook-render render` does. With
+`server.auto_start = true` (the default) they send requests to the shared
+loopback `serve` worker on `server.port` instead of loading a model in the
+benchmark process. A running render's worker is reused; when none is
+listening, the benchmark starts one from `--config` (or the default config file),
+with batch rows equal to `--concurrency`, which exits after its idle timeout.
+A reused worker keeps its own batch rows, so check its `/health`
+`concurrent_requests` before comparing row counts. To measure in-process
+inference instead, set `server.auto_start = false` in the benchmark's config.
+The manifest's `slots` records each slot's configured type, the transport it
+actually used (`http` with its protocol and URL, or `in_process`) and whether
+it was a local slot routed to the shared server.
+
 Use the same corpus on the GPU worker. Its renderer config must contain the
 configured remote engine in `[render_pool]`; select that worker by its existing
 name. Run each concurrency separately with a fresh output directory:

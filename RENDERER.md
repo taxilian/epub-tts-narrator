@@ -570,6 +570,10 @@ They share the TTS model rather than loading competing copies.
   ever killed. Engine identity is not advertised on `/health`, so protocol +
   model is the accepted compatibility check.
 
+`scripts/benchmark_rendering.py generate|pipeline --worker local` routes
+its slots the same way (and can start the worker), recording each slot's
+transport in the manifest's `slots`.
+
 Set `auto_start = false` to explicitly retain direct in-process inference.
 Diagnostics live in `~/.cache/epub-tts-narrator/`:
 `serve-{port}.log` (the spawned worker's output — check it when startup fails),

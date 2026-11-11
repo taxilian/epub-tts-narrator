@@ -270,6 +270,45 @@ def selected_workers(config, worker_name, concurrency):
     return workers
 
 
+def load_benchmark_config(path):
+    """Load the renderer config the way ``audiobook-render render`` does.
+
+    ``_config_path`` lets ``auto_serve.shared_worker_config`` route local slots
+    to the shared loopback ``serve`` worker (and start one from this file)
+    instead of loading a private Drama 3 model in this process.
+    """
+    from epub_tts_narrator.config import resolve_config_path
+    from epub_tts_narrator.renderer.config import load_config
+
+    config = load_config(path)
+    config["_config_path"] = str(resolve_config_path(path).resolve())
+    return config
+
+
+def route_slots(config):
+    """Route local slots as the render pool will, and describe each slot's transport.
+
+    Returns the routed config and one record per slot; ``create_render_engine``
+    leaves an already-routed config unchanged. API keys are never recorded.
+    """
+    from epub_tts_narrator.renderer.auto_serve import shared_worker_config
+
+    configured = config.get("render_pool", {}).get("workers", [])
+    routed_config = shared_worker_config(config)
+    routed = routed_config.get("render_pool", {}).get("workers", [])
+    slots = []
+    for before, after in zip(configured, routed):
+        slot = {"name": after["name"], "configured_type": before["type"], "type": after["type"],
+                "transport": "in_process" if after["type"] == "local" else "http",
+                "concurrency": after.get("concurrency", 1)}
+        if after["type"] != "local":
+            slot.update(protocol=after.get("protocol"), url=after.get("url"))
+            if before["type"] == "local":
+                slot["shared_local_server"] = True
+        slots.append(slot)
+    return routed_config, routed, slots
+
+
 def synthesize_case(engine, case, voices, output, secrets, *, warmup=False, seed_offset=0):
     from epub_tts_narrator.renderer.fish_http import inspect_wav
 
@@ -297,14 +336,14 @@ def synthesize_case(engine, case, voices, output, secrets, *, warmup=False, seed
 
 
 def generate(args):
-    from epub_tts_narrator.renderer.config import load_config
     from epub_tts_narrator.renderer.pool import create_render_engine
 
     corpus, voices = load_corpus(args.corpus)
-    config = load_config(args.config)
-    workers = selected_workers(config, args.worker, args.concurrency)
+    config = load_benchmark_config(args.config)
+    selected_workers(config, args.worker, args.concurrency)
+    config, workers, slots = route_slots(config)
     args.output.mkdir(parents=True, exist_ok=False)
-    report = {"format": "epub-tts-render-benchmark-results", "version": 1,
+    report = {"slots": slots, "format": "epub-tts-render-benchmark-results", "version": 1,
               "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
               "started_utc": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
               "concurrency": args.concurrency, "results": [], "status": "warming",
@@ -355,13 +394,13 @@ def pipeline(args):
     """First-pass production-shaped overlap; one pool and one shared ASR model."""
     from epub_tts_narrator.renderer.assembly import normalize_clip
     from epub_tts_narrator.renderer.chapter_verification import create_chapter_verifier
-    from epub_tts_narrator.renderer.config import load_config
     from epub_tts_narrator.renderer.pool import create_render_engine
     from epub_tts_narrator.renderer.quality import validate_audio
 
     corpus, voices = load_corpus(args.corpus)
-    config = load_config(args.config)
-    workers = selected_workers(config, args.worker, args.concurrency)
+    config = load_benchmark_config(args.config)
+    selected_workers(config, args.worker, args.concurrency)
+    config, workers, slots = route_slots(config)
     args.output.mkdir(parents=True, exist_ok=False)
     path = args.output / "manifest.json"
     secrets = configured_secrets(config)
@@ -369,7 +408,7 @@ def pipeline(args):
               "seed_offset": getattr(args, "seed_offset", 0),
               "corpus_sha256": corpus["corpus_sha256"], "corpus": str(args.corpus.resolve()),
               "started_utc": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
-              "concurrency": args.concurrency, "workers": [w["name"] for w in workers],
+              "concurrency": args.concurrency, "workers": [w["name"] for w in workers], "slots": slots,
               "results": [], "status": "warming",
               "quality": deepcopy(config["quality"]), "transport_protocol": workers[0].get("protocol", "local"),
               "seed_control": "unsupported_stochastic" if "sglang" in workers[0].get("protocol", "") else "requested; see backend metadata",

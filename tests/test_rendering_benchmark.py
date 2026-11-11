@@ -222,6 +222,72 @@ class GenerationTests(unittest.TestCase):
             self.assertTrue(all(r["engine_metadata"]["seed_applied"] is False for r in result["results"]))
 
 
+class LocalServerRoutingTests(unittest.TestCase):
+    """--worker local must use the shared loopback serve worker, never a private model."""
+
+    def run_local(self, folder, *, auto_start=True, config_arg="explicit"):
+        corpus = {"corpus_sha256": digest("routing corpus"), "cases": [
+            {"id": "case-0", "length_class": "short", "paragraph": False, "voice_asset": "voice",
+             "seed_requested": 1, "expected_text": "Test passage.",
+             "turns": [{"text": "Test passage.", "direction": ""}]}]}
+        config = deepcopy(DEFAULTS)
+        config["server"]["auto_start"] = auto_start
+        config_path = folder / "epub-tts-narrator.toml"
+        args = SimpleNamespace(corpus=folder / "corpus.json", worker="local", concurrency=8,
+                               output=folder / "results", config=config_path if config_arg == "explicit" else None)
+        client = SimpleNamespace(url="http://127.0.0.1:8080/v1/tts", api_key="DO-NOT-ECHO-KEY",
+                                 protocol="fish_inline", model="drama-3", timeout=300)
+        engines = []
+
+        class Engine:
+            identity = {"engine": "offline-fixture"}
+            def synthesize(self, text, voice, output, *, seed, direction):
+                output.write_bytes(b"audio fixture")
+                return {"seed_requested": seed}
+            def close(self):
+                pass
+
+        def make_engine(settings):
+            engines.append(deepcopy(settings))
+            return Engine()
+
+        with patch("scripts.benchmark_rendering.load_corpus", return_value=(corpus, {"voice": {}})), \
+                patch("epub_tts_narrator.renderer.config.load_config", return_value=config), \
+                patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine", return_value=client) as resolve, \
+                patch("epub_tts_narrator.renderer.pool.create_render_engine", side_effect=make_engine), \
+                patch("epub_tts_narrator.renderer.fish_http.inspect_wav", return_value={"duration_seconds": 2}), \
+                patch.object(Path, "cwd", return_value=folder), \
+                patch("scripts.benchmark_rendering.shutil.which", return_value=None), redirect_stdout(io.StringIO()):
+            generate(args)
+        from epub_tts_narrator.renderer.common import read_json
+        manifest_text = (args.output / "manifest.json").read_text(encoding="utf-8")
+        return engines[0], read_json(args.output / "manifest.json"), manifest_text, resolve, config_path
+
+    def test_local_slots_become_shared_server_clients_when_the_config_path_is_set(self):
+        for config_arg in ("explicit", "default"):
+            with self.subTest(config_arg=config_arg), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary).resolve()
+                settings, report, text, resolve, config_path = self.run_local(folder, config_arg=config_arg)
+                self.assertEqual(settings["_config_path"], str(config_path))
+                self.assertEqual(resolve.call_args.args[0]["server"]["batch_rows"], 8)
+                [worker] = settings["render_pool"]["workers"]
+                self.assertEqual((worker["type"], worker["url"], worker["concurrency"]),
+                                 ("fish_http", "http://127.0.0.1:8080/v1/tts", 8))
+                self.assertEqual(report["slots"], [{
+                    "name": "benchmark-local", "configured_type": "local", "type": "fish_http",
+                    "transport": "http", "concurrency": 8, "protocol": "fish_inline",
+                    "url": "http://127.0.0.1:8080/v1/tts", "shared_local_server": True}])
+                self.assertEqual(report["transport_protocol"], "fish_inline")
+                self.assertNotIn("DO-NOT-ECHO-KEY", text)
+
+    def test_auto_start_false_keeps_in_process_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            settings, report, _, resolve, _ = self.run_local(Path(temporary).resolve(), auto_start=False)
+            resolve.assert_not_called()
+            self.assertEqual(settings["render_pool"]["workers"][0]["type"], "local")
+            self.assertEqual([(s["type"], s["transport"]) for s in report["slots"]], [("local", "in_process")])
+
+
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required for real normalization")
 class VerificationTests(unittest.TestCase):
     def test_real_audio_checks_preserve_raw_bytes_and_count_bad_text_as_rejected(self):
