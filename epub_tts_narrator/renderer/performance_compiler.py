@@ -31,8 +31,11 @@ PERFORMANCE_CAPABILITIES = {
         "pause_duration": False, "language_switching": False, "context_continuation": False,
     },
 }
-_SOUNDS = {"sigh": "sigh", "laugh": "laugh", "chuckle": "chuckle", "breath": "breath",
-           "gasp": "gasp", "sob": "sob", "cough": "cough", "throat_clear": "clear throat"}
+# Drama 3's documented point tags are third-person verbs ("[sighs]", "[laughs]",
+# "[gasps]", "[clears throat]"; arXiv 2610.18010 appendix C); the rest follow that form.
+_SOUNDS = {"sigh": "sighs", "laugh": "laughs", "chuckle": "chuckles", "breath": "breathes in",
+           "gasp": "gasps", "sob": "sobs", "cough": "coughs", "throat_clear": "clears throat",
+           "groan": "groans", "pant": "pants", "yawn": "yawns"}
 _PAIRED = DELIVERY_TAGS - {"style"}
 
 

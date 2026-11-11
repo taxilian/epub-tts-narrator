@@ -29,6 +29,7 @@ from .narrator_read import (MARKER_CLOSE, MARKER_OPEN, MARKUP_CHARS, _attach_not
                             prekept_direction, CONTEXT_AFTER, CONTEXT_BEFORE)
 from .performance_plan import text_sha256, validate_performance
 from .provider import OutputTruncatedError
+from .speech_cues import line_cues, speakers
 from .spoken_text import build_spoken
 
 
@@ -128,9 +129,14 @@ def _validator(expected, blocks_by_number):
     return validate
 
 
-def request_directions(document, requests, targets, *, notes="", workers=1, group_chars=MARKUP_CHARS,
+def request_directions(document, requests, targets, *, notes="", cues=None, workers=1, group_chars=MARKUP_CHARS,
                        progress=lambda message: None):
-    """Ask for every target line's delivery and notes; returns (deliveries, notes, stats)."""
+    """Ask for every target line's delivery and notes; returns (deliveries, notes, stats).
+
+    ``cues`` maps a qid to the narration that says how its speaker says it; it is
+    sent with that line's request so the delivery agrees with the book.
+    """
+    cues = cues or {}
     source = document["source"]
     numbers = _numbers(source)
     positions = {block["id"]: position for position, block in enumerate(source["blocks"])}
@@ -155,9 +161,12 @@ def request_directions(document, requests, targets, *, notes="", workers=1, grou
                    "before": _context(source["blocks"][max(0, first - 20):first], CONTEXT_BEFORE, tail=True),
                    "text": _render_blocks(group, numbers, by_block),
                    "after": _context(source["blocks"][last + 1:last + 21], CONTEXT_AFTER, tail=False)}
+        expected = [marker["id"].split(" ")[0] for block in group for marker in by_block.get(block["id"], [])]
+        group_cues = {qid: cues[qid] for qid in expected if qid in cues}
+        if group_cues:
+            payload["cues"] = group_cues
         if hint:
             payload["hints"] = hint
-        expected = [marker["id"].split(" ")[0] for block in group for marker in by_block.get(block["id"], [])]
         validate = _validator(expected, {numbers[block["id"]]: block for block in group})
         try:
             return requests.run(system, payload, validate)
@@ -196,6 +205,9 @@ def _strip_controls(segment):
     kept = [control for control in record["controls"] if control["kind"] not in REFRESHED_CONTROLS]
     if not kept and not segment.get("speech_normalization", {}).get("edits"):
         segment.pop("performance_controls")
+        if segment.get("spoken_text") == segment["text"] and "performance" not in segment:
+            # Written only for the controls just removed.
+            segment.pop("spoken_text")
         return False
     spoken = build_spoken(segment)[0]
     segment["performance_controls"] = validate_performance(
@@ -218,8 +230,19 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
     targets = lines(revised, selected)
     before = {segment["id"]: (segment["delivery"]["direction"], deepcopy(segment.get("performance_controls")))
               for segment in segments if segment["block_id"] in selected}
-    deliveries, found, request_stats = request_directions(revised, requests, targets, notes=notes, workers=workers,
-                                                          group_chars=group_chars, progress=progress)
+    people = speakers(revised["cast"])
+    block_rows = {}
+    for segment in segments:
+        if segment["block_id"] in selected:
+            block_rows.setdefault(segment["block_id"], []).append(segment)
+    texts = {block["id"]: block["text"] for block in revised["source"]["blocks"]}
+    cues = {}
+    for block_id, rows in block_rows.items():
+        cues.update(line_cues(rows, texts[block_id], people))
+    line_cue_text = {line["qid"]: cues[id(segments[line["index"]])]["clause"] for line in targets
+                     if id(segments[line["index"]]) in cues}
+    deliveries, found, request_stats = request_directions(revised, requests, targets, notes=notes, cues=line_cue_text,
+                                                          workers=workers, group_chars=group_chars, progress=progress)
     by_qid = {line["qid"]: segments[line["index"]] for line in targets}
     rows_by_block, locked = {}, set()
     for segment in segments:
@@ -232,7 +255,8 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
         rows_by_block.setdefault(segment["block_id"], []).append(segment)
     for line in targets:
         segments[line["index"]]["delivery"] = {"direction": deliveries.get(line["qid"], ""), "evidence": []}
-    stats = {"attached": 0, "dropped": 0, "delivery": 0, "shifts": 0, "narration_reads": 0, "italic_emphasis": 0}
+    stats = {"attached": 0, "dropped": 0, "delivery": 0, "shifts": 0, "narration_reads": 0, "italic_emphasis": 0,
+             "cue_sounds": 0, "cue_scoped": 0, "cue_tones": 0}
     notes_by_block = {}
     qid_block = {line["qid"]: line["block_id"] for line in targets}
     for note in found:
@@ -241,13 +265,14 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
     blocks = {block["id"]: block for block in revised["source"]["blocks"]}
     for block_id, rows in rows_by_block.items():
         block = blocks[block_id]
-        if block_id not in notes_by_block and not block.get("inline_spans"):
+        if block_id not in notes_by_block and not block.get("inline_spans") and not any(id(row) in cues for row in rows):
             continue
         # Angle brackets in a row's text can be kept speech in older books; leave those rows' notes out.
         open_rows = [row for row in rows if id(row) not in locked and not set("<>") & set(row["text"])]
         open_ids = {id(row) for row in open_rows}
         _attach_notes(open_rows, notes_by_block.get(block_id, []), block,
-                      {qid: row for qid, row in by_qid.items() if id(row) in open_ids}, stats)
+                      {qid: row for qid, row in by_qid.items() if id(row) in open_ids}, stats,
+                      {key: value for key, value in cues.items() if key in open_ids})
     # The shared review writes its own audit record; keep the analysis audit and
     # file this refresh's beside it.
     provenance = revised.setdefault("provenance", {})
@@ -266,6 +291,8 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
     report = {"version": DIRECTIONS_VERSION, "lines": len(targets), "directed": directed,
               "narration_reads": stats["narration_reads"], "changes": stats["shifts"],
               "italic_emphasis": stats["italic_emphasis"], "notes_attached": stats["attached"],
+              "cued_lines": len(line_cue_text), "cue_sounds": stats["cue_sounds"], "cue_scoped": stats["cue_scoped"],
+              "cue_tones": stats["cue_tones"],
               "notes_dropped": stats["dropped"] + request_stats["dropped_notes"],
               "kept_pronunciation_rows": len(locked), "changed_segments": len(changed),
               "groups": request_stats["groups"], "subdivided_groups": request_stats["subdivided_groups"],

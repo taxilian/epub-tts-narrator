@@ -62,7 +62,7 @@ class PerformanceCompilerTests(unittest.TestCase):
             {"kind": "pause", "offset": len(text), "duration_ms": 1000}))
         self.assertEqual(result["expected_text"], text)
         self.assertIn("[pause for 0.5 seconds]", result["text"])
-        self.assertIn("[sigh]", result["text"])
+        self.assertIn("[sighs]", result["text"])
         self.assertEqual(result["verification"]["requested_pause_ms"], 1500)
         self.assertTrue(result["verification"]["preserve_leading_silence"])
         self.assertTrue(result["verification"]["preserve_trailing_silence"])
@@ -82,7 +82,7 @@ class PerformanceCompilerTests(unittest.TestCase):
         text = "go stop"
         result = compile_performance(text, record(text, delivery(text, 0, 3), delivery(text, 3, 7, tag="forceful"),
             {"kind": "vocalization", "offset": 3, "sound": "breath"}))
-        self.assertEqual(result["text"], "<whisper>go </whisper> [breath] <forceful>stop</forceful>")
+        self.assertEqual(result["text"], "<whisper>go </whisper> [breathes in] <forceful>stop</forceful>")
 
     def test_plain_backend_reports_every_unsupported_control(self):
         text = "Go."

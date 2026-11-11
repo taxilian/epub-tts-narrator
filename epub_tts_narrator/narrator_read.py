@@ -33,6 +33,7 @@ from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
 from .provider import OutputTruncatedError
 from .quote_spans import _NOT_NAMES, quote_spans, spans_by_block
+from .speech_cues import REASON as CUE_REASON, SCOPED_TONES, line_cues, speakers, tone_direction
 from .speech_traits import validate_speech_traits
 
 VERSION = 1
@@ -836,8 +837,10 @@ def _direction(value, limit=80):
 
 
 def prekept_direction(kind, spec):
-    """Scene-read delivery changes and the book's own italics skip the inline review."""
-    return kind == "delivery" and spec.get("reason") in (SHIFT_REASON, ITALIC_REASON)
+    """Scene-read delivery changes, the book's own italics, and what the narration says
+    about how a line is spoken (``speech_cues``) skip the inline review."""
+    return ((kind == "delivery" and spec.get("reason") in (SHIFT_REASON, ITALIC_REASON))
+            or spec.get("reason") == CUE_REASON)
 
 
 def _parse_note(row, qids, blocks_by_number):
@@ -1705,17 +1708,56 @@ def _shift_controls(row, shifts, stats):
     return controls
 
 
-def _attach_notes(rows, notes, block, by_qid, stats):
+def _cue_controls(rows, cues, notes, by_qid, stats):
+    """What the narration says about a line's own delivery -> tone words and controls.
+
+    Shouting, screaming, soft and hurried go into the line's direction; whispering
+    and drawling become scoped tags over the line; a sound becomes a point event
+    before its first word, unless the model already placed a sound on that line.
+    Returns {id(row): (row, [("controls", raw), ...])}, listed before other notes so
+    the book's own words win a conflict.
+    """
+    voiced = {id(by_qid[note["target"][1]]) for note in notes
+              if note["target"][0] == "q" and note["target"][1] in by_qid
+              and note["raw"].get("kind") == "vocalization"}
+    pending = {}
+    for row in rows:
+        cue = cues.get(id(row))
+        if not cue:
+            continue
+        text, items = row["text"], []
+        tone = cue["tone"]
+        if tone in SCOPED_TONES:
+            items.append({"kind": "delivery", "tag": SCOPED_TONES[tone], "original": text, "left": "", "right": "",
+                          "reason": CUE_REASON})
+        elif tone:
+            direction = _direction(tone_direction(row["delivery"]["direction"], tone))
+            if direction != row["delivery"]["direction"]:
+                row["delivery"] = dict(row["delivery"], direction=direction)
+                stats["cue_tones"] = stats.get("cue_tones", 0) + 1
+        words = list(_WORD.finditer(text))
+        if cue["sound"] and words and id(row) not in voiced and len(text) <= 2000:
+            word = words[0]
+            items.append({"kind": "vocalization", "sound": cue["sound"], "position": "before",
+                          "original": word.group(), "left": text[:word.start()], "right": text[word.end():],
+                          "reason": CUE_REASON})
+        if items:
+            pending[id(row)] = (row, [("controls", raw) for raw in items])
+    return pending
+
+
+def _attach_notes(rows, notes, block, by_qid, stats, cues=None):
     """Turn terse notes into each row's private ``inline_proposals`` (reviewed later).
 
     Each note must locate a unique exact span in its target row. Invalid notes are
     dropped and counted. A note that cannot combine with the row's earlier notes is
-    dropped alone. The remove-only review decides every survivor except scene-read
-    delivery changes and italics (``prekept_direction``).
+    dropped alone. ``cues`` (``speech_cues.line_cues``) come first. The remove-only
+    review decides every survivor except scene-read delivery changes, italics and
+    cues (``prekept_direction``).
     """
     from .attribution_compact import parse_proposals
     block_text, block_id = block["text"], block["id"]
-    pending, shifts = {}, {}
+    pending, shifts = _cue_controls(rows, cues or {}, notes, by_qid, stats), {}
     for note in notes:
         kind, value = note["target"]
         if note["kind"] == "read":
@@ -1759,7 +1801,7 @@ def _attach_notes(rows, notes, block, by_qid, stats):
             try:
                 result = parse_proposals(trial, row["text"], f"{block_id} notes", base_direction=row["delivery"]["direction"])
             except ValueError:
-                if raw.get("reason") != ITALIC_REASON:
+                if raw.get("reason") not in (ITALIC_REASON, CUE_REASON):
                     stats["dropped"] += 1
                 if raw.get("reason") == SHIFT_REASON:
                     stats["shifts"] -= 1
@@ -1767,10 +1809,13 @@ def _attach_notes(rows, notes, block, by_qid, stats):
             payload, cleaned = trial, result
             if raw.get("reason") == ITALIC_REASON:
                 stats["italic_emphasis"] += 1
+            elif raw.get("reason") == CUE_REASON:
+                key = "cue_sounds" if raw["kind"] == "vocalization" else "cue_scoped"
+                stats[key] = stats.get(key, 0) + 1
         if cleaned is not None:
             row["inline_proposals"] = cleaned
             stats["attached"] += sum(1 for _, raw in items if raw in payload["edits"] or raw in payload["controls"]
-                                     if raw.get("reason") not in (SHIFT_REASON, ITALIC_REASON))
+                                     if raw.get("reason") not in (SHIFT_REASON, ITALIC_REASON, CUE_REASON))
 
 
 _JOINT = re.compile(r"\b(?:in unison|together|simultaneously|at the same time|at once|in chorus|both)\b", re.IGNORECASE)
@@ -1928,7 +1973,7 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
     """Exact-coverage segments; returns rows and fills ``stats`` with note/delivery counts."""
     stats = stats if stats is not None else {}
     stats.update({"attached": 0, "dropped": 0, "delivery": 0, "delivery_cited": 0, "shifts": 0,
-                  "narration_reads": 0, "italic_emphasis": 0,
+                  "narration_reads": 0, "italic_emphasis": 0, "cue_sounds": 0, "cue_scoped": 0, "cue_tones": 0,
                   "simultaneous": 0, "simultaneous_unproven": 0, "variant_lines": 0, "effect_lines": 0,
                   "voice_exceptions": 0})
     roles = {role["id"]: role for role in cast["roles"]}
@@ -1957,6 +2002,7 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
         return variant, (effects[-1] if effects else None), (effects[-1]["kind"] if effects else None)
     narrator = roles["narrator_main"]
     index = name_index(ledger)
+    people = speakers(cast)
     by_block = {}
     for span in spans:
         by_block.setdefault(span["block_id"], []).append(dict(labels[span["id"]], start=span["start"],
@@ -2082,8 +2128,9 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
             rows.append(row)
             if piece.get("qid"):
                 by_qid[piece["qid"]] = row
-        if block["id"] in notes_by_block or block.get("inline_spans"):
-            _attach_notes(rows, notes_by_block.get(block["id"], []), block, by_qid, stats)
+        cues = line_cues(rows, text, people)
+        if block["id"] in notes_by_block or block.get("inline_spans") or cues:
+            _attach_notes(rows, notes_by_block.get(block["id"], []), block, by_qid, stats, cues)
         segments.extend(rows)
     return segments
 

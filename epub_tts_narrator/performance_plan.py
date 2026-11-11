@@ -17,7 +17,8 @@ from .spoken_text import MAX_DELIVERY_CHARACTERS
 
 PERFORMANCE_VERSION = 1
 DELIVERY_TAGS = frozenset({"style", "whisper", "emphasis", "soft", "fast", "slow", "stress", "forceful"})
-VOCAL_SOUNDS = frozenset({"sigh", "laugh", "chuckle", "breath", "gasp", "sob", "cough", "throat_clear"})
+VOCAL_SOUNDS = frozenset({"sigh", "laugh", "chuckle", "breath", "gasp", "sob", "cough", "throat_clear",
+                          "groan", "pant", "yawn"})
 MAX_CONTROLS = 256
 _VOWELS = frozenset("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW".split())
 _CONSONANTS = frozenset("B CH D DH F G HH JH K L M N NG P R S SH T TH V W Y Z ZH".split())

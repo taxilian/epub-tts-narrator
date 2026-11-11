@@ -162,7 +162,7 @@ class InlinePerformanceTests(unittest.TestCase):
                 clipped = max(chunk["spoken_start"], hushed[0]), min(chunk["spoken_end"], hushed[1])
                 self.assertGreater(clipped[1], clipped[0])
             if any(control["kind"] == "vocalization" for control in controls):
-                self.assertEqual(directed.count(" [sigh] "), 1)
+                self.assertEqual(directed.count(" [sighs] "), 1)
             if any(control["kind"] == "pronunciation" for control in controls):
                 self.assertIn("KWY-et-lee", directed)
                 self.assertNotIn("KWY-et-lee", compiled["expected_text"])
@@ -309,7 +309,7 @@ class InlinePerformanceTests(unittest.TestCase):
             {"kind": "vocalization", "offset": 0, "sound": "laugh"}]}
         compiled = compile_performance(text, record, traits="measured pace", direction="gently")
         self.assertEqual(compiled["expected_text"], text)
-        self.assertEqual(compiled["text"].count(" [laugh] "), 1)
+        self.assertEqual(compiled["text"].count(" [laughs] "), 1)
         self.assertIn("laughed", compiled["text"])
         self.assertIn("[with a low chuckle] ", compiled["text"])
         self.assertIn(" [measured pace; gently] ", compiled["text"])

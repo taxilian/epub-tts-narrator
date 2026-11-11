@@ -129,25 +129,30 @@ class DirectionRefreshTests(unittest.TestCase):
         self.assertIn("‹q1 Mara›", asked["text"])
         self.assertIn("‹q2 Tom›", asked["text"])
         self.assertNotIn("cast", asked)
+        # The narration about each line's own speaker travels with the line.
+        self.assertEqual(asked["cues"], {"q1": "Mara laughed.", "q2": "Tom whispered."})
         self.assertEqual([(row["id"], row["role_id"], row["voice_id"]) for row in revised["segments"]],
                          [(row["id"], row["role_id"], row["voice_id"]) for row in document["segments"]])
         rows = {row["id"]: row for row in revised["segments"]}
         mara = rows["b1:14:43"]
         self.assertEqual(mara["delivery"], {"direction": "flat, weary", "evidence": []})
         controls = mara["performance_controls"]["controls"]
-        self.assertIn(("style", "But you never listen.”", "hurt, rising"),
-                      [(c["tag"], c["text"], c.get("direction")) for c in controls])
-        self.assertIn(("emphasis", "never"), [(c["tag"], c["text"]) for c in controls])
+        scoped = [(c["tag"], c["text"], c.get("direction")) for c in controls if c["kind"] == "delivery"]
+        self.assertIn(("style", "But you never listen.”", "hurt, rising"), scoped)
+        self.assertIn(("emphasis", "never", ""), scoped)
+        # "Mara laughed." beside her own line: a laugh as she starts it.
+        self.assertIn({"kind": "vocalization", "offset": 1, "sound": "laugh"}, controls)
         self.assertEqual(rows["b2:0:33"]["delivery"]["direction"], "tense, hushed")
         tom = rows["b3:0:15"]
         self.assertEqual(tom["delivery"]["direction"], "hushed, afraid")
-        # The old emphasis is replaced by the reviewed whisper.
+        # The old emphasis is replaced: "Tom whispered." whispers his whole line, and the
+        # model's narrower whisper inside it is the one dropped.
         self.assertEqual([(c["tag"], c["text"]) for c in tom["performance_controls"]["controls"]],
-                         [("whisper", "Who is there?")])
+                         [("whisper", "“Who is there?”")])
         self.assertEqual(revised["provenance"]["inline_performance"], document["provenance"]["inline_performance"])
         self.assertEqual((report["lines"], report["directed"], report["changes"], report["narration_reads"],
-                          report["italic_emphasis"]), (3, 3, 1, 1, 1))
-        self.assertEqual(report["review"], {"direction": 2, "kept": 1})
+                          report["italic_emphasis"], report["cue_sounds"], report["cue_scoped"]), (3, 3, 1, 1, 1, 1, 1))
+        self.assertEqual(report["review"], {"direction": 4})
 
     def test_a_chapter_refresh_asks_only_for_its_lines_with_book_wide_ids(self):
         document = scene_document()
@@ -189,6 +194,21 @@ class DirectionRefreshTests(unittest.TestCase):
         self.assertEqual(tom["delivery"]["direction"], "hushed, afraid")
         self.assertEqual(report["kept_pronunciation_rows"], 1)
         self.assertEqual(readiness(revised)["errors"], [])
+
+
+class LeftoverSpokenTextTests(DirectionRefreshTests.__base__):
+    def test_a_line_that_loses_its_only_control_loses_the_spoken_text_written_for_it(self):
+        document = scene_document()
+        run = document["segments"][5]
+        run["performance_controls"] = validate_performance(
+            {"version": 1, "text_sha256": text_sha256(run["text"]),
+             "controls": [{"kind": "delivery", "start": 1, "end": 4, "text": "Run", "tag": "emphasis"}]}, run["text"])
+        run["spoken_text"] = run["text"]
+        with tempfile.TemporaryDirectory() as cache:
+            revised, _ = refresh_directions(document, CachedRequests(DirectorClient(), cache), block_ids=["b4"])
+        self.assertEqual(readiness(revised)["errors"], [])
+        self.assertNotIn("performance_controls", revised["segments"][5])
+        self.assertNotIn("spoken_text", revised["segments"][5])
 
 
 class TerminalIO(io.StringIO):

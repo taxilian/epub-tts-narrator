@@ -745,7 +745,8 @@ class NarratedAnalyzeTests(unittest.TestCase):
         self.assertEqual(document["provenance"]["narrator_read"]["verification"]["tie_breaks"], 1)
 
     def test_spelling_edits_and_cues_go_through_the_remove_only_review(self):
-        self.source = make_source([[('"Nooooo, wait," Mara whispered.', "p"), ("The door went bang.", "p")]])
+        # "said": no cue from the narration, so every note here is the model's own.
+        self.source = make_source([[('"Nooooo, wait," Mara said.', "p"), ("The door went bang.", "p")]])
 
         def rewrite(qids, result):
             qid = qids["Nooooo, wait,"]
@@ -775,6 +776,27 @@ class NarratedAnalyzeTests(unittest.TestCase):
                     self.assertEqual(counts.get("removed"), 3)
                     self.assertEqual(controls, [])
                 self.assertIn("The door went bang.", rows)
+
+    def test_the_narration_s_cues_for_a_speaker_are_applied_without_review(self):
+        self.source = make_source([[('"Run!" Mara shouted.', "p"), ('"Fine," Mara laughed.', "p"),
+                                    ('"Hush," Mara whispered.', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Run!"], "1"], [qids["Fine,"], "1", "", "wry"], [qids["Hush,"], "1"]]
+            result.pop("p", None)
+
+        self.cache = self.cache.parent / "cache-cues"
+        document = self.markup_with(rewrite, review_answer="remove")
+        self.assertEqual(readiness(document)["errors"], [])
+        lines = {row["text"]: row for row in document["segments"] if row["kind"] == "dialogue"}
+        self.assertEqual(lines['"Run!"']["delivery"]["direction"], "shouting")
+        self.assertEqual(lines['"Fine,"']["delivery"]["direction"], "wry")
+        self.assertIn({"kind": "vocalization", "offset": 1, "sound": "laugh"},
+                      lines['"Fine,"']["performance_controls"]["controls"])
+        self.assertEqual([(c["tag"], c["text"]) for c in lines['"Hush,"']["performance_controls"]["controls"]],
+                         [("whisper", '"Hush,"')])
+        stats = document["provenance"]["narrator_read"]["segments"]
+        self.assertEqual((stats["cue_sounds"], stats["cue_scoped"], stats["cue_tones"]), (1, 1, 1))
 
     def test_truncated_markup_is_split_at_paragraph_boundaries_and_retried(self):
         from epub_tts_narrator.provider import OutputTruncatedError

@@ -63,12 +63,12 @@ Read ahead: a tag or description after the quotation often names the speaker. A 
 {_REAL}"""
 
 # Direction-only refresh of a published book: speakers are fixed input.
-DIRECTIONS_VERSION = 1
+DIRECTIONS_VERSION = 2
 
 DIRECTIONS = f"""You are an audiobook director marking how each line is performed. Who speaks is already decided.
 {_DATA}
 
-Input: "before"/"after" = neighbouring text for context only, "text" = numbered paragraphs (N|text) where each line is prefixed by its id and speaker, like ‹q17 Mara›; ‹q18 Mara, thought› is a thought and ‹q19 Mara, written› written text read aloud; "?" means the speaker is not settled yet.
+Input: "before"/"after" = neighbouring text for context only, "text" = numbered paragraphs (N|text) where each line is prefixed by its id and speaker, like ‹q17 Mara›; ‹q18 Mara, thought› is a thought and ‹q19 Mara, written› written text read aloud; "?" means the speaker is not settled yet. "cues" = for some lines, the narration beside the line that says how its speaker says it ("Wolf laughed", "she said softly", "he roared"): the delivery must agree with it. The laugh, sigh, whisper or shout a cue names is added for you; do not add it again as a note.
 Give EVERY line id in "text" exactly once, in order:
 {{"q":[[qid,delivery],[qid,delivery,[[words,delivery]]]],
  "p":[[target,op,...]]}}
