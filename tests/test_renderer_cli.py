@@ -412,7 +412,7 @@ class RendererCLITests(unittest.TestCase):
         settings = load_config(self.config)["render"]
         self.assertIs(settings["normalize_pauses"], True)
         self.assertIs(settings["normalize_take_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (400, 200))
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (500, 250))
         before = self.config.read_text()
         invalid = {
             "paragraph_synthesis": ("1", '"true"'),

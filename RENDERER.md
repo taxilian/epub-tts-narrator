@@ -112,8 +112,8 @@ seed = 1729
 sample_rate = 44100
 normalize_pauses = true
 normalize_take_pauses = true
-sentence_pause_ms = 400
-clause_pause_ms = 200
+sentence_pause_ms = 500
+clause_pause_ms = 250
 paragraph_pause_ms = 700
 blank_pause_ms = 1200
 bracket_pause_ms = 200
@@ -1211,13 +1211,13 @@ All pauses added during assembly are controlled in the global config's existing 
 
 | Setting | Default | Where it applies |
 | --- | ---: | --- |
-| `sentence_pause_ms` | 400 | After `.`, `!`, `?`, or an ellipsis, between clips and inside a take |
-| `clause_pause_ms` | 200 | After a comma, semicolon, colon, or dash, between clips and inside a take |
+| `sentence_pause_ms` | 500 | After `.`, `!`, `?`, or an ellipsis, between clips and inside a take |
+| `clause_pause_ms` | 250 | After a comma, semicolon, colon, or dash, between clips and inside a take |
 | `paragraph_pause_ms` | 700 | At a source paragraph boundary, including the chapter's final paragraph |
 | `blank_pause_ms` | 1200 | Before a paragraph marked as following a blank line (a scene break) |
 | `bracket_pause_ms` | 200 | On entering or leaving bracketed text |
 
-The defaults follow measured human audiobook reading. In LibriTTS, which is cut from LibriVox audiobooks, pauses between sentences average 370 ms, with 1 s at the 90th percentile ([Owoicho et al., Speech Prosody 2024](https://www.isca-archive.org/speechprosody_2024/owoicho24_speechprosody.pdf)). A professional narrator's audiobook reading showed comma, sentence and paragraph pauses rising in that order, with paragraph-final pauses about 1.6 times sentence-final ones ([Bailly et al., Interspeech 2012](https://www.isca-archive.org/interspeech_2012/bailly12_interspeech.pdf)). A storytelling-speech corpus puts long pauses at about 410–450 ms, and listeners do not hear anything under 50 ms as a pause ([Analysis and Modeling Pauses for Synthesis of Storytelling Speech, 2015](https://parakrant.github.io/pdf/pubs/IC3_2015.pdf)). So the defaults are a sentence pause of 400 ms, a clause pause half that, a paragraph pause of 700 ms, and a scene break of 1200 ms.
+The defaults follow measured human audiobook reading. In LibriTTS, which is cut from LibriVox audiobooks, pauses between sentences average 370 ms, with 1 s at the 90th percentile ([Owoicho et al., Speech Prosody 2024](https://www.isca-archive.org/speechprosody_2024/owoicho24_speechprosody.pdf)). A professional narrator's audiobook reading showed comma, sentence and paragraph pauses rising in that order, with paragraph-final pauses about 1.6 times sentence-final ones ([Bailly et al., Interspeech 2012](https://www.isca-archive.org/interspeech_2012/bailly12_interspeech.pdf)). A storytelling-speech corpus puts long pauses at about 410–450 ms, and listeners do not hear anything under 50 ms as a pause ([Analysis and Modeling Pauses for Synthesis of Storytelling Speech, 2015](https://parakrant.github.io/pdf/pubs/IC3_2015.pdf)). The defaults sit at the unhurried end of that range, since an average of 370 ms sounded rushed in listening: a sentence pause of 500 ms, a clause pause half that, a paragraph pause of 700 ms, and a scene break of 1200 ms.
 
 Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. The settings are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. For example, a sentence ending a paragraph uses the larger of the sentence and paragraph settings. Zero disables a particular added pause; another applicable cue or protected audio may still leave a gap. Protected audio is never removed just to meet a target.
 

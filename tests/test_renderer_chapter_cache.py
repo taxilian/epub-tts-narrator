@@ -20,7 +20,7 @@ class ChapterSettingsTests(unittest.TestCase):
         settings = chapter_cache.chapter_settings({})
         self.assertEqual(settings["version"], 2)
         self.assertIs(settings["normalize_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (400, 200))
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (500, 250))
         for key, values in {
             "normalize_pauses": (1, "true", None),
             "sentence_pause_ms": (-1, 5001, True, 220.0, float("nan")),

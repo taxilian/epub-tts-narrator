@@ -180,8 +180,8 @@ normalize_pauses = true
 # Also apply the sentence/clause targets inside each take (long takes, paragraph
 # performances, recovery joins); other long quiet inside a take is only shortened.
 normalize_take_pauses = true
-sentence_pause_ms = 400   # After . ! ? or an ellipsis
-clause_pause_ms = 200     # After a comma, semicolon, colon, or dash
+sentence_pause_ms = 500   # After . ! ? or an ellipsis
+clause_pause_ms = 250     # After a comma, semicolon, colon, or dash
 paragraph_pause_ms = 700  # At a source paragraph boundary, including the chapter's final one
 blank_pause_ms = 1200     # Before a paragraph marked as following a blank line (scene break)
 bracket_pause_ms = 200    # On entering or leaving bracketed text
