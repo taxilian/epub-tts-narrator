@@ -20,7 +20,7 @@ class ChapterSettingsTests(unittest.TestCase):
         settings = chapter_cache.chapter_settings({})
         self.assertEqual(settings["version"], 2)
         self.assertIs(settings["normalize_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (260, 120))
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (400, 200))
         for key, values in {
             "normalize_pauses": (1, "true", None),
             "sentence_pause_ms": (-1, 5001, True, 220.0, float("nan")),
@@ -93,7 +93,7 @@ class ChapterCheckpointTests(unittest.TestCase):
     def test_ready_chapter_preserves_frames_source_and_reuses_verified_encodings(self):
         original = file_hash(self.source)
         first = self.prepare()
-        self.assertEqual(first["frames"], 44100 * 4 + 17640)
+        self.assertEqual(first["frames"], 44100 * 4 + 30870)
         self.assertEqual(first["segments"][0]["chapter_end_frame"], 44100 * 4)
         self.assertEqual(first["number"], 7)
         self.assertTrue(first["encoded_path"].endswith("/chapter-0007.m4a"))
@@ -147,7 +147,7 @@ class ChapterCheckpointTests(unittest.TestCase):
 
     def test_changed_pause_voice_policy_or_clip_invalidates_checkpoint(self):
         first = self.prepare()
-        self.settings["paragraph_pause_ms"] = 550
+        self.settings["paragraph_pause_ms"] = 850
         pause = self.prepare()
         self.assertNotEqual(first["cache_key"], pause["cache_key"])
         self.assertEqual(pause["frames"] - first["frames"], 6615)
@@ -264,7 +264,10 @@ class ChapterCheckpointTests(unittest.TestCase):
     def test_disabled_normalization_keeps_exact_composed_pcm(self):
         self.settings["normalize_loudness"] = False
         ready = self.prepare()
-        original = assembly.compose_chapter(self.clips, self.root / "original.wav")
+        defaults = chapter_cache.chapter_settings({})
+        original = assembly.compose_chapter(self.clips, self.root / "original.wav", **{
+            key: defaults[key] for key in ("paragraph_pause_ms", "blank_pause_ms", "bracket_pause_ms",
+                                           "sentence_pause_ms", "clause_pause_ms")})
         self.assertEqual(file_hash(ready["wav_path"]), file_hash(original["wav_path"]))
         self.assertEqual(ready["normalization"]["status"], "disabled")
 

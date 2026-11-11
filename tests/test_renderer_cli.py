@@ -411,12 +411,14 @@ class RendererCLITests(unittest.TestCase):
     def test_pause_normalization_settings_have_defaults_and_strict_types(self):
         settings = load_config(self.config)["render"]
         self.assertIs(settings["normalize_pauses"], True)
-        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (260, 120))
+        self.assertIs(settings["normalize_take_pauses"], True)
+        self.assertEqual((settings["sentence_pause_ms"], settings["clause_pause_ms"]), (400, 200))
         before = self.config.read_text()
         invalid = {
             "paragraph_synthesis": ("1", '"true"'),
             "max_paragraph_chars": ("319", "1501", "1000.0", "true"),
             "normalize_pauses": ("1", '"true"'),
+            "normalize_take_pauses": ("1", '"true"'),
             "sentence_pause_ms": ("-1", "5001", "220.0", "true", "nan"),
             "clause_pause_ms": ("-1", "5001", "100.0", "false", "inf"),
         }

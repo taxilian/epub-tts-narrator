@@ -242,7 +242,7 @@ class StagedWorkflowTests(unittest.TestCase):
     def test_assembly_rejects_changed_generation_or_normalization_settings(self):
         self.chapters()
         for section, name, value in (
-            ("render", "seed", 123), ("render", "paragraph_pause_ms", 700),
+            ("render", "seed", 123), ("render", "paragraph_pause_ms", 900),
             ("render", "target_lufs", -22), ("engine", "temperature", 0.1),
         ):
             with self.subTest(section=section, name=name):

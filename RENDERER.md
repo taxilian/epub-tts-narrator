@@ -111,11 +111,12 @@ max_attempts = 3
 seed = 1729
 sample_rate = 44100
 normalize_pauses = true
-sentence_pause_ms = 260
-clause_pause_ms = 120
-paragraph_pause_ms = 400
-blank_pause_ms = 600
-bracket_pause_ms = 120
+normalize_take_pauses = true
+sentence_pause_ms = 400
+clause_pause_ms = 200
+paragraph_pause_ms = 700
+blank_pause_ms = 1200
+bracket_pause_ms = 200
 allow_review = false
 ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
@@ -1210,15 +1211,17 @@ All pauses added during assembly are controlled in the global config's existing 
 
 | Setting | Default | Where it applies |
 | --- | ---: | --- |
-| `sentence_pause_ms` | 260 | After `.`, `!`, `?`, or an ellipsis at an audio clip boundary |
-| `clause_pause_ms` | 120 | After a comma, semicolon, colon, or dash at an audio clip boundary |
-| `paragraph_pause_ms` | 400 | At a source paragraph boundary, including the chapter's final paragraph |
-| `blank_pause_ms` | 600 | Before a paragraph marked as following a blank line |
-| `bracket_pause_ms` | 120 | On entering or leaving bracketed text |
+| `sentence_pause_ms` | 400 | After `.`, `!`, `?`, or an ellipsis, between clips and inside a take |
+| `clause_pause_ms` | 200 | After a comma, semicolon, colon, or dash, between clips and inside a take |
+| `paragraph_pause_ms` | 700 | At a source paragraph boundary, including the chapter's final paragraph |
+| `blank_pause_ms` | 1200 | Before a paragraph marked as following a blank line (a scene break) |
+| `bracket_pause_ms` | 200 | On entering or leaving bracketed text |
+
+The defaults follow measured human audiobook reading. In LibriTTS, which is cut from LibriVox audiobooks, pauses between sentences average 370 ms, with 1 s at the 90th percentile ([Owoicho et al., Speech Prosody 2024](https://www.isca-archive.org/speechprosody_2024/owoicho24_speechprosody.pdf)). A professional narrator's audiobook reading showed comma, sentence and paragraph pauses rising in that order, with paragraph-final pauses about 1.6 times sentence-final ones ([Bailly et al., Interspeech 2012](https://www.isca-archive.org/interspeech_2012/bailly12_interspeech.pdf)). A storytelling-speech corpus puts long pauses at about 410–450 ms, and listeners do not hear anything under 50 ms as a pause ([Analysis and Modeling Pauses for Synthesis of Storytelling Speech, 2015](https://parakrant.github.io/pdf/pubs/IC3_2015.pdf)). So the defaults are a sentence pause of 400 ms, a clause pause half that, a paragraph pause of 700 ms, and a scene break of 1200 ms.
 
 Pause normalization is enabled by default with `[render] normalize_pauses = true`. During chapter assembly it conservatively removes excess silence at the outer edges of each clip, retaining protective margins around speech. The settings are total gap targets: retained quiet tails and heads count toward the pause, and overlapping cues use the largest target. For example, a sentence ending a paragraph uses the larger of the sentence and paragraph settings. Zero disables a particular added pause; another applicable cue or protected audio may still leave a gap. Protected audio is never removed just to meet a target.
 
-Pauses inside a clip are unchanged. When adjacent passages with the same role and voice are generated as one continuous performance, their internal sentence pauses remain under the TTS engine's control. Role and voice changes use separate clips. There is no separate added speaker-change pause, and chapter concatenation adds no extra silence of its own. Set `normalize_pauses = false` to retain original clip padding and disable sentence/clause targets; paragraph, blank-line, and bracket pauses are then added on top of the original padding.
+With `normalize_take_pauses = true` (the default, effective only while `normalize_pauses` is on), the same sentence and clause targets also apply inside each take. A long take, a paragraph performance, or a sentence-split recovery would otherwise keep the engine's own pauses: often well over a second at one sentence and almost none at a recovery join. Assembly measures the quiet stretch actually present between the two words at each interior sentence or clause boundary, using the same quiet definition as clip edges, and cuts or extends its middle so the whole stretch equals the target. Who made the silence does not matter, and the result is a total, never the engine's pause plus an added one. Boundaries are located from the take's verification word timings, matched word for word on both sides of the punctuation. Takes accepted without primary word timings are first recognized once more, audio only, by the local MLX Whisper verifier during `render` (cached under `render-work/pause-word-timings/`); only words that match the passage are used. Any other quiet stretch inside a take is only ever shortened: a stall in the middle of a phrase is capped at the clause target, or at the longer target when a take has no timings. Requested pauses (`[pause]` performance controls), simultaneous speech, and censored clips keep the engine's timing. Accepted WAVs never change; each edited clip's timing records its `pause_edits` in original-WAV frames, so `source_audio_start_frame`/`source_audio_end_frame` still trace it. Set `normalize_take_pauses = false` to leave pauses inside takes as generated. Role and voice changes use separate clips. There is no separate added speaker-change pause, and chapter concatenation adds no extra silence of its own. Set `normalize_pauses = false` to retain original clip padding and disable sentence/clause targets; paragraph, blank-line, and bracket pauses are then added on top of the original padding.
 
 Changing pause settings rebuilds chapter audio from the accepted clips; it does not regenerate speech or modify voice references. Rerun `render BOOK_DIRECTORY --chapters N --chapters-only` using the same work directory, then listen to the newly printed chapter file. Use `assemble` afterward to package it, choosing a new output directory if a finished audiobook already exists. Timing records include `source_audio_start_frame` and `source_audio_end_frame` so each assembled clip can be traced to the retained range of its original accepted WAV. Source text ranges remain unchanged.
 

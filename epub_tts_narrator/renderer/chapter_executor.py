@@ -275,7 +275,8 @@ class ChapterExecutor:
             composed = prepare_chapter(
                 dict(spec["chapter"], _ordinal=spec["chapter"]["number"], _total_chapters=spec["total_chapters"]),
                 clips, Path(temporary) / "chapters", book=spec["book"], render_settings=config["render"],
-                context=prepared["context"], notify=notify, censorship_policy=config["censorship"])
+                context=prepared["context"], notify=notify, censorship_policy=config["censorship"],
+                acceptance=acceptance)
             stage = Path(temporary) / "ready"
             stage.mkdir()
             pointers = audio_pointers(composed["frames"], composed["number"],

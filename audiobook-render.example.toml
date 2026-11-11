@@ -172,16 +172,19 @@ max_chunk_chars = 320
 max_attempts = 3
 seed = 1729
 sample_rate = 44100
-# All added pauses, in milliseconds (integers from 0 through 5000).
-# With normalization enabled, these are total gap targets between audio clips:
-# retained quiet edges count toward the gap, and overlapping cues use the largest.
-# Pauses inside a continuous TTS-generated paragraph are unchanged.
+# All pauses, in milliseconds (integers from 0 through 5000). Defaults follow
+# measured human audiobook reading (sentence pauses average about 370 ms).
+# With normalization enabled, these are total gap targets: retained quiet edges
+# count toward the gap, and overlapping cues use the largest.
 normalize_pauses = true
-sentence_pause_ms = 260  # After . ! ? or an ellipsis at a clip boundary
-clause_pause_ms = 120    # After a comma, semicolon, colon, or dash at a clip boundary
-paragraph_pause_ms = 400 # At a source paragraph boundary, including the chapter's final one
-blank_pause_ms = 600     # Before a paragraph marked as following a blank line
-bracket_pause_ms = 120   # On entering or leaving bracketed text
+# Also apply the sentence/clause targets inside each take (long takes, paragraph
+# performances, recovery joins); other long quiet inside a take is only shortened.
+normalize_take_pauses = true
+sentence_pause_ms = 400   # After . ! ? or an ellipsis
+clause_pause_ms = 200     # After a comma, semicolon, colon, or dash
+paragraph_pause_ms = 700  # At a source paragraph boundary, including the chapter's final one
+blank_pause_ms = 1200     # Before a paragraph marked as following a blank line (scene break)
+bracket_pause_ms = 200    # On entering or leaving bracketed text
 # Zero disables that added pause; it does not remove protected speech edges.
 # normalize_pauses = false keeps original clip padding, disables sentence/clause
 # targets, and adds paragraph/blank/bracket pauses on top of the existing padding.

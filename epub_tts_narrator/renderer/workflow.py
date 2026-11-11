@@ -2520,6 +2520,12 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             clips = prepare_chapter_censorship(
                 clips, acceptance, config["censorship"], verifier=verifier,
                 cache_dir=Path(work) / "censorship-alignment", notify=notify)
+        render = config["render"]
+        if (verifier is not None and render.get("normalize_pauses", True)
+                and render.get("normalize_take_pauses", True)):
+            from .take_pauses import align_missing_timings
+            clips = align_missing_timings(clips, acceptance, verifier,
+                                          Path(work) / "pause-word-timings", notify=notify)
         return clips, acceptance
 
 
@@ -2766,6 +2772,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                 clips, work / "chapters", book=bundle["source"]["book"],
                 render_settings=config["render"], context=context, notify=notify,
+                acceptance=chapter_acceptance,
                 **({"censorship_policy": config["censorship"]}
                    if config.get("censorship", {}).get("enabled", False) else {}))
             with plan_lock:
@@ -2986,6 +2993,7 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                     dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
                     clips, work / "chapters", book=bundle["source"]["book"],
                     render_settings=config["render"], context=context, notify=notify,
+                    acceptance=chapter_acceptance,
                     **({"censorship_policy": config["censorship"]}
                        if config.get("censorship", {}).get("enabled", False) else {}))
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)

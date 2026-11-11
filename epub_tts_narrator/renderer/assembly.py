@@ -261,12 +261,36 @@ def _censorship_timing(lanes, policy, first_frame, edges):
     } for lane in lanes]}
 
 
+def _interior_pause(record, text):
+    """A requested pause inside the take keeps the model's own timing."""
+    if record is None:
+        return False
+    from ..performance_plan import validate_performance
+    return any(control["kind"] == "pause" and 0 < control["offset"] < len(text)
+               for control in validate_performance(record, text)["controls"])
+
+
+def _copy_frames(audio, start, end, destination, path):
+    """Copy ``[start, end)`` PCM16 mono frames; return the frame count."""
+    audio.setpos(start)
+    remaining = end - start
+    while remaining > 0:
+        requested = min(65536, remaining)
+        chunk = audio.readframes(requested)
+        if len(chunk) != requested * 2:
+            raise ValueError(f"Truncated PCM frame: {path}")
+        destination.writeframesraw(chunk)
+        remaining -= requested
+    return end - start
+
+
 def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     sample_rate: int = 44100, paragraph_pause_ms: float = 400,
                     blank_pause_ms: float = 600, bracket_pause_ms: float = 120,
                     normalize_pauses: bool = True, sentence_pause_ms: float = 260,
                     clause_pause_ms: float = 120, censorship_policy=None,
-                    ffmpeg: str | None = None) -> dict:
+                    ffmpeg: str | None = None, normalize_take_pauses: bool = False,
+                    take_timings=None) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for
@@ -275,6 +299,10 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     A segment's ``voice_effect`` is applied to a same-length copy of its clip
     (``voice_effects.apply_effect``, which needs ``ffmpeg``); trims and
     censorship masks are still computed from the untouched take.
+
+    With ``normalize_take_pauses`` the sentence/clause targets also apply to
+    boundaries inside a take, located from ``take_timings`` (chunk ID ->
+    verification ``expected_text`` and ``words``); see ``take_pauses``.
     """
     _rate(sample_rate)
     paragraph_frames = _pause_frames(paragraph_pause_ms, sample_rate)
@@ -284,6 +312,9 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     clause_frames = _pause_frames(clause_pause_ms, sample_rate)
     if type(normalize_pauses) is not bool:
         raise ValueError("normalize_pauses must be boolean")
+    if type(normalize_take_pauses) is not bool:
+        raise ValueError("normalize_take_pauses must be boolean")
+    take_timings = take_timings or {}
     from .censorship import policy_identity
     censorship_enabled = (censorship_policy is not None
                           and policy_identity(censorship_policy) is not None)
@@ -350,6 +381,20 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     # after masking would erase a censored first or final word.
                     if censorship_enabled:
                         masked_lanes = _censorship_inputs(clip, censorship_policy, sample_rate, info)
+                    pause_edits = []
+                    if (normalize_pauses and normalize_take_pauses and masked_lanes is None
+                            and "speaker_lanes" not in clip
+                            and not _interior_pause(record, clip["spoken_text"])):
+                        from .take_pauses import boundary_edits
+                        # Without word timings, long quiet is still capped.
+                        timing_source = take_timings.get(
+                            clip["chunk_id"], {"expected_text": clip["spoken_text"], "words": []})
+                        pause_edits, _ = boundary_edits(
+                            source, timing_source["expected_text"], timing_source["words"],
+                            sentence_frames=sentence_frames, clause_frames=clause_frames)
+                        pause_edits = [edit for edit in pause_edits
+                                       if edges["start"] <= edit["source_frame"] < edges["end"]
+                                       and edit["source_frame"] + edit.get("remove_frames", 0) <= edges["end"]]
                     silence(max(0, max(pending_pause, pending_punctuation)
                                 - previous_tail - edges["leading"]))
                     pending_pause = 0
@@ -380,16 +425,15 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                             count += len(data) // 2
                     else:
                         with wave.open(str(read_path), "rb") as audio:
-                            audio.setpos(edges["start"])
-                            remaining = edges["end"] - edges["start"]
-                            while remaining:
-                                requested = min(65536, remaining)
-                                chunk = audio.readframes(requested)
-                                if len(chunk) != requested * 2:
-                                    raise ValueError(f"Truncated PCM frame: {read_path}")
-                                destination.writeframesraw(chunk)
-                                count += len(chunk) // 2
-                                remaining -= requested
+                            position = edges["start"]
+                            # Interior pause edits cut or extend quiet stretches only.
+                            for edit in pause_edits + [{"source_frame": edges["end"]}]:
+                                count += _copy_frames(audio, position, edit["source_frame"],
+                                                      destination, read_path)
+                                position = edit["source_frame"] + edit.get("remove_frames", 0)
+                                if edit.get("insert_frames"):
+                                    destination.writeframesraw(b"\x00\x00" * edit["insert_frames"])
+                                    count += edit["insert_frames"]
                     cursor += count
                     previous_tail = edges["trailing"]
                 timing = {
@@ -406,6 +450,8 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 if edges is not None:
                     timing.update(source_audio_start_frame=edges["start"],
                                   source_audio_end_frame=edges["end"])
+                    if pause_edits:
+                        timing["pause_edits"] = deepcopy(pause_edits)
                 if masked_lanes is not None:
                     timing["censorship"] = _censorship_timing(
                         masked_lanes, censorship_policy, first_frame, edges)

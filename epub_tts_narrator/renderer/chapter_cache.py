@@ -134,8 +134,14 @@ def _timings(chapter):
         if "source_audio_start_frame" in segment or "source_audio_end_frame" in segment:
             audio_start, audio_end = (segment.get("source_audio_start_frame"),
                                       segment.get("source_audio_end_frame"))
+            edits = segment.get("pause_edits")
+            change = 0
+            if edits is not None:
+                from .take_pauses import edited_length, validate_edits
+                validate_edits(edits, audio_start, audio_end)
+                change = edited_length(edits)
             if (type(audio_start) is not int or type(audio_end) is not int
-                    or not 0 <= audio_start <= audio_end or audio_end - audio_start != end - start):
+                    or not 0 <= audio_start <= audio_end or audio_end - audio_start + change != end - start):
                 raise ValueError("Cached source audio synchronization frame range is invalid")
         if "source_segments" in segment:
             sources = segment["source_segments"]
@@ -376,10 +382,29 @@ def _legacy_audio_paths(folder, chapter, kind):
     return wav, encoded
 
 
+def take_pause_timings(acceptance, clips=()):
+    """Chunk ID -> expected text and word timings: verification's, else a saved alignment."""
+    timings = {clip["chunk_id"]: clip["pause_alignment"] for clip in clips
+               if isinstance(clip.get("pause_alignment"), dict)}
+    for item in acceptance or ():
+        report = item.get("report") if isinstance(item, dict) else None
+        if (isinstance(report, dict) and isinstance(report.get("expected_text"), str)
+                and isinstance(report.get("words"), list) and report["words"]):
+            timings[item["chunk_id"]] = {"expected_text": report["expected_text"],
+                                         "words": report["words"]}
+    return timings
+
+
 def prepare_chapter(chapter, clips, directory, *, book, render_settings, context, notify=print,
-                    censorship_policy=None):
-    """Compose, level, and encode once; leave a complete chapter after later failures."""
+                    censorship_policy=None, acceptance=None):
+    """Compose, level, and encode once; leave a complete chapter after later failures.
+
+    ``acceptance`` supplies each take's word timings for in-take pause
+    normalization; those timings join the chapter identity when used.
+    """
     settings = chapter_settings(render_settings, censorship_policy=censorship_policy)
+    take_timings = (take_pause_timings(acceptance, clips)
+                    if settings["normalize_pauses"] and settings["normalize_take_pauses"] else {})
     directory = Path(directory)
     for candidate in (directory, directory.parent):
         if candidate.is_symlink():
@@ -387,7 +412,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     clip_identity = []
     for clip in clips:
         item = {key: deepcopy(value) for key, value in clip.items()
-                if key not in {"wav_path", "censorship", "censorship_lanes"}}
+                if key not in {"wav_path", "censorship", "censorship_lanes", "pause_alignment"}}
         if "censorship" in settings:
             if "censorship" in clip:
                 item["censorship"] = deepcopy(clip["censorship"])
@@ -397,6 +422,8 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                     for lane in clip["censorship_lanes"]]
         item["audio_sha256"] = (file_hash(regular_file(clip["wav_path"]))
                                 if clip.get("wav_path") is not None else None)
+        if clip.get("chunk_id") in take_timings:
+            item["take_pause_timing_sha256"] = digest(take_timings[clip["chunk_id"]])
         preset = (clip.get("segment", {}).get("voice_effect") or {}).get("preset")
         if preset and clip.get("wav_path") is not None:
             # Only effected clips carry the recipe, so other chapters keep their identity.
@@ -427,7 +454,8 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
             normalize_pauses=settings["normalize_pauses"],
             sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"],
-            censorship_policy=censorship_policy, ffmpeg=settings["ffmpeg"])
+            censorship_policy=censorship_policy, ffmpeg=settings["ffmpeg"],
+            normalize_take_pauses=settings["normalize_take_pauses"], take_timings=take_timings)
         composed.update(metadata)
         normalization = _normalize(Path(composed["wav_path"]), settings)
         encoded = None

@@ -6,15 +6,14 @@ import sys
 import wave
 
 
-def audio_edges(path, *, trim=True, leading_pause_ms=0, trailing_pause_ms=0):
-    """Locate quiet outer padding with 10ms peak windows and protective guards.
+def activity(path):
+    """Return ``(rate, frames, window, audible)`` for 10ms peak windows.
 
-    Peak detection at -60 dBFS (or -40 dB relative to a very quiet clip) keeps
-    breaths and soft consonants. No interior samples are removed. Uncertain or
-    wholly silent audio is returned intact; this is not a speech quality gate.
+    This is the one quiet/audible definition for assembly: clip edges and the
+    pauses inside a take are measured the same way, so their targets agree.
+    A window is audible above -60 dBFS (or -40 dB below a very quiet clip's
+    loudest peak), which keeps breaths and soft consonants.
     """
-    if any(type(value) is not int or not 0 <= value <= 5000 for value in (leading_pause_ms, trailing_pause_ms)):
-        raise ValueError("Intentional outer pauses must be integer milliseconds from zero through 5000")
     with wave.open(str(path), "rb") as source:
         rate, frames = source.getframerate(), source.getnframes()
         window = max(1, round(rate / 100))
@@ -31,7 +30,20 @@ def audio_edges(path, *, trim=True, leading_pause_ms=0, trailing_pause_ms=0):
         if read != frames:
             raise ValueError(f"Truncated PCM audio: {path}")
     threshold = min(32768 * 10 ** (-60 / 20), max(peaks, default=0) * .01)
-    active = [i for i, peak in enumerate(peaks) if peak > threshold]
+    return rate, frames, window, [peak > threshold for peak in peaks]
+
+
+def audio_edges(path, *, trim=True, leading_pause_ms=0, trailing_pause_ms=0):
+    """Locate quiet outer padding with 10ms peak windows and protective guards.
+
+    Peak detection at -60 dBFS (or -40 dB relative to a very quiet clip) keeps
+    breaths and soft consonants. No interior samples are removed. Uncertain or
+    wholly silent audio is returned intact; this is not a speech quality gate.
+    """
+    if any(type(value) is not int or not 0 <= value <= 5000 for value in (leading_pause_ms, trailing_pause_ms)):
+        raise ValueError("Intentional outer pauses must be integer milliseconds from zero through 5000")
+    rate, frames, window, audible = activity(path)
+    active = [i for i, loud in enumerate(audible) if loud]
     if not active:
         return dict(start=0, end=frames, leading=0, trailing=0, frames=frames)
     first, last = active[0] * window, min(frames, (active[-1] + 1) * window)
