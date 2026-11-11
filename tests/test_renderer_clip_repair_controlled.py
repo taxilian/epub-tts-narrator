@@ -4,11 +4,12 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.performance_plan import text_sha256, validate_performance
-from epub_tts_narrator.renderer import clip_repair_execute
+from epub_tts_narrator.renderer import clip_recovery, clip_repair_execute
 from epub_tts_narrator.renderer.clip_repair_performance import (
     controlled_repair_guidance, project_plan_performance)
 from epub_tts_narrator.renderer.common import read_json
 from epub_tts_narrator.renderer.engines import EngineError, prepare_synthesis
+from epub_tts_narrator.renderer.fish_http import FishHTTPError
 from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 import test_renderer_clip_repair as clip_repair_tests
@@ -77,6 +78,153 @@ class ControlledClipRepairTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 4)
         self.assertEqual(len(self.client.repair_calls), 1)
         self.assertEqual(len(self.client.review_calls), 2)
+
+    def test_approved_repair_retries_model_truncation_without_reasking_or_losing_phones(self):
+        self.set_controlled_polgara()
+        self.client.plan = {'parts': [{'text': '"Forgive me, Lady Polgara."',
+                                      'delivery': 'croaked', 'speech_traits': ''}],
+                            'reason': 'Preserve the words and phones with a complete sentence.'}
+        synthesize = self.engine.synthesize
+        starts = []
+
+        def transient(text, voice, path, *, seed, **options):
+            if text == self.client.plan['parts'][0]['text']:
+                starts.append(seed)
+                if len(starts) == 1:
+                    raise FishHTTPError("Fish HTTP 500 (fixture): EngineError: Drama 3 did not finish the text: 'silence'")
+            return synthesize(text, voice, path, seed=seed, **options)
+
+        with patch.object(self.engine, 'synthesize', side_effect=transient):
+            result, acceptance = self.render_chunk()
+
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(len(set(starts)), 2)
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(sorted(row['reviewer'] for row in self.client.review_calls), [1, 2])
+        self.assertEqual(self.client.selection_calls, [])
+        record = self.accepted_record(result)
+        performance = record['engine_metadata']['clip_repair']['parts'][0]['performance']
+        self.assertEqual(performance['controls'][0]['phonemes'],
+                         self.chunk['expressive_performance']['controls'][0]['phonemes'])
+
+    def assert_failed_repair(self, error, expected_starts, maximum=12):
+        self.set_controlled_polgara()
+        self.config['verification']['max_resolution_attempts'] = maximum
+        self.client.plan = {'parts': [{'text': '"Forgive me, Lady Polgara."',
+                                      'delivery': 'croaked', 'speech_traits': ''}],
+                            'reason': 'Keep the confirmed reading with complete punctuation.'}
+        synthesize = self.engine.synthesize
+        starts = []
+
+        def fail_repair(text, voice, path, *, seed, **options):
+            if text == self.client.plan['parts'][0]['text']:
+                starts.append(seed)
+                raise error
+            return synthesize(text, voice, path, seed=seed, **options)
+
+        with patch.object(self.engine, 'synthesize', side_effect=fail_repair):
+            with self.assertRaisesRegex(ValueError, 'No physically usable'):
+                self.render_chunk()
+        self.assertEqual(len(starts), expected_starts)
+        self.assertEqual(len(set(starts)), expected_starts)
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+        return read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+
+    def test_repair_model_retries_stop_at_the_configured_per_part_limit(self):
+        state = self.assert_failed_repair(
+            FishHTTPError("Drama 3 did not finish the text: 'silence'"),
+            self.config['render']['max_attempts'])
+        self.assertEqual(state['error_code'], 'synthesis_or_input_failure')
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+        resumed = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+        self.assertEqual(resumed['parts'][0]['starts'], self.config['render']['max_attempts'] + 1)
+
+    def test_repair_retries_do_not_exceed_the_shared_allowance(self):
+        state = self.assert_failed_repair(
+            FishHTTPError("Drama 3 did not finish the text: 'silence'"), 1, maximum=4)
+        self.assertEqual(state['error_code'], 'shared_budget_exhausted')
+
+    def test_repair_transport_timeout_is_not_retried_as_model_truncation(self):
+        state = self.assert_failed_repair(FishHTTPError('fixture request timed out'), 1)
+        self.assertEqual(state['error_code'], 'synthesis_or_input_failure')
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+
+    def test_approved_repair_resumes_when_new_resolution_is_disabled(self):
+        self.assert_failed_repair(FishHTTPError('fixture request timed out'), 1)
+        run = clip_recovery.run
+
+        def resume_without_new_resolution(*args, **options):
+            options['allow_resolution'] = False
+            return run(*args, **options)
+
+        with patch.object(clip_recovery, 'run', side_effect=resume_without_new_resolution):
+            result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertIn('clip_repair', self.accepted_record(result)['engine_metadata'])
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+
+    def test_disabled_resolution_does_not_start_a_new_repair(self):
+        self.set_controlled_polgara()
+        run = clip_recovery.run
+
+        def without_new_resolution(*args, **options):
+            options['allow_resolution'] = False
+            return run(*args, **options)
+
+        with patch.object(clip_recovery, 'run', side_effect=without_new_resolution):
+            with self.assertRaisesRegex(ValueError, 'No physically usable'):
+                self.render_chunk()
+        self.assertEqual(self.client.repair_calls, [])
+        self.assertEqual(self.client.review_calls, [])
+
+    def test_repair_retries_preserve_a_start_for_each_pending_plan_part(self):
+        self.set_controlled_polgara()
+        self.config['verification']['max_resolution_attempts'] = 5
+        self.client.plan = {'parts': [
+            {'text': '"Forgive me,', 'delivery': 'croaked', 'speech_traits': ''},
+            {'text': 'Lady Polgara."', 'delivery': 'croaked', 'speech_traits': ''}],
+            'reason': 'Keep the address and its confirmed phones in separate complete pieces.'}
+        with self.assertRaisesRegex(ValueError, 'No physically usable'):
+            self.render_chunk()
+        self.assertEqual(len(self.engine.calls), 4)
+        state = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
+        self.assertEqual(state['error_code'], 'shared_budget_exhausted')
+        self.assertEqual([part['starts'] for part in state['parts']], [1, 0])
+
+    def test_interrupted_model_retry_resumes_the_approved_repair_with_a_new_seed(self):
+        self.set_controlled_polgara()
+        self.client.plan = {'parts': [{'text': '"Forgive me, Lady Polgara."',
+                                      'delivery': 'croaked', 'speech_traits': ''}],
+                            'reason': 'Keep the reading and complete punctuation.'}
+        synthesize = self.engine.synthesize
+        starts = []
+
+        def interrupted(text, voice, path, *, seed, **options):
+            if text == self.client.plan['parts'][0]['text']:
+                starts.append(seed)
+                if len(starts) == 1:
+                    raise FishHTTPError("Drama 3 did not finish the text: 'silence'")
+                raise KeyboardInterrupt('interrupted repair retry')
+            return synthesize(text, voice, path, seed=seed, **options)
+
+        with patch.object(self.engine, 'synthesize', side_effect=interrupted):
+            with self.assertRaisesRegex(KeyboardInterrupt, 'interrupted repair retry'):
+                self.render_chunk()
+        self.assertEqual(len(starts), 2)
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual(len(self.client.repair_calls), 1)
+        self.assertEqual(len(self.client.review_calls), 2)
+        self.assertNotIn(self.engine.calls[-1]['seed'], starts)
 
     def test_projection_preserves_confirmed_phones_across_valid_split_parts(self):
         self.set_controlled_polgara()

@@ -7,6 +7,7 @@ import uuid
 from .assembly import normalize_clip
 from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .generation_failures import drama3_truncation
 from .clip_repair_contract import approved, confirm_part, logical_text
 from .clip_repair_performance import project_plan_performance, repair_traits
 from .clip_repair_state import ClipRecoveryUnavailable
@@ -17,7 +18,7 @@ from .retry_budget import generation_attempts
 from .speech_recovery import _concatenate
 
 
-def execute_plan(session, generate, verifier, config, *, budget, episode, reserve):
+def execute_plan(session, generate, verifier, config, *, budget, episode, reserve, notify=print):
     from .interrupts import stop_if_requested
     state, request, directory = session.state, session.request, session.path.parent
     if state['phase'] in {'failed', 'rejected'}:
@@ -86,32 +87,51 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                 confirm_part(request, part, saved['metadata'], performance=performance)
                 continue
             if 'raw_sha256' not in saved:
-                stop_if_requested()
-                claimed = budget.claim(directory, digest(request), maximum, episode=episode,
-                                       episode_maximum=maximum, episode_reserve=reserve)
-                if claimed is None:
-                    state.update(phase='failed', error_code='shared_budget_exhausted')
+                part_reserve = reserve + sum('raw_sha256' not in pending for pending in state['parts'][number:])
+                for part_start in range(config['render']['max_attempts']):
+                    stop_if_requested()
+                    claimed = budget.claim(directory, digest(request), maximum, episode=episode,
+                                           episode_maximum=maximum, episode_reserve=part_reserve)
+                    if claimed is None:
+                        state.update(phase='failed', error_code='shared_budget_exhausted')
+                        session.save()
+                        notify(f'  Clip repair part {number}/{len(state["parts"])} cannot start: '
+                               f'{budget.episode_started(episode)}/{maximum} shared starts used, '
+                               f'{part_reserve} reserved for unfinished parts.')
+                        return None
+                    if part_start:
+                        notify(f'  Clip repair part {number}/{len(state["parts"])}: retrying truncated model output '
+                               'with a fresh seed within the shared allowance.')
+                    saved['starts'] += 1
+                    saved['raw_file'] = speech_take_filename(
+                        request, attempt, role=f'part-{number:03d}-start-{saved["starts"]:03d}-raw')
                     session.save()
-                    return None
-                saved['starts'] += 1
-                saved['raw_file'] = speech_take_filename(
-                    request, attempt, role=f'part-{number:03d}-start-{saved["starts"]:03d}-raw')
-                session.save()
-                seed = int(digest({'request': request, 'part': number, 'start': saved['starts']})[:8], 16) % 2**32
-                try:
-                    if performance is None:
-                        metadata = generate(part, folder / saved['raw_file'], seed)
-                    else:
-                        metadata = generate(part, folder / saved['raw_file'], seed, performance=performance)
-                    # Repair parts are joined; a join is never chapter history.
-                    metadata = {key: value for key, value in metadata.items() if key != 'generated_codes'}
-                    confirm_part(request, part, metadata, performance=performance)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    state.update(phase='failed', error_code='synthesis_or_input_failure', error_type=type(exc).__name__)
+                    seed = int(digest({'request': request, 'part': number, 'start': saved['starts']})[:8], 16) % 2**32
+                    try:
+                        if performance is None:
+                            metadata = generate(part, folder / saved['raw_file'], seed)
+                        else:
+                            metadata = generate(part, folder / saved['raw_file'], seed, performance=performance)
+                        # Repair parts are joined; a join is never chapter history.
+                        metadata = {key: value for key, value in metadata.items() if key != 'generated_codes'}
+                        confirm_part(request, part, metadata, performance=performance)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        failure = {'passed': False, 'error_type': type(exc).__name__, 'error': str(exc)}
+                        if (drama3_truncation(failure)
+                                and part_start + 1 < config['render']['max_attempts']):
+                            state.update(phase='executing', error_code='model_truncation',
+                                         error_type=type(exc).__name__)
+                            session.save()
+                            continue
+                        state.update(phase='failed', error_code='synthesis_or_input_failure', error_type=type(exc).__name__)
+                        session.save()
+                        notify(f'  Clip repair part {number}/{len(state["parts"])} generation failed '
+                               f'({type(exc).__name__}) after {part_start + 1} start(s) in this invocation; '
+                               'approved plan and completed parts are retained.')
+                        return None
+                    saved.update(metadata=metadata, raw_sha256=file_hash(regular_file(folder / saved['raw_file'])))
                     session.save()
-                    return None
-                saved.update(metadata=metadata, raw_sha256=file_hash(regular_file(folder / saved['raw_file'])))
-                session.save()
+                    break
             raw = regular_file(folder / saved['raw_file'])
             if file_hash(raw) != saved['raw_sha256']:
                 raise ValueError('Pending clip repair raw audio changed')

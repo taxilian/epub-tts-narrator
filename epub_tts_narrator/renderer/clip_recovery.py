@@ -89,9 +89,14 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                 raise
             failure_report = exc.report
     notify = options.get('notify', print)
+    resume_approved = repair_session is not None and (
+        repair_session.state['phase'] in {'approved', 'executing', 'evaluated'}
+        or (repair_session.state['phase'] == 'failed'
+            and repair_session.state.get('error_code') in
+            {'synthesis_or_input_failure', 'shared_budget_exhausted'}))
     try:
         if (not selector.exists() and not selector.is_symlink() and generate_plan_part is not None
-                and options.get('allow_resolution', True)):
+                and (options.get('allow_resolution', True) or resume_approved)):
             session = repair_session or ClipRepairState(directory, request, client)
             budget = options['retry_budget']
             episode = options.get('resolution_episode') or request.get('parent_request_hash', digest(request))
@@ -117,7 +122,7 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                 echoed = any(candidate_echo(item['record'], expected) for item in candidates)
                 with history_recovery('none' if echoed else None):
                     result = execute_plan(session, generate_plan_part, verifier, config,
-                                          budget=budget, episode=episode, reserve=reserve)
+                                          budget=budget, episode=episode, reserve=reserve, notify=notify)
                 if result is not None:
                     return result
         notify('  Selecting the best physically usable full-clip take under the best-effort exhaustion policy.')

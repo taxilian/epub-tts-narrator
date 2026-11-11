@@ -23,6 +23,7 @@ from .common import digest, file_hash, read_json, regular_file, write_json
 from .continuity import POLICY as CONTINUITY_POLICY
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
+from .generation_failures import drama3_truncation as _drama3_truncation
 from .interrupts import stop_if_requested
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
 from .progress import (ChapterProgress, format_duration, generation_activity,
@@ -108,15 +109,6 @@ _TRUNCATION_SPLIT_THRESHOLD = 2
 
 def _seed(base, key, attempt):
     return (base + int(digest(key)[:8], 16) + attempt) % 2**32
-
-
-def _drama3_truncation(report):
-    if report.get("passed") is not False:
-        return False
-    if report.get("reasons") == ["generation_incomplete"]:
-        return True
-    return (report.get("error_type") in {"EngineError", "FishHTTPError"}
-            and "did not finish the text" in str(report.get("error", "")))
 
 
 def _diagnostic_text(value, limit=60):
@@ -722,6 +714,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     and previous.get("report", {}).get("passed") is not True
                     and not pending_confirmation(previous.get("report", {}))
                     and not previous.get("report", {}).get("retry_on_resume", False)
+                    and not ("recovery" in request and previous.get("audio_file") is None)
                     and not (purpose == "reference" and attempt == demoted_attempt)):
                 last_report = previous.get("report", {})
                 continue
