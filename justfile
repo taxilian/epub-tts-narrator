@@ -33,7 +33,7 @@ runpod-cleanup *args:
     @"{{ python }}" -m epub_tts_narrator.renderer runpod cleanup "$@"
 
 test *args:
-    @"{{ python }}" -m unittest discover -s tests -q "$@"
+    @"{{ python }}" tests/run_detached.py "$@"
 
 pronounce *args:
     @"{{ python }}" -m epub_tts_narrator.renderer pronounce "$@"

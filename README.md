@@ -176,7 +176,7 @@ Run the full offline unittest suite in `.venv-renderer`. Its test requirements i
 ```sh
 uv venv --python 3.12 .venv-renderer  # first setup only
 uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
-.venv-renderer/bin/python -m unittest discover -s tests -q
+.venv-renderer/bin/python tests/run_detached.py  # unittest discovery without a terminal
 ```
 
 For an existing environment, rerun only the install command to update missing dependencies. The full suite should finish without skips on this supported environment. Tests use tracked fixtures or create their own temporary bundles, never saved books under `runs/`.

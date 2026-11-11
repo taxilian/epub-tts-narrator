@@ -152,8 +152,8 @@ uv pip install --python .venv-renderer/bin/python -e .
 # Setup/update: complete test environment (includes renderer runtime and all test extras)
 uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
 
-# Test (offline, full suite; zero skips expected on the supported renderer environment)
-.venv-renderer/bin/python -m unittest discover -s tests -q
+# Test (offline, full suite; zero skips expected on the supported renderer environment; detached from the terminal so tty prompts cannot hang it)
+.venv-renderer/bin/python tests/run_detached.py
 
 # Run
 python3.11 -m epub_tts_narrator analyze BOOK.epub        # or: epub-tts-narrator ...

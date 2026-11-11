@@ -23,7 +23,7 @@ For development and the full offline test suite, install `test.requirements.txt`
 
 ```sh
 uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
-.venv-renderer/bin/python -m unittest discover -s tests -q
+.venv-renderer/bin/python tests/run_detached.py
 ```
 
 Rerun the install command when test dependencies change; do not recreate an existing environment. Tests require no model downloads, cloud credentials, or previously generated book bundles.

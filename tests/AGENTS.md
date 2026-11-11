@@ -75,7 +75,7 @@ The full suite runs in `.venv-renderer` with all dependencies declared in `test.
 uv venv --python 3.12 .venv-renderer  # first setup only
 uv pip install --python .venv-renderer/bin/python -r test.requirements.txt
 ```
-Full suite: `.venv-renderer/bin/python -m unittest discover -s tests -q` (zero skips expected on the supported environment).
+Full suite: `.venv-renderer/bin/python tests/run_detached.py` (same discovery with no controlling terminal and stdin from `/dev/null`, so a test that reaches a tty prompt cannot hang an interactive shell; accepts the same discover options, e.g. `-p "test_epub.py"`; `just test` uses it; zero skips expected on the supported environment).
 Single file: `.venv-renderer/bin/python -m unittest discover -s tests -p "test_epub.py" -q`
 Renderer subset: `.venv-renderer/bin/python -m unittest discover -s tests -p "test_renderer_*.py" -q`
 
