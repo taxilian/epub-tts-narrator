@@ -323,6 +323,22 @@ def parser():
     verification.add_argument("--resume", metavar="RUN_ID",
                               help="Explicitly resume one printed verification run; ordinary invocations always start fresh")
     verification.add_argument("--workers", type=int, default=3, help="Concurrent model requests, 1-5 (default 3)")
+    directions = commands.add_parser(
+        "refresh-directions",
+        help="Rewrite how each line is performed in a published book, keeping its speakers, cast and voices")
+    directions.add_argument("directory", type=Path, help="Completed analysis directory to update in place; originals are backed up")
+    directions.add_argument("--config", type=Path,
+                            help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    direction_scope = directions.add_mutually_exclusive_group()
+    direction_scope.add_argument("--chapters", help="Comma-separated source chapter numbers, such as 3,5")
+    direction_scope.add_argument("--chapter", type=int, help="One source chapter number")
+    directions.add_argument("--instructions", help="Performance guidance for the director (1-2000 characters)")
+    directions.add_argument("--apply", action="store_true",
+                            help="Publish the new directions without asking (a terminal run otherwise asks); publication ownership over the book "
+                                 "and its descendants is reserved before any model request")
+    directions.add_argument("--resume", metavar="RUN_ID",
+                            help="Finish one printed direction run after an interruption; ordinary runs always ask afresh")
+    directions.add_argument("--workers", type=int, default=3, help="Concurrent model requests, 1-5 (default 3)")
     review_ui = commands.add_parser(
         "review-ui", help="Browse and edit passages in a published book with an interactive terminal UI")
     review_ui.add_argument("directory", type=Path, help="Completed analysis directory to review")
@@ -595,6 +611,9 @@ def main(argv=None):
         if args.command == "verify-attribution":
             from .attribution_verification_command import run_attribution_verification
             return run_attribution_verification(args, load_config(args.config), provider_client, progress)
+        if args.command == "refresh-directions":
+            from .direction_refresh_command import run_direction_refresh
+            return run_direction_refresh(args, load_config(args.config), provider_client, progress)
         if args.command in {"refresh-voice-profiles", "review-ui"}:
             return _run_directory_command(args)
         directory_mode = (args.command == "analyze" and

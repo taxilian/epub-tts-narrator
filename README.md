@@ -101,6 +101,16 @@ Every ordinary invocation performs a fresh audit in a new run-local request cach
 
 Edit-review redisplays each finding's text, original/proposed speakers, and evidence at its decision point. You can accept the proposal, leave it unchanged, finish, or open a staged manual edit. Manual editing can choose any existing-cast speaker (including one outside both proposals), change the delivery direction within 240 characters, and set the review flag; explicit confirmation is required, and cancel or EOF discards the unconfirmed staged edit. Publication preserves source text, performance controls, cast/voice assets, and descendant bindings. The final summary distinguishes applied findings from those left unchanged, breaks down accepted proposals versus manual edits, and names the backup/revision journal whenever publication occurs.
 
+Give a finished book new performance directions — how each line is spoken, mid-line changes of feeling, the book's italics as emphasis — without touching its speakers, cast or voices (or use `just refresh-directions`):
+
+```sh
+# Try one chapter first; it shows examples and asks before saving.
+epub-tts-narrator refresh-directions runs/book-01 --chapter 3
+epub-tts-narrator refresh-directions runs/book-01 --apply
+```
+
+It works on consensus and narrator-read books alike, so an older book gets the current direction guide without a new analysis or new speaker choices. It replaces the selected chapters' directions, including any typed in `review-ui`; the originals are backed up. Every run asks the model afresh, so you can run it again until you like the result; `--apply` saves without asking, and a run without a terminal or `--apply` only reports. After an interruption, `--resume RUN_ID` (printed at the start) finishes that run without repeating its requests. Lines whose directions change are rendered again on the next render.
+
 Browse and correct a finished book by hand with `review-ui` (or `just review-ui`):
 
 ```sh

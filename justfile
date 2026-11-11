@@ -11,6 +11,9 @@ analyze *args:
 verify-attribution *args:
     @"{{ python }}" -m epub_tts_narrator verify-attribution "$@"
 
+refresh-directions *args:
+    @"{{ python }}" -m epub_tts_narrator refresh-directions "$@"
+
 review-ui *args:
     @"{{ python }}" -m epub_tts_narrator review-ui "$@"
 

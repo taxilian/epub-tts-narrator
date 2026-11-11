@@ -33,6 +33,14 @@ Update your notes for this window. Output only changes:
  "done":[[question_id,answer_id]]}}           an earlier question is now answered
 Use existing ids; refer to a character you add in this same reply by its exact new name. Include minor speakers (a guard who speaks gets an entry). Do not add people who are only mentioned and never speak, unless they are likely to speak later. Never guess identity from a similar name alone; use the text."""
 
+# Shared by MARKUP and DIRECTIONS; MARKUP's bytes are unchanged by this split.
+_DELIVERY = 'the direction a director gives the voice actor for this line, 2-10 words, read from the scene. Combine what fits: the feeling and how strong it is ("slightly amused", "very angry", "barely holding back tears"); the intent toward the listener ("pleading", "warning him off", "teasing", "trying to reassure"); pace and volume ("quick and breathless", "slow, dangerously quiet", "calling across the yard"); a physical state that changes the sound ("out of breath", "through gritted teeth", "half asleep", "in pain"). Like: "low, tired but in control", "fast, nervous, stumbling over words", "voice breaking, close to panic", "dry, faintly mocking", "warm, gently teasing". Give one for every spoken line, read from the speech tag or adverb, the speaker\'s state or action, what has just happened, and the words themselves; turn a speech verb into a performance ("snapped" -> "sharp, irritated"). Match the intensity the scene shows: an ordinary line gets a light touch ("easy, friendly", "brisk, businesslike"), and never overact. Never: the speaker\'s fixed voice (pitch, age, accent: the cast voice has it), movements that make no sound (nod, shrug, bow), or words that do not change the sound ("matter-of-fact", "practical", "informative", "neutral").'
+_CHANGE = "when the feeling turns partway through one quotation (a joke turning serious, anger breaking into tears, a calm start rising to a shout), the delivery covers the start and each change is [words,delivery]: words = the exact first words where it changes (never the quotation's first words), delivery = how the rest is performed, 2-10 words."
+_NOTES = '"p" = in-line performance notes, wherever they apply. target = a qid, or paragraph number N for narration outside quotations; original = short exact text inside that target, unique there.'
+_READ = ' ["7","read","tense, hushed"]  narration paragraph 7 carries strong feeling of its own (suspense, horror, grief, a fight): a short direction for how the narrator voices it ("grave and slow", "low, building dread"), never a sound or event of the scene. Rare; ordinary narration gets none.'
+_SHAPING = ' ["q12","whisper","stay quiet"]  how a few words are spoken: whisper, soft, emphasis, stress, forceful, fast, slow. Only when the text says so.\n ["q12","pause","then",400,"before"]  a dramatic pause the text marks (100-5000 ms).\n ["q12","laugh","wait","after"]  a sound the speaker makes with these words: sigh, laugh, chuckle, breath, gasp, sob, cough, throat_clear; only when the text says so (e.g. "she laughed"). original = words inside the quotation where the sound goes (its first words for "before", its last words for "after"), not the tag.'
+_REAL = ' Use the real tag or sound word, never the words "tag" or "sound".'
+
 MARKUP = f"""You are an audiobook narrator marking who speaks each quotation and how.
 {_DATA}
 
@@ -43,20 +51,35 @@ Label EVERY quotation id in "text" exactly once, in order:
  "p":[[target,op,...]]}}
 who: a cast id; "-" when the quotation is not speech (a title, sign, scare quotes, a term); "?id,id" when you cannot tell who speaks (list the likely ids); "+Name" for a speaker missing from the cast; "id&id" when those characters say the same words together.
 kind: "" for spoken dialogue; "t" thought; "l" written text (letter, message, chat, sign read aloud by a character).
-delivery: the direction a director gives the voice actor for this line, 2-10 words, read from the scene. Combine what fits: the feeling and how strong it is ("slightly amused", "very angry", "barely holding back tears"); the intent toward the listener ("pleading", "warning him off", "teasing", "trying to reassure"); pace and volume ("quick and breathless", "slow, dangerously quiet", "calling across the yard"); a physical state that changes the sound ("out of breath", "through gritted teeth", "half asleep", "in pain"). Like: "low, tired but in control", "fast, nervous, stumbling over words", "voice breaking, close to panic", "dry, faintly mocking", "warm, gently teasing". Give one for every spoken line, read from the speech tag or adverb, the speaker's state or action, what has just happened, and the words themselves; turn a speech verb into a performance ("snapped" -> "sharp, irritated"). Match the intensity the scene shows: an ordinary line gets a light touch ("easy, friendly", "brisk, businesslike"), and never overact. Never: the speaker's fixed voice (pitch, age, accent: the cast voice has it), movements that make no sound (nod, shrug, bow), or words that do not change the sound ("matter-of-fact", "practical", "informative", "neutral"). quote: leave it out when this paragraph makes the feeling clear, as it usually does. Only when the feeling comes from an earlier paragraph, quote = short exact text from it (<=12 words, copied character for character, without added quotation marks) that shows it. For "id&id", quote = exact text showing they speak together.
-changes: when the feeling turns partway through one quotation (a joke turning serious, anger breaking into tears, a calm start rising to a shout), the delivery covers the start and each change is [words,delivery]: words = the exact first words where it changes (never the quotation's first words), delivery = how the rest is performed, 2-10 words. Example: ["q12","3","","thrilled, breathless","",[["But it means","uncertain, deflating"]]]. A delivery describes one way of speaking: never write "then" or "turning" inside it; use changes. Use quote "" when you have no quote. Every spoken, thought or written row has its delivery; only a "-" row stops after who.
+delivery: {_DELIVERY} quote: leave it out when this paragraph makes the feeling clear, as it usually does. Only when the feeling comes from an earlier paragraph, quote = short exact text from it (<=12 words, copied character for character, without added quotation marks) that shows it. For "id&id", quote = exact text showing they speak together.
+changes: {_CHANGE} Example: ["q12","3","","thrilled, breathless","",[["But it means","uncertain, deflating"]]]. A delivery describes one way of speaking: never write "then" or "turning" inside it; use changes. Use quote "" when you have no quote. Every spoken, thought or written row has its delivery; only a "-" row stops after who.
 Read ahead: a tag or description after the quotation often names the speaker. A name near a quotation is not proof; an action by another person is not attribution. Consecutive quotations need not alternate.
 "x" is only for speech, thought or messages NOT inside quotation marks (e.g. "Mara: Meet me at noon." in a chat log): start_text and end_text are short exact substrings of paragraph N marking the first and last words of that span. Usually empty.
-"p" = in-line performance notes, wherever they apply. target = a qid, or paragraph number N for narration outside quotations; original = short exact text inside that target, unique there.
- ["7","read","tense, hushed"]  narration paragraph 7 carries strong feeling of its own (suspense, horror, grief, a fight): a short direction for how the narrator voices it ("grave and slow", "low, building dread"), never a sound or event of the scene. Rare; ordinary narration gets none.
+{_NOTES}
+{_READ}
  ["q12","sp","Nooooo","No","drawn out"]  stylized spelling said normally; only stretched letters, drawn-out words and dialect respellings; never replace, soften or censor words, never fix grammar.
- ["q12","whisper","stay quiet"]  how a few words are spoken: whisper, soft, emphasis, stress, forceful, fast, slow. Only when the text says so.
- ["q12","pause","then",400,"before"]  a dramatic pause the text marks (100-5000 ms).
- ["q12","laugh","wait","after"]  a sound the speaker makes with these words: sigh, laugh, chuckle, breath, gasp, sob, cough, throat_clear; only when the text says so (e.g. "she laughed"). original = words inside the quotation where the sound goes (its first words for "before", its last words for "after"), not the tag.
+{_SHAPING}
  ["q12","as","normal"]  this line uses the speaker's normal voice although a voice change in the cast notes is active (a flashback, the helmet is off); or ["q12","as","helmet"] an equipment effect (helmet, radio, vocoder, pa, phone, underwater) for this line only, when the text says so.
- Use the real tag or sound word, never the words "tag" or "sound"."""
+{_REAL}"""
 
-VERIFY = f"""You check uncertain speaker labels in an audiobook script.
+# Direction-only refresh of a published book: speakers are fixed input.
+DIRECTIONS_VERSION = 1
+
+DIRECTIONS = f"""You are an audiobook director marking how each line is performed. Who speaks is already decided.
+{_DATA}
+
+Input: "before"/"after" = neighbouring text for context only, "text" = numbered paragraphs (N|text) where each line is prefixed by its id and speaker, like ‹q17 Mara›; ‹q18 Mara, thought› is a thought and ‹q19 Mara, written› written text read aloud; "?" means the speaker is not settled yet.
+Give EVERY line id in "text" exactly once, in order:
+{{"q":[[qid,delivery],[qid,delivery,[[words,delivery]]]],
+ "p":[[target,op,...]]}}
+delivery: {_DELIVERY} Read the feeling from this paragraph and the ones before it.
+changes: {_CHANGE} Example: ["q12","thrilled, breathless",[["But it means","uncertain, deflating"]]]. A delivery describes one way of speaking: never write "then" or "turning" inside it; use changes.
+{_NOTES}
+{_READ}
+{_SHAPING}
+{_REAL}"""
+
+VERIFY =f"""You check uncertain speaker labels in an audiobook script.
 {_DATA}
 
 Each item gives numbered paragraphs (N|text) with quotation ids like ‹q17›, the target quotation, the options, and the cast lines for the options.
