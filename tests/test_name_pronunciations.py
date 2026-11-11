@@ -106,6 +106,16 @@ class FormsAndOccurrencesTests(unittest.TestCase):
         for item in occurrences(text, "Salvatore"):
             self.assertEqual(text[item["start"]:item["end"]], item["word"])
 
+    def test_a_hyphenated_name_matches_whole_never_by_its_parts(self):
+        text = "King Cho-Hag's horse; Cho‐Hag rode, two Cho-Hags, Cho-Hag'll go, a Cho-Hag-like grin. Cho alone, Hag too."
+        found = [(item["word"], item["form"]) for item in occurrences(text, "Cho-Hag")]
+        self.assertEqual(found, [("Cho-Hag's", "possessive"), ("Cho‐Hag", "base"), ("Cho-Hags", "plural"),
+                                 ("Cho-Hag", "base"), ("Cho-Hag", "base")])
+        for item in occurrences(text, "Cho-Hag"):
+            self.assertEqual(text[item["start"]:item["end"]], item["word"])
+        # Its parts are not uses of it, and a part defined alone still matches only alone.
+        self.assertEqual([item["word"] for item in occurrences(text, "Cho")], ["Cho", "Cho", "Cho", "Cho", "Cho", "Cho"])
+
     def test_phonemes_must_follow_cmu_stress_rules(self):
         self.assertEqual(validate_name_phonemes("S AE2 L V AH0 T AO1 R IY0"), "S AE2 L V AH0 T AO1 R IY0")
         for value in ("S AE L", "S AE0 L", "s ae1 l", "S Æ1 L", "<|phoneme_start|>S AE1 L", "S AE1  L"):
@@ -357,6 +367,15 @@ class StorageTaggingAndRenderTests(unittest.TestCase):
                       compiled)
         with self.assertRaisesRegex(ValueError, "separate groups"):
             validate_name_phonemes("M AY1 L || K IY1")
+
+    def test_a_hyphenated_name_gets_one_reading_over_the_whole_name(self):
+        directory = self.root / "cho-hag"
+        export_bundle(rose_document("Cho-Hag said softly, “Hello.”", "They saw Cho‐Hag’s horse, and Cho waited.",
+                                    name="Cho-Hag"), directory, allow_review=True)
+        bundle = load_bundle(directory)
+        save_definition(directory, "Cho-Hag", "CH OW1 HH AE2 G", status="confirmed", source="manual")
+        plan = make_plan(bundle, self.config)
+        self.assertEqual(self.controls(plan), [("Cho-Hag", "CH OW1 HH AE2 G"), ("Cho‐Hag’s", "CH OW1 HH AE2 G Z")])
 
     def test_a_say_as_spelling_is_spoken_in_place_of_each_use(self):
         directory, bundle = self.milekey_book()

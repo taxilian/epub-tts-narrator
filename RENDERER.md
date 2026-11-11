@@ -632,7 +632,7 @@ Pronunciation work is optional and manual. Nothing runs automatically: the rende
 
 ### Names and invented words (`pronounce`)
 
-Use this when the engine reads a name or invented word inconsistently or wrongly (for example "Salvatore" coming out sometimes as "sal-vuh-tore" and sometimes as "sal-vuh-torie", or a place, people or term such as "Yarran" or "Rivan"). `pronounce-name` is the same command under its older name.
+Use this when the engine reads a name or invented word inconsistently or wrongly (for example "Salvatore" coming out sometimes as "sal-vuh-tore" and sometimes as "sal-vuh-torie", or a place, people or term such as "Yarran" or "Rivan"). A hyphenated name such as "Cho-Hag" is one word: give it with its hyphen, and only the whole name gets the reading, never "Cho" or "Hag" alone, whichever hyphen character the book uses. `pronounce-name` is the same command under its older name.
 
 ```sh
 just pronounce runs/quest-academy-08 Salvatore

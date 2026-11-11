@@ -195,12 +195,15 @@ def word_pronunciation(name, reading, word):
     keeps the word's own ending (``Milekey's`` → ``mile-key's``) and is
     capitalized throughout for a word written in capitals.
     """
-    lower = word.casefold()
+    # Any hyphen character the book uses in a hyphenated name is the same name.
+    lower = word.casefold().translate(_HYPHEN_FOLD)
     if "phonemes" in reading:
-        forms = form_phonemes(name, reading["phonemes"])
+        forms = {spelling.translate(_HYPHEN_FOLD): value
+                 for spelling, value in form_phonemes(name, reading["phonemes"]).items()}
         return {"alphabet": "cmu_arpabet", "value": forms[lower][1] if lower in forms else reading["phonemes"]}
     value = validate_say_as(reading["say_as"])
-    if form_spellings(name).get(lower, "base") != "base":
+    spellings = {spelling.translate(_HYPHEN_FOLD): form for spelling, form in form_spellings(name).items()}
+    if spellings.get(lower, "base") != "base":
         value += word[len(name):]
     if len(word) > 1 and word.isupper():
         value = value.upper()
@@ -246,19 +249,30 @@ def _parts(token, offset):
             start = index + 1
 
 
+_HYPHEN_FOLD = str.maketrans({hyphen: "-" for hyphen in _HYPHENS})
+
+
 def occurrences(text, name):
     """Every span in ``text`` that could be the name, without judging meaning.
 
     Case-insensitive; matches the whole name, its possessive or plural, or the
     name part of an apostrophe/hyphen continuation (``Salvatore'll``,
     ``Salvatore-like``). Longer words that merely start with it never match.
+    A hyphenated name (``Cho-Hag``) matches as a whole: the same number of
+    consecutive hyphen-joined parts, whichever hyphen character the book uses,
+    never one of its parts alone.
     """
-    key = name_key(name)
-    forms = form_spellings(name)
+    key = name_key(name).translate(_HYPHEN_FOLD)
+    forms = {spelling.translate(_HYPHEN_FOLD): form for spelling, form in form_spellings(name).items()}
+    width = key.count("-") + 1
     result = []
     for token in WORD_PATTERN.finditer(text):
-        for start, part in _parts(token.group(), token.start()):
-            lower = part.casefold()
+        parts = list(_parts(token.group(), token.start()))
+        for index in range(len(parts) - width + 1):
+            start = parts[index][0]
+            last_start, last = parts[index + width - 1]
+            part = text[start:last_start + len(last)]
+            lower = part.casefold().translate(_HYPHEN_FOLD)
             if lower in forms:
                 result.append({"start": start, "end": start + len(part), "word": part, "form": forms[lower]})
             elif lower.startswith(key) and len(lower) > len(key) and lower[len(key)] in _APOSTROPHES:
