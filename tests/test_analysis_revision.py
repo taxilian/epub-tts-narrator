@@ -362,8 +362,10 @@ class AnalysisRevisionTests(unittest.TestCase):
         config["provider"].update(model="test-model", api_key="test-key")
         config["analysis"]["attribution_workers"] = 8
         output, errors = io.StringIO(), io.StringIO()
+        # Without this, a run inside a real terminal would wait at /dev/tty for a person.
         with (patch("epub_tts_narrator.cli.load_config", return_value=config),
               patch("epub_tts_narrator.speaker_completion.complete_speakers", side_effect=complete) as completion,
+              patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")),
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
             code = main(["resolve-speakers", *map(str, selected)])
         return code, completion, output.getvalue(), errors.getvalue()

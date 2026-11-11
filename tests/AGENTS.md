@@ -35,7 +35,8 @@ Use stdlib `unittest` and `unittest.TestCase`; no pytest fixtures, markers, or c
 Name classes `<Subject>Tests(unittest.TestCase)`.
 Name methods as sentence length behavior descriptions, including the relevant condition.
 Use `subTest` for malformed input matrices and related case tables.
-Use `tempfile.TemporaryDirectory` with cleanup for filesystem tests.
+Use `tempfile.TemporaryDirectory` with cleanup for filesystem tests. A CLI test with a relative output path runs in its own temporary working directory (`self.enterContext(contextlib.chdir(...))`): analysis caches live inside the output, so a relative path would otherwise write under `tests/`.
+The suite must finish the same with or without a controlling terminal (it runs in the `ordered-render` tmux pane). A CLI test that can reach an interactive speaker prompt patches `epub_tts_narrator.speaker_decisions.open` to raise `OSError`, unless it deliberately supplies a fake terminal; otherwise `/dev/tty` waits for a person and the suite hangs.
 For started patches, register cleanup: `self.addCleanup(patch.stopall)` or per-patch `self.addCleanup(patcher.stop)` — both are house style.
 Keep tests deterministic, offline, and independent of execution order.
 Never depend on prior analysis/render output under `runs/`, `dist-runs/`, or another developer-local directory. Construct temporary bundles from tracked fixtures or test-owned data and exercise the real exporter/loader.

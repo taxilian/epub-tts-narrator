@@ -355,12 +355,13 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("mode", client.calls[0][1])
         self.assertEqual(regenerated, original)
 
-    def test_changed_model_identity_does_not_reuse_other_provider_cache(self):
+    def test_changed_model_identity_reuses_provider_independent_cache(self):
+        # Model, endpoint and reasoning effort are provenance, not cache keys (ANALYSIS.md).
         self.run_analysis()
         client = FakeClient()
         client.identity = dict(client.identity, model="another-fixture-model")
         self.run_analysis(client)
-        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(client.calls, [])
 
     def test_changed_model_text_is_retried_once_then_rejected_and_not_cached(self):
         client = FakeClient(invalid_text=True)

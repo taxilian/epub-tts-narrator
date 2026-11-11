@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.pronunciations import discovery_pending, preparation_pending, load_pronunciations, set_pronunciation
 from epub_tts_narrator.provider import ProviderError
@@ -111,7 +112,10 @@ class PronunciationWorkflowTests(unittest.TestCase):
         self.assertEqual(propose("Qarm", "Quarm"), {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
         self.assertEqual(propose("Qarm", "Quarm"), {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"})
         self.assertEqual(CandidateClient.modes, ["pronunciation_proposal"])
-        self.assertEqual(snapshot(self.book), before)
+        # Only the book's own request cache may change; published files stay byte-identical.
+        published = lambda files: {name: data for name, data in files.items()
+                                   if not name.startswith(CACHE_DIRNAME + "/")}
+        self.assertEqual(published(snapshot(self.book)), published(before))
 
     def test_resume_preserves_user_cmu_choice_without_pronunciation_backfill(self):
         CandidateClient.fail_scan = True

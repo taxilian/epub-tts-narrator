@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import time
@@ -131,8 +132,23 @@ class PerformancePlanningTests(unittest.TestCase):
         self.assertEqual([call["target_segments"][0]["segment_id"] for call in self.client.calls], ["s2", "s3"])
         self.assertEqual([call["mode"] for call in self.client.calls], ["performance_review", "performance_planning"])
 
+    def test_changed_model_rebinds_plan_from_provider_independent_request_cache(self):
+        first = self.prepare()
+        self.client.calls.clear()
+        self.client.identity["model"] = "different-model"
+        self.client.fail_mode = "performance_planning"
+        result = self.prepare()
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["segments"], first["segments"])
+        self.assertEqual(result["provenance"]["provider"]["model"], "different-model")
+        self.assertNotEqual(result["provenance"]["inputs_sha256"], first["provenance"]["inputs_sha256"])
+
     def test_changed_model_invalidates_completed_plan_before_call_failure(self):
         self.prepare()
+        # Validated requests are provider-independent; remove them so the
+        # rebound plan must call the model and the failure is observable.
+        shutil.rmtree(self.output.with_name(self.output.name + ".work") / "requests")
         self.client.identity["model"] = "different-model"
         self.client.fail_mode = "performance_planning"
         with self.assertRaises(ProviderError):

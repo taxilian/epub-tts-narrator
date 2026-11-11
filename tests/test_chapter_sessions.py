@@ -380,16 +380,16 @@ class ClientHeartbeatTests(unittest.TestCase):
         heartbeat.check()
 
     def test_heartbeat_failure_is_visible_to_the_foreground_check(self):
+        # Transient failures end the session only once its TTL could have expired.
         calls = []
-        heartbeat = ClientHeartbeat(self.make_client(calls, fail_after=0), "b" * 64, 0.01, timeout=1.0)
+        heartbeat = ClientHeartbeat(self.make_client(calls, fail_after=0), "b" * 64, 0.01,
+                                    timeout=1.0, ttl=0.05)
         heartbeat.start()
-        deadline = time.monotonic() + 2
-        while heartbeat.failure is None and time.monotonic() < deadline:
-            time.sleep(0.005)
+        heartbeat._thread.join(2)
         heartbeat.stop()
         with self.assertRaisesRegex(ChapterClientError, "heartbeat failed"):
             heartbeat.check()
-        self.assertEqual(len(calls), 2)
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_stopped_heartbeat_never_renews_a_revoked_session(self):
         sessions = ClientSessions(30)

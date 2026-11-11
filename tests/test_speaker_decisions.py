@@ -1,5 +1,6 @@
 """Human decisions happen after bounded automatic work and survive retries."""
 
+import contextlib
 from copy import deepcopy
 from contextlib import nullcontext
 from io import StringIO
@@ -552,10 +553,13 @@ class SpeakerDecisionTests(unittest.TestCase):
     def analyze_with_input(self, document, input_stream, expected_status=0):
         """Exercise analyze's actual prompt and handoff without model or disk work."""
         from epub_tts_narrator.cli import main
-        cache_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(cache_dir.cleanup)
+        # The request cache always lives inside the output directory, so run
+        # in a private working directory: "fresh-book" must never touch tests/.
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.enterContext(contextlib.chdir(workspace.name))
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
-                  "analysis": {"series_registry": None, "cache_dir": cache_dir.name, "chunk_chars": 1000,
+                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
                                "attribution_workers": 5, "identity_consensus": True, "attribution_review": True,
                                "attribution_review_chunk_chars": 1000, "attribution_review_notes": None,

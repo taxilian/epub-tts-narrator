@@ -6,6 +6,7 @@ import unittest
 
 import test_voice_profile_refresh as fixtures
 from epub_tts_narrator.analysis_directory import continuation_directories
+from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.renderer.bundle import load_bundle
 
 
@@ -34,8 +35,7 @@ class VoiceProfileResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'refresh-voice-profiles'):
             load_bundle(self.paths[2])
         # Remove request-cache responses: the explicit checkpoint must suffice.
-        for path in (self.root / 'cache').glob('*.json'):
-            path.unlink()
+        self.clear_request_cache()
         resumed = fixtures.Client()
         self.assertEqual(self.invoke_refresh(resumed)[0], 0)
         self.assertEqual(resumed.calls, [voices[1]])
@@ -58,8 +58,7 @@ class VoiceProfileResumeTests(unittest.TestCase):
             self.assertEqual(self.invoke_refresh(fixtures.Client())[0], 1)
         self.assertEqual(fixtures.VoiceProfileRefreshTests.managed(self), before)
         self.assertEqual(self.state()['phase'], 'publishing')
-        for path in (self.root / 'cache').glob('*.json'):
-            path.unlink()
+        self.clear_request_cache()
         resumed = fixtures.DeadClient()
         self.assertEqual(self.invoke_refresh(resumed)[0], 0)
 
@@ -95,11 +94,17 @@ class VoiceProfileResumeTests(unittest.TestCase):
         self.assertFalse((self.paths[0] / '.voice-profile-refresh.json').exists())
         self.assertTrue(lock.is_dir())
 
+    def clear_request_cache(self):
+        # Request caches live inside each analysis directory (analysis_progress.CACHE_DIRNAME).
+        removed = [path for book in self.paths for path in (book / CACHE_DIRNAME).rglob('*.json')]
+        self.assertTrue(removed, 'expected cached model responses to remove')
+        for path in removed:
+            path.unlink()
+
     def prepare_failed_publication(self):
         with patch('epub_tts_narrator.analysis_revision._install', side_effect=OSError('disk failure')):
             self.assertEqual(self.invoke_refresh(fixtures.Client())[0], 1)
-        for path in (self.root / 'cache').glob('*.json'):
-            path.unlink()
+        self.clear_request_cache()
 
     def test_provider_change_discards_prepared_proposals(self):
         self.prepare_failed_publication()
@@ -174,8 +179,7 @@ class VoiceProfileResumeTests(unittest.TestCase):
         with patch('epub_tts_narrator.analysis_revision._install', side_effect=OSError('disk failure')):
             self.assertEqual(self.invoke_refresh(fixtures.Client(), argv_extra=('--workers', '5'))[0], 1)
         self.assertEqual({row['status'] for row in self.state()['voices'].values()}, {'prepared'})
-        for path in (self.root / 'cache').glob('*.json'):
-            path.unlink()
+        self.clear_request_cache()
         self.assertEqual(self.invoke_refresh(fixtures.DeadClient(), argv_extra=('--workers', '5'))[0], 0)
 
     def test_external_cast_modification_fails_closed(self):
