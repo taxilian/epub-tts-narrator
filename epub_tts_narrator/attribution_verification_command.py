@@ -72,17 +72,17 @@ def run_attribution_verification(args, config, client_factory, progress):
     print(f"Verification selection: strategy={strategy}; {len(selected)}/{len(document['source']['blocks'])} "
           f"blocks across {len(covered)} chapter(s); instructions={'yes' if instructions else 'no'}.")
     # A write-capable invocation secures the whole publication scope before any
-    # model work: abandoned render locks are proven idle, live renderers and
-    # stale revision locks fail here, and later renders refuse themselves
-    # through the .analysis-update.lock handshake, so Accept/Edit can never hit
-    # a late lock.
+    # model work: stale revision locks fail here, and later renders refuse
+    # themselves through the .analysis-update.lock handshake, so Accept/Edit can
+    # never hit a late lock. Live renderers are never a blocker for an
+    # attribution save; the running render keeps its loaded snapshot.
     write_capable = bool(args.interactive or args.apply
                          or (sys.stdin.isatty() and sys.stdout.isatty()))
     with ExitStack() as stack:
         if write_capable:
             reserved = stack.enter_context(reserve_revision_scope([directory]))
             print(f"Publication ownership reserved before verification: {len(reserved)} book(s) in the "
-                  f"update chain are locked against concurrent renders and revisions.", file=sys.stderr)
+                  f"update chain are locked against concurrent analysis revisions.", file=sys.stderr)
         else:
             reserved = {}
             print("Report-only invocation: no publication ownership is taken and no changes can be applied.",

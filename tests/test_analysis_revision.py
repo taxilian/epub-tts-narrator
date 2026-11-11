@@ -98,20 +98,25 @@ class AnalysisRevisionTests(unittest.TestCase):
             revise_directories({self.paths[0]: revision}, progress=lambda _: None)
         self.assertEqual(self.managed(), before)
 
-    def test_concurrent_manifest_change_and_active_render_block_update(self):
+    def test_concurrent_manifest_change_still_blocks_the_revision(self):
         hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
                   for path in self.paths}
         hashes[str(self.paths[0])] = "0" * 64
         with self.assertRaisesRegex(ValueError, "changed while speaker"):
             revise_directories({self.paths[0]: self.revision()}, expected_manifest_hashes=hashes)
+
+    def test_placeholder_render_lock_directories_do_not_block_an_attribution_revision(self):
+        # Legacy/placeholder lock directories once refused saves; attribution
+        # publication never probes render activity.
         (self.paths[1] / "render-work/.render.lock").mkdir()
-        with self.assertRaisesRegex(ValueError, "Rendering is active"):
-            revise_directories({self.paths[0]: self.revision()})
-        (self.paths[1] / "render-work/.render.lock").rmdir()
-        # The renderer's work directory can live outside the book directory.
         (self.paths[1] / ".audio-render.lock").mkdir()
-        with self.assertRaisesRegex(ValueError, "Rendering is active"):
-            revise_directories({self.paths[0]: self.revision()})
+        try:
+            revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
+        finally:
+            (self.paths[1] / "render-work/.render.lock").rmdir()
+            (self.paths[1] / ".audio-render.lock").rmdir()
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
 
     def test_abandoned_analysis_update_lock_is_reclaimed_after_a_crash(self):
         lock = self.paths[0] / ".analysis-update.lock"
@@ -150,9 +155,11 @@ class AnalysisRevisionTests(unittest.TestCase):
         self.assertEqual((lock / "owner.json").read_bytes(), owner)
         self.assertEqual(lease.stat().st_ino, inode)
 
-    def test_live_marked_render_lock_blocks_revision_and_artifacts_are_kept(self):
-        lock = self.paths[1] / ".audio-render.lock"
-        held, release = self.root / "held", self.root / "release"
+    def live_render_lock(self, book):
+        """Hold the book's audio lock from a live external process until released."""
+        lock = book / ".audio-render.lock"
+        held, release = self.root / f"held-{lock.parent.name}-{book.name}", self.root / "release"
+        release.unlink(missing_ok=True)
         child = subprocess.Popen([
             sys.executable, "-c",
             "import sys, time\n"
@@ -164,21 +171,36 @@ class AnalysisRevisionTests(unittest.TestCase):
             "    time.sleep(0.01)\n",
             str(lock), str(held), str(release)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            deadline = time.monotonic() + 15
-            while not held.exists():
-                self.assertIsNone(child.poll())
-                self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
-            with self.assertRaisesRegex(ValueError, "Rendering is active.*live process"):
+        return lock, held, release, child
+
+    def test_live_marked_render_lock_publishes_attribution_and_keeps_ownership_artifacts(self):
+        for book in (self.paths[0], self.paths[1]):
+            # Same-book and descendant renders alike must never refuse a review
+            # save; the active renderer keeps finishing its loaded snapshot.
+            lock, held, release, child = self.live_render_lock(book)
+            try:
+                deadline = time.monotonic() + 15
+                while not held.exists():
+                    self.assertIsNone(child.poll())
+                    self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
+                owner = (lock / "owner.json").read_bytes()
+                lease = lock.with_name(lock.name + ".lease")
+                inode = lease.stat().st_ino
                 revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
-            self.assertTrue((lock / "owner.json").is_file())
-            self.assertTrue(lock.is_dir())
-        finally:
-            release.write_text("go")
-            self.assertEqual(child.wait(timeout=15), 0)
+                revised, _, _ = _completed_directory(self.paths[0])
+                self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
+                for path in self.paths:
+                    continuation_directories(path)
+                self.assertTrue(lock.is_dir())
+                self.assertEqual((lock / "owner.json").read_bytes(), owner)
+                self.assertEqual(lease.stat().st_ino, inode)
+            finally:
+                release.write_text("go")
+                self.assertEqual(child.wait(timeout=15), 0)
+                held.unlink(missing_ok=True)
         revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
-        self.assertTrue(lock.is_dir())
-        self.assertTrue((lock / "owner.json").is_file())
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
 
     def test_reserved_scope_holds_publication_ownership_for_the_whole_chain(self):
         from epub_tts_narrator.analysis_revision import reserve_revision_scope
@@ -195,32 +217,30 @@ class AnalysisRevisionTests(unittest.TestCase):
         revised, _, _ = _completed_directory(self.paths[0])
         self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
 
-    def test_reservation_refuses_a_renderer_starting_before_the_update_lock(self):
+    def test_reserved_scope_reserves_and_publishes_while_a_renderer_is_live(self):
         from epub_tts_narrator.analysis_revision import reserve_revision_scope
-        lock = self.paths[0] / ".audio-render.lock"
-        held, release = self.root / "held", self.root / "release"
-        child = subprocess.Popen([
-            sys.executable, "-c",
-            "import sys, time\n"
-            "from pathlib import Path\n"
-            "from epub_tts_narrator.renderer.run_locks import acquire_directory_lock\n"
-            "lock = acquire_directory_lock(sys.argv[1])\n"
-            "Path(sys.argv[2]).write_text('held')\n"
-            "while not Path(sys.argv[3]).exists():\n"
-            "    time.sleep(0.01)\n",
-            str(lock), str(held), str(release)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        lock, held, release, child = self.live_render_lock(self.paths[0])
         try:
             deadline = time.monotonic() + 15
             while not held.exists():
                 self.assertIsNone(child.poll())
                 self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
-            with self.assertRaisesRegex(ValueError, "Rendering is active"):
-                with reserve_revision_scope([self.paths[0]]):
-                    pass
-            self.assertTrue((lock / "owner.json").is_file())
+            owner = (lock / "owner.json").read_bytes()
+            lease = lock.with_name(lock.name + ".lease")
+            inode = lease.stat().st_ino
+            with reserve_revision_scope([self.paths[0]]) as reserved:
+                self.assertEqual(sorted(reserved), sorted(self.paths))
+                for path in self.paths:
+                    self.assertTrue((path / ".analysis-update.lock").is_dir())
+                revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                                   reserved_update_locks=reserved)
+            revised, _, _ = _completed_directory(self.paths[0])
+            self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
             for path in self.paths:
                 self.assertFalse((path / ".analysis-update.lock").exists())
+            self.assertTrue(lock.is_dir())
+            self.assertEqual((lock / "owner.json").read_bytes(), owner)
+            self.assertEqual(lease.stat().st_ino, inode)
         finally:
             release.write_text("go")
             self.assertEqual(child.wait(timeout=15), 0)

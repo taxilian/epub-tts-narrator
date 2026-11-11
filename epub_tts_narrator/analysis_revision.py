@@ -47,24 +47,28 @@ def _render_active(path):
 
 
 @contextmanager
-def reserve_revision_scope(directories):
+def reserve_revision_scope(directories, *, scope="attribution"):
     """Hold the publication write scope before expensive revision work begins.
 
-    Every book in the chain is probed for live renderers (a marked lock whose
-    kernel lease no live process holds is proven idle), its
-    ``.analysis-update.lock`` is acquired, and render activity is probed again
-    so a renderer that started in between is refused here, before any costly
-    work. A renderer starting after the reservation refuses itself through the
-    ``.analysis-update.lock`` handshake in ``renderer.workflow._lock_book_audio``,
-    so publication cannot hit a late lock conflict. Yield the mapping of
-    directory to owned lock for ``revise_directories(reserved_update_locks=...)``;
-    release on exit.
+    Every book in the chain has its ``.analysis-update.lock`` acquired before
+    any costly work. For scopes other than ``attribution``, render activity is
+    probed before and after the locks so a renderer that started in between is
+    refused here. Attribution revisions stay saveable while renderers are live,
+    including the same book and its descendants: the running renderer finishes
+    its loaded snapshot, a renderer starting during the publication window
+    refuses itself through the ``.analysis-update.lock`` handshake in
+    ``renderer.workflow._lock_book_audio``, and the next render sees the saved
+    revision and re-renders the chapters whose attribution changed. A renderer
+    starting after the reservation cannot hit a late lock conflict either way.
+    Yield the mapping of directory to owned lock for
+    ``revise_directories(reserved_update_locks=...)``; release on exit.
     """
     from .renderer.run_locks import acquire_directory_lock
     paths = related_directories(directories)
     locks = {}
     try:
-        _require_renderers_idle(paths)
+        if scope != "attribution":
+            _require_renderers_idle(paths)
         for path in paths:
             lock_path = path / ".analysis-update.lock"
             try:
@@ -73,7 +77,8 @@ def reserve_revision_scope(directories):
                 raise ValueError(
                     f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
                     f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
-        _require_renderers_idle(paths)
+        if scope != "attribution":
+            _require_renderers_idle(paths)
         yield dict(locks)
     finally:
         for lock in reversed(list(locks.values())):
@@ -265,6 +270,9 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     directories to locks already owned through ``reserve_revision_scope``;
     publication reuses them instead of acquiring the locks again, and the
     render-activity re-checks trust that reservation's probe handshake.
+    Attribution revisions never refuse live renderers (see
+    ``reserve_revision_scope``); every other scope still probes render
+    activity before staging and again immediately before publication.
     """
     from .cli import export_bundle
     sidecars = {} if sidecars is None else {
@@ -341,7 +349,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 original_hashes[path][sidecar.name] = _hash(sidecar)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if not reserved and (reason := _render_active(path)):
+        if scope != "attribution" and not reserved and (reason := _render_active(path)):
             raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
     transaction = None
@@ -424,7 +432,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if not reserved and (reason := _render_active(path)):
+            if scope != "attribution" and not reserved and (reason := _render_active(path)):
                 raise ValueError(f"Rendering started during revision: {path} ({reason})")
         # A reservation destroyed or replaced after entry cannot write: each
         # handle must still prove exclusive ownership immediately before the

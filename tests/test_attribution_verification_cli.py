@@ -381,27 +381,23 @@ class AttributionVerificationLockTests(AttributionCLIHarness):
         self.assertFalse((self.book / ".analysis-update.lock").exists())
         self.assertTrue(list((self.book / ".analysis-revisions").glob("*/revision.json")))
 
-    def test_live_render_lock_fails_write_modes_before_model_requests(self):
+    def test_write_modes_apply_and_publish_during_a_live_render(self):
         self.make_book()
         child, release = self.hold_render_lock(self.book)
         try:
-            for arguments, input_text, tty in [(("--apply",), "", False),
-                                               (("--interactive",), "y\n", True)]:
-                with self.subTest(arguments=arguments):
-                    code, _, errors, client = self.invoke(*arguments, input_text=input_text, tty=tty)
-                    self.assertEqual(code, 1)
-                    self.assertEqual(client.calls, [])
-                    self.assertIn("Rendering is active", errors)
-                    self.assertIn(".audio-render.lock", errors)
-                    self.assertIn("live process", errors)
-                    self.assertFalse((self.book / ".analysis-update.lock").exists())
-                    self.assertFalse((self.book / ".analysis-cache").exists())
+            owner = (self.book / ".audio-render.lock" / "owner.json").read_bytes()
+            code, output, errors, client = self.invoke("--apply")
+            self.assertEqual(code, 0, errors)
+            self.assertTrue(client.calls)
+            self.assertIn("2 applied / 0 left unchanged.", output)
+            revised, _, _ = _completed_directory(self.book)
+            self.assertEqual(revised["segments"][1]["role_id"], "tom")
+            self.assertTrue((self.book / ".audio-render.lock" / "owner.json").is_file())
+            self.assertEqual((self.book / ".audio-render.lock" / "owner.json").read_bytes(), owner)
+            self.assertFalse((self.book / ".analysis-update.lock").exists())
         finally:
             release.write_text("go")
             self.assertEqual(child.wait(timeout=15), 0)
-        code, output, errors, _ = self.invoke("--apply")
-        self.assertEqual(code, 0, errors)
-        self.assertIn("2 applied / 0 left unchanged.", output)
 
     def test_abandoned_marked_render_lock_is_proven_idle_and_the_audit_publishes(self):
         self.make_book()
