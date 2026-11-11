@@ -1265,6 +1265,12 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                    "prompt": prompt, "text": text, "base_seed": config["render"]["seed"]}
         if sample_source is not None:
             request["sample_source"] = sample_source
+        from . import reference_clips
+        extra_scripts = reference_clips.plan_scripts(config, request["designer"], bundle, voice_id,
+                                                     store.canonical_id, sample_source)
+        if extra_scripts:
+            # More clips of the same hosted voice, joined into one reference.
+            request["reference_clips"] = extra_scripts
         notify(f"Creating persistent reference voice {voice_id}")
         gemini = request["designer"].get("engine") == "gemini_voice_design"
         if gemini and source_fingerprint:
@@ -1324,10 +1330,20 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                         raise FreshGeminiVoiceRequired(
                             "Interrupted reference audio has no saved voice-description binding")
                     raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
+                clips = []
+                if request.get("reference_clips"):
+                    try:
+                        wav, accepted, clips = reference_clips.add_clips(
+                            wav, accepted, request["reference_clips"], designer=source, prompt=prompt,
+                            directory=directory, request=request, verifier=verifier, config=config,
+                            label=voice_id, notify=notify)
+                    except reference_clips.FreshVoiceRequired as exc:
+                        raise FreshGeminiVoiceRequired(str(exc)) from exc
                 reference_text = accepted["report"].get("reference_text", text)
                 return store.publish(voice_id, profile, wav, reference_text, binding_identity,
                                      accepted["report"], {
                                  **accepted.get("engine_metadata", {}),
+                                 **reference_clips.creation_metadata(clips),
                                  "description_applied": True, "designer": designer_identity(source),
                                  "engine": engine.identity,
                                  "requested_description": prompt,

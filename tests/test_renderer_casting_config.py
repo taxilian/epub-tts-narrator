@@ -33,6 +33,17 @@ class CastingConfigTests(unittest.TestCase):
                     ValueError, "casting.gemini_concurrency"):
                 self.load(f"[casting]\ngemini_concurrency={value}\n")
 
+    def test_reference_clips_default_to_three_and_accept_one_through_three(self):
+        self.assertEqual(self.load()["casting"]["reference_clips"], 3)
+        for value in (1, 2, 3):
+            with self.subTest(value=value):
+                self.assertEqual(self.load(f"[casting]\nreference_clips={value}\n")["casting"]["reference_clips"], value)
+
+    def test_reference_clips_reject_nonintegers_and_out_of_range_values(self):
+        for value in (0, 4, "true", "2.0", '"3"'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "casting.reference_clips"):
+                self.load(f"[casting]\nreference_clips={value}\n")
+
 
 if __name__ == "__main__":
     unittest.main()

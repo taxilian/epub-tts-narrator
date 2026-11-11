@@ -293,6 +293,8 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.config["quality"] = validate_policy({})
         self.config["gemini"]["api_key"] = SECRET
         self.config = select_voice_designer(self.config, "gemini")
+        # One clip per voice unless a test asks for more (see the reference-clip tests).
+        self.config["casting"]["reference_clips"] = 1
         self.transcripts = {}
         self.engine = ReferencePlaybackEngine(self.transcripts)
         self.designer = GeminiFixtureDesigner(self.transcripts)
@@ -430,6 +432,60 @@ class GeminiCastingIntegrationTests(unittest.TestCase):
         self.assertEqual(selected["creation"]["requested_description"], prompt)
         self.assertEqual(selected["reference_text"], script)
         self.assertEqual(session.rows()[0]["prompt"], prompt)
+
+    def clip_session(self, calls, responses):
+        """A three-clip casting session whose joined recordings the fixture recognizer knows."""
+        from epub_tts_narrator.renderer import reference_clips
+        from shared_fixtures import pcm_hash
+        original = reference_clips.join_wavs
+
+        def join_and_register(paths, output, **kwargs):
+            joined = original(paths, output, **kwargs)
+            self.transcripts[pcm_hash(joined)] = " ".join(self.transcripts[pcm_hash(path)] for path in paths)
+            return joined
+        joining = patch.object(reference_clips, "join_wavs", side_effect=join_and_register)
+        joining.start()
+        self.addCleanup(joining.stop)
+        config = deepcopy(self.config)
+        config["casting"]["reference_clips"] = 3
+        designer = self.remote_designer(responses, calls)
+        return self.session(config=config, designer_factory=lambda _: designer)
+
+    def test_three_reference_clips_come_from_one_hosted_voice_and_are_saved_joined(self):
+        calls = []
+        session = self.clip_session(calls, [{"id": "voice_clips_fixture"}])
+        script = "I will meet you at the gate."
+        session.update_prompt("voice_mara", "A warm adult female voice, clear and gently paced.", script)
+        selected = session.regenerate("voice_mara")
+        clips = selected["creation"]["reference_clips"]
+        endpoints = [endpoint for endpoint, _ in calls]
+        # One hosted voice, created once, speaks every clip; then it is deleted once.
+        self.assertEqual(endpoints, ["/voices"] + ["/interactions"] * len(clips))
+        self.assertGreaterEqual(len(clips), 2)
+        self.assertEqual(self.deleted_voices, ["voice_clips_fixture"])
+        spoken = [payload["input"][0]["content"][0]["text"] for endpoint, payload in calls if endpoint == "/interactions"]
+        self.assertEqual(spoken[0], script)
+        self.assertEqual([clip["reference_text"] for clip in clips], spoken)
+        self.assertEqual(selected["reference_text"], " ".join(spoken))
+        # Extra clips are other book speech of the same character, never one segment twice.
+        segments = [clip["sample_source"]["segment_ids"] for clip in clips[1:]]
+        flat = [segment for group in segments for segment in group]
+        self.assertEqual(len(flat), len(set(flat)))
+        # The saved reference is every clip in order with half-second pauses.
+        import wave
+        with wave.open(selected["reference_audio"], "rb") as audio:
+            rate, frames = audio.getframerate(), audio.getnframes()
+        self.assertEqual(frames, len(clips) * rate + (len(clips) - 1) * rate // 2)
+        self.assertEqual(selected["creation"]["requested_reference_text"], script)
+
+    def test_one_reference_clip_setting_keeps_the_single_recording(self):
+        calls = []
+        session = self.clip_session(calls, [{"id": "voice_single_fixture"}])
+        session.config["casting"]["reference_clips"] = 1
+        session.update_prompt("voice_mara", "A warm adult female voice.", "I will meet you at the gate.")
+        selected = session.regenerate("voice_mara")
+        self.assertEqual([endpoint for endpoint, _ in calls], ["/voices", "/interactions"])
+        self.assertNotIn("reference_clips", selected["creation"])
 
     def test_gemini_receives_a_young_character_described_by_sound_while_the_edit_keeps_its_words(self):
         calls = []

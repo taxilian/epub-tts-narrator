@@ -159,7 +159,7 @@ DEFAULTS = {
     "casting": {
         "player": ["/usr/bin/afplay"], "normalize_samples": True,
         "sample_loudness_lufs": -20.0, "sample_true_peak_db": -1.5,
-        "gemini_concurrency": 4,
+        "gemini_concurrency": 4, "reference_clips": 3,
     },
     "render": {
         "work_dir": None, "output_dir": None, "chapter_numbers": [], "epub": None,
@@ -571,6 +571,9 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     concurrency = result["casting"]["gemini_concurrency"]
     if type(concurrency) is not int or not 1 <= concurrency <= 8:
         raise ValueError("casting.gemini_concurrency must be an integer from 1 through 8")
+    clips = result["casting"]["reference_clips"]
+    if type(clips) is not int or not 1 <= clips <= 3:
+        raise ValueError("casting.reference_clips must be an integer from 1 through 3")
     for key, low, high in (("sample_loudness_lufs", -40, -10), ("sample_true_peak_db", -9, 0)):
         value = result["casting"][key]
         if (isinstance(value, bool) or not isinstance(value, (int, float))

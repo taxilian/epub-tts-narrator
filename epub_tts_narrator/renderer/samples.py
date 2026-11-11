@@ -361,6 +361,26 @@ def select_book_sample(bundle, voice_id, *, canonical_id):
     return _choose(candidates, source_base)
 
 
+def select_extra_samples(bundle, voice_id, *, canonical_id, exclude_segments=(), count):
+    """Up to ``count`` more book auditions for one voice, none sharing a segment.
+
+    Each follows the same rules as ``select_book_sample`` and avoids
+    ``exclude_segments`` (the first clip's script) and every earlier choice.
+    Characters with too little clean speech get fewer, possibly none; creative
+    casting text is never used for extra clips.
+    """
+    source_base, _, candidates, _ = _candidate_data(bundle, voice_id, canonical_id)
+    used, chosen = set(exclude_segments), []
+    while len(chosen) < count:
+        selected = _choose([candidate for candidate in candidates
+                            if candidate["source"]["segment_id"] not in used], source_base)
+        if selected is None:
+            break
+        chosen.append(selected)
+        used.update(selected["source"]["segment_ids"])
+    return chosen
+
+
 def validate_casting_script(script):
     """Use the same audition safety limits during model validation and selection."""
     if (not isinstance(script, dict) or script.get("basis") != "casting"

@@ -904,6 +904,26 @@ sample_true_peak_db = -1.5
 
 Set `normalize_samples = false` to audition the original levels. Loudness targets accept -40 through -10 LUFS; the true-peak ceiling accepts -9 through 0 dB. Changing either setting creates new cached playback copies automatically. Normalization uses the configured `render.ffmpeg` executable and never starts a speech model.
 
+### Reference clips
+
+Drama 3 clones a voice more closely from more reference speech: its technical report measures speaker similarity 0.605 from one clip and 0.633 from three, and Fish recommends two or three clips of 15–20 seconds. With the Gemini designer, a new voice (from `cast`, `G`/`GG`/`G11`, bulk casting, or automatic creation during `render`) is therefore recorded as up to three clips of the same hosted voice:
+
+```toml
+[casting]
+reference_clips = 3  # 1 through 3; 1 records a single clip as before
+```
+
+The first clip speaks the voice's audition script (the one `E` edits). Each further clip speaks other book speech by the same character, chosen by the same audition rules and never repeating a passage already used. Every clip is verified like any reference. The clips are joined in order with half-second pauses, and the joined recording is verified again, then saved as the voice's reference with the clips' transcripts joined in the same order. Its creation metadata lists each clip (`reference_clips`: transcript, audio checksum, take request and book source).
+
+Rendering needs nothing new: the joined recording is one longer reference, so every engine, `serve` worker, chapter service and Runpod worker uses it as it is. Existing voices keep their single clip until you regenerate them, and each regenerated voice re-renders only its own lines.
+
+Fewer clips are kept in these cases:
+- **Not enough book speech:** a character without enough other clean speech gets fewer clips. A first audition can use all of a minor character's lines.
+- **A clip fails verification:** that clip is left out.
+- **The joined recording fails verification:** the voice keeps its first clip alone.
+
+Only Gemini keeps one voice across several scripts within one creation. ElevenLabs and local designers would design a different voice for each clip, so their voices keep one clip. A creation interrupted after its hosted voice was deleted cannot add matching clips, so the next run starts that voice again with a fresh hosted voice and records every clip from it. Derived voices (age or condition changes) are cloned from their main voice's saved reference, so they hear all of its clips.
+
 With `[voice_design] type = "engine"`, the character description conditions Drama 3's scene system prompt and the sample script supplies its single named line. Several sentences may occupy that line. No reference recording is required to create the initial voice; later synthesis clones the saved recording. State vocal presentation, age range, accent, pitch, and a few stable traits clearly. Keep the reference at an ordinary speaking pace with one clean, dry voice, and avoid conflicting performances in one description. Word verification cannot judge whether every vocal trait sounds right; use the audition menu for that.
 
 For a fresh analysis, the analyzer now supplies stable acoustic directions in both the voice description and traits, including voices added during identity reconciliation. Casting uses these automatically together with the selected book excerpt; no prompt-preparation or repair command is needed. Existing edited drafts and selected references retain precedence, so this change does not rewrite older casting work. Speech verification checks the words and audio quality, not whether vocal gender, character fit, or every requested texture sounds right.

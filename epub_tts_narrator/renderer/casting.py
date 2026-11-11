@@ -1069,6 +1069,12 @@ class CastingSession:
             "sample_source": deepcopy(draft["sample_source"]),
             "source_fingerprint": self.bundle["manifest"]["source_fingerprint"],
         }
+        from . import reference_clips
+        extra_scripts = reference_clips.plan_scripts(self.config, request["designer"], self.bundle, voice_id,
+                                                     self.store.canonical_id, draft["sample_source"])
+        if extra_scripts:
+            # More clips of the same hosted voice, joined into one reference.
+            request["reference_clips"] = extra_scripts
         directory = Path(self.config["render"]["work_dir"]) / "casting-candidates" / digest(request)
         try:
             pending = None if fresh else self._pending_confirmation(request, directory.parent)
@@ -1124,9 +1130,21 @@ class CastingSession:
                 return self._generate_locked(voice_id, fresh=True)
             if accepted.get("engine_metadata", {}).get("description_applied") is not True:
                 raise RenderBlocked("Saved generation has no evidence that the voice description was applied")
+            clips = []
+            if request.get("reference_clips"):
+                try:
+                    wav, accepted, clips = reference_clips.add_clips(
+                        wav, accepted, request["reference_clips"], designer=designer, prompt=prompt,
+                        directory=directory, request=request, verifier=verifier, config=self.config,
+                        label=profile.get("name") or voice_id, notify=self.notify)
+                except reference_clips.FreshVoiceRequired:
+                    self.notify("This voice's temporary Gemini voice was removed before all of its reference "
+                                "clips were made; creating a fresh voice.")
+                    return self._generate_locked(voice_id, fresh=True)
             reference_text = accepted["report"].get("reference_text", text)
             metadata = {
                 **accepted.get("engine_metadata", {}),
+                **reference_clips.creation_metadata(clips),
                 "method": "casting_candidate", "candidate_id": nonce,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "requested_description": prompt,
