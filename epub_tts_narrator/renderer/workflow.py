@@ -2520,7 +2520,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
             clips = prepare_chapter_censorship(
                 clips, acceptance, config["censorship"], verifier=verifier,
                 cache_dir=Path(work) / "censorship-alignment", notify=notify)
-        render = config["render"]
+        render = config.get("render", {})
         if (verifier is not None and render.get("normalize_pauses", True)
                 and render.get("normalize_take_pauses", True)):
             from .take_pauses import align_missing_timings
