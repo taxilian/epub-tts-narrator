@@ -305,7 +305,8 @@ def publish_directory(document, registry, output, exporter, *, continue_from=Non
     pending = is_pending_directory(output)
     owned_directories, expected_files = {}, {}
     if not pending:
-        output.mkdir()
+        # Parent folders are ordinary locations, not analysis state.
+        output.mkdir(parents=True)
         owned_directories[output] = _identity(output)
     staging = output / ".analysis-publish"
     staging.mkdir()
