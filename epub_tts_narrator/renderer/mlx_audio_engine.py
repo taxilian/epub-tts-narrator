@@ -224,9 +224,11 @@ class MLXAudioDrama3Engine(HistorySynthesis):
                 if frames.shape[0] > MAX_PROMPT_ROWS:
                     continue
                 mx.synchronize()
+                from .role_sampling import effective
+                sampling = effective(self)
                 mx.random.seed(seed)
                 codes = list(model._frames(frames, system_rows, voice, self.max_new_tokens,
-                                           self.temperature, self.top_k, self.top_p))
+                                           sampling["temperature"], sampling["top_k"], sampling["top_p"]))
                 if not codes:
                     raise EngineError("MLX-Audio Drama 3 returned no audio frames")
                 if len(codes) >= self.max_new_tokens:

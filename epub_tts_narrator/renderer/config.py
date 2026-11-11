@@ -109,6 +109,9 @@ DEFAULTS = {
         "guidance_scale": 5.0, "loudness": 0.0,
     },
     "jev": deepcopy(JEV_DEFAULTS),
+    # Character speech (dialogue, thought, letter segments) may use its own
+    # Drama 3 sampling; unset values use the [engine] ones (role_sampling.py).
+    "dialogue_sampling": {"temperature": None, "top_p": None},
     "huggingface": {"api_key": ""},
     "render_pool": {
         "workers": [],
@@ -437,6 +440,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     result["quality"] = validate_policy(result["quality"])
     result["censorship"] = validate_censorship(result["censorship"])
     result["jev"] = validate_jev_settings(result["jev"])
+    from .role_sampling import validate as validate_dialogue_sampling
+    validate_dialogue_sampling(result["dialogue_sampling"], result["engine"]["type"])
     if (not isinstance(result["verification"]["phonetic_fallback"], str)
             or result["verification"]["phonetic_fallback"] not in {"analysis", "off"}):
         raise ValueError("verification.phonetic_fallback must be analysis or off")

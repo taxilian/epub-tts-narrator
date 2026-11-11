@@ -1560,9 +1560,15 @@ def history_reuse_tolerant(config):
     return config["render"].get("history_reuse", "tolerant") == "tolerant"
 
 
+def _request_engine(chunk, engine_identity, config):
+    """The cache engine identity, with character-speech sampling when it differs."""
+    from .role_sampling import chunk_overrides, with_overrides
+    return with_overrides(_cache_engine_identity(engine_identity, config), chunk_overrides(chunk, config))
+
+
 def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
     request = {
-        "kind": "speech", "engine": _cache_engine_identity(engine_identity, config),
+        "kind": "speech", "engine": _request_engine(chunk, engine_identity, config),
         "voice_asset_hash": voice["asset_hash"],
         "chunk": chunk, "base_seed": config["render"]["seed"],
         "sample_rate": config["render"]["sample_rate"],
@@ -1574,7 +1580,7 @@ def _speech_request(chunk, voice, engine_identity, config, *, performer=None):
 
 def _paragraph_request(chunk, voices, engine_identity, config):
     return {"kind": "paragraph_speech", "version": 1,
-            "engine": _cache_engine_identity(engine_identity, config),
+            "engine": _request_engine(chunk, engine_identity, config),
             "chunk": chunk, "base_seed": config["render"]["seed"],
             "sample_rate": config["render"]["sample_rate"],
             "voice_assets": {speaker["voice_id"]: voices[speaker["voice_id"]]["asset_hash"]
@@ -1636,6 +1642,10 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
                          "model_revision": config.get("render_pool", {}).get("model_revision", selected.revision)}
         if selected.repo != DEFAULT_DRAMA3_MODEL:
             engine_config["model"] = selected.repo
+    from .role_sampling import dialogue_overrides
+    if dialogue_overrides(config):
+        # Bound only when it changes audio, so existing checkpoints keep their hash.
+        engine_config["dialogue_sampling"] = dialogue_overrides(config)
     return {
         "version": 1, "bundle_hash": bundle["bundle_hash"],
         "continuity": CONTINUITY_POLICY,
@@ -2277,6 +2287,11 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 raise RenderBlocked(str(exc), request=request) from exc
 
     def take(text, generate, request, **options):
+        from .role_sampling import chunk_sampling
+        with chunk_sampling(chunk, config):
+            return sampled_take(text, generate, request, **options)
+
+    def sampled_take(text, generate, request, **options):
         if continuity is None:
             # Direct callers outside a chapter (tools, previews) have no history.
             return execute_take(text, generate, request, **options)

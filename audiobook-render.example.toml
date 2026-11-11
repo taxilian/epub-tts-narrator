@@ -28,6 +28,13 @@ top_p = 0.7
 top_k = 30
 max_new_tokens = 2048
 
+# Optional: character speech (dialogue, thoughts, letters) with its own sampling.
+# Unset values use [engine]; narration always does. Changing a value regenerates
+# only character takes (see RENDERER.md).
+# [dialogue_sampling]
+# temperature = 0.95
+# top_p = 0.7
+
 # Optional distributed speech generation. With no workers, use [engine] normally.
 # All configured workers receive the same saved voice recordings and transcripts.
 # Keep these worker tables commented until the corresponding servers are running.

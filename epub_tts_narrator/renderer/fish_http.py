@@ -380,10 +380,17 @@ class FishHTTPEngine(HistorySynthesis):
             raise FishHTTPError(f"Fish HTTP health check returned invalid JSON ({self.name})")
         return body
 
+    def _request_sampling(self):
+        """This client's sampling, with a request's own values (role_sampling) over it."""
+        from .request_sampling import current_sampling
+        requested = current_sampling() or {}
+        return {key: requested.get(key, value) for key, value in self.sampling.items()}
+
     def _transmit(self, text, references, history, output, seed, seeded_ids, layout="directing"):
+        sampling = self._request_sampling()
         body = {"text": text, "references": references, "history": history, "format": "wav",
-                "normalize": False, "temperature": float(self.sampling["temperature"]),
-                "top_p": float(self.sampling["top_p"]), "max_new_tokens": self.sampling["max_new_tokens"]}
+                "normalize": False, "temperature": float(sampling["temperature"]),
+                "top_p": float(sampling["top_p"]), "max_new_tokens": sampling["max_new_tokens"]}
         if layout != "directing":
             # Only sent to workers whose /health advertises the layout.
             body["layout"] = layout
@@ -395,7 +402,7 @@ class FishHTTPEngine(HistorySynthesis):
         if len(payload) > MAX_AUDIO_BYTES:
             raise EngineError("Fish HTTP request is larger than 100 MiB")
         headers = {**self._headers("application/msgpack"),
-                   "X-Audiobook-Seed": str(seed), "X-Audiobook-Top-K": str(self.sampling["top_k"])}
+                   "X-Audiobook-Seed": str(seed), "X-Audiobook-Top-K": str(sampling["top_k"])}
         request = Request(self.url, data=payload, headers=headers, method="POST")
         output.parent.mkdir(parents=True, exist_ok=True)
         staged = None
@@ -443,9 +450,9 @@ class FishHTTPEngine(HistorySynthesis):
                 metadata = inspect_wav(staged)
                 # The controlling system owns sampling: the worker must prove it
                 # applied exactly this client's settings and seed, never its own.
-                expected = {"temperature": float(self.sampling["temperature"]),
-                            "top_p": float(self.sampling["top_p"]),
-                            "top_k": self.sampling["top_k"], "max_new_tokens": self.sampling["max_new_tokens"]}
+                expected = {"temperature": float(sampling["temperature"]),
+                            "top_p": float(sampling["top_p"]),
+                            "top_k": sampling["top_k"], "max_new_tokens": sampling["max_new_tokens"]}
                 if result.get("sampling") != expected or result.get("seed") != seed:
                     raise FishHTTPError(f"Render worker {self.name} did not apply the controlling sampling "
                                         "settings and seed; update and restart audiobook-render serve", retryable=False)

@@ -355,6 +355,25 @@ class HistoryWireTransportTests(unittest.TestCase):
                     engine.synthesize("Hello.", self.voice, output, seed=8)
                 self.assertFalse(output.exists())
 
+    def test_a_requests_own_sampling_is_sent_and_must_be_proven(self):
+        # Character speech ([dialogue_sampling]) runs inside request_sampling.
+        from epub_tts_narrator.renderer.request_sampling import request_sampling
+        engine = FishHTTPEngine({"url": "http://127.0.0.1:8080/v1/tts"},
+                                sampling={"temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048})
+        with request_sampling({"temperature": 0.95}):
+            engine.synthesize("Hello.", self.voice, self.root / "dialogue.wav", seed=8)
+        payload, headers = self.payload()
+        self.assertEqual((payload["temperature"], payload["top_p"], headers["X-audiobook-top-k"]), (0.95, 0.7, "30"))
+        engine.synthesize("Hello.", self.voice, self.root / "narration.wav", seed=8)
+        self.assertEqual(self.payload()[0]["temperature"], 0.7)
+        self.assertEqual(engine.identity["sampling"]["temperature"], 0.7)
+        self.applied = {"sampling": {"temperature": 0.7, "top_p": 0.7, "top_k": 30, "max_new_tokens": 2048},
+                        "seed": 8}
+        with request_sampling({"temperature": 0.95}), \
+                self.assertRaisesRegex(FishHTTPError, "did not apply the controlling sampling"):
+            engine.synthesize("Hello.", self.voice, self.root / "ignored.wav", seed=8)
+        self.assertFalse((self.root / "ignored.wav").exists())
+
     def test_http_target_quotes_are_trimmed_before_controls_but_reference_is_unchanged(self):
         voice = {**self.voice, "reference_text": ' “Saved reference.” '}
         self.client().synthesize('  “ Don\'t call it "easy". ” ', voice,

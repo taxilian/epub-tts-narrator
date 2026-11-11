@@ -496,6 +496,27 @@ Sampling defaults are Fish's own evaluation settings: `temperature = 0.7`,
 `top_p = 0.7`, `top_k = 30`. Stalls and off-voice takes are caught by the
 normal verification and retried.
 
+Character speech can use its own sampling while narration keeps the `[engine]`
+values:
+
+```toml
+[dialogue_sampling]
+temperature = 0.95 # unset: engine.temperature
+top_p = 0.7        # unset: engine.top_p
+```
+
+A request uses these values when every passage in it is a character's own
+speech: segment kind `dialogue`, `thought` or `letter`. Narration, headings and
+other text, and a paragraph that mixes narration with speech, use `[engine]`.
+`top_k` and `max_new_tokens` are always shared. Only values that differ from
+`[engine]` change anything. Such a take's cache identity records the sampling
+it was generated with, so turning the setting on, off or to another value
+regenerates character takes and keeps narrator takes. The setting applies to
+local Drama 3 (MLX and MLX-Audio, batched or not) and to `serve` workers, which
+must echo the exact values before a take is accepted. Remote chapter services
+(`serve-chapters`) apply their own configuration's setting. It requires
+`engine.type = "drama3_mlx"`.
+
 Supported engines: the vendored Sogni runtime, the MLX-Audio quantized models,
 `audiobook-render serve` workers (another Mac, or Runpod's inference service),
 remote chapter services and Runpod. Plugins must advertise the

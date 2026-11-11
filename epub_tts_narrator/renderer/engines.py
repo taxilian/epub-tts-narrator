@@ -584,11 +584,11 @@ class Drama3MLXEngine(HistorySynthesis):
         rows = streaming_rows(text, self._reference(voice), kept, model.tokenizer, model.model.config)
         if self._scheduler is not None:
             return self._batched_segment(model, text, rows, seed, frame_budget(text, self.max_new_tokens or 2048))
+        from .role_sampling import effective
         mx.random.seed(seed)
         frames, finish_reason = generate_frames_watched(
             model.model, rows, max_new_tokens=frame_budget(text, self.max_new_tokens or 2048),
-            temperature=self.temperature, top_k=self.top_k, top_p=self.top_p,
-            watch=silence_watch(model, text))
+            **effective(self), watch=silence_watch(model, text))
         if not len(frames):
             raise EngineError("Drama 3 returned no audio frames")
         codes = frames[:, 1:].T.copy()
@@ -608,9 +608,9 @@ class Drama3MLXEngine(HistorySynthesis):
             hints = prefix_ends(model.tokenizer, model.model.config, text, texts, codes, list(previous))
             return self._batched_segment(model, text, prompt, seed, frame_budget(text, self.max_new_tokens),
                                          prefix_hints=hints)
+        from .role_sampling import effective
         return generate_segment(
-            model, text, references=references, previous_takes=previous,
-            temperature=self.temperature, top_p=self.top_p, top_k=self.top_k,
+            model, text, references=references, previous_takes=previous, **effective(self),
             max_new_tokens=frame_budget(text, self.max_new_tokens), seed=seed,
             watch=silence_watch(model, text))
 
