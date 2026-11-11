@@ -456,6 +456,8 @@ class ReviewApp:
             self.view = "info"
         elif key == "BACKSPACE":
             self.direction_buffer = self.direction_buffer[:-1]
+        elif key == "SPACE":
+            self.direction_buffer += " "
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             self.direction_buffer += key
 

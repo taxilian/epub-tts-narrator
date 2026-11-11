@@ -17,7 +17,7 @@ import wave
 
 from epub_tts_narrator.analysis_directory import fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle, main
-from epub_tts_narrator.review_tui import ReviewApp, run_review
+from epub_tts_narrator.review_tui import CursesScreen, ReviewApp, run_review
 from epub_tts_narrator.series import link_analysis
 from tests.test_contracts import valid_document
 
@@ -228,6 +228,19 @@ class ClippedScreen(FakeScreen):
         super().write(y, x, str(text)[:available], attributes)
 
 
+class RawKeyTerminal:
+    """get_wch-only terminal so keys reach ReviewApp through the real CursesScreen.read_key normalization."""
+
+    def __init__(self, characters):
+        self.characters = list(characters)
+
+    def keypad(self, enabled):
+        pass
+
+    def get_wch(self):
+        return self.characters.pop(0)
+
+
 class RevisionStub:
     def __init__(self, directory, *, error=None, rewrite_manifest=False):
         self.directory = Path(directory)
@@ -376,6 +389,49 @@ class ReviewAppTests(unittest.TestCase):
 
         self.assertEqual(app.pending, {})
         self.assertEqual(app.view, "info")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX required")
+    def test_direction_editor_accepts_spaces_through_real_key_normalization_and_saves(self):
+        import curses
+        app, revision, _ = self.app()
+        self.open_second_passage(app)
+        app.handle_key("F3")
+
+        terminal = RawKeyTerminal("Quietly loudly\n")
+        screen = CursesScreen(curses, terminal, [])
+        while terminal.characters:
+            app.handle_key(screen.read_key())
+
+        self.assertEqual(app.view, "info")
+        self.assertEqual(app.pending["s2"]["delivery"]["direction"], "Quietly loudly")
+
+        app.handle_key("S")
+
+        self.assertEqual(len(revision.calls), 1)
+        call = revision.calls[0]
+        self.assertEqual(call["scope"], "attribution")
+        self.assertEqual(call["revisions"][app.directory]["segments"][1]["delivery"]["direction"],
+                         "Quietly loudly")
+        self.assertEqual(app.pending, {})
+        self.assertEqual(app.document["segments"][1]["delivery"]["direction"], "Quietly loudly")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX required")
+    def test_speaker_picker_space_toggles_selection_through_real_key_normalization(self):
+        import curses
+        app, _, _ = self.app()
+        self.open_second_passage(app)
+        app.handle_key("F2")
+        self.assertEqual(app.view, "speaker")
+        selected = list(app.speaker_selected)
+        self.assertTrue(selected)
+        self.assertEqual(app.speaker_options[app.speaker_index], selected[0])
+
+        screen = CursesScreen(curses, RawKeyTerminal("  "), [])
+        app.handle_key(screen.read_key())
+        self.assertEqual(app.speaker_selected, [])
+
+        app.handle_key(screen.read_key())
+        self.assertEqual(app.speaker_selected, selected)
 
     def test_review_key_toggles_an_assigned_passage(self):
         app, _, _ = self.app()
