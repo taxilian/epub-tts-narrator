@@ -22,7 +22,7 @@ from .runpod_api import RunpodAmbiguousOutcome
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name"):
         command = commands.add_parser(name)
         if name == "render":
             command.add_argument("bundle", type=Path, nargs="+",
@@ -128,6 +128,14 @@ def parser():
             command.add_argument("--list", action="store_true", help="Show defined names and their tagging status")
             command.add_argument("--remove", action="store_true",
                                  help="Remove this book's own pronunciation (and draft) for NAME; books continued from it stop inheriting it")
+        if name == "import-voices":
+            command.description = ("Reuse another book's chosen voices for the same characters (matched by name, "
+                                   "not voice ID), e.g. after re-analyzing a book from a cleaner EPUB. Voices this "
+                                   "book already chose are kept; unmatched ones are listed for cast.")
+            command.add_argument("--from", dest="source_book", type=Path, required=True, metavar="OTHER_BOOK",
+                                 help="Analyzed book directory whose voices to reuse")
+            command.add_argument("--dry-run", action="store_true",
+                                 help="Show which voices would be imported, without loading models")
         if name == "import-voice":
             command.add_argument("--voice-id", required=True)
             command.add_argument("--audio", type=Path, required=True)
@@ -370,6 +378,7 @@ def main(argv=None):
             from .render_queue import render_queue_command
             return render_queue_command(args, config_path)
         bundle = load_bundle(bundle_paths[0])
+        global_config = config
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
         if args.command in {"pronounce", "pronounce-name"} and (args.replace or args.local_only) \
@@ -622,6 +631,12 @@ def main(argv=None):
                                "description_applied": saved.get("description_applied") if saved else None})
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "import-voices" and args.dry_run:
+            from .voice_transfer import import_voices
+            counts = import_voices(bundle, config, global_config, args.source_book, None, None, dry_run=True)
+            print(f"Dry run: {counts['imported']} voice(s) would be imported; {counts['kept']} kept, "
+                  f"{counts['missing']} missing in the other book, {counts['unmatched']} unmatched.")
+            return 0
         from .engines import create_engine
         from .pool import create_render_components
         from .verification import create_verifier
@@ -651,6 +666,12 @@ def main(argv=None):
         else:
             engine = create_engine(config["engine"])
             verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
+        if args.command == "import-voices":
+            from .voice_transfer import import_voices
+            counts = import_voices(bundle, config, global_config, args.source_book, engine, verifier)
+            print(f"Imported {counts['imported']} voice(s); {counts['kept']} kept, {counts['missing']} missing in "
+                  f"the other book, {counts['unmatched']} unmatched (choose those with cast).")
+            return 0 if not counts["unmatched"] and not counts["missing"] else 2
         if args.command == "import-voice":
             result = import_voice(bundle, args.voice_id, args.audio,
                                   args.transcript.read_text(encoding="utf-8"), config, engine, verifier)

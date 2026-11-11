@@ -41,6 +41,10 @@ pronounce *args:
 pronounce-name *args:
     @"{{ python }}" -m epub_tts_narrator.renderer pronounce "$@"
 
+# BOOK --from OTHER_BOOK: reuse OTHER_BOOK's chosen voices for the same characters.
+import-voices *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer import-voices "$@"
+
 # BOOK FILE: write BOOK's confirmed pronunciations to a YAML file.
 export-pronunciations book file *args:
     @book="$1"; file="$2"; shift 2; "{{ python }}" -m epub_tts_narrator.renderer pronounce "$book" --export "$file" "$@"

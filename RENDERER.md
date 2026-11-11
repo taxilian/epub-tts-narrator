@@ -1069,6 +1069,16 @@ To start with a chosen reference recording instead, import it before that voice 
 
 References are normalized and independently transcribed before publication. Each saved asset contains its reference WAV, exact transcript, cast profile, model identity, verification report, and content hash. The nearest selected voice in the continuation chain is reused until the current book introduces an override or that selection is changed. Importing an inherited voice creates a current-book override without changing the ancestor. An existing local asset is never silently replaced.
 
+To reuse the voices you chose for another book, for example after re-analyzing a book from a cleaner EPUB (which gives it new voice IDs), import them by character:
+
+```sh
+just import-voices runs/belgariad-1-v2 --from runs/eddings-belgariad-1 --dry-run
+just import-voices runs/belgariad-1-v2 --from runs/eddings-belgariad-1
+# or: audiobook-render import-voices BOOK --from OTHER_BOOK [--dry-run]
+```
+
+Voices are matched by character, never by voice ID. The narration voice goes to the narration voice. A character's voice goes to the other book's voice whose character has the same name, or else to the one voice sharing one of its names or aliases. Each match is imported like `import-voice`, with the other book's selected reference recording and its verified transcript, so it is normalized and transcribed again. Its book-local speech traits come too, unless this book set its own. A voice this book already chose, or already inherits with the same recording, is kept. Derived voices (aging, conditions) are cloned from their main voice and are skipped. Ambiguous and unmatched characters are listed for `cast`, and the command then exits 2. `--dry-run` shows the matches without loading models.
+
 Generate all chapters and assemble the complete book:
 
 ```sh
