@@ -271,6 +271,19 @@ class FishHTTPEngine(HistorySynthesis):
             self._history_layouts = frozenset({"directing"} | ({"streaming"} & set(layouts)))
         self._history_checked = True
 
+    def work_status(self, timeout=2.0):
+        """The worker's own report of its work (``/health`` ``work``), or None when it does not say.
+
+        A short, read-only request for the run shell's Nodes view; never part
+        of rendering, and any failure just means "unknown".
+        """
+        try:
+            health = self._get_json(self.url.rsplit("/v1/", 1)[0] + "/health", timeout=timeout)
+        except FishHTTPError:
+            return None
+        work = health.get("work")
+        return work if isinstance(work, dict) else None
+
     def close(self) -> None:
         pass
 
@@ -364,10 +377,11 @@ class FishHTTPEngine(HistorySynthesis):
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _get_json(self, url):
+    def _get_json(self, url, timeout=None):
         request = Request(url, headers=self._headers(), method="GET")
+        limit = min(self.timeout, 60) if timeout is None else min(self.timeout, timeout)
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=min(self.timeout, 60)) as response:
+            with build_opener(_NoRedirect()).open(request, timeout=limit) as response:
                 body = json.loads(response.read(1024 * 1024))
         except HTTPError as exc:
             exc.close()

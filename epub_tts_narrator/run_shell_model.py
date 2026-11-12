@@ -527,6 +527,21 @@ class RunModel:
                 rows.append((node["name"], node["role"], slot + 1, jobs[slot] if slot < len(jobs) else None))
         return rows
 
+    def node_work_rows(self, nodes):
+        """Per node: ``(node, rows, decoding, prefilling, waiting, requests, sent)`` from its own report.
+
+        ``sent`` is this render's requests in flight to the node; the node's
+        own numbers count every client. ``None`` where a node does not say.
+        """
+        result = []
+        for node in nodes or []:
+            if node["role"] != "speech":
+                continue
+            work = node.get("work") or {}
+            result.append((node["name"], work.get("rows"), work.get("decoding"), work.get("prefilling"),
+                           work.get("waiting"), work.get("requests"), len(node["jobs"])))
+        return result
+
     def node_summary(self, nodes):
         """``{node: {role: (busy, slots)}}`` for the at-a-glance line."""
         result = {}

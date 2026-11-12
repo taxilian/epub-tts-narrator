@@ -316,6 +316,21 @@ class _Worker:
             if callable(close):
                 close()
 
+    def work_status(self):
+        """What this node reports doing now (rows decoding/prefilling/waiting), or None.
+
+        Observing never creates an engine or loads a model: a worker whose
+        engine does not exist yet reports nothing.
+        """
+        engine = self._engine
+        if engine is None:
+            return None
+        if self.local:
+            from .drama3_batch_scheduler import engine_batch_status
+            return engine_batch_status(engine)
+        probe = getattr(engine, "work_status", None)
+        return probe() if callable(probe) else None
+
 
 class _Recognizer:
     """One recognition endpoint: the controller's own thread (client None) or a serve worker."""
@@ -371,7 +386,7 @@ class RenderPool:
         from .node_activity import ACTIVITY
         for worker in self._workers:
             ACTIVITY.register(self, worker.settings["name"], "speech", worker.settings.get("concurrency", 1),
-                              local=worker.local)
+                              local=worker.local, probe=worker.work_status)
         for recognizer in self._recognizers:
             ACTIVITY.register(self, recognizer.settings["name"], "verify", recognizer.settings["concurrency"],
                               local=recognizer.local)

@@ -64,6 +64,31 @@ class SchedulerTests(unittest.TestCase):
     def submit(self, scheduler, script, *, max_new=50, seed=0):
         return scheduler.submit(script, max_new, temperature=0.7, top_k=30, top_p=0.7, seed=seed)
 
+    def test_live_state_counts_decoding_rows_and_waiting_requests(self):
+        from epub_tts_narrator.renderer.drama3_batch_scheduler import engine_batch_status
+        backend = ScriptedBackend(2)
+        backend.gate = threading.Event()
+        scheduler = Drama3BatchScheduler(backend)
+        self.addCleanup(scheduler.close)
+        self.assertEqual(scheduler.live(), {"rows": 2, "decoding": 0, "prefilling": 0, "waiting": 0})
+        long = frames(*range(101, 140)) + frames(EOS)
+        futures = [self.submit(scheduler, long, seed=index) for index in range(3)]
+        deadline = __import__("time").monotonic() + 5
+        while scheduler.live()["decoding"] < 2 and __import__("time").monotonic() < deadline:
+            __import__("time").sleep(0.01)
+        self.assertEqual(scheduler.live(), {"rows": 2, "decoding": 2, "prefilling": 0, "waiting": 1})
+        backend.gate.set()
+        for future in futures:
+            future.result(5)
+        self.assertEqual(scheduler.live()["waiting"], 0)
+
+        class Engine:
+            batch_rows = 4
+            _scheduler = None
+        self.assertEqual(engine_batch_status(Engine()), {"rows": 4, "decoding": 0, "prefilling": 0, "waiting": 0})
+        Engine.batch_rows = 1
+        self.assertIsNone(engine_batch_status(Engine()))
+
     def test_each_request_gets_its_own_frames_and_freed_rows_are_reused(self):
         backend = ScriptedBackend(2)
         backend.gate = threading.Event()  # hold steps until all three are queued

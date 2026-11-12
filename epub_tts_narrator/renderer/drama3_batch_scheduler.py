@@ -131,6 +131,14 @@ class Drama3BatchScheduler:
                 "idle_seconds": self.idle_seconds, "busy_seconds": busy, "queued": queued,
                 **({"prefix_cache": self.backend.prefixes.stats()} if hasattr(self.backend, "prefixes") else {})}
 
+    def live(self):
+        """What the batch is doing right now: its rows, and how many requests decode, prefill or wait."""
+        with self._condition:
+            waiting = len(self._queue)
+            prefilling = len(self._admitting)
+        return {"rows": self.backend.rows, "decoding": len(self._active), "prefilling": prefilling,
+                "waiting": waiting}
+
     def close(self, timeout=60):
         with self._condition:
             self._closed = True
@@ -266,3 +274,18 @@ class Drama3BatchScheduler:
                         self._finish(slot, result=(row.frames, "length"))
         for slot in list(self._active):
             self._finish(slot, error=SchedulerClosed("The Drama 3 batch scheduler closed"))
+
+
+def engine_batch_status(engine):
+    """A batching engine's live rows (``Drama3BatchScheduler.live``), or None when it does not batch.
+
+    Read-only: an engine whose model has not loaded yet reports its rows as
+    idle rather than loading anything.
+    """
+    rows = getattr(engine, "batch_rows", 1)
+    if type(rows) is not int or rows <= 1:
+        return None
+    scheduler = getattr(engine, "_scheduler", None)
+    if scheduler is None:
+        return {"rows": rows, "decoding": 0, "prefilling": 0, "waiting": 0}
+    return scheduler.live()

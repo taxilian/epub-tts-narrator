@@ -48,10 +48,11 @@ class NodeActivity:
         self._tokens = itertools.count(1)
         self.chapter_capacity = None
 
-    def register(self, owner, name, role, slots, *, local):
+    def register(self, owner, name, role, slots, *, local, probe=None):
+        """``probe()`` (optional) returns the node's own report of its work, polled by ``probe_nodes``."""
         with self._lock:
             self._nodes[(name, role)] = {"name": name, "role": role, "slots": int(slots), "local": bool(local),
-                                         "owner": owner}
+                                         "owner": owner, "probe": probe, "work": None, "probed": None}
 
     def unregister(self, owner):
         """Forget the nodes one pool registered (its close)."""
@@ -62,6 +63,28 @@ class NodeActivity:
             live = {key[0] + "\0" + key[1] for key in self._nodes}
             self._jobs = {token: item for token, item in self._jobs.items()
                           if item["name"] + "\0" + item["role"] in live}
+
+    def probe_nodes(self, max_age=2.0):
+        """Ask each node that can say what it is doing (rows decoding, prefilling, waiting).
+
+        Called by an observer on its own thread, at most every ``max_age``
+        seconds per node; a remote node is a short read-only health request. A
+        node that cannot be reached reports nothing until it can.
+        """
+        now = self._clock()
+        with self._lock:
+            due = [(key, node["probe"]) for key, node in self._nodes.items()
+                   if callable(node["probe"]) and (node["probed"] is None or now - node["probed"] >= max_age)]
+            for key, _ in due:
+                self._nodes[key]["probed"] = now
+        for key, probe in due:
+            try:
+                work = probe()
+            except Exception:
+                work = None
+            with self._lock:
+                if key in self._nodes:
+                    self._nodes[key]["work"] = dict(work) if isinstance(work, dict) else None
 
     def set_chapter_capacity(self, count):
         with self._lock:
@@ -92,7 +115,8 @@ class NodeActivity:
                     node["jobs"].append({"book": item.get("book"), "chapter": item.get("chapter"),
                                          "block": item.get("block"), "elapsed": now - item["started"]})
         for node in nodes:
-            node.pop("owner", None)
+            for private in ("owner", "probe", "probed"):
+                node.pop(private, None)
         order = {"speech": 0, "verify": 1}
         return sorted(nodes, key=lambda node: (not node["local"], node["name"], order.get(node["role"], 2)))
 

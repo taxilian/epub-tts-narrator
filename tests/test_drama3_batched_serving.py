@@ -106,6 +106,23 @@ class BatchedServingTests(unittest.TestCase):
             with self.subTest(expected=expected), urlopen(url.replace("/v1/tts", "/health"), timeout=5) as response:
                 self.assertEqual(json.loads(response.read())["concurrent_requests"], expected)
 
+    def test_health_reports_what_the_worker_is_doing_now(self):
+        from urllib.request import urlopen
+        from epub_tts_narrator.renderer.fish_http import FishHTTPEngine
+        batching = BatchingFakeEngine()
+        url = self.serve(batching, batch_rows=2)
+        with urlopen(url.replace("/v1/tts", "/health"), timeout=5) as response:
+            work = json.loads(response.read())["work"]
+        self.assertEqual(work, {"requests": 0, "rows": 2, "decoding": 0, "prefilling": 0, "waiting": 0})
+        with urlopen(self.serve(FakeEngine()).replace("/v1/tts", "/health"), timeout=5) as response:
+            self.assertEqual(json.loads(response.read())["work"], {"requests": 0})
+        client = FishHTTPEngine({"name": "second-mac", "type": "fish_http", "url": url, "api_key": "",
+                                 "concurrency": 2, "timeout_seconds": 30})
+        self.assertEqual(client.work_status()["rows"], 2)
+        unreachable = FishHTTPEngine({"name": "gone", "type": "fish_http", "url": "http://127.0.0.1:9/v1/tts",
+                                      "api_key": "", "concurrency": 1, "timeout_seconds": 30})
+        self.assertIsNone(unreachable.work_status(timeout=0.5))
+
     def test_eight_decode_rows_are_all_admitted_with_a_small_pending_queue(self):
         engine = BatchingFakeEngine()
         engine.together = threading.Barrier(8, timeout=5)

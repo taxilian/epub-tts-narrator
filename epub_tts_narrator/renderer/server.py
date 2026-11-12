@@ -295,6 +295,16 @@ class _RenderServer(ThreadingHTTPServer):
             self.server_close()
             raise
 
+    def work_status(self, asking=0):
+        """Numbers only: requests in progress here and, when batching, rows decoding/prefilling/waiting.
+
+        ``asking`` leaves out the requests asking for this (the health check itself).
+        """
+        from .drama3_batch_scheduler import engine_batch_status
+        with self._activity_lock:
+            requests = max(0, self._inflight_requests - asking)
+        return {"requests": requests, **(engine_batch_status(self.engine) or {})}
+
     def next_request_id(self):
         with self._activity_lock:
             self._request_sequence += 1
@@ -524,7 +534,10 @@ class _Handler(BaseHTTPRequestHandler):
                   "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else []),
                   # Requests this worker decodes at once (server.batch_rows on a
                   # batching engine); a controller's worker concurrency should match.
-                  "concurrent_requests": getattr(self.server.engine, "concurrent_requests", 1)}
+                  "concurrent_requests": getattr(self.server.engine, "concurrent_requests", 1),
+                  # What this worker is doing now (all clients): requests it has
+                  # accepted, and for a batching engine its rows' live state.
+                  "work": self.server.work_status(asking=1)}
         if self.server.recognizers is not None:
             health.update(recognition_protocol=RECOGNITION_PROTOCOL, recognition=self.server.recognition)
         self._json(200, health)

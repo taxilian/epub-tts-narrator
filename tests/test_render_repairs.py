@@ -252,6 +252,31 @@ class GlanceTests(unittest.TestCase):
         activity.unregister(owner)
         self.assertEqual(activity.snapshot(), [])
 
+    def test_nodes_report_their_own_batch_state_when_probed_and_nothing_when_unreachable(self):
+        from epub_tts_narrator.renderer.node_activity import NodeActivity
+        activity = NodeActivity(clock=self.clock)
+        owner, calls = object(), []
+
+        def batched():
+            calls.append("second-mac")
+            return {"requests": 9, "rows": 8, "decoding": 6, "prefilling": 1, "waiting": 2}
+
+        def unreachable():
+            raise OSError("connection refused")
+        activity.register(owner, "second-mac", "speech", 8, local=False, probe=batched)
+        activity.register(owner, "third-mac", "speech", 4, local=False, probe=unreachable)
+        activity.register(owner, "local", "verify", 1, local=True)
+        activity.probe_nodes()
+        activity.probe_nodes()  # too soon: not asked again
+        self.assertEqual(calls, ["second-mac"])
+        self.clock.now += 3
+        activity.probe_nodes()
+        self.assertEqual(calls, ["second-mac", "second-mac"])
+        with activity.busy("second-mac", "speech", {"book": "b", "chapter": 1, "block": 1}):
+            rows = self.model.node_work_rows(activity.snapshot())
+        self.assertEqual(rows, [("second-mac", 8, 6, 1, 2, 9, 1), ("third-mac", None, None, None, None, None, 0)])
+        self.assertNotIn("probe", activity.snapshot()[0])
+
     def test_rejected_takes_are_listed_once_and_changed_takes_rebuild_their_chapter(self):
         rebuilt = []
         self.bus.publish("rebuild", scope={"book": "b1"}, data={"handler": lambda number: rebuilt.append(number) or True})

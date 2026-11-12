@@ -62,6 +62,7 @@ class RunApp(CapturePrintMixin, App):
     #books { height: 1fr; }
     #rows, #workers, #errors { height: 1fr; }
     #coordinators { height: auto; max-height: 18; }
+    #node-work { height: auto; max-height: 8; }
     .section-title { color: $text-muted; padding: 0 1; margin-top: 1; }
     #nodes-line { height: auto; padding: 0 1; }
     #stages { height: auto; max-height: 12; }
@@ -145,6 +146,9 @@ class RunApp(CapturePrintMixin, App):
             with TabPane("Nodes", id="workers-tab"):
                 yield Static("", id="coordinators-title", classes="section-title")
                 yield DataTable(id="coordinators", cursor_type="row")
+                yield Static(Text("What each speech node reports doing now (it counts every client, not only "
+                                  "this render)"), classes="section-title")
+                yield DataTable(id="node-work", cursor_type="row")
                 yield Static("", id="nodes-title", classes="section-title")
                 yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
                 yield DataTable(id="stages", cursor_type="row")
@@ -172,12 +176,19 @@ class RunApp(CapturePrintMixin, App):
         self.query_one("#books", DataTable).add_columns("Done", "Book", "State", "Chapters", "Active", "Blocks", "Failures")
         self.query_one("#coordinators", DataTable).add_columns("Chapter worker", "Book", "Chapter", "Blocks", "Working on")
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
-        self.query_one("#workers", DataTable).add_columns("Node", "Role", "Slot", "Book", "Chapter", "Block", "For")
+        self.query_one("#workers", DataTable).add_columns("Node", "Role", "Slot", "Book", "Chapter", "Block",
+                                                          "Since sent")
+        self.query_one("#node-work", DataTable).add_columns("Node", "Batch rows", "Decoding", "Prefilling",
+                                                            "Waiting on the node", "Requests on the node",
+                                                            "Sent by this render")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
         self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
         self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take", "Why")
         self.start_command()
         self.set_interval(0.5, self.refresh_view)
+        # Nodes report their own batch state; asking can take a moment, so never on the UI thread.
+        self.set_interval(2.0, lambda: self.run_worker(self._probe_nodes, thread=True, exclusive=True,
+                                                       group="node-probe"))
         self.refresh_view(force=True)
 
     # Command thread ------------------------------------------------------------
@@ -299,8 +310,15 @@ class RunApp(CapturePrintMixin, App):
                 cells = (name, label, str(slot), str(job.get("book") or ""), str(job.get("chapter") or ""),
                          f"#{job['block']}" if job.get("block") else "", format_seconds(job.get("elapsed", 0)))
             rows.append((f"{name}:{role}:{slot}", cells))
+        def number(value):
+            return "—" if value is None else str(value)
+        sync_table(self.query_one("#node-work", DataTable), [
+            (name, (name, number(rows), number(decoding), number(prefilling), number(waiting), number(requests),
+                    str(sent)))
+            for name, rows, decoding, prefilling, waiting, requests, sent in model.node_work_rows(nodes)])
         self.query_one("#nodes-title", Static).update(Text(
-            "Render nodes: speech (TTS) and verify (transcription) slots, and the block each slot is working on"
+            "This render's requests on each node: speech (TTS) and verify (transcription) slots and the block "
+            "each is working on, timed from when it was sent (so it includes waiting on the node)"
             if rows else "Render nodes: none reported (no worker pool; speech and verification run in this process)"))
         sync_table(self.query_one("#workers", DataTable), rows)
         summary = model.node_summary(nodes)
@@ -311,6 +329,14 @@ class RunApp(CapturePrintMixin, App):
                                    for role, (busy, slots) in sorted(roles.items(), key=lambda item: item[0] != "speech")))
             line.append("    ")
         self.query_one("#nodes-line", Static).update(line)
+
+    @staticmethod
+    def _probe_nodes():
+        try:
+            from .renderer.node_activity import ACTIVITY
+            ACTIVITY.probe_nodes()
+        except Exception:
+            pass
 
     @staticmethod
     def _node_status():
