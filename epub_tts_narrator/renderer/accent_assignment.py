@@ -10,8 +10,11 @@ distinct real-world English accent for each group. A person's guidance
 
 The result is saved beside the book in ``voice-accent-assignments.json``
 (per voice, nearest book first, so a continued book keeps its inherited
-characters' accents and only new characters are assigned around them). A
-cue a person chose (``voice-accents.json``) always wins; ``accent_cues``
+characters' accents and only new characters are assigned around them). Each
+voice's designed description and speech traits go with it as evidence:
+one or the other often already names the right accent. A cue a person
+chose (``voice-accents.json``), or an accent named in vocal traits they
+set (``voice-traits.json``), always wins and is sent as fixed; ``accent_cues``
 falls back to a description's accent only for voices with no assignment.
 
 Renders assign voices that have no accent yet before planning
@@ -33,10 +36,13 @@ ASSIGNMENTS_FILENAME = "voice-accent-assignments.json"
 GUIDANCE_FILENAME = "voice-accent-guidance.json"
 GUIDANCE_FORMAT = "audiobook-book-accent-guidance"
 MAX_NOTES = 2000
-MAX_LINES = 2
-MAX_EVIDENCE = 3
+MAX_INTRO = 2
+INTRO_BEFORE = 80
+INTRO_AFTER = 240
+MAX_ALIASES = 8
+MAX_NAMES = 240
 MAX_QUOTE = 160
-MAX_ABOUT = 400
+MAX_ABOUT = 500
 SPOKEN_KINDS = {"dialogue", "thought", "letter"}
 
 
@@ -118,11 +124,44 @@ def _clip(text):
     return text if len(text) <= MAX_QUOTE else text[:MAX_QUOTE - 1].rsplit(" ", 1)[0] + "…"
 
 
-def voice_entries(bundle):
-    """What the story says about each voice that speaks: {voice_id: {"names", "about", "lines"}}.
+def _introductions(book, names, limit):
+    """The first paragraphs of ``book`` naming the character, each clipped around the mention."""
+    names = sorted({name for name in names if len(name) >= 3 and any(letter.isupper() for letter in name)},
+                   key=len, reverse=True)
+    if not names:
+        return []
+    pattern = re.compile(r"(?<![\w'’-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w'’-])")
+    found = []
+    for block in (book.get("source") or {}).get("blocks", []):
+        match = pattern.search(block.get("text", ""))
+        if match is None:
+            continue
+        text = block["text"]
+        left = max(0, match.start() - INTRO_BEFORE)
+        if left:
+            space = text.find(" ", left, match.start())
+            left = space + 1 if space != -1 else left
+        right = min(len(text), match.end() + INTRO_AFTER)
+        if right < len(text):
+            space = text.rfind(" ", match.end(), right)
+            right = space if space != -1 else right
+        found.append(("…" if left else "") + " ".join(text[left:right].split()) + ("…" if right < len(text) else ""))
+        if len(found) == limit:
+            break
+    return found
 
-    Derived voices (a character's later state) are left out; they take their
-    main voice's accent.
+
+def voice_entries(bundle, parents=()):
+    """What the story says about each voice that speaks.
+
+    ``{voice_id: {"label", "names", "about", "intro", "line"}}``: the
+    character's names and aliases, the analysis's description (and the one
+    from the earliest book they appear in, when it differs), the narration
+    where the series first mentions them (where a story usually says who
+    they are and where they come from; ``parents`` are earlier books' bundles,
+    nearest first), and one of their own lines as a dialect clue. Derived
+    voices (a character's later state) are left out; they take their main
+    voice's accent.
     """
     cast = bundle["cast"]
     derived = {voice["id"] for voice in cast["voices"] if isinstance(voice.get("derived_from"), dict)}
@@ -133,9 +172,9 @@ def voice_entries(bundle):
             if not voice_id:
                 continue
             used.add(voice_id)
-            lines = spoken.setdefault(voice_id, [])
-            if row.get("kind") in SPOKEN_KINDS and len(lines) < MAX_LINES and row.get("text", "").strip():
-                lines.append(_clip(row["text"]))
+            if voice_id not in spoken and row.get("kind") in SPOKEN_KINDS and len(row.get("text", "").split()) >= 4:
+                spoken[voice_id] = _clip(row["text"])
+    earliest_first = [*reversed(list(parents)), bundle]
     entries = {}
     for profile in cast["voices"]:
         voice_id = profile["id"]
@@ -143,39 +182,93 @@ def voice_entries(bundle):
             continue
         characters = [character for character in cast["characters"] if character.get("voice_id") == voice_id]
         roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
-        names = [character["name"] + (f" (also {', '.join(character['aliases'][:3])})"
+        names = [character["name"] + (f" (also {', '.join(character['aliases'][:MAX_ALIASES])})"
                                       if character.get("aliases") else "") for character in characters]
         narrates = any(role.get("kind") == "narration" for role in roles)
+        label = ", ".join(character["name"] for character in characters)
         if not names:
-            names = ["Narrator"] if narrates else [role["id"] for role in roles[:1]] or [voice_id]
+            label = "Narrator" if narrates else (roles[0]["id"] if roles else voice_id)
+            names = [label]
         about = "; ".join(character.get("description", "") for character in characters if character.get("description"))
         if not about:
             about = "; ".join(role.get("description", "") for role in roles if role.get("description"))
+        intro, first_about = [], ""
+        for book in earliest_first:
+            here = [character for character in book["cast"]["characters"] if character.get("voice_id") == voice_id]
+            if not here:
+                continue
+            if not first_about:
+                first_about = "; ".join(character.get("description", "") for character in here
+                                        if character.get("description"))
+            words = [name for character in here for name in [character["name"], *character.get("aliases", [])]]
+            intro += _introductions(book, words, MAX_INTRO - len(intro))
+            if len(intro) >= MAX_INTRO:
+                break
+        if first_about and first_about != about:
+            about = f"{first_about} (when first met); now: {about}" if about else first_about
         if narrates and characters:
             about += "; also narrates the book"
-        quotes = [evidence["quote"] for character in characters for evidence in character.get("evidence", [])
-                  if isinstance(evidence, dict) and isinstance(evidence.get("quote"), str)][:MAX_EVIDENCE]
-        lines = list(dict.fromkeys([*map(_clip, quotes), *spoken.get(voice_id, [])]))
-        entries[voice_id] = {"names": ", ".join(names)[:200], "about": about[:MAX_ABOUT], "lines": lines}
+        if not intro:
+            intro = [_clip(evidence["quote"]) for character in characters for evidence in character.get("evidence", [])
+                     if isinstance(evidence, dict) and isinstance(evidence.get("quote"), str)][:MAX_INTRO]
+        entries[voice_id] = {"label": label[:120], "names": ", ".join(names)[:MAX_NAMES], "about": about[:MAX_ABOUT],
+                             "intro": intro, "line": spoken.get(voice_id, "")}
     return entries
 
 
-def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=frozenset()):
+def parent_bundles(config):
+    """Earlier books' bundles, nearest first (for where a returning character was introduced)."""
+    from .bundle import load_bundle
+    return [load_bundle(path) for path in config.get("_voice_parents", [])]
+
+
+MAX_VOICE = 300
+MAX_TRAITS = 200
+
+
+def voice_clues(bundle, config=None, *, store=None):
+    """Each voice's designed sound: {voice_id: (description, traits)}.
+
+    The description that designed its saved recording (else its profile
+    description), and the vocal traits a person set, else the analysis's
+    speech traits. Either often already names the accent.
+    """
+    from ..speech_traits import speech_traits
+    from .speech_traits import designed_description, speech_trait_overrides
+    chosen = speech_trait_overrides(bundle, config) if config is not None else {}
+    clues = {}
+    for profile in bundle["cast"]["voices"]:
+        try:
+            analysed = speech_traits(profile)
+        except ValueError:
+            analysed = ""
+        traits = chosen.get(profile["id"]) or analysed
+        clues[profile["id"]] = (" ".join(designed_description(store, profile).split())[:MAX_VOICE],
+                                " ".join(traits.split())[:MAX_TRAITS])
+    return clues
+
+
+def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=frozenset(), clues=None,
+                       entries=None):
     """One request assigning ``voice_ids`` around ``fixed`` ({voice_id: cue}).
 
-    Returns {"groups": [{"origin", "accent", "voice_ids"}], "accents": {voice_id: cue}}.
-    A voice the reply leaves out gets no accent.
+    ``clues`` ({voice_id: (voice description, traits)}, ``voice_clues``) go
+    with each voice. Returns {"groups": [{"origin", "accent", "voice_ids"}],
+    "accents": {voice_id: cue}}. A voice the reply leaves out gets no accent.
     """
-    entries = voice_entries(bundle)
+    entries = entries if entries is not None else voice_entries(bundle)
+    clues = clues if clues is not None else voice_clues(bundle)
     short, rows, fixed_rows = {}, [], []
     for voice_id in voice_ids:
         short[f"v{len(short) + 1}"] = voice_id
         entry = entries[voice_id]
-        rows.append([f"v{len(short)}", entry["names"], entry["about"], entry["lines"]])
+        description, traits = clues.get(voice_id, ("", ""))
+        rows.append([f"v{len(short)}", entry["names"], entry["about"], entry["intro"], entry["line"],
+                     description, traits])
     for voice_id, cue in fixed.items():
         if voice_id in entries:
             fixed_rows.append([f"f{len(fixed_rows) + 1}", entries[voice_id]["names"], cue])
-    payload = {"mode": "accent_assignment", "v": 1, "book": bundle["source"]["book"]["title"], "voices": rows}
+    payload = {"mode": "accent_assignment", "v": 3, "book": bundle["source"]["book"]["title"], "voices": rows}
     if fixed_rows:
         payload["fixed"] = fixed_rows
     system = ASSIGN
@@ -231,9 +324,13 @@ def _book_cache(bundle, config_path):
 
 
 def _fixed(bundle, config, entries, *, own_only=False):
-    """Decided accents the request must keep: a person's cues, and existing assignments."""
-    from .speech_traits import accent_overrides
+    """Decided accents the request must keep: a person's cues (or an accent in traits they set), and existing assignments."""
+    from .speech_traits import _book_terms, accent_overrides, speech_trait_overrides, trait_accent
     chosen = accent_overrides(bundle, config, include_cleared=True)
+    for voice_id, traits in speech_trait_overrides(bundle, config).items():
+        accent = trait_accent(traits, _book_terms(bundle)) if traits else ""
+        if accent and voice_id not in chosen:
+            chosen[voice_id] = accent
     assigned = assigned_accents(bundle, config)
     if own_only:
         # Reassigning this book keeps only what earlier books decided.
@@ -252,7 +349,7 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     config = resolve_book_config(bundle, config)
     if not config.get("casting", {}).get("assign_accents", True):
         return None
-    entries = voice_entries(bundle)
+    entries = voice_entries(bundle, parent_bundles(config))
     chosen, fixed = _fixed(bundle, config, entries)
     pending = [voice_id for voice_id in entries if voice_id not in fixed]
     if not pending:
@@ -264,8 +361,11 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
         return None
     notify(f"Assigning accents to {len(pending)} voice(s) without one, around {sum(1 for v in fixed.values() if v)} "
            "decided accent(s).")
+    from .book_context import voice_store
     result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
-                                notes=guidance(bundle, config), terms=_book_terms(bundle))
+                                notes=guidance(bundle, config), terms=_book_terms(bundle),
+                                clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
+                                entries=entries)
     save_assignments(bundle, config, {voice_id: result["accents"].get(voice_id, "") for voice_id in pending})
     _report(result, entries, notify)
     return result
@@ -273,7 +373,7 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
 
 def _report(result, entries, notify):
     for group in result["groups"]:
-        names = ", ".join(entries[voice_id]["names"].split(" (also")[0] for voice_id in group["voice_ids"])
+        names = ", ".join(entries[voice_id]["label"] for voice_id in group["voice_ids"])
         notify(f"  {group['accent']} ({group['origin']}): {names}")
 
 
@@ -302,11 +402,11 @@ def run_accents_command(bundle, config, args, config_path):
     if instructions is not None and not 1 <= len(instructions) <= MAX_NOTES:
         raise ValueError(f"--instructions must contain from 1 to {MAX_NOTES} characters")
     notes = instructions if instructions is not None else guidance(bundle, config)
-    entries = voice_entries(bundle)
+    entries = voice_entries(bundle, parent_bundles(config))
     chosen, fixed = _fixed(bundle, config, entries, own_only=True)
     pending = [voice_id for voice_id in entries if voice_id not in fixed]
-    print(f"Accent assignment: {len(pending)} voice(s) to assign; {len(fixed)} kept (cues a person chose, and "
-          f"accents inherited from earlier books); guidance={'yes' if notes else 'no'}.")
+    print(f"Accent assignment: {len(pending)} voice(s) to assign; {len(fixed)} kept (cues or trait accents a person "
+          f"chose, and accents inherited from earlier books); guidance={'yes' if notes else 'no'}.")
     if not pending:
         print("Every voice's accent is already decided; nothing to assign.")
         return 0
@@ -321,12 +421,15 @@ def run_accents_command(bundle, config, args, config_path):
     requests = _requests(bundle, config_path, cache, progress=lambda message: print(message, file=sys.stderr))
     if requests is None:
         raise ValueError("Set provider.model in the TOML configuration to assign accents")
+    from .book_context import voice_store
     result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
-                                notes=notes, terms=_book_terms(bundle))
+                                notes=notes, terms=_book_terms(bundle),
+                                clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
+                                entries=entries)
     _report(result, entries, print)
     missing = [voice_id for voice_id in pending if voice_id not in result["accents"]]
     if missing:
-        print(f"{len(missing)} voice(s) got no accent: " + ", ".join(entries[v]["names"] for v in missing[:8]))
+        print(f"{len(missing)} voice(s) got no accent: " + ", ".join(entries[v]["label"] for v in missing[:8]))
     before = accent_cues(bundle, config)
     changed = sum(1 for voice_id in pending if result["accents"].get(voice_id, "") != before.get(voice_id, ""))
     print(f"{changed} voice(s) would change accent; their lines render again on the next render of this book.")

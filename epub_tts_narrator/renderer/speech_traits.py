@@ -134,6 +134,30 @@ def suggest_accent(description, terms=frozenset()):
     return phrase if named and len(phrase) <= MAX_ACCENT_CHARACTERS else ""
 
 
+def trait_accent(traits, terms=frozenset()):
+    """The accent a person's vocal traits name, else "".
+
+    Their first clause when it is an accent ("General American; clipped
+    consonants", "Heavy Russian accent, slow"): it ends in "accent" or in a
+    place or people word. Otherwise a "… accent" phrase anywhere in them.
+    """
+    import re
+    from ..narrator_read import _REAL_WORLD
+    if not isinstance(traits, str) or not traits.strip():
+        return ""
+    first = re.split(r"[;,.\n]", traits.strip(), maxsplit=1)[0].strip()
+    words = first.split()
+    last = words[-1].casefold() if words else ""
+    if 0 < len(words) <= 5 and (last == "accent" or last in _REAL_WORLD - _NOT_PLACES
+                                 or last.endswith(("ian", "ese")) or words[-1][:1].isupper() and len(words) > 1):
+        from .accent_assignment import accent_cue
+        try:
+            return accent_cue(first, terms)
+        except ValueError:
+            pass
+    return suggest_accent(traits, terms)
+
+
 _TERMS = {}
 
 
@@ -160,7 +184,8 @@ def accent_cues(bundle, config, *, store=None):
     """Every voice's accent cue for a render.
 
     A person's choice (``voice-accents.json``, nearest book first; an empty
-    choice means no cue) wins. Otherwise the book-wide accent assignment
+    choice means no cue) wins, then an accent named in vocal traits a person
+    set (``voice-traits.json``, ``trait_accent``). Otherwise the book-wide accent assignment
     (``accent_assignment.py``: the cast grouped by origin, one real accent per
     group). A voice with neither uses the accent its description names
     (``suggest_accent``): the description that designed its saved recording,
@@ -169,6 +194,7 @@ def accent_cues(bundle, config, *, store=None):
     """
     from .accent_assignment import assigned_accents
     chosen = accent_overrides(bundle, config, include_cleared=True)
+    chosen_traits = speech_trait_overrides(bundle, config)
     assigned = assigned_accents(bundle, config)
     if store is None:
         from .book_context import voice_store
@@ -182,6 +208,8 @@ def accent_cues(bundle, config, *, store=None):
         elif isinstance(profile.get("derived_from"), dict):
             derived[voice_id] = profile["derived_from"].get("voice_id")
             continue
+        elif trait_accent(chosen_traits.get(voice_id), _book_terms(bundle) if chosen_traits.get(voice_id) else ()):
+            cue = trait_accent(chosen_traits[voice_id], _book_terms(bundle))
         elif assigned.get(voice_id):
             cue = assigned[voice_id]
         else:

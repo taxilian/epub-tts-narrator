@@ -70,15 +70,19 @@ class CastingTraitTests(unittest.TestCase):
         self.assertEqual(row["speech_traits"], TRAITS)
         self.assertNotIn("speech_traits", read_json(self.session._draft_path(self.voice_id)))
 
-    def test_trait_edits_never_change_the_render_plan(self):
-        # Rendered lines carry only their own delivery direction; accents come
-        # from the reference recording and same-voice history.
+    def test_trait_edits_reach_the_render_plan_only_as_the_accent_they_name(self):
+        # Rendered lines never carry the traits text. An accent leading traits a
+        # person set is their accent choice, so it opens that voice's lines.
         original = make_render_plan(self.bundle, self.config, multi_speaker=False)
-        self.session.update_prompt(self.voice_id, speech_traits=TRAITS)
+        self.session.update_prompt(self.voice_id, speech_traits="relaxed conversational cadence, warm")
         self.assertEqual(make_render_plan(self.bundle, self.config, multi_speaker=False), original)
+        self.session.update_prompt(self.voice_id, speech_traits=TRAITS)
         _, preflight, _ = _preflight(self.bundle, self.config, chapters_only=True, multi_speaker=False)
-        self.assertFalse(any("speech_traits" in chunk for chapter in preflight["chapters"]
-                             for chunk in chapter["chunks"]))
+        bound = [turn["speech_traits"] for chapter in preflight["chapters"] for chunk in chapter["chunks"]
+                 for turn in chunk.get("paragraph_turns", [chunk]) if "speech_traits" in turn]
+        self.assertTrue(bound)
+        self.assertTrue(all(value == {self.voice_id: "Light Mexican Spanish-influenced English accent"}
+                            for value in bound))
         self.session.update_prompt(self.voice_id, speech_traits="")
         self.assertEqual(make_render_plan(self.bundle, self.config, multi_speaker=False), original)
 

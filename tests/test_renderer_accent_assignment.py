@@ -55,11 +55,54 @@ class AssignmentTests(unittest.TestCase):
                 patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"):
             return prepare_accents(self.bundle, self.config, None, notify=lambda _: None, **kwargs)
 
-    def test_each_speaking_voice_is_described_by_its_story_names_and_lines(self):
+    def test_each_speaking_voice_is_described_by_its_names_and_where_the_story_introduces_it(self):
         self.assertTrue(self.voices)
-        for entry in self.entries.values():
-            self.assertTrue(entry["names"])
-            self.assertTrue(entry["lines"])
+        for voice_id, entry in self.entries.items():
+            character = next(c for c in self.bundle["cast"]["characters"] if c["voice_id"] == voice_id)
+            self.assertIn(character["name"], entry["names"])
+            self.assertTrue(entry["intro"])
+            self.assertTrue(any(character["name"] in text for text in entry["intro"]))
+
+    def test_a_returning_character_is_introduced_from_the_earliest_book_that_names_them(self):
+        voice_id = self.voices[0]
+        character = next(c for c in self.bundle["cast"]["characters"] if c["voice_id"] == voice_id)
+        earlier = {"cast": {"characters": [{"name": character["name"], "aliases": ["the Harbormaster"],
+                                            "voice_id": voice_id, "description": "A fisher from the northern isles"}]},
+                   "source": {"blocks": [{"text": "Nothing here."},
+                                         {"text": f"The Harbormaster, {character['name']}, came from the northern isles."}]}}
+        entry = voice_entries(self.bundle, [earlier])[voice_id]
+        self.assertIn("came from the northern isles", entry["intro"][0])
+        self.assertTrue(entry["about"].startswith("A fisher from the northern isles (when first met)"))
+
+    def test_each_voice_goes_with_its_designed_description_and_traits(self):
+        voice_id = self.voices[0]
+        profile = next(v for v in self.bundle["cast"]["voices"] if v["id"] == voice_id)
+        profile.update(description="Deep voice, sturdy Yorkshire baritone", speechTraits="Sturdy Yorkshire; unhurried")
+        requests = FakeRequests(everyone("Yorkshire"))
+        self.prepare(requests)
+        row = next(row for row in requests.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
+        self.assertEqual(row[-2:], ["Deep voice, sturdy Yorkshire baritone", "Sturdy Yorkshire; unhurried"])
+
+    def test_an_accent_in_traits_a_person_set_is_their_choice(self):
+        from epub_tts_narrator.renderer.speech_traits import save_speech_traits
+        voice_id = self.voices[0]
+        save_speech_traits(self.bundle, self.config, voice_id, "General American; cool measured pace")
+        requests = FakeRequests(everyone("Welsh"))
+        self.prepare(requests)
+        payload = requests.calls[0][1]
+        self.assertEqual(payload["fixed"], [["f1", self.entries[voice_id]["names"], "General American accent"]])
+        self.assertNotIn(self.entries[voice_id]["names"], [row[1] for row in payload["voices"]])
+        cues = accent_cues(self.bundle, self.config)
+        self.assertEqual(cues[voice_id], "General American accent")
+        self.assertEqual(cues[self.voices[1]], "Welsh accent")
+        # Traits that name no accent are only a clue: the next assignment places that voice too.
+        save_speech_traits(self.bundle, self.config, voice_id, "cool measured pace, clipped consonants")
+        self.assertNotIn(voice_id, accent_cues(self.bundle, self.config))
+        again = FakeRequests(everyone("Irish"))
+        self.prepare(again)
+        row = next(row for row in again.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
+        self.assertEqual(row[-1], "cool measured pace, clipped consonants")
+        self.assertEqual(accent_cues(self.bundle, self.config)[voice_id], "Irish accent")
 
     def test_groups_become_each_voices_cue_and_a_voice_left_out_gets_none(self):
         first, *rest = self.voices
