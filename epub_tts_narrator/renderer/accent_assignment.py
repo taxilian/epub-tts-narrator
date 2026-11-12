@@ -497,11 +497,14 @@ def _report(result, entries, notify, origins=()):
 
 
 def run_accents_command(bundle, config, args, config_path):
-    """``audiobook-render accents BOOK``: propose this book's accents, review and revise them, then save.
+    """``audiobook-render accents BOOK``: review this book's accent plan, change it, then save.
 
-    On a terminal the plan opens in the full-screen accent screen
-    (``accent_tui.py``); elsewhere the plan is printed, and a terminal can
-    save it, type instructions for the model to revise it, or leave it.
+    A book with a saved plan opens it for editing and asks the model nothing
+    until a person asks (a revision, a new plan, or ``--instructions``); a
+    book without one gets a proposal first. On a terminal the plan opens in
+    the full-screen accent screen (``accent_tui.py``); elsewhere it is
+    printed, and a terminal can save it, type instructions for the model to
+    revise it, ask for a new plan, or leave it.
     """
     from .accent_review import AccentPlanner, ask_line, report
     planner = AccentPlanner(bundle, config, config_path, instructions=args.instructions,
@@ -514,18 +517,34 @@ def run_accents_command(bundle, config, args, config_path):
     if not planner.pending:
         print("Every voice's accent is already decided; nothing to assign.")
         return 0
+    # --keep records reasons for accents saved before reasons were, so it asks the model.
+    saved = not planner.keep and planner.load_saved()
+    if saved:
+        print(f"Opening this book's saved plan ({len(planner.groups)} group(s)); the model is asked only when "
+              "you ask for a revision or a new plan" + (", starting with --instructions." if args.instructions
+                                                        else ".") +
+              (f" {len(planner.unassigned())} character(s) added since have no accent yet."
+               if planner.unassigned() else ""))
     from epub_tts_narrator.tui_support import wants_tui
     if not args.apply and wants_tui(args):
         from .accent_tui import AccentApp
         from .accent_review import AccentController
         controller = AccentController(planner)
         try:
-            AccentApp(controller, title=bundle["source"]["book"]["title"]).run()
+            AccentApp(controller, title=bundle["source"]["book"]["title"],
+                      instructions=args.instructions if saved else None).run()
         finally:
             controller.close()
         print(f"Saved accents for {len(planner.pending)} voice(s)." if planner.saved else "Nothing saved.")
         return 0
-    planner.propose()
+    if not saved:
+        planner.propose()
+    elif args.instructions:
+        planner.revise(args.instructions)
+    elif args.apply:
+        report(planner)
+        print("The saved plan is unchanged; nothing to save. Pass --instructions to revise it.")
+        return 0
     report(planner)
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     while not args.apply:
@@ -538,7 +557,10 @@ def run_accents_command(bundle, config, args, config_path):
             return 0
         if choice == "save":
             break
-        planner.revise(instructions)
+        if choice == "new":
+            planner.propose()
+        else:
+            planner.revise(instructions)
         report(planner)
     count = planner.save()
     print(f"Saved accents for {count} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and reason in "

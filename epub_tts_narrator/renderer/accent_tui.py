@@ -55,9 +55,10 @@ class AccentApp(CapturePrintMixin, App):
         Binding("s", "save", "Save", tooltip="Save the accents, groups and reasons"),
     ]
 
-    def __init__(self, controller, *, title="Accents"):
+    def __init__(self, controller, *, title="Accents", instructions=None):
         super().__init__()
         self.controller = controller
+        self.initial_instructions = instructions  # revise the saved plan with these on opening
         self.book_title = title
         self._ui_thread = None
         self._started = time.monotonic()
@@ -86,7 +87,12 @@ class AccentApp(CapturePrintMixin, App):
         self.query_one("#members", DataTable).border_title = "Characters (m moves one)"
         self.query_one("#log", MessageLog).border_title = "Log"
         self.query_one("#jobs", JobsTable).border_title = "Model requests"
-        self.controller.propose()
+        if not self.controller.planner.groups:
+            self.controller.propose()  # no saved plan yet
+        elif self.initial_instructions:
+            self.controller.revise(self.initial_instructions)
+        else:
+            self.controller.log("This is the saved plan; nothing is asked of the model until you press i or n.")
         self.render_all()
         self.query_one("#groups", DataTable).focus()
         self.set_interval(0.5, self._tick)
@@ -114,7 +120,7 @@ class AccentApp(CapturePrintMixin, App):
         status = f"{len(planner.groups)} group(s) · {planner.changed()} voice(s) would change"
         if self.controller.busy():
             status += " · asking the model…"
-        elif planner.saved and not planner.dirty:
+        elif (planner.saved or planner.from_saved) and not planner.dirty:
             status += " · saved"
         elif planner.dirty:
             status += " · not saved"

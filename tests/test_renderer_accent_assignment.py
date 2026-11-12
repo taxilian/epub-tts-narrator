@@ -199,8 +199,10 @@ class AssignmentTests(BookTestCase):
         self.assertEqual(set(assigned_accents(self.bundle, self.config).values()), {"Welsh accent"})
         requests = FakeRequests(everyone("Yorkshire"))
         self.run_command(requests, instructions="They are all from Leeds", apply=True)
-        self.assertEqual(requests.calls[0][1]["notes"], "They are all from Leeds")
-        self.assertNotIn("fixed", requests.calls[0][1])  # this book's own assignments are redone
+        # The book already has a plan, so the instructions revise it.
+        self.assertEqual(requests.calls[0][1]["revise"], "They are all from Leeds")
+        self.assertEqual(requests.calls[0][1]["plan"][0][1], "Welsh accent")
+        self.assertNotIn("fixed", requests.calls[0][1])  # this book's own assignments are what is revised
         self.assertEqual(set(assigned_accents(self.bundle, self.config).values()), {"Yorkshire accent"})
         self.assertEqual(guidance(self.bundle, self.config), "They are all from Leeds")
         self.assertTrue((self.directory / GUIDANCE_FILENAME).is_file())

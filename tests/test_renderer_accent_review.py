@@ -114,12 +114,76 @@ class PlannerTests(PlannerCase):
         planner.set_accent(0, "Irish")
 
 
+class SavedPlanTests(PlannerCase):
+    """A saved plan reopens for editing; the model is asked only when a person asks."""
+
+    def save_plan(self):
+        planner = self.planner(split(("the harbor", "Scottish"), ("inland", "Welsh")))
+        planner.propose()
+        planner.set_why(0, "Fishers")
+        planner.save()
+        return planner
+
+    def test_the_saved_plan_reopens_without_a_request(self):
+        saved = self.save_plan()
+        reopened = self.planner()  # no replies: any request would fail
+        self.assertTrue(reopened.load_saved())
+        self.assertEqual(reopened.groups, saved.groups)
+        self.assertEqual((reopened.dirty, reopened.unassigned()), (False, []))
+        self.assertEqual(self.replies.calls, [])
+
+    def test_a_character_added_since_is_left_without_an_accent(self):
+        self.save_plan()
+        newcomer = self.bundle["cast"]["voices"][0]["id"]
+        groups = read_groups(self.directory, self.bundle["source"]["book"]["id"])
+        for group in groups:
+            if newcomer in group["voice_ids"]:
+                position = group["voice_ids"].index(newcomer)
+                del group["voice_ids"][position], group["names"][position]
+        accent_assignment.save_groups(self.bundle, [g for g in groups if g["voice_ids"]], replace=True)
+        accent_assignment.save_assignments(self.bundle, self.config, {newcomer: None})
+        reopened = self.planner()
+        self.assertTrue(reopened.load_saved())
+        self.assertEqual(reopened.unassigned(), [newcomer])
+
+    def test_accents_saved_before_groups_were_recorded_show_one_group_per_accent(self):
+        first, *others = self.planner().pending
+        accent_assignment.save_assignments(self.bundle, self.config, {first: "Welsh accent",
+                                                                      **{v: "Irish accent" for v in others}})
+        reopened = self.planner()
+        self.assertTrue(reopened.load_saved())
+        self.assertEqual(sorted((g["accent"], g["origin"]) for g in reopened.groups),
+                         [("Irish accent", "(origin not recorded)"), ("Welsh accent", "(origin not recorded)")])
+
+    def test_the_command_reports_a_saved_plan_without_asking_and_revises_only_when_told(self):
+        self.save_plan()
+        args = SimpleNamespace(instructions=None, apply=False, resume=None, keep=False, plain=True)
+        silent = Replies()
+        output = io.StringIO()
+        with patch.object(accent_assignment, "_requests", return_value=silent), \
+                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"), \
+                patch("sys.stdout", output), patch("sys.stderr", io.StringIO()):
+            self.assertEqual(accent_assignment.run_accents_command(self.bundle, self.config, args, None), 0)
+        self.assertEqual(silent.calls, [])
+        self.assertIn("saved plan", output.getvalue())
+        self.assertIn("why: Fishers", output.getvalue())
+        revising = Replies(split(("the harbor", "Irish"), ("inland", "Welsh")))
+        args = SimpleNamespace(instructions="Harbor folk are Irish", apply=True, resume=None, keep=False, plain=True)
+        with patch.object(accent_assignment, "_requests", return_value=revising), \
+                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"), \
+                patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
+            accent_assignment.run_accents_command(self.bundle, self.config, args, None)
+        self.assertEqual(revising.calls[0][1]["revise"], "Harbor folk are Irish")
+        self.assertEqual(revising.calls[0][1]["plan"][0][2], "Fishers")
+
+
 class LineTests(PlannerCase):
     def test_the_line_choice_reads_save_leave_or_instructions(self):
         for answers, expected in (([" a\n"], ("save", None)), (["L\n"], ("leave", None)),
                                   (["i make them Irish\n"], ("revise", "make them Irish")),
                                   (["I\n", "make them Irish\n"], ("revise", "make them Irish")),
-                                  (["?\n", "a\n"], ("save", None)), ([""], ("leave", None))):
+                                  (["?\n", "a\n"], ("save", None)), (["n\n"], ("new", None)),
+                                  ([""], ("leave", None))):
             with self.subTest(answers=answers), patch("sys.stdout", io.StringIO()):
                 lines = iter(answers)
                 self.assertEqual(ask_line(lambda: next(lines), write=lambda _: None), expected)
@@ -195,6 +259,22 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.planner.saved)
             first = self.planner.pending[0]
             self.assertEqual(assigned_accents(self.case.bundle, self.case.config)[first], "Irish accent")
+
+    async def test_a_saved_plan_opens_without_asking_the_model(self):
+        self.planner.propose()
+        self.planner.save()
+        reopened = self.case.planner()  # no replies: any request would fail
+        reopened.load_saved()
+        controller = AccentController(reopened, describe_error=str)
+        self.addCleanup(controller.close)
+        from epub_tts_narrator.renderer.accent_tui import AccentApp
+        app = AccentApp(controller, title="Fixture Book")
+        async with app.run_test(size=(160, 45)) as pilot:
+            controller.jobs.wait_idle(5)
+            await pilot.pause()
+            self.assertEqual(app.query_one("#groups", DataTable).row_count, 2)
+            self.assertEqual(controller.jobs.jobs(), [])
+            self.assertIn("saved", app.sub_title)
 
     async def test_moving_a_character_and_quitting_unsaved_asks_first(self):
         async with self.app.run_test(size=(160, 45)) as pilot:

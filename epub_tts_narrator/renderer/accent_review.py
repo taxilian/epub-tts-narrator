@@ -54,12 +54,49 @@ class AccentPlanner:
         self.clues = assignment.voice_clues(bundle, self.config, store=voice_store(bundle, self.config))
         self.before = accent_cues(bundle, self.config)
         self.groups = []
+        self.from_saved = False  # the plan on screen is the saved one, not a new proposal
         self.revisions = []  # instructions given while reviewing, in order
         self.dirty = False
         self.saved = False
         self._requests = requests
         self.run_id = resume
         self._resume = resume
+
+    # The saved plan ---------------------------------------------------------
+
+    def load_saved(self):
+        """Open this book's saved plan for editing, without asking the model. False when there is none.
+
+        Characters added since it was saved are left without an accent (``unassigned``).
+        A book saved before groups were recorded shows one group per accent.
+        """
+        own = assignment.assigned_accents(self.bundle, self.config, own=True)
+        accents = {voice_id: own[voice_id] for voice_id in self.pending if own.get(voice_id)}
+        if not accents:
+            return False
+        groups, placed = [], set()
+        for group in assignment.read_groups(self.bundle["directory"], self.bundle["source"]["book"]["id"]):
+            members = [voice_id for voice_id in group["voice_ids"]
+                       if accents.get(voice_id, "").casefold() == group["accent"].casefold() and voice_id not in placed]
+            if members:
+                placed.update(members)
+                groups.append({"origin": group["origin"], "accent": group["accent"], "why": group["why"],
+                               "voice_ids": members, "names": [self.label(voice_id) for voice_id in members]})
+        by_accent = {}
+        for voice_id, accent in accents.items():
+            if voice_id not in placed:
+                by_accent.setdefault(accent, []).append(voice_id)
+        for accent, members in by_accent.items():
+            groups.append({"origin": "(origin not recorded)", "accent": accent, "why": "", "voice_ids": members,
+                           "names": [self.label(voice_id) for voice_id in members]})
+        self.groups = groups
+        self.from_saved = True
+        self.dirty = False
+        if self.explicit_guidance is not None:
+            # On a saved plan, --instructions are a revision of it, kept with the book's earlier guidance.
+            self.explicit_guidance = None
+            self.base_notes = assignment.guidance(self.bundle, self.config)
+        return True
 
     # Model requests ---------------------------------------------------------
 
@@ -79,7 +116,8 @@ class AccentPlanner:
         return self._requests
 
     def _notes(self):
-        return "\n".join(note for note in [self.base_notes, *self.revisions] if note)[-assignment.MAX_NOTES:]
+        notes = dict.fromkeys(note for note in [self.base_notes, *self.revisions] if note)
+        return "\n".join(notes)[-assignment.MAX_NOTES:]
 
     def _ask(self, revise=None):
         return assignment.request_assignment(
@@ -107,6 +145,7 @@ class AccentPlanner:
     def _take(self, result):
         self.groups = [dict(group, voice_ids=list(group["voice_ids"]), names=list(group["names"]))
                        for group in result["groups"]]
+        self.from_saved = False
         self.dirty = True
 
     # Reading ----------------------------------------------------------------
@@ -285,11 +324,11 @@ def report(planner, write=print):
 
 
 def ask_line(read=None, write=print):
-    """The line interface's choice: ("save"|"leave"|"revise", instructions)."""
+    """The line interface's choice: ("save"|"leave"|"new"|"revise", instructions)."""
     read = read or sys.stdin.readline
     while True:
         print("[A] save these accents / [I] type instructions for the model to revise them / "
-              "[L] leave the book unchanged: ", end="", flush=True)
+              "[N] ask the model for a new plan / [L] leave the book unchanged: ", end="", flush=True)
         try:
             answer = read()
         except KeyboardInterrupt:
@@ -303,6 +342,8 @@ def ask_line(read=None, write=print):
         answer = answer.strip()
         if answer.casefold() in {"a", "l", "q"}:
             return ("save" if answer.casefold() == "a" else "leave"), None
+        if answer.casefold() == "n":
+            return "new", None
         if answer.casefold() == "i" or answer.casefold().startswith("i "):
             text = answer[1:].strip()
             if not text:
@@ -314,4 +355,4 @@ def ask_line(read=None, write=print):
             if text:
                 return "revise", text
             continue
-        write("Please enter A, I or L.")
+        write("Please enter A, I, N or L.")
