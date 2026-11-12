@@ -49,6 +49,21 @@ class StagedWorkflowTests(unittest.TestCase):
     def checkpoint(self, number=1):
         return self.root / "work" / "completed-chapters" / f"chapter-{number:04d}.json"
 
+    def stale_checkpoint_with_newer_accepted_take(self, request_hash, *, seed_offset=1000):
+        checkpoint = self.checkpoint()
+        stale = checkpoint.read_bytes()
+        directory = self.root / "work" / "clips" / request_hash
+        accepted = read_json(directory / "accepted.json")
+        (directory / accepted["audio_file"]).unlink()
+        write = self.engine._write
+
+        def replacement_take(text, path, seed):
+            return write(text, path, seed + seed_offset)
+
+        with patch.object(self.engine, "_write", side_effect=replacement_take):
+            self.chapters()
+        checkpoint.write_bytes(stale)
+
     def test_chapters_only_then_model_free_assembly_preserve_exact_audio_and_sync(self):
         result = self.chapters()
         self.assertEqual(result["status"], "chapters_complete")
@@ -303,6 +318,41 @@ class StagedWorkflowTests(unittest.TestCase):
         for action in (self.package, self.chapters):
             with self.subTest(action=action), self.assertRaisesRegex(RenderBlocked, "Cached audio changed"):
                 action()
+
+    def test_newer_accepted_take_makes_completed_chapter_stale_and_rebuilds_from_cache(self):
+        self.chapters()
+        record = read_json(self.checkpoint())
+        request_hash = record["acceptance"][0]["request_hash"]
+        self.stale_checkpoint_with_newer_accepted_take(request_hash)
+        before = len(self.engine.speech_calls), len(self.verifier.calls)
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")):
+            with self.assertRaisesRegex(RenderBlocked, "saved clip.*removed"):
+                self.package()
+            self.assertEqual(self.chapters()["status"], "chapters_complete")
+            self.assertEqual(self.package()["status"], "complete")
+        self.assertEqual(before, (len(self.engine.speech_calls), len(self.verifier.calls)))
+
+    def test_stale_checkpoint_scan_does_not_hide_changed_later_clip(self):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first lantern shone above the quiet harbor.", "narration", "p"),
+            ("A second lantern marked the return channel.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / "two-clip-bundle")
+        self.bundle = prepare_bundle(load_bundle(self.root / "two-clip-bundle"))
+        self.chapters()
+        record = read_json(self.checkpoint())
+        first_hash = record["acceptance"][0]["request_hash"]
+        second_hash = record["acceptance"][1]["request_hash"]
+        self.stale_checkpoint_with_newer_accepted_take(first_hash)
+
+        second_directory = self.root / "work" / "clips" / second_hash
+        second_accepted = read_json(second_directory / "accepted.json")
+        second_wav = second_directory / second_accepted["audio_file"]
+        second_wav.write_bytes(second_wav.read_bytes()[:-2] + b"xx")
+        with self.assertRaisesRegex(RenderBlocked, f"Invalid saved chapter clip {second_hash}: Cached audio changed"):
+            self.package()
 
     def test_changed_normalization_reuses_verified_clips_and_replaces_chapter_checkpoint(self):
         old = self.chapters()

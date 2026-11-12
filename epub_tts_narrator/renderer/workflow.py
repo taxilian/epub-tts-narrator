@@ -1793,8 +1793,12 @@ def _saved_chapter_clips_present(work, record):
                     present = False
                     continue
                 checksum = file_hash(regular_file(wav))
-                if checksum != cached.get("audio_sha256") or checksum != lane.get("audio_sha256"):
+                if checksum != cached.get("audio_sha256"):
                     raise ValueError("Cached audio changed")
+                if checksum != lane.get("audio_sha256"):
+                    # The accepted take changed after the checkpoint. Keep scanning:
+                    # another constituent may still prove actual corruption.
+                    present = False
             except (ValueError, OSError) as exc:
                 raise RenderBlocked(f"Invalid saved chapter clip {key}: {exc}") from exc
     return present
@@ -1857,7 +1861,7 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
             f"Completed {chapter['id']} is stale: source, selected voices, synthesis model, or "
             "render settings changed. Run render --chapters-only for this chapter again.")
     if not _saved_chapter_clips_present(work, record):
-        raise RenderBlocked(f"A saved clip for {chapter['id']} was removed. "
+        raise RenderBlocked(f"A saved clip for {chapter['id']} was removed or its accepted take changed. "
                             "Run render --chapters-only for this chapter to restore it.")
     try:
         # A checkpoint binds every spoken chunk to a successful verification,
