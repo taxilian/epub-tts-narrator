@@ -142,6 +142,8 @@ def parser():
             command.add_argument("--transcript", type=Path, required=True,
                                  help="UTF-8 file containing the exact reference recording transcript")
         if name == "cast":
+            from epub_tts_narrator.tui_support import add_plain_option
+            add_plain_option(command)
             command.add_argument("--voice-designer", choices=("local", "gemini", "elevenlabs"),
                                  help="Override voice creation (default: Gemini when configured, otherwise local)")
             command.add_argument("--action", default="interactive",

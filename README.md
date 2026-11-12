@@ -21,6 +21,8 @@ python3.11 -m venv .venv
 uv venv --python 3.12 .venv-renderer
 uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
+# Optional: full-screen casting (Textual); commands keep their line output without it
+uv pip install --python .venv-renderer/bin/python -e ".[tui]"
 ```
 
 Two commands come from one package: `epub-tts-narrator` (analysis; `epub-audiobook` remains a legacy alias) and `audiobook-render` (rendering). The module forms `python -m epub_tts_narrator` and `python -m epub_tts_narrator.renderer` work without installing.

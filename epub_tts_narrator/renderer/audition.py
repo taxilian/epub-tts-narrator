@@ -532,7 +532,16 @@ def casting_command(args, bundle, config):
             true_peak_db=settings.get("sample_true_peak_db", -1.5),
             ffmpeg=render.get("ffmpeg", "ffmpeg"),
         )
-    session = CastingSession(bundle, config, model_setup_factory=ModelSetup)
+    from epub_tts_narrator.tui_support import wants_tui
+    use_tui = action == "interactive" and wants_tui(args)
+    setup_factory, bridge = ModelSetup, None
+    if use_tui:
+        from epub_tts_narrator.tui_widgets import PromptBridge
+        # Model download questions are answered in a dialog, never on the raw terminal.
+        bridge = PromptBridge(None)
+        setup_factory = lambda settings: ModelSetup(settings, input_stream=bridge.input,  # noqa: E731
+                                                    output_stream=bridge.output)
+    session = CastingSession(bundle, config, model_setup_factory=setup_factory)
     player = AudioPlayer(settings.get("player", ["/usr/bin/afplay"]), normalizer=normalizer)
     try:
         rows = session.rows()
@@ -550,7 +559,14 @@ def casting_command(args, bundle, config):
             if accent is not None:
                 edits["accent"] = accent
             session.update_prompt(args.voice_id, **edits)
-        if action == "interactive":
+        if action == "interactive" and use_tui:
+            from .cast_tui import run_cast_tui
+            from .cast_tui_model import CastController
+            controller = CastController(session, player, config_path=getattr(args, "config", None))
+            controller.prompt_bridge = bridge
+            book = bundle.get("source", {}).get("book", {})
+            run_cast_tui(controller, title=book.get("title") or Path(bundle["directory"]).name)
+        elif action == "interactive":
             run_casting(session, player)
         elif action == "list":
             print(json.dumps([row] if row else rows, ensure_ascii=False, indent=2))
