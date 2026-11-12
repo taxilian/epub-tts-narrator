@@ -126,6 +126,19 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("Done: Generate Ava with Gemini")
                             for _, _, text in self.controller.messages))
 
+    def test_the_accent_cue_is_shown_offered_from_the_description_and_saved(self):
+        ava = self.row("v-ava")
+        ava["accent_suggestion"] = "light Irish accent"
+        sections = {title: (value, key) for title, value, key in self.controller.details(ava)}
+        self.assertEqual(sections["Accent cue (said before every line)"],
+                         ("(none); suggested: light Irish accent", "A"))
+        self.assertEqual(self.controller.field_value(ava, "accent"), "light Irish accent")
+        self.controller.save_field(ava, "accent", "light Irish accent")
+        with self.assertRaisesRegex(ValueError, "at most 80"):
+            self.controller.save_field(ava, "accent", "x" * 81)
+        self.settle()
+        self.assertEqual(self.session.calls, [("update_prompt", ("v-ava",), {"accent": "light Irish accent"})])
+
     def test_invalid_edits_fail_before_anything_is_queued(self):
         ava = self.row("v-ava")
         for field, value in (("prompt", ""), ("reference_text", "x" * 1001), ("speech_traits", "[shouting]"),

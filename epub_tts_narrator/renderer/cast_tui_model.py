@@ -31,6 +31,7 @@ FIELDS = {
     "prompt": "Voice description",
     "reference_text": "Audition script",
     "speech_traits": "Speech traits",
+    "accent": "Accent cue",
 }
 
 
@@ -162,6 +163,9 @@ def detail_sections(row, rows, status, note):
         (FIELDS["reference_text"], row.get("reference_text", ""), "s"),
         ("Script source", script_source, ""),
         (FIELDS["speech_traits"], row.get("speech_traits") or "(none)", "t"),
+        (FIELDS["accent"] + " (said before every line)", (row.get("accent") or "(none)")
+         + (f"; suggested: {row['accent_suggestion']}" if row.get("accent_suggestion")
+            and row.get("accent_suggestion") != row.get("accent") else ""), "A"),
         ("Sharing", sharing, "d"),
         ("Reference clips", clip_text, "c"),
     ]
@@ -328,12 +332,19 @@ class CastController:
         elif field == "speech_traits":
             if value != "":
                 validate_speech_traits(value)
+        elif field == "accent":
+            if value != "":
+                from .speech_traits import validate_accent
+                validate_accent(value)
         else:
             raise ValueError("Unknown voice field")
 
     def field_value(self, row, field):
         if field not in FIELDS:
             raise ValueError("Unknown voice field")
+        if field == "accent" and not row.get("accent"):
+            # Offer the cue the voice description suggests; saving it is still the person's choice.
+            return row.get("accent_suggestion") or ""
         return row.get(field) or ""
 
     def save_field(self, row, field, value):
