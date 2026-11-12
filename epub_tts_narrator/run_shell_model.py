@@ -495,6 +495,36 @@ class RunModel:
                                  f"{gauges.get('queued_now', 0)} queued", level)
         return result
 
+    def task_glance(self, now=None):
+        """At-a-glance figures for a command that is not a render: ``{name: (value, detail, level)}``."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            progress = dict(self.progress or {}) if self.running else {}
+            events = [event for _, event in self.logs]
+            failures = len(self.current_failures())
+        level, text = self.health(now)
+        warnings = [event for event in events if event.severity == "warning"]
+        errors = [event for event in events if event.severity == "error"]
+        step = "—"
+        detail = ""
+        if progress.get("step_name"):
+            step = f"{progress['step_name']} {progress.get('step_fraction', 0):.0%}"
+            detail = f"step {progress.get('step')} of {progress.get('steps')}" + (
+                f" · {progress['stage']}" if progress.get("stage") else "")
+        requests = progress.get("streams") or 0
+        received = progress.get("received")
+        return {
+            "Health": (text, "", level),
+            "Step": (step, detail, "busy" if self.running else "ok"),
+            "Model requests": (str(requests), (f"{received / 1024:.1f} KiB received" if received else
+                                               "none in progress" if not requests else ""), "busy"),
+            "Warnings": (str(len(warnings)), _short(warnings[-1].text) if warnings else "none",
+                         "warning" if warnings else "ok"),
+            "Errors": (str(len(errors) + failures), _short(errors[-1].text) if errors else "none",
+                       "error" if errors or failures else "ok"),
+            "Elapsed": (_duration((self.finished_at or now) - self.started), "", "ok"),
+        }
+
     def book_rows(self):
         """``[(book, percent or None, state, ready, total, active chapters, blocks done/total, failures)]``.
 
@@ -594,6 +624,11 @@ class RunModel:
                 lines.append(_line(event))
         lines.extend(_line(event) for event in tail)
         return lines
+
+
+def _short(text, limit=60):
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _line(event):

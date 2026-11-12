@@ -271,6 +271,7 @@ class BusStreamConsole(StreamConsole):
         self.bus.publish("progress", data={
             "overall": self._overall, "stage": self._stage, "step": step, "steps": step_count,
             "step_name": step_name, "step_fraction": step_fraction, "streams": len(self._active),
+            "received": sum(state["received"] for state in self._active.values()),
             "activity": lines[0] if lines else "", "totals": lines[1] if lines else ""})
         self._last_draw = now
 

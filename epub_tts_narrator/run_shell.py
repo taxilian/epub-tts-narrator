@@ -130,16 +130,29 @@ class RunApp(CapturePrintMixin, App):
         self._thread = None
         self._player = None
 
+    PROFILE = "render"
+    FILTER_KEYS = "b book · c chapter · w worker · V voice · v level · / text · x clear"
+
     def compose(self) -> ComposeResult:
         yield Header()
         with TabbedContent(initial="summary", id="tabs"):
             with TabPane("Summary", id="summary"):
                 with Grid(id="glance"):
                     for name in self.TILES:
-                        yield Static("", classes="tile", id="tile-" + name.lower().replace(" ", "-"))
-                yield Static("", id="nodes-line")
-                yield Static("", id="progress")
-                yield DataTable(id="books", cursor_type="row", zebra_stripes=True)
+                        yield Static("", classes="tile", id=_tile_id(name))
+                yield from self._compose_summary()
+            yield from self._compose_tabs()
+        yield Footer()
+
+    def _compose_summary(self):
+        yield Static("", id="nodes-line")
+        yield Static("", id="progress")
+        yield DataTable(id="books", cursor_type="row", zebra_stripes=True)
+
+    def _compose_tabs(self):
+        """Every tab after Summary; the render layout adds chapters, nodes and rejected takes."""
+        render = self.PROFILE == "render"
+        if render:
             with TabPane("Chapters", id="chapters"):
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="sched")
@@ -152,19 +165,19 @@ class RunApp(CapturePrintMixin, App):
                 yield Static("", id="nodes-title", classes="section-title")
                 yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
                 yield DataTable(id="stages", cursor_type="row")
-            with TabPane("Log", id="log-tab"):
-                yield Static("", id="filters")
-                yield Input(placeholder="Filter messages by text", id="search")
-                yield RichLog(id="log", wrap=True, markup=False, highlight=False)
-            with TabPane("Errors", id="errors-tab"):
-                yield DataTable(id="errors", cursor_type="row")
+        with TabPane("Log", id="log-tab"):
+            yield Static("", id="filters")
+            yield Input(placeholder="Filter messages by text", id="search")
+            yield RichLog(id="log", wrap=True, markup=False, highlight=False)
+        with TabPane("Errors", id="errors-tab"):
+            yield DataTable(id="errors", cursor_type="row")
+        if render:
             with TabPane("Rejected", id="rejected-tab"):
                 yield Static(Text("Every take verification rejected in this run. Enter opens all takes of the "
                                   "passage: listen, mark each good (wrongly rejected) or bad, or change which one "
                                   "is used. e writes the takes you marked differently from verification to "
                                   "render-work/take-feedback-review.json for later study."), classes="section-title")
                 yield DataTable(id="rejected", cursor_type="row", zebra_stripes=True)
-        yield Footer()
 
     def on_mount(self):
         self.title = self.run_title
@@ -173,6 +186,14 @@ class RunApp(CapturePrintMixin, App):
             self.capture_prints(stdout_tty=True, tee=self.bridge.output)
         else:
             self.capture_prints()
+        self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
+        self._mount_profile()
+        self.start_command()
+        self.set_interval(0.5, self.refresh_view)
+        self.refresh_view(force=True)
+
+    def _mount_profile(self):
+        """The render layout's tables and its node polling."""
         self.query_one("#books", DataTable).add_columns("Done", "Book", "State", "Chapters", "Active", "Blocks", "Failures")
         self.query_one("#coordinators", DataTable).add_columns("Chapter worker", "Book", "Chapter", "Blocks", "Working on")
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
@@ -182,14 +203,10 @@ class RunApp(CapturePrintMixin, App):
                                                             "Waiting on the node", "Requests on the node",
                                                             "Sent by this render")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
-        self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
         self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take", "Why")
-        self.start_command()
-        self.set_interval(0.5, self.refresh_view)
         # Nodes report their own batch state; asking can take a moment, so never on the UI thread.
         self.set_interval(2.0, lambda: self.run_worker(self._probe_nodes, thread=True, exclusive=True,
                                                        group="node-probe"))
-        self.refresh_view(force=True)
 
     # Command thread ------------------------------------------------------------
 
@@ -242,9 +259,28 @@ class RunApp(CapturePrintMixin, App):
             return
         self.model.changed.clear()
         model = self.model
-        model.sched = self._sched_status()
         self.sub_title = model.summary()
         self._draw_glance()
+        self._draw_profile()
+        failures = []
+        for index, item in enumerate(model.visible_failures()):
+            scope = item["scope"]
+            failures.append((str(index), (str(item["attempt"]), item.get("state", "failed"),
+                                          scope.get("book") or "", str(scope.get("chapter") or ""),
+                                          item["record"].get("error_type") or item["kind"],
+                                          (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
+        sync_table(self.query_one("#errors", DataTable), failures)
+        tabs = self.query_one("#tabs", TabbedContent)
+        current = len(model.current_failures())
+        tabs.get_tab("errors-tab").label = f"Errors ({current})" if current else "Errors"
+        self._draw_log()
+        self.query_one("#filters", Static).update(Text(
+            "Filters: " + (model.filter.describe() or "none") + "   (" + self.FILTER_KEYS + ")"))
+
+    def _draw_profile(self):
+        """The render layout's chapters, nodes, pipeline stages and rejected takes."""
+        model = self.model
+        model.sched = self._sched_status()
         rows = []
         for key, scope, snapshot, text in model.visible_rows():
             if snapshot:
@@ -263,28 +299,15 @@ class RunApp(CapturePrintMixin, App):
         sync_table(self.query_one("#stages", DataTable), [
             (name, (STAGE_NAMES.get(name, name), str(gauges.get("active_now", 0)), str(gauges.get("queued_now", 0))))
             for name, gauges in sorted(stages.items()) if name in STAGE_NAMES])
-        failures = []
-        for index, item in enumerate(model.visible_failures()):
-            scope = item["scope"]
-            failures.append((str(index), (str(item["attempt"]), item.get("state", "failed"),
-                                          scope.get("book") or "", str(scope.get("chapter") or ""),
-                                          item["record"].get("error_type") or item["kind"],
-                                          (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
-        sync_table(self.query_one("#errors", DataTable), failures)
         sync_table(self.query_one("#rejected", DataTable), [
             (f"{item['request_hash']}:{item['attempt']}",
              (format_seconds(item["time"] - model.started), str(item["scope"].get("book") or ""),
               str(item["scope"].get("chapter") or ""), f"#{item['scope']['block']}" if item["scope"].get("block") else "",
               str(item["attempt"]), (", ".join(item["reasons"]) + (f" ({item['detail']})" if item["detail"] else ""))[:160]))
             for item in model.visible_rejections()[:2000]])
-        tabs = self.query_one("#tabs", TabbedContent)
         rejected = len(model.rejections)
-        tabs.get_tab("rejected-tab").label = f"Rejected ({rejected})" if rejected else "Rejected"
-        current = len(model.current_failures())
-        tabs.get_tab("errors-tab").label = f"Errors ({current})" if current else "Errors"
-        self._draw_log()
-        self.query_one("#filters", Static).update(
-            "Filters: " + (model.filter.describe() or "none") + "   (b book · c chapter · w worker · V voice · v level · / text · x clear)")
+        self.query_one("#tabs", TabbedContent).get_tab("rejected-tab").label = (
+            f"Rejected ({rejected})" if rejected else "Rejected")
 
     def _draw_nodes(self):
         """Chapter workers (not tied to a node) and every node's speech/verify slots."""
@@ -346,10 +369,20 @@ class RunApp(CapturePrintMixin, App):
         except Exception:
             return [], None
 
+    def _glance(self):
+        return self.model.glance()
+
+    def _progress_text(self):
+        progress = self.model.progress if self.model.running else None
+        return "" if not progress else "\n".join(line for line in (
+            f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
+            f"{progress['step_fraction']:.0%} · {progress['stage']}",
+            progress.get("activity", ""), progress.get("totals", "")) if line)
+
     def _draw_glance(self):
         model = self.model
-        for name, (value, detail, level) in model.glance().items():
-            tile = self.query_one("#tile-" + name.lower().replace(" ", "-"), Static)
+        for name, (value, detail, level) in self._glance().items():
+            tile = self.query_one("#" + _tile_id(name), Static)
             text = Text(name + "\n", style="dim")
             text.append(value, style="bold")
             if detail:
@@ -357,12 +390,11 @@ class RunApp(CapturePrintMixin, App):
             tile.update(text)
             for other in ("ok", "busy", "warning", "error"):
                 tile.set_class(other == level, other)
-        progress = model.progress if model.running else None
-        self.query_one("#progress", Static).update(
-            "" if not progress else "\n".join(line for line in (
-                f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
-                f"{progress['step_fraction']:.0%} · {progress['stage']}",
-                progress.get("activity", ""), progress.get("totals", "")) if line))
+        self._draw_summary_extra()
+
+    def _draw_summary_extra(self):
+        model = self.model
+        self.query_one("#progress", Static).update(Text(self._progress_text()))
         sync_table(self.query_one("#books", DataTable), [
             (str(book), (Text("" if percent is None else f"{percent:3d}%", style="bold"),
                          str(book or "this run"), Text(state, style=BOOK_STYLES.get(state, "")),
@@ -380,13 +412,7 @@ class RunApp(CapturePrintMixin, App):
         if self._log_seen == 0:
             items = items[-3000:]
         for sequence, event in items:
-            line = Text(format_seconds(event.time - self.model.started) + " ", style="dim")
-            if event.scope.get("book"):
-                line.append(f"[{event.scope['book']}] ", style="bold")
-            if event.scope.get("chapter") is not None:
-                line.append(f"Ch {event.scope['chapter']}: ", style="bold")
-            line.append(event.text, style=SEVERITY_STYLES.get(event.severity, ""))
-            log.write(line)
+            log.write(_log_line(event, self.model.started))
             self._log_seen = sequence
 
     @staticmethod
@@ -720,6 +746,78 @@ class RunApp(CapturePrintMixin, App):
         self.start_command()
 
 
+def _tile_id(name):
+    return "tile-" + name.lower().replace(" ", "-")
+
+
+class TaskApp(RunApp, inherit_bindings=False):
+    """The run shell for commands that are not renders: analysis, attribution review, assembly, imports.
+
+    Their work is a sequence of steps with model requests, not books of
+    chapters on render nodes, so the Summary shows the run's health, its
+    current step and live model requests, warnings and errors, and the
+    latest output; the Log and Errors views are the same as for a render.
+    """
+
+    PROFILE = "task"
+    FILTER_KEYS = "v level · / text · x clear"
+    TILES = ("Health", "Step", "Model requests", "Warnings", "Errors", "Elapsed")
+    TABS = {"summary": "summary", "log": "log-tab", "errors": "errors-tab"}
+    CSS = RunApp.CSS + """
+    #glance { grid-size: 3 2; }
+    #recent { height: 1fr; border: round $primary-background; }
+    """
+    BINDINGS = [
+        Binding("q", "quit_run", "Quit", tooltip="Quit; while running this asks before stopping anything"),
+        Binding("ctrl+q", "quit_run", "Quit", show=False, priority=True, tooltip="Same as q"),
+        Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
+        Binding("1", "tab('summary')", "Summary", tooltip="At a glance: health, step, model requests, latest output"),
+        Binding("2", "tab('log')", "Log", tooltip="Every message, filtered"),
+        Binding("3", "tab('errors')", "Errors", tooltip="Every failure with its detail"),
+        Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
+        Binding("slash", "search", "Search", tooltip="Filter messages by text"),
+        Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
+        Binding("R", "resume", "Resume", tooltip="Run the same command again; completed work is reused"),
+        Binding("ctrl+c", "interrupt", "Stop", priority=True, show=False,
+                tooltip="Stop, after confirming (completed work is kept)"),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recent_seen = 0
+
+    def _compose_summary(self):
+        yield Static("", id="progress")
+        yield Static(Text("Latest output (2 shows everything, with filters)"), classes="section-title")
+        yield RichLog(id="recent", wrap=True, markup=False, highlight=False)
+
+    def _mount_profile(self):
+        pass
+
+    def _draw_profile(self):
+        pass
+
+    def _glance(self):
+        return self.model.task_glance()
+
+    def _draw_summary_extra(self):
+        self.query_one("#progress", Static).update(Text(self._progress_text()))
+        recent = self.query_one("#recent", RichLog)
+        for sequence, event in self.model.visible_logs(after=self._recent_seen)[-500:]:
+            recent.write(_log_line(event, self.model.started))
+            self._recent_seen = sequence
+
+
+def _log_line(event, started):
+    line = Text(format_seconds(event.time - started) + " ", style="dim")
+    if event.scope.get("book"):
+        line.append(f"[{event.scope['book']}] ", style="bold")
+    if event.scope.get("chapter") is not None:
+        line.append(f"Ch {event.scope['chapter']}: ", style="bold")
+    line.append(event.text, style=SEVERITY_STYLES.get(event.severity, ""))
+    return line
+
+
 STAGE_NAMES = {"synthesis": "Generating speech", "synthesis_slot": "Waiting for a speech slot",
                "recognition": "Transcribing (verification)", "review": "Reviewing transcripts",
                "preparation": "Preparing audio", "admission": "Waiting to start",
@@ -754,7 +852,7 @@ def _render_interrupts(app):
 
 
 def run_in_shell(command, *, title, graceful_render_stop=False, interactive_input=False, resumable=True,
-                 resume_command=None, closing_output=None):
+                 resume_command=None, closing_output=None, layout="task"):
     """Run ``command()`` inside the run shell; return its result (or re-raise its error).
 
     Render boards, prints and terminal prompts go to the screen while it is
@@ -765,7 +863,9 @@ def run_in_shell(command, *, title, graceful_render_stop=False, interactive_inpu
     question) are asked in dialogs. ``resumable`` allows ``R`` to run the
     command again; ``resume_command(model)`` may return a different command
     for that (one that resumes the printed run ID). When the screen closes, the final messages and every error
-    are printed so the terminal keeps a record.
+    are printed so the terminal keeps a record. ``layout`` is ``"render"``
+    for the render dashboard, else the task layout (step, model requests,
+    latest output).
     """
     from .renderer.progress import shell_board
     bus = EventBus()
@@ -773,7 +873,9 @@ def run_in_shell(command, *, title, graceful_render_stop=False, interactive_inpu
     bus.subscribe(model.on_event)
     from .run_events import set_active_bus
     bridge = PromptBridge(None, on_answer=lambda answer: bus.log("> " + (answer or "(no answer)")))
-    app = RunApp(model, bus, command, title=title, interactive_input=interactive_input,
+    # A render's dashboard (books, chapters, nodes, rejected takes) or the plainer task layout.
+    app_class = RunApp if layout == "render" else TaskApp
+    app = app_class(model, bus, command, title=title, interactive_input=interactive_input,
                  resumable=resumable, bridge=bridge, resume_command=resume_command)
     bridge.app = app
     if graceful_render_stop:

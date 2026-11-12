@@ -336,31 +336,88 @@ class ChoiceScreen(ModalScreen):
         self.dismiss(None)
 
 
-class PromptScreen(ModalScreen):
-    """Show a terminal prompt's text and return one typed line (Escape: empty answer)."""
+_CHOICE = re.compile(r"\[([A-Za-z0-9])\]\s*([^/\[]*?)\s*(?=/|\[|$)")
 
-    DEFAULT_CSS = BASE_CSS
+
+def prompt_choices(question):
+    """``[(key, label)]`` from a question like ``[A] apply the new directions / [L] leave it``."""
+    text = question.rstrip().rstrip(":").rstrip()
+    choices = [(key, label.strip(" :")) for key, label in _CHOICE.findall(text)]
+    return choices if len(choices) >= 2 else []
+
+
+class PromptScreen(ModalScreen):
+    """A question the command asks on its terminal, answered in a dialog.
+
+    The command's recent output scrolls above; the question itself always
+    stays visible at the bottom. Lettered choices (``[A] … / [L] …``) become
+    buttons, and pressing a choice's letter answers at once; any other
+    question takes a typed line. Escape ends input, exactly like Ctrl-D on a
+    terminal (the commands treat it as leaving things unchanged); it
+    dismisses with ``None``.
+    """
+
+    DEFAULT_CSS = BASE_CSS + """
+    PromptScreen .dialog { height: 90%; }
+    PromptScreen #prompt-context { height: 1fr; border: round $primary-background; padding: 0 1; }
+    PromptScreen #prompt-question { text-style: bold; margin-top: 1; }
+    PromptScreen #prompt-choices { height: auto; margin-top: 1; }
+    PromptScreen #prompt-choices Button { margin-right: 2; }
+    """
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, text):
+    def __init__(self, text, question=None):
         super().__init__()
-        self.text = text
+        if question is None:
+            lines = text.rstrip("\n").split("\n")
+            question, text = lines[-1], "\n".join(lines[:-1])
+        self.text, self.question = text, question.strip()
+        self.choices = prompt_choices(self.question)
 
     def compose(self) -> ComposeResult:
+        from textual.containers import VerticalScroll
         with Vertical(classes="dialog"):
-            yield Label("Input needed", classes="dialog-title")
-            yield Static(Text(self.text))
-            yield Input(id="answer")
-            yield Static("Enter answers · Escape answers with nothing", classes="dialog-help")
+            yield Label("The command asks", classes="dialog-title")
+            if self.text.strip():
+                with VerticalScroll(id="prompt-context"):
+                    yield Static(Text(self.text))
+            yield Static(Text(self.question.strip() or "Answer:"), id="prompt-question")
+            if self.choices:
+                with Horizontal(id="prompt-choices"):
+                    for key, label in self.choices:
+                        yield Button(Text(f"[{key}] {label}"), id=f"choice-{key}")
+            yield Input(id="answer", placeholder="Or type an answer and press Enter" if self.choices else
+                        "Type an answer and press Enter")
+            yield Static(Text(("Press a choice's letter (or its button) to answer · " if self.choices else "")
+                              + "Escape ends input, which leaves things unchanged"), classes="dialog-help")
 
     def on_mount(self):
-        self.query_one("#answer", Input).focus()
+        if self.text.strip():
+            self.query_one("#prompt-context").scroll_end(animate=False)
+        if self.choices:
+            self.query_one(f"#choice-{self.choices[0][0]}", Button).focus()
+        else:
+            self.query_one("#answer", Input).focus()
+
+    def on_key(self, event):
+        # A choice's letter answers at once, unless the person is typing in the box.
+        if not self.choices or isinstance(self.focused, Input):
+            return
+        key = (event.character or "").casefold()
+        match = next((choice for choice, _ in self.choices if choice.casefold() == key), None)
+        if match is not None:
+            event.stop()
+            self.dismiss(match)
+
+    def on_button_pressed(self, event):
+        if event.button.id and event.button.id.startswith("choice-"):
+            self.dismiss(event.button.id.removeprefix("choice-"))
 
     def on_input_submitted(self, event):
         self.dismiss(event.value)
 
     def action_cancel(self):
-        self.dismiss("")
+        self.dismiss(None)
 
 
 class _BridgeOutput:
@@ -385,7 +442,9 @@ class _BridgeInput:
         self._bridge = bridge
 
     def readline(self):
-        return self._bridge.ask() + "\n"
+        answer = self._bridge.ask()
+        # Escape in the dialog ends input, as end-of-file does on a terminal.
+        return "" if answer is None else answer + "\n"
 
     def isatty(self):
         return True
@@ -399,7 +458,7 @@ class PromptBridge:
     Must never be used from the UI thread itself (that would deadlock).
     """
 
-    CONTEXT_LINES = 30
+    CONTEXT_LINES = 400
 
     def __init__(self, app, *, on_answer=None):
         self.app = app
@@ -417,16 +476,16 @@ class PromptBridge:
             text = "\n".join(text.split("\n")[-self.CONTEXT_LINES:])
             self.pending = ""
         answered = threading.Event()
-        result = {"value": ""}
+        result = {"value": None}
 
         def done(value):
-            result["value"] = value or ""
+            result["value"] = value
             answered.set()
 
         self.app.call_from_thread(self.app.push_screen, PromptScreen(text), done)
         answered.wait()
         if self.on_answer is not None:
-            self.on_answer(result["value"])
+            self.on_answer(result["value"] if result["value"] is not None else "(input ended)")
         return result["value"]
 
 

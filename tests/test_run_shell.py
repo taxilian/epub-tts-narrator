@@ -28,6 +28,17 @@ def chunks(count):
     return [{"spoken_text": "word " * 10} for _ in range(count)]
 
 
+class PromptChoiceTests(unittest.TestCase):
+    def test_lettered_choices_are_read_from_the_question(self):
+        from epub_tts_narrator.tui_widgets import prompt_choices
+        self.assertEqual(prompt_choices("[A] apply the new directions / [L] leave the book unchanged: "),
+                         [("A", "apply the new directions"), ("L", "leave the book unchanged")])
+        self.assertEqual([key for key, _ in prompt_choices(
+            "[A] accept all / [E] edit-review individual corrections / [L] leave unchanged (quit): ")], ["A", "E", "L"])
+        self.assertEqual(prompt_choices("Speaker number, U for unresolved, Enter to keep: "), [])
+        self.assertEqual(prompt_choices("Press [Enter] to continue"), [])
+
+
 class EventParsingTests(unittest.TestCase):
     def test_existing_prefixes_become_scope(self):
         scope, text = parse_scope("[book-2] Ch 3: === Failed chapter 3 / 9: verification; continuing ===")
@@ -330,12 +341,13 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, sys, "stdin", previous)
         async with app.run_test(size=(150, 40)) as pilot:
             await self.wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
-            self.assertIn("[A] accept all", app.screen.text)
+            self.assertTrue(app.screen.question.startswith("[A] accept all"))
+            self.assertEqual([key for key, _ in app.screen.choices], ["A", "E", "L"])
             self.assertIn("3 attribution finding(s).", app.screen.text)
-            await pilot.press("e", "enter")
+            await pilot.press("e")  # a choice's letter answers at once
             await self.wait_for(pilot, lambda: not app.is_running)
-        self.assertEqual(answers, [True, "e\n"])
-        self.assertIn("> e", [event.text for _, event in self.model.logs])
+        self.assertEqual(answers, [True, "E\n"])  # the commands accept either case
+        self.assertIn("> E", [event.text for _, event in self.model.logs])
 
     async def test_resume_can_run_a_different_command_and_non_resumable_runs_refuse(self):
         calls = []
@@ -396,6 +408,106 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.is_running, still_open)
                 self.assertEqual(outcome, [expected])
                 self.board.__exit__(None, None, None)
+
+    async def test_a_free_question_takes_a_typed_answer_and_long_context_scrolls(self):
+        import sys
+        from epub_tts_narrator.tui_widgets import PromptBridge, PromptScreen
+        answers = []
+
+        def command():
+            for number in range(200):
+                print(f"q{number}: Mara -> 'urgent, low' (was 'quiet')")
+            print("Speaker number, U for unresolved, Enter to keep: ", end="", flush=True)
+            answers.append(sys.stdin.readline())
+            return 0
+
+        bridge = PromptBridge(None)
+        app = self.make_app(command)
+        app.interactive_input, app.bridge, bridge.app = True, bridge, app
+        previous = sys.stdin
+        sys.stdin = bridge.input
+        self.addCleanup(setattr, sys, "stdin", previous)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await self.wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            await pilot.pause()
+            self.assertEqual(app.screen.choices, [])
+            self.assertEqual(app.screen.question, "Speaker number, U for unresolved, Enter to keep:")
+            self.assertIn("q199:", app.screen.text)
+            self.assertTrue(app.screen.query_one("#answer").region.height > 0)  # still on screen
+            await pilot.press("1", "2", "enter")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual(answers, ["12\n"])
+
+    async def test_escape_in_a_question_ends_input_like_end_of_file(self):
+        import sys
+        from epub_tts_narrator.tui_widgets import PromptBridge, PromptScreen
+        answers = []
+
+        def command():
+            print("[A] apply the new directions / [L] leave the book unchanged: ", end="", flush=True)
+            answers.append(sys.stdin.readline())
+            return 0
+
+        bridge = PromptBridge(None, on_answer=lambda answer: self.bus.log("> " + answer))
+        app = self.make_app(command)
+        app.interactive_input, app.bridge, bridge.app = True, bridge, app
+        previous = sys.stdin
+        sys.stdin = bridge.input
+        self.addCleanup(setattr, sys, "stdin", previous)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await self.wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            await pilot.press("enter")  # Enter on the focused first choice answers with it...
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual(answers, ["A\n"])
+        answers.clear()
+        app = self.make_app(command)
+        bridge = PromptBridge(None, on_answer=lambda answer: self.bus.log("> " + answer))
+        app.interactive_input, app.bridge, bridge.app = True, bridge, app
+        sys.stdin = bridge.input
+        async with app.run_test(size=(120, 30)) as pilot:
+            await self.wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            await pilot.press("escape")  # ...and Escape ends input, which the commands read as "leave it"
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual(answers, [""])
+        self.assertIn("> (input ended)", [event.text for _, event in self.model.logs])
+
+    async def test_commands_that_are_not_renders_get_the_task_layout(self):
+        from epub_tts_narrator.run_shell import TaskApp
+        from epub_tts_narrator.tui_widgets import ConfirmScreen
+        release = threading.Event()
+
+        def command():
+            print("Narrator read: markup 3/12 complete")
+            print("Could not prepare an extra script; the voice keeps fewer clips")
+            self.bus.publish("progress", data={"overall": 0.6, "stage": "attribution", "step": 2, "steps": 4,
+                                               "step_name": "Attribution", "step_fraction": 0.25, "streams": 3,
+                                               "received": 4096, "activity": "Thinking: …", "totals": "LLM 3 active"})
+            release.wait(10)
+            return 0
+
+        self.bus = EventBus()
+        self.model = RunModel("refresh-directions — book")
+        self.bus.subscribe(self.model.on_event)
+        app = TaskApp(self.model, self.bus, command, title="refresh-directions — book")
+        board = shell_board(self.bus)
+        board.__enter__()
+        self.addCleanup(board.__exit__, None, None, None)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: self.model.progress is not None)
+            await pilot.pause(0.6)
+            tabs = [pane.id for pane in app.query("TabPane")]
+            self.assertEqual(tabs, ["summary", "log-tab", "errors-tab"])
+            self.assertIn("Attribution 25%", str(app.query_one("#tile-step").render()))
+            self.assertIn("4.0 KiB received", str(app.query_one("#tile-model-requests").render()))
+            self.assertIn("1", str(app.query_one("#tile-warnings").render()))
+            self.assertEqual(len(app.query_one("#recent").lines), 2)
+            await pilot.press("2")
+            self.assertEqual(app.query_one("#tabs").active, "log-tab")
+            await pilot.press("q")
+            self.assertIsInstance(app.screen, ConfirmScreen)
+            await pilot.press("escape")
+            release.set()
+            await self.wait_for(pilot, lambda: not app.is_running)
 
     async def test_filters_and_tabs(self):
         release = threading.Event()

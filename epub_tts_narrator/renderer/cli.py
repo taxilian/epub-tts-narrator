@@ -365,7 +365,8 @@ def main(argv=None, *, in_shell=False):
             return run_in_shell(lambda: main(argv, in_shell=True), title=title,
                                 graceful_render_stop=args.command == "render",
                                 resumable=CAST_SHELL_ACTIONS.get(args.action, True) if cast_bulk else True,
-                                resume_command=_resume_books(argv, books) if args.command == "render" else None)
+                                resume_command=_resume_books(argv, books) if args.command == "render" else None,
+                                layout="render" if args.command == "render" else "task")
     engine = verifier = None
     config = None
     interrupts = None
