@@ -591,6 +591,10 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
                 warn(f"Using XHTML fallback for unsupported spine resource: {item['href']}")
                 item_id = item["fallback"]
 
+        # Lazy import avoids a module cycle: the helper shares the safe primitives above.
+        from .epub_navigation import navigation_titles
+        navigation_titles_by_path = navigation_titles(items, spine, xml)
+
         chapters: list[dict] = []
         blocks: list[dict] = []
         heading_ids: dict[str, str] = {}
@@ -636,13 +640,13 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
             heading = heading_row["text"] if heading_row else None
             document_title = next((_normalize("".join(node.itertext())) for node in root.iter()
                                    if _tag(node) == "title"), "")
-            chapter = {"id": chapter_id, "title": heading or document_title or PurePosixPath(href).stem,
+            chapter = {"id": chapter_id, "title": navigation_titles_by_path.get(href) or heading or document_title or PurePosixPath(href).stem,
                        "source_href": href, "block_ids": []}
             for row in rows:
                 block_id = f"b{len(blocks) + 1:06d}"
                 blocks.append({"id": block_id, "chapter_id": chapter_id, **row})
                 chapter["block_ids"].append(block_id)
-                if row is heading_row:
+                if row is heading_row and href not in navigation_titles_by_path:
                     heading_ids[chapter_id] = block_id
             chapters.append(chapter)
             if not rows:
