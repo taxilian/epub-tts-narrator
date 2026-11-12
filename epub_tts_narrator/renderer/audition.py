@@ -327,7 +327,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
             traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
             say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)")
-                + (" (from the voice description)" if row.get("accent_automatic") else ""))
+                + {"assigned": " (the book's accent for this character's origin)",
+                  "description": " (from the voice description)"}.get(row.get("accent_source"), ""))
             suggestion = row.get("accent_suggestion") or ""
             if suggestion and suggestion != row.get("accent"):
                 say("From the description: " + suggestion)

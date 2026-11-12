@@ -377,6 +377,8 @@ class CastingSession:
         # The cue a render uses: a person's choice, else the accent the voice's description names.
         accents = accent_cues(self.bundle, self.config, store=self.store)
         chosen_accents = accent_overrides(self.bundle, self.config, include_cleared=True)
+        from .accent_assignment import assigned_accents
+        assigned = assigned_accents(self.bundle, self.config)
         from .config import designer_records_several_clips
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
@@ -444,6 +446,9 @@ class CastingSession:
                                   else speech_traits(profile)),
                 "accent": accents.get(voice_id, ""),
                 "accent_automatic": voice_id not in chosen_accents and bool(accents.get(voice_id)),
+                "accent_source": ("chosen" if voice_id in chosen_accents else "" if not accents.get(voice_id)
+                                  else "assigned" if accents[voice_id] in {assigned.get(voice_id), assigned.get((derived or {}).get("voice_id"))}
+                                  else "description"),
                 "reference_clips": dict(zip(("count", "source"), clip_choice(
                     self.bundle, self.config, voice_id, canonical_id=self.store.canonical_id,
                     overrides=clip_counts)), designer_records_several=several_clips),

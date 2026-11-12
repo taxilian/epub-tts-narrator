@@ -164,7 +164,8 @@ def detail_sections(row, rows, status, note):
         ("Script source", script_source, ""),
         (FIELDS["speech_traits"], row.get("speech_traits") or "(none)", "t"),
         (FIELDS["accent"] + " (said before every line)", (row.get("accent") or "(none)")
-         + (" (from the voice description)" if row.get("accent_automatic") else "")
+         + {"assigned": " (the book's accent for this character's origin)",
+                  "description": " (from the voice description)"}.get(row.get("accent_source"), "")
          + (f"; suggested: {row['accent_suggestion']}" if row.get("accent_suggestion")
             and row.get("accent_suggestion") != row.get("accent") else ""), "A"),
         ("Sharing", sharing, "d"),

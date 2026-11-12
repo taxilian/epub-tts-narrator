@@ -328,6 +328,8 @@ def _prepare_book(book, args, *, notify=print):
         check_publication_source(bundle, config)
     from .name_pronunciation_tags import prepare_name_pronunciations
     prepare_name_pronunciations(bundle, args.config, notify=notify)
+    from .accent_assignment import prepare_accents
+    prepare_accents(bundle, config, args.config, notify=notify)
     plan = make_plan(bundle, config)
     expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if expected_series and expected_series != config["voices"]["series_id"]:

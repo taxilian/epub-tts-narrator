@@ -150,6 +150,9 @@ sample_true_peak_db = -1.5
 # Gemini-designed voices: record up to this many clips of one hosted voice (1-3),
 # joined into one verified reference (RENDERER.md, "Reference clips").
 reference_clips = 3
+# Before a render, give every voice without an accent one: the cast is grouped by where
+# they come from and each group gets a distinct real-world accent (RENDERER.md, "Accent cues").
+assign_accents = true
 
 [render]
 # Defaults: <book-directory>/render-work and <book-directory>/audiobook.

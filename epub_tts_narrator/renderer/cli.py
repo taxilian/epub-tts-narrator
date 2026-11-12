@@ -31,7 +31,7 @@ CAST_SHELL_ACTIONS = {"generate-missing": True, "prepare-samples": True, "normal
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name", "take-feedback"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name", "take-feedback", "accents"):
         command = commands.add_parser(name)
         if name == "render":
             command.add_argument("bundle", type=Path, nargs="+",
@@ -148,6 +148,14 @@ def parser():
                                  help="Where to write the review (default: BOOK/render-work/take-feedback-review.json)")
             command.add_argument("--all", action="store_true", dest="feedback_all",
                                  help="Also include takes where the person agreed with verification")
+        if name == "accents":
+            command.description = ("Reassign every voice's accent for this book: the text model groups the cast by "
+                                   "where they come from and gives each group a distinct real-world accent. Cues a "
+                                   "person chose and accents inherited from earlier books are kept.")
+            command.add_argument("--instructions", help="Guidance for the accents, e.g. \"the Alorns sound "
+                                 "Scandinavian, Tolnedrans Italian\"; saved with the accents and reused for new voices")
+            command.add_argument("--apply", action="store_true", help="Save without asking")
+            command.add_argument("--resume", metavar="RUN_ID", help="Finish an interrupted run without new requests")
         if name == "import-voices":
             command.description = ("Reuse another book's chosen voices for the same characters (matched by name, "
                                    "not voice ID), e.g. after re-analyzing a book from a cleaner EPUB. Voices this "
@@ -379,7 +387,7 @@ def main(argv=None, *, in_shell=False):
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
         if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
-                            "history-echoes", "take-feedback"}:
+                            "history-echoes", "take-feedback", "accents"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -446,6 +454,9 @@ def main(argv=None, *, in_shell=False):
                   + (f"; {counts['audio_changed']} take(s) changed since they were judged" if counts["audio_changed"] else "")
                   + ".")
             return 0
+        if args.command == "accents":
+            from .accent_assignment import run_accents_command
+            return run_accents_command(bundle, config, args, config_path)
         if args.command in {"pronounce", "pronounce-name"} and (args.replace or args.local_only) \
                 and not (args.export or args.import_file):
             raise ValueError("--replace needs --import, and --local-only needs --export")
@@ -624,6 +635,8 @@ def main(argv=None, *, in_shell=False):
         if args.command == "render":
             from .name_pronunciation_tags import prepare_name_pronunciations
             prepare_name_pronunciations(bundle, config_path)
+            from .accent_assignment import prepare_accents
+            prepare_accents(bundle, config, config_path)
         plan = make_plan(bundle, config)
         if args.command == "plan":
             from .workflow import make_render_plan

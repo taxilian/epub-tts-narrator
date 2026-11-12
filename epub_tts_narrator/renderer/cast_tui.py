@@ -355,7 +355,8 @@ class CastApp(CapturePrintMixin, App):
         elif field == "accent":
             help_text = ("A short cue such as \"heavy Brooklyn accent\", said before every line in this voice; "
                          "empty means no cue for this voice. "
-                         + ("Now taken from the voice description. " if row.get("accent_automatic") else "")
+                         + ({"assigned": "Now the book's accent for this character's origin. ",
+                            "description": "Now taken from the voice description. "}.get(row.get("accent_source"), ""))
                          + ("Pre-filled from the voice description. " if not row.get("accent")
                                                 and row.get("accent_suggestion") else "") + help_text)
         elif field in {"prompt", "reference_text"}:

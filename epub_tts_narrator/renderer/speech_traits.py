@@ -100,7 +100,7 @@ def suggest_accent(description, terms=frozenset()):
 
     The last "<words> accent" phrase, from after its last joining word. It must
     name a real place or people: a capitalized word not starting a sentence, a
-    known real-world accent word, or a lowercase -ian/-ese word ("italian").
+    known real-world accent word, or an -ian/-ese word ("italian").
     A negated phrase ("no accent"), a bare manner ("heavy accent"), and one
     naming a book's own term (``terms``, e.g. "Nyissan accent", which a speech
     model cannot know) give no cue.
@@ -129,7 +129,7 @@ def suggest_accent(description, terms=frozenset()):
             if part.casefold() in terms:
                 return ""
             named = named or (part[:1].isupper() and not _sentence_start(text, word.start())
-                              or part.casefold() in places or part.islower() and part.endswith(("ian", "ese")))
+                              or part.casefold() in places or part.casefold().endswith(("ian", "ese")))
     phrase = " ".join([*(word.group() for word in words), "accent"])
     return phrase if named and len(phrase) <= MAX_ACCENT_CHARACTERS else ""
 
@@ -160,25 +160,39 @@ def accent_cues(bundle, config, *, store=None):
     """Every voice's accent cue for a render.
 
     A person's choice (``voice-accents.json``, nearest book first; an empty
-    choice means no cue) wins. Any other voice uses the accent its description
-    names (``suggest_accent``): the description that designed its saved
-    recording, or, before it is made, the one that will.
+    choice means no cue) wins. Otherwise the book-wide accent assignment
+    (``accent_assignment.py``: the cast grouped by origin, one real accent per
+    group). A voice with neither uses the accent its description names
+    (``suggest_accent``): the description that designed its saved recording,
+    or, before it is made, the one that will. A derived voice (a character's
+    later state) without its own choice keeps its main voice's cue.
     """
+    from .accent_assignment import assigned_accents
     chosen = accent_overrides(bundle, config, include_cleared=True)
+    assigned = assigned_accents(bundle, config)
     if store is None:
         from .book_context import voice_store
         store = voice_store(bundle, config)
     cues = {}
+    derived = {}
     for profile in bundle["cast"]["voices"]:
         voice_id = profile["id"]
         if voice_id in chosen:
             cue = chosen[voice_id]
+        elif isinstance(profile.get("derived_from"), dict):
+            derived[voice_id] = profile["derived_from"].get("voice_id")
+            continue
+        elif assigned.get(voice_id):
+            cue = assigned[voice_id]
         else:
             cue = suggest_accent(designed_description(store, profile))
             if cue:
                 cue = suggest_accent(designed_description(store, profile), _book_terms(bundle))
         if cue:
             cues[voice_id] = cue
+    for voice_id, base in derived.items():
+        if cues.get(base):
+            cues[voice_id] = cues[base]
     return cues
 
 

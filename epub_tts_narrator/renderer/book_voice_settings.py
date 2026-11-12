@@ -106,12 +106,22 @@ def save_book_setting(setting, bundle, config, voice_id, value):
     Removing a value makes the voice inherit an earlier book's choice or the
     global default again.
     """
+    save_book_settings(setting, bundle, config, {voice_id: value})
+
+
+def save_book_settings(setting, bundle, config, changes, *, replace=False):
+    """Save several voices' values for this book in one write (``None`` removes one).
+
+    With ``replace`` this book's own values become exactly ``changes``.
+    """
     from .common import write_json
 
-    if voice_id not in {voice["id"] for voice in bundle["cast"]["voices"]}:
+    allowed = {voice["id"] for voice in bundle["cast"]["voices"]}
+    if set(changes) - allowed:
         raise ValueError("Voice ID is not in the bundle cast")
-    if value is not None:
-        setting.validate(value)
+    for value in changes.values():
+        if value is not None:
+            setting.validate(value)
     directory = Path(bundle["directory"])
     lock = directory / setting.lock_name
     try:
@@ -120,11 +130,12 @@ def save_book_setting(setting, bundle, config, voice_id, value):
         raise ValueError(setting.busy_message) from None
     try:
         series_id = config["voices"]["series_id"]
-        values = read_book_setting(setting, bundle, series_id)
-        if value is None:
-            values.pop(voice_id, None)
-        else:
-            values[voice_id] = value
+        values = {} if replace else read_book_setting(setting, bundle, series_id)
+        for voice_id, value in changes.items():
+            if value is None:
+                values.pop(voice_id, None)
+            else:
+                values[voice_id] = value
         write_json(directory / setting.filename, {
             "format": setting.record_format, "version": 1,
             "series_id": series_id, "book_id": bundle["source"]["book"]["id"],

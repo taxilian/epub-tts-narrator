@@ -41,6 +41,10 @@ pronounce *args:
 pronounce-name *args:
     @"{{ python }}" -m epub_tts_narrator.renderer pronounce "$@"
 
+# BOOK [--instructions TEXT] [--apply]: group the cast by origin and give each group a distinct real accent.
+accents *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer accents "$@"
+
 # BOOK --from OTHER_BOOK: reuse OTHER_BOOK's chosen voices for the same characters.
 import-voices *args:
     @"{{ python }}" -m epub_tts_narrator.renderer import-voices "$@"
