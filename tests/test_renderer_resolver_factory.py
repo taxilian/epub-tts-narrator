@@ -37,7 +37,7 @@ def primary():
 
 
 class RecurringResolverFactoryTests(unittest.TestCase):
-    settings = {"model": "/unused/whisper", "language": "en"}
+    settings = {"model": "/unused/whisper", "language": "en", "phonetic_fallback": "off"}
     provider = {"model": "analysis-model", "base_url": "https://offline.invalid/v1",
                 "api_key": "private-analysis-fixture"}
 
@@ -134,6 +134,20 @@ class RecurringResolverFactoryTests(unittest.TestCase):
         self.assertNotEqual(initial.identity, changed.identity)
         self.assertNotIn("private", json.dumps(initial.identity))
         self.assertNotIn("api_key", json.dumps(initial.identity))
+
+    def test_reference_only_adapter_preserves_existing_backend_judges_and_speech_keys(self):
+        from epub_tts_narrator.renderer.quality import validation_key
+        base = primary()
+        settings = {**self.settings, "recurring_resolution": "off", "phonetic_fallback": "analysis"}
+        with patch("epub_tts_narrator.renderer.verification.MlxWhisperVerifier", return_value=base):
+            wrapped = create_verifier(settings, None, self.provider)
+
+        self.assertEqual(wrapped.identity, base.identity)
+        self.assertEqual(validation_key("words", wrapped), validation_key("words", base))
+        self.assertEqual(wrapped.judge_reference("a", "b"), {"decision": "equivalent"})
+        self.assertEqual(wrapped.review_phonetics("a", "b"), {"decision": "accepted"})
+        base.judge_reference.assert_called_once_with("a", "b", None)
+        base.review_phonetics.assert_called_once_with("a", "b")
 
     def test_resolver_is_closed_even_when_base_close_fails(self):
         base, resolver = primary(), Resolver(SimpleNamespace(identity={}))

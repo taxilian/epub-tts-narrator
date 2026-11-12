@@ -38,13 +38,15 @@ class ReferenceTextJudgingVerifier:
         self.verifier = verifier
         self.judge = judge
         self.identity = dict(verifier.identity)
-        self.reference_judge_identity = getattr(judge, "identity", None)
-        if self.reference_judge_identity is not None:
+        self.reference_judge_identity = (getattr(judge, "identity", None) if judge is not None else
+                                         getattr(verifier, "reference_judge_identity", None))
+        if judge is not None and self.reference_judge_identity is not None:
             self.identity["text_judge"] = self.reference_judge_identity
         self.phonetic_reviewer = phonetic_reviewer
-        self.phonetic_review_identity = getattr(phonetic_reviewer, "identity", None) if judge is not None else None
+        self.phonetic_review_identity = (getattr(phonetic_reviewer, "identity", None) if judge is not None else
+                                        getattr(verifier, "phonetic_review_identity", None))
         self.reference_phonetic_review_identity = getattr(phonetic_reviewer, "reference_identity", None)
-        if self.phonetic_review_identity is not None:
+        if judge is not None and self.phonetic_review_identity is not None:
             self.identity["phonetic_review"] = self.phonetic_review_identity
 
     def __getattr__(self, name):
@@ -52,16 +54,18 @@ class ReferenceTextJudgingVerifier:
 
     def judge_reference(self, expected_text, primary_transcript, secondary_transcript=None):
         if self.judge is None:
-            return None
+            return self.verifier.judge_reference(expected_text, primary_transcript, secondary_transcript)
         return self.judge.judge(expected_text, primary_transcript, secondary_transcript)
 
     def judge_skipped_word(self, expected_text, transcript, word, context):
-        judge = getattr(self.judge, "judge_skipped_word", None)
+        judge = getattr(self.judge if self.judge is not None else self.verifier, "judge_skipped_word", None)
         if not callable(judge):
             return None
         return judge(expected_text, transcript, word, context)
 
     def review_phonetics(self, expected_text, transcript):
+        if self.judge is None:
+            return self.verifier.review_phonetics(expected_text, transcript)
         if self.phonetic_reviewer is None:
             return None
         return self.phonetic_reviewer.review(expected_text, transcript)

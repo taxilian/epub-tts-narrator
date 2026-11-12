@@ -151,6 +151,8 @@ def _text_review_method(name, method):
         return (function is getattr(ReferenceTextJudgingVerifier, name)
                 and type(owner.judge) is JevTranscriptJudge)
     if name in {"review_phonetics", "review_reference_phonetics"}:
+        if name == "review_phonetics" and owner.judge is None:
+            return False
         reviewer = owner.phonetic_reviewer
         return (function is getattr(ReferenceTextJudgingVerifier, name)
                 and type(reviewer) is PronunciationReviewer
