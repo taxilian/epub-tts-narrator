@@ -251,6 +251,19 @@ class ChapterRetries:
             self._busy += 1
             return self._queue.popleft()
 
+    def peek(self):
+        """The next requested unit without taking it, or None."""
+        with self._condition:
+            return self._queue[0] if self._queue else None
+
+    def take_nowait(self):
+        """The next requested chapter without waiting, or None (marks the caller busy when one is returned)."""
+        with self._condition:
+            if not self._queue:
+                return None
+            self._busy += 1
+            return self._queue.popleft()
+
     def done(self):
         with self._condition:
             self._busy -= 1

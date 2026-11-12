@@ -681,6 +681,52 @@ class BookOutcomeBoardTests(QueueFixtureTests):
         self.assertEqual(code, 1)
         self.assertEqual(reported, [(str(self.books[0]), False), (str(self.books[1]), True)])
 
+    def run_in_shell_board(self, behavior, on_event, count=3):
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with (shell_board(bus),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
+            return render_queue_command(self.render_args(*range(1, count + 1)), self.config, poll_seconds=0.01)
+
+    def test_a_retried_book_goes_back_to_the_front_of_the_queue(self):
+        rendered, broken = [], {"book-1"}
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            name = Path(config["render"]["work_dir"]).parent.name
+            rendered.append(name)
+            if name in broken:
+                raise RuntimeError("fixture: voices were missing")
+            return {"chapters": []}
+
+        def on_event(event):
+            if event.kind == "book" and event.data["state"] == "failed" and event.data["retry"] is not None:
+                broken.discard(event.scope["book"])  # the person fixed it, then pressed r
+                self.assertTrue(event.data["retry"]())
+
+        self.assertEqual(self.run_in_shell_board(behavior, on_event), 0)
+        self.assertEqual(rendered, ["book-1", "book-1", "book-2", "book-3"])
+
+    def test_a_queue_with_only_failed_books_waits_for_retries_until_released(self):
+        holds = []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            if Path(config["render"]["work_dir"]).parent.name == "book-2":
+                raise RuntimeError("fixture failure")
+            return {"chapters": []}
+
+        def on_event(event):
+            if event.kind == "hold" and event.data["release"] is not None:
+                holds.append(event.data["failed"])
+                event.data["release"]()
+
+        self.assertEqual(self.run_in_shell_board(behavior, on_event, count=2), 1)
+        self.assertEqual(holds, [1])
+
     def test_a_preparation_failure_counts_as_a_failed_book(self):
         from test_renderer_live_board import TTY
         stream = TTY()

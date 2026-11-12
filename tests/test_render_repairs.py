@@ -139,7 +139,7 @@ class GlanceTests(unittest.TestCase):
         self.assertIn("No block accepted", self.model.health()[1])
         self.bus.publish("failure", "x", scope={"chapter": 1}, data={"record": {"number": 1}})
         self.bus.publish("hold", data={"release": lambda: None, "failed": 1})
-        self.assertEqual(self.model.health(), ("error", "Waiting for retries: 1 failed chapter(s)"))
+        self.assertEqual(self.model.health(), ("error", "Waiting for retries: 1 failure(s)"))
         self.model.finish(2)
         self.assertEqual(self.model.health()[0], "error")
 
@@ -149,6 +149,24 @@ class GlanceTests(unittest.TestCase):
         self.snapshot("k", None, 2, 1, [])
         self.assertEqual(self.model.book_rows()[0][:4], ("solo", "rendering", 1, 4))
         self.assertEqual(self.model.logs[-1][1].scope["book"], "solo")
+
+    def test_a_failed_book_can_go_back_into_the_queue_and_clears_once_it_renders(self):
+        requested = []
+        self.bus.publish("book", "failed", scope={"book": "b2"},
+                         data={"key": "/books/b2", "state": "failed", "retry": lambda: requested.append("b2") or True})
+        [item] = self.model.current_failures()
+        self.assertEqual((item["kind"], item["state"]), ("book", "failed"))
+        self.assertTrue(self.model.retry(item))
+        self.assertEqual((requested, item["state"], self.model.current_failures()), (["b2"], "retrying", []))
+        self.bus.publish("outcome", scope={"book": "b2"}, data={"key": "/books/b2", "succeeded": True})
+        self.assertEqual(item["state"], "retried")
+        # Failing again after a retry turns the same entry back into a failure, with its new retry.
+        item["state"] = "retrying"
+        self.bus.log("[b2] failed: fixture failure again")
+        self.bus.publish("book", "failed", scope={"book": "b2"},
+                         data={"key": "/books/b2", "state": "failed", "retry": lambda: True})
+        self.assertEqual([entry["state"] for entry in self.model.failures], ["failed"])
+        self.assertEqual(self.model.failures[0]["error"], "failed: fixture failure again")
 
     def test_repair_hints_name_the_likely_fix(self):
         def item(error, error_type="RenderBlocked", **extra):

@@ -2756,6 +2756,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     voice_lock = None
     assembly_executor = None
     retries = retry_thread = None
+    retry_threads = []
     try:
         book_lock = _lock_book_audio(bundle)
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
@@ -2915,41 +2916,64 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started)
 
         # A run shell can ask to render a failed chapter again while the run
-        # continues (plain and custom notify never offer retries). Retries run
-        # on their own coordinator with a fresh retry allowance, as a rerun
-        # would; the sequential legacy path runs them after its main pass.
+        # continues (plain and custom notify never offer retries). A retried
+        # chapter goes to the front of the queue: its own coordinator starts
+        # at once, its clips dispatch ahead of every waiting clip, and a
+        # sequential engine renders it next. Each retry gets a fresh retry
+        # allowance, as a rerun would.
         from .progress import offers_chapter_retries
         retry_errors = []
+        sequential = scheduler is None and chapter_coordinators is None
         if offers_chapter_retries(notify):
             from .render_chapter_flow import ChapterRetries
             retries = ChapterRetries()
 
-            def retry_worker():
-                while (index := retries.take()) is not None:
-                    try:
-                        number = plan["chapters"][index]["number"]
-                        with plan_lock:
-                            chapter_failures.pop(number, None)
-                        notify(f"Retrying chapter {number} / {len(bundle['chapters'])} with a fresh retry allowance.")
-                        process(index, budget=SpeechRetryBudget())
-                    except BaseException as error:  # noqa: BLE001 - re-raised by the run after the drain
-                        retry_errors.append(error)
-                        retries.close()
-                    finally:
-                        retries.done()
+            def run_retry(index):
+                number = plan["chapters"][index]["number"]
+                owner = (run_key, number)
+                prioritize = getattr(scheduler, "set_priority", None)
+                try:
+                    with plan_lock:
+                        chapter_failures.pop(number, None)
+                    notify(f"Retrying chapter {number} / {len(bundle['chapters'])} first, "
+                           "with a fresh retry allowance.")
+                    if callable(prioritize):
+                        prioritize(owner)
+                    process(index, budget=SpeechRetryBudget())
+                except BaseException as error:  # noqa: BLE001 - re-raised by the run after the drain
+                    retry_errors.append(error)
+                    retries.close()
+                finally:
+                    if callable(prioritize):
+                        prioritize(owner, False)
+                    retries.done()
 
-            def start_retries():
+            def dispatch_retries():
                 import contextvars
-                thread = Thread(target=contextvars.copy_context().run, args=(retry_worker,),
-                                name="chapter-retries", daemon=True)
-                thread.start()
-                return thread
-            if scheduler is not None or chapter_coordinators is not None:
-                retry_thread = start_retries()
-        if scheduler is None and chapter_coordinators is None:
+                while (index := retries.take()) is not None:
+                    thread = Thread(target=contextvars.copy_context().run, args=(run_retry, index),
+                                    name=f"chapter-retry-{plan['chapters'][index]['number']}", daemon=True)
+                    retry_threads.append(thread)
+                    thread.start()
+
+            def run_waiting_retries():
+                """Sequential engines: render every requested retry now, before the next chapter."""
+                while (index := retries.take_nowait()) is not None:
+                    run_retry(index)
+                    if retry_errors:
+                        raise retry_errors[0]
+
+            if not sequential:
+                import contextvars
+                retry_thread = Thread(target=contextvars.copy_context().run, args=(dispatch_retries,),
+                                      name="chapter-retries", daemon=True)
+                retry_thread.start()
+        if sequential:
             for chapter_index in range(len(plan["chapters"])):
                 stop_if_requested()
                 finish_completed()
+                if retries is not None:
+                    run_waiting_retries()
                 process(chapter_index)
         else:
             # Bounded chapter coordinators share one logical scheduler; the
@@ -2965,9 +2989,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             # Hold while the person retries failed chapters; finishing (or a
             # stop) lets the run report what still failed, as it always has.
             from .progress import report_retry_hold
-            if retry_thread is None:
-                retry_thread = start_retries()
             while True:
+                if sequential:
+                    run_waiting_retries()
                 retries.wait_idle(stop_check=stop_if_requested)
                 finish_completed(final=True)
                 if retry_errors:
@@ -3014,6 +3038,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             retries.close()
             if retry_thread is not None:
                 retry_thread.join()
+            for thread in retry_threads:
+                thread.join()
         if assembly_executor is not None:
             assembly_executor.shutdown(wait=True, cancel_futures=True)
         if voice_lock is not None:

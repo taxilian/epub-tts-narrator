@@ -49,6 +49,10 @@ def _checked(function, args, kwargs):
     return function(*args, **kwargs)
 
 
+class _PriorityMarker:
+    priority = True
+
+
 class LogicalClipScheduler:
     """Globally bounded FIFO executor for logical clip transactions."""
 
@@ -65,6 +69,10 @@ class LogicalClipScheduler:
         self._cond = Condition()
         self._owners = {}
         self._order = deque()
+        # Owners a person asked to render again go to the front: their
+        # transactions (still in their own order) dispatch before any other.
+        self._priority_owners = set()
+        self._priority_order = deque()
         self._submit_waiters = deque()
         self._inflight = 0
         self._pending = 0
@@ -82,6 +90,15 @@ class LogicalClipScheduler:
     def on_logical_executor(self):
         return getattr(self._threads, "logical", False)
 
+    def set_priority(self, owner, high=True):
+        """Put ``owner``'s transactions ahead of every other owner's (a retried chapter)."""
+        with self._cond:
+            if high:
+                self._priority_owners.add(owner)
+            else:
+                self._priority_owners.discard(owner)
+            self._cond.notify_all()
+
     def submit(self, owner, function, *args, **kwargs):
         """Queue one logical transaction for ``owner``; blocks while full."""
         if not callable(function):
@@ -90,7 +107,13 @@ class LogicalClipScheduler:
         future = Future()
         marker = object()
         with self._cond:
-            self._submit_waiters.append(marker)
+            if owner in self._priority_owners:
+                # A retried chapter also waits ahead of other submitters.
+                position = sum(1 for waiter in self._submit_waiters if getattr(waiter, "priority", False))
+                marker = _PriorityMarker()
+                self._submit_waiters.insert(position, marker)
+            else:
+                self._submit_waiters.append(marker)
             try:
                 while True:
                     if self._closed:
@@ -111,7 +134,7 @@ class LogicalClipScheduler:
                     entry = {"queue": deque(), "active": 0}
                     self._owners[owner] = entry
                 entry["queue"].append((future, function, args, kwargs, context))
-                self._order.append((owner, future))
+                (self._priority_order if owner in self._priority_owners else self._order).append((owner, future))
                 self._pending += 1
                 self._pump()
             finally:
@@ -178,15 +201,17 @@ class LogicalClipScheduler:
                     self._pending -= 1
             self._owners.clear()
             self._order.clear()
+            self._priority_order.clear()
             self._cond.notify_all()
         for future in popped:
             future.cancel()
         self._executor.shutdown(wait=wait)
 
     def _pump(self):
-        # Caller holds self._cond: dispatch globally in submission order.
-        while self._inflight < self._limit and self._order:
-            owner, future = self._order.popleft()
+        # Caller holds self._cond: dispatch globally in submission order,
+        # prioritized (retried) owners first.
+        while self._inflight < self._limit and (self._priority_order or self._order):
+            owner, future = (self._priority_order or self._order).popleft()
             entry = self._owners.get(owner)
             if entry is None or not entry["queue"] or entry["queue"][0][0] is not future:
                 continue

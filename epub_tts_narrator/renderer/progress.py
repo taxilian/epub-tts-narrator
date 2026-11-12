@@ -280,9 +280,14 @@ class BusBoard(TerminalBoard):
         self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope,
                          data={"record": dict(failure), "retry": retry, "repair": repair})
 
-    def book_state(self, key, state):
-        """One book's lifecycle: queued, preparing, rendering, assembling, done, failed, interrupted."""
-        self.bus.publish("book", state, scope={"book": _book_label(key)}, data={"key": str(key), "state": state})
+    def book_state(self, key, state, retry=None):
+        """One book's lifecycle: queued, preparing, rendering, assembling, done, failed, interrupted.
+
+        A failed book in a multi-book queue carries ``retry``, which puts it
+        back at the front of that queue.
+        """
+        self.bus.publish("book", state, scope={"book": _book_label(key)},
+                         data={"key": str(key), "state": state, "retry": retry})
 
     def retry_hold(self, release, failed, *, book=None):
         """The run waits for retries (``release`` finishes it), or stopped waiting (``None``)."""
@@ -386,9 +391,9 @@ class PrefixedBoardNotify:
         if getattr(self.board, "structured_status", False):
             self.board.chapter_failure(failure, book=_prefix_book(self.prefix), retry=retry, repair=repair)
 
-    def book_state(self, key, state):
+    def book_state(self, key, state, retry=None):
         if getattr(self.board, "structured_status", False):
-            self.board.book_state(key, state)
+            self.board.book_state(key, state, retry=retry)
 
     def retry_hold(self, release, failed):
         if getattr(self.board, "structured_status", False):
@@ -408,10 +413,10 @@ def offers_chapter_retries(notify):
     return owner is not None and bool(getattr(owner, "structured_status", False))
 
 
-def report_book_state(notify, key, state):
+def report_book_state(notify, key, state, retry=None):
     """A book's lifecycle state for a run shell; plain, terminal and custom output ignore it."""
     if offers_chapter_retries(notify):
-        _board_of(notify).book_state(key, state)
+        _board_of(notify).book_state(key, state, retry=retry)
 
 
 def report_chapter_failure(notify, failure, retry=None, repair=None):

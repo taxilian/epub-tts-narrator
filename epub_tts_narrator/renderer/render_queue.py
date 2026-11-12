@@ -539,11 +539,43 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
     from .progress import report_book_state
     for book in books:
         report_book_state(notify, book, "queued")
+    # A run shell can put a failed book back into this queue (after fixing
+    # what stopped it); a retried book is admitted next, ahead of the books
+    # still waiting. Plain and custom notify never offer book retries.
+    from collections import deque
+    from .progress import offers_chapter_retries, report_retry_hold
+    from .render_chapter_flow import ChapterRetries
+    book_retries = ChapterRetries() if offers_chapter_retries(notify) else None
+    pending = deque(enumerate(books))
+    latest = {}
+
+    def failed(index, run, message):
+        """Record one book's failure, offering the shell a retry while the queue runs."""
+        run.status = ("failed", message)
+        run.finished = True
+        retry = None if book_retries is None else (lambda: book_retries.request(index))
+        report_book_state(notify, run.book, "failed", retry=retry)
+        _record_book_outcome(notify, run.book, False)
+        _emit(notify, f"[{run.name}] failed: {message}")
+
+    def next_book():
+        """``(index, book, retried)`` to admit now, or None when nothing is waiting."""
+        if book_retries is not None:
+            index = book_retries.take_nowait()
+            if index is not None:
+                book_retries.done()
+                return index, books[index], True
+        if pending:
+            return (*pending.popleft(), False)
+        return None
+
     with RenderInterrupts():
         try:
-            for index, book in enumerate(books):
+            while True:
                 stop_if_requested()
-                if runs:
+                if runs and (pending or (book_retries is not None and book_retries.peek() is not None)):
+                    # Wait for room before choosing, so a book put back in the
+                    # queue meanwhile is the one admitted next.
                     previous = runs[-1]
                     spare_polls = 0
                     while previous.thread is not None and previous.thread.is_alive():
@@ -557,14 +589,38 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                                 busy = 0
                             spare_polls = spare_polls + 1 if busy < slots else 0
                             if spare_polls >= GATE_OPEN_POLLS:
-                                _emit(notify, f"Admitting book {index + 1} of {len(books)}: "
+                                again = book_retries is not None and book_retries.peek() is not None
+                                upcoming = book_retries.peek() if again else pending[0][0]
+                                _emit(notify, f"Admitting book {upcoming + 1} of {len(books)}"
+                                             f"{' again' if again else ''}: "
                                              f"spare capacity ({busy} of {slots} slots).")
                                 break
                         changed.wait(poll_seconds)
                         changed.clear()
-
+                chosen = next_book()
+                if chosen is None:
+                    alive = any(run.thread is not None and run.thread.is_alive() for run in runs)
+                    if book_retries is None:
+                        break
+                    if alive:
+                        # Books are still rendering; a retried book may join at any moment.
+                        changed.wait(poll_seconds)
+                        changed.clear()
+                        continue
+                    failures = [run for run in latest.values() if run.status and run.status[0] != "ok"]
+                    if not failures:
+                        break
+                    report_retry_hold(notify, book_retries.release, len(failures))
+                    if not book_retries.wait_for_request(stop_check=stop_if_requested):
+                        break
+                    report_retry_hold(notify, None, 0)
+                    continue
+                index, book, retried = chosen
                 run = _BookRun(index, book)
+                latest[index] = run
                 book_notify = _prefixed(f"[{run.name}] ", notify)
+                if retried:
+                    _emit(notify, f"[{run.name}] Back in the queue at the front: rendering it again.")
                 report_book_state(notify, book, "preparing")
                 try:
                     bundle, config, plan = _prepare_book(book, args, notify=book_notify)
@@ -578,16 +634,11 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                             from .queue_chapters import QueueChapterCoordinators
                             coordinators = QueueChapterCoordinators(slots)
                 except Exception as error:
-                    message = _failure_message(error, run.config)
-                    run.status = ("failed", message)
-                    run.finished = True
                     runs.append(run)
-                    report_book_state(notify, book, "failed")
-                    _record_book_outcome(notify, run.book, False)
-                    _emit(notify, f"[{run.name}] failed: {message}")
+                    failed(index, run, _failure_message(error, run.config))
                     continue
 
-                def render_one(run=run, bundle=bundle, config=config, book_notify=book_notify):
+                def render_one(run=run, bundle=bundle, config=config, book_notify=book_notify, index=index):
                     try:
                         result = render_book(
                             bundle, config, engine, verifier, notify=book_notify,
@@ -602,10 +653,13 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         status = ("failed", _failure_message(error, config))
                     else:
                         status = ("ok", None)
-                    run.status = status
-                    run.finished = True
-                    _record_book_outcome(notify, run.book, status[0] == "ok")
-                    _emit(notify, f"[{run.name}] {status[0]}" + (f": {status[1]}" if status[1] else ""))
+                    if status[0] == "ok":
+                        run.status = status
+                        run.finished = True
+                        _record_book_outcome(notify, run.book, True)
+                        _emit(notify, f"[{run.name}] ok")
+                    else:
+                        failed(index, run, status[1])
                     changed.set()
 
                 run.thread = threading.Thread(target=render_one,
@@ -627,7 +681,11 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                 close = getattr(component, "close", None)
                 if callable(close):
                     close()
-    return _summary([(run.name, *run.status) for run in runs if run.status is not None], notify)
+    if book_retries is not None:
+        book_retries.close()
+    # One line per book: a retried book reports its latest attempt only.
+    return _summary([(run.name, *run.status) for _, run in sorted(latest.items()) if run.status is not None],
+                    notify)
 
 
 def render_queue_command(args, config_path, *, notify=print,

@@ -353,14 +353,23 @@ class PipelineLifecycleTests(unittest.TestCase):
         self._four_chapter_bundle("retry-bundle")
         events = []
 
+        lines = []
+
         def on_event(event):
             events.append(event.kind)
+            if event.kind == "log":
+                lines.append(event.text)
             if event.kind == "failure":
                 self.broken = False  # the person fixed the cause, then pressed r
                 self.assertTrue(event.data["retry"]())
 
         result = self._render_in_shell(scheduler, on_event)
         self.assertEqual(result["status"], "complete")
+        retried = next(index for index, line in enumerate(lines) if line.startswith("Retrying chapter 2 / 4 first"))
+        if scheduler == "legacy":
+            # A sequential engine renders the retried chapter next, ahead of the chapters still waiting.
+            later = next(index for index, line in enumerate(lines) if line.startswith("Processing chapter 3 / 4"))
+            self.assertLess(retried, later)
         self.assertEqual(events.count("failure"), 1)
         self.assertEqual(read_json(self.root / "work" / "status.json")["status"], "complete")
         self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())

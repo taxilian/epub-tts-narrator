@@ -90,7 +90,8 @@ class RunApp(CapturePrintMixin, App):
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
-        Binding("r", "retry", "Retry", tooltip="Render the highlighted failed chapter again while the run continues"),
+        Binding("r", "retry", "Retry", tooltip="Put the highlighted failed chapter or book back at the front of the "
+                                               "queue while the run continues"),
         Binding("t", "takes", "Takes", tooltip="Listen to the failed passage's takes and accept a good one"),
         Binding("F", "finish", "Finish", show=False,
                 tooltip="Stop waiting for retries; the run reports what still failed (asks first)"),
@@ -404,16 +405,15 @@ class RunApp(CapturePrintMixin, App):
     def _open_failure(self, item):
         from .run_shell_screens import FailureScreen
         actions = []
-        if item["kind"] == "chapter" and item.get("state", "failed") == "failed" and self.model.running \
-                and callable(item.get("retry")):
-            actions.append("retry")
+        if item.get("state", "failed") == "failed" and self.model.running and callable(item.get("retry")):
+            actions.append("retry" if item["kind"] == "chapter" else "retry_book")
         if item.get("repair") is not None:
             actions.append("takes")
         if item["scope"].get("book") is not None and self.resumable:
             actions.append("resume_book")
 
         def chosen(action):
-            if action == "retry":
+            if action in ("retry", "retry_book"):
                 self._retry(item)
             elif action == "takes":
                 self._takes(item)
@@ -423,7 +423,10 @@ class RunApp(CapturePrintMixin, App):
 
     def _retry(self, item):
         if self.model.retry(item):
-            self.notify(f"Retrying chapter {item['scope'].get('chapter')}; other chapters keep going.")
+            if item["kind"] == "book":
+                self.notify(f"{item['scope'].get('book')} is back at the front of the queue.")
+            else:
+                self.notify(f"Retrying chapter {item['scope'].get('chapter')} first; other chapters keep going.")
         elif self.model.running:
             self.notify("This failure cannot be retried in place; R resumes after the run.", severity="warning")
         else:
@@ -433,7 +436,7 @@ class RunApp(CapturePrintMixin, App):
     def action_retry(self):
         item = self._highlighted_failure()
         if item is None:
-            self.notify("Highlight a failed chapter in Errors (5) to retry it", severity="warning")
+            self.notify("Highlight a failed chapter or book in Errors (5) to retry it", severity="warning")
             return
         self._retry(item)
 

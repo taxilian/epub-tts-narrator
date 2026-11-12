@@ -25,7 +25,8 @@ from .tui_widgets import BASE_CSS, ChoiceScreen, highlighted_key, sync_table
 
 
 ACTIONS = {
-    "retry": "Retry this chapter now (reuses every verified clip)",
+    "retry": "Retry this chapter now, ahead of everything waiting (reuses every verified clip)",
+    "retry_book": "Put this book back in the queue now, at the front (completed work is reused)",
     "takes": "Listen to the takes and accept one that sounds right",
     "resume_book": "Resume this book after the run (completed work is reused)",
     "close": "Close",

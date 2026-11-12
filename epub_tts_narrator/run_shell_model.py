@@ -175,12 +175,17 @@ class RunModel:
                 self._book(book, key=event.data.get("key"))["state"] = "done" if self.books[book] else "failed"
                 if not self.books[book]:
                     self._book_failure(book, event.data.get("key"))
+                else:
+                    for item in self.failures:
+                        # A retried book that now rendered is no longer a failure.
+                        if item["kind"] == "book" and item["scope"].get("book") == book and item.get("state") == "retrying":
+                            item["state"] = "retried"
             elif event.kind == BOOK:
                 book = event.scope.get("book")
                 state = event.data.get("state")
                 self._book(book, key=event.data.get("key"))["state"] = state
                 if state in ("failed", "interrupted"):
-                    self._book_failure(book, event.data.get("key"))
+                    self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"))
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
@@ -204,15 +209,23 @@ class RunModel:
             state["key"] = key
         return state
 
-    def _book_failure(self, book, key):
-        """One book-level failure per book and attempt, carrying its last error message."""
-        if any(item["kind"] == "book" and item["scope"].get("book") == book and item["attempt"] == self.attempt
-               for item in self.failures):
-            return
+    def _book_failure(self, book, key, retry=None):
+        """One book-level failure per book and attempt, carrying its last error and any retry.
+
+        A book that fails again after a retry updates the same entry, which
+        becomes a failure again with its newest error.
+        """
         last = next((item.text for _, item in reversed(self.logs)
                      if item.severity == "error" and item.scope.get("book") in (book, None)), "")
+        existing = next((item for item in self.failures if item["kind"] == "book"
+                         and item["scope"].get("book") == book and item["attempt"] == self.attempt), None)
+        if existing is not None:
+            if retry is not None or existing.get("state") == "retrying":
+                existing.update(state="failed", error=last or existing["error"],
+                                retry=retry if retry is not None else existing.get("retry"))
+            return
         self.failures.append({"kind": "book", "scope": {"book": book}, "error": last,
-                              "record": {"book": key}, "state": "failed", "attempt": self.attempt})
+                              "record": {"book": key}, "retry": retry, "state": "failed", "attempt": self.attempt})
 
     def _count_log(self, event):
         match = _READY.search(event.text) or _REUSED.match(event.text)
@@ -384,7 +397,7 @@ class RunModel:
             if self.stopping:
                 return "warning", "Stopping at safe boundaries"
             if self.holds:
-                return "error", f"Waiting for retries: {failures} failed chapter(s)"
+                return "error", f"Waiting for retries: {failures} failure(s)"
             if self.rows and now - self.last_progress > STALL_SECONDS:
                 return "warning", f"No block accepted for {_duration(now - self.last_progress)}"
             if failures:
@@ -471,7 +484,7 @@ class RunModel:
             if failures:
                 parts.append(f"{failures} failure(s)")
             if self.holds and self.running:
-                parts.append("waiting for retries (r retries a chapter, F finishes)")
+                parts.append("waiting for retries (r retries, F finishes)")
             parts.append({"running": "stopping…" if self.stopping else "running", "finished": "finished",
                           "failed": "finished with errors", "interrupted": "interrupted"}[self.state])
             if self.attempt > 1:

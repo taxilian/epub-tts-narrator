@@ -106,6 +106,52 @@ class FifoTests(SchedulerTestCase):
             future.result(10)
         self.assertEqual(self.starts.order, ["0-a", "1-a", "1-b", "2-a", "2-b"])
 
+    def test_a_retried_owner_goes_to_the_front_and_keeps_its_own_order(self):
+        scheduler = self.start_scheduler(1, 2, pending_limit=8)
+        gate = Event()
+        self.addCleanup(gate.set)
+        priming = self.submit("book:0", "0-a", gate=gate)
+        waiting = [self.submit("book:1", "1-a"), self.submit("book:1", "1-b")]
+        self.starts.expect("0-a")
+        scheduler.set_priority("retry:2")
+        retried = [self.submit("retry:2", "r-a"), self.submit("retry:2", "r-b")]
+        gate.set()
+        for future in (priming, *waiting, *retried):
+            future.result(10)
+        self.assertEqual(self.starts.order, ["0-a", "r-a", "r-b", "1-a", "1-b"])
+        scheduler.set_priority("retry:2", False)
+        later = [self.submit("book:3", "3-a"), self.submit("retry:2", "r-c")]
+        for future in later:
+            future.result(10)
+        self.assertEqual(self.starts.order[-2:], ["3-a", "r-c"])
+
+    def test_a_retried_owner_also_waits_ahead_of_blocked_submitters(self):
+        scheduler = self.start_scheduler(1, 2, pending_limit=1)
+        gate = Event()
+        self.addCleanup(gate.set)
+        running = self.submit("book:0", "0-a", gate=gate)
+        self.starts.expect("0-a")
+        queued = self.submit("book:0", "0-b")  # fills the pending bound
+        results = {}
+
+        def submit_later(owner, name):
+            results[name] = self.submit(owner, name)
+        ordinary = Thread(target=submit_later, args=("book:1", "1-a"))
+        ordinary.start()
+        while not scheduler._submit_waiters:
+            threading.Event().wait(0.01)
+        scheduler.set_priority("retry:2")
+        retried = Thread(target=submit_later, args=("retry:2", "r-a"))
+        retried.start()
+        while len(scheduler._submit_waiters) < 2:
+            threading.Event().wait(0.01)
+        gate.set()
+        ordinary.join(10)
+        retried.join(10)
+        for future in (running, queued, results["1-a"], results["r-a"]):
+            future.result(10)
+        self.assertLess(self.starts.order.index("r-a"), self.starts.order.index("1-a"))
+
     def test_global_limit_never_grows_with_registered_or_configured_chapters(self):
         scheduler = self.start_scheduler(2, 4)
         gates = {"1-a": Event(), "2-a": Event()}
