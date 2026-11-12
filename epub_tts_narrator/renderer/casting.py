@@ -1112,6 +1112,11 @@ class CastingSession:
             return self._clone_locked(voice_id, profile)
         draft = self._draft(voice_id, self.store.load(voice_id))
         prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
+        # The voice is designed with the accent its lines will be cued with, so the recording and the cue agree.
+        from .speech_traits import accent_cues, with_accent
+        accented = with_accent(prompt, accent_cues(self.bundle, self.config, store=self.store).get(voice_id, ""))
+        # A description already at the length limit is designed as written; the cue still opens every line.
+        prompt = accented if len(accented) <= MAX_PROMPT_CHARACTERS else prompt
         text = _validate_text(draft["reference_text"], "Sample text", MAX_REFERENCE_CHARACTERS)
         engine, designer = self._get_engine(), self._get_designer()
         # Hosted design receives a description it can accept for any character;

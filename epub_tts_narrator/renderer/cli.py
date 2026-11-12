@@ -612,6 +612,10 @@ def main(argv=None, *, in_shell=False):
         if args.command == "cast":
             from .audition import casting_command
             config = select_voice_designer(config, args.voice_designer)
+            if args.action in {"interactive", "generate", "generate-missing", "regenerate-all"}:
+                # Accents first, so new voices are designed with the accent their lines will carry.
+                from .accent_assignment import prepare_accents
+                prepare_accents(bundle, config, config_path)
             return casting_command(args, bundle, config)
         if args.command == "cache-report":
             if not 1 <= args.max_examples <= 100:
@@ -638,6 +642,7 @@ def main(argv=None, *, in_shell=False):
         if args.command == "render":
             from .name_pronunciation_tags import prepare_name_pronunciations
             prepare_name_pronunciations(bundle, config_path)
+        if args.command in {"render", "create-voices"}:
             from .accent_assignment import prepare_accents
             prepare_accents(bundle, config, config_path)
         plan = make_plan(bundle, config)

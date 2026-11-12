@@ -158,6 +158,27 @@ def trait_accent(traits, terms=frozenset()):
     return suggest_accent(traits, terms)
 
 
+def with_accent(description, cue, terms=frozenset()):
+    """A voice description that names ``cue`` as its accent, for designing the voice.
+
+    An accent the description already names is replaced by the cue, so the
+    designer never hears two accents; otherwise "Speaks with a … accent." is
+    added. The cue itself already passed the real-accent rules.
+    """
+    if not cue or not isinstance(description, str):
+        return description
+    named = suggest_accent(description, terms)
+    if named.casefold() == cue.casefold():
+        return description
+    if named:
+        index = description.casefold().rfind(named.casefold())
+        if index >= 0:
+            return description[:index] + cue + description[index + len(named):]
+    article = "an" if cue[:1].casefold() in "aeiou" else "a"
+    text = description.rstrip()
+    return f"{text}{'' if not text or text.endswith(('.', '!', '?')) else '.'} Speaks with {article} {cue}.".lstrip()
+
+
 _TERMS = {}
 
 

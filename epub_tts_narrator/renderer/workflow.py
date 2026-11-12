@@ -1285,7 +1285,12 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
                 bundle, requested_id, canonical_id=store.canonical_id, fallback_text=text)
             text = sample["reference_text"]
             sample_source = sample["source"]
-        prompt = designer_prompt(default_voice_prompt(profile), designer_identity(source))
+        prompt = default_voice_prompt(profile)
+        if isinstance(bundle, dict) and {"directory", "cast", "source"} <= set(bundle):
+            # Designed with the accent its lines will be cued with, so the recording and the cue agree.
+            from .speech_traits import accent_cues, with_accent
+            prompt = with_accent(prompt, accent_cues(bundle, config, store=store).get(requested_id, ""))
+        prompt = designer_prompt(prompt, designer_identity(source))
         request = {"kind": "create_voice", "engine": engine.identity, "designer": designer_identity(source),
                    "series_id": store.series_id, "voice_id": voice_id, "profile": profile,
                    "prompt": prompt, "text": text, "base_seed": config["render"]["seed"]}

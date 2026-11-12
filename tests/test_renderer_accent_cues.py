@@ -159,6 +159,21 @@ class SuggestionTests(unittest.TestCase):
         self.assertEqual(suggest_accent("strong Murgo accent"), "strong Murgo accent")
 
 
+class DesignTests(unittest.TestCase):
+    def test_a_voice_is_designed_naming_exactly_its_cued_accent(self):
+        from epub_tts_narrator.renderer.speech_traits import with_accent
+        for description, cue, expected in (
+                ("Sturdy baritone with a neutral General American accent and a warm edge.", "Yorkshire accent",
+                 "Sturdy baritone with a Yorkshire accent and a warm edge."),
+                ("Low husky voice, unhurried", "Received Pronunciation accent",
+                 "Low husky voice, unhurried. Speaks with a Received Pronunciation accent."),
+                ("Bright voice.", "Irish accent", "Bright voice. Speaks with an Irish accent."),
+                ("Rough voice with a thick Welsh accent", "thick Welsh accent", "Rough voice with a thick Welsh accent"),
+                ("Bright voice.", "", "Bright voice.")):
+            with self.subTest(description=description):
+                self.assertEqual(with_accent(description, cue), expected)
+
+
 class AccentInheritanceTests(unittest.TestCase):
     make_book = test_book_context.BookContextTests.make_book
 

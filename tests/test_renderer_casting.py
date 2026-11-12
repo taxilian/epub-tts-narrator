@@ -357,6 +357,16 @@ class CastingTests(unittest.TestCase):
         self.assertIsNone(self.session.store.load(self.voice_id))
         self.assertEqual(len(self.session.rows()[0]["candidates"]), 1)
 
+    def test_a_voice_is_designed_with_the_accent_its_lines_will_carry(self):
+        # The fixture reads the tracked example book in place; the cue comes from a patched lookup instead.
+        self.session.update_prompt(self.voice_id, "Warm and low, with a neutral General American accent.")
+        with patch("epub_tts_narrator.renderer.speech_traits.accent_cues",
+                   return_value={self.voice_id: "broad Yorkshire accent"}):
+            candidate = self.session.generate(self.voice_id)
+        expected = audiobook_voice_prompt("Warm and low, with a broad Yorkshire accent.")
+        self.assertEqual(self.engine.calls[0]["prompt"], expected)
+        self.assertEqual(candidate["creation"]["requested_description"], expected)
+
     def test_each_generate_creates_a_new_candidate_and_seed(self):
         first = self.session.generate(self.voice_id)
         second = self.session.generate(self.voice_id)
