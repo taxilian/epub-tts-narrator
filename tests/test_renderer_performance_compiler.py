@@ -34,6 +34,25 @@ class PerformanceCompilerTests(unittest.TestCase):
         self.assertIn("scoped_style_reset_is_approximate", result["warnings"])
         self.assertEqual(result["expected_text"], text)
 
+    def test_style_matching_passage_direction_is_suppressed_with_an_audit_trail(self):
+        for text, end in (("Come here.", 10), ("Come here. Now.", 10)):
+            with self.subTest(text=text, end=end):
+                control = delivery(text, 0, end, tag="style", direction="  ANGRY  ")
+                result = compile_performance(text, record(text, control), direction="angry")
+                self.assertEqual(result["text"], f"[angry] {text}")
+                expected = {**control, "direction": "ANGRY", "note": "redundant_passage_direction",
+                            "scope_accuracy": "suppressed"}
+                self.assertEqual(result["applied_controls"], [expected])
+                self.assertEqual(result["warnings"], ["redundant_style_direction_suppressed"])
+
+    def test_style_distinct_from_passage_direction_preserves_both_directions(self):
+        text = "Come here."
+        control = delivery(text, tag="style", direction="cold fury")
+        result = compile_performance(text, record(text, control), direction="angry")
+        self.assertEqual(result["text"], "[angry] [cold fury] Come here.")
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["applied_controls"], [{**control, "scope_accuracy": "starts_at_span"}])
+
     def test_a_mid_line_change_holds_to_the_end_and_keeps_stressed_words_inside_it(self):
         text = '"Fine. But you never listen."'
         but, never = text.index("But"), text.index("never")

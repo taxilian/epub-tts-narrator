@@ -157,7 +157,12 @@ The plain backend explicitly reports every unsupported requested control.
     controls = canonical["controls"]
     starts, closes, replacements, events = {}, {}, {}, {}
     baseline = "; ".join(value for value in (traits, direction) if value) or "return to ordinary speaking delivery"
-    style_starts = {c["start"] for c in controls if c["kind"] == "delivery" and c["tag"] == "style"}
+    style_controls = [c for c in controls if c["kind"] == "delivery" and c["tag"] == "style"]
+    standing_direction = direction.strip().casefold()
+    redundant_style_starts = {c["start"] for c in style_controls
+                              if standing_direction and c["direction"].strip().casefold() == standing_direction}
+    # Only an emitted style can take over without a baseline reset.
+    style_starts = {c["start"] for c in style_controls} - redundant_style_starts
     for control in controls:
         item = deepcopy(control)
         kind = control["kind"]
@@ -166,16 +171,21 @@ The plain backend explicitly reports every unsupported requested control.
             # At one position a paired tag closes before a style resets, and a
             # style starts before a paired tag opens inside it.
             if tag == "style":
-                starts.setdefault(a, []).append((0, f"[{control['direction']}] "))
-                if b in style_starts:
-                    # The next style takes over here; a reset in between is noise.
-                    item["scope_accuracy"] = "until_next_style"
-                elif b < len(text):
-                    closes.setdefault(b, []).append((1, f" [{baseline}] "))
-                    result["warnings"].append("scoped_style_reset_is_approximate")
-                    item["scope_accuracy"] = "approximate_reset"
+                if a in redundant_style_starts:
+                    item["note"] = "redundant_passage_direction"
+                    item["scope_accuracy"] = "suppressed"
+                    result["warnings"].append("redundant_style_direction_suppressed")
                 else:
-                    item["scope_accuracy"] = "starts_at_span"
+                    starts.setdefault(a, []).append((0, f"[{control['direction']}] "))
+                    if b in style_starts:
+                        # The next style takes over here; a reset in between is noise.
+                        item["scope_accuracy"] = "until_next_style"
+                    elif b < len(text):
+                        closes.setdefault(b, []).append((1, f" [{baseline}] "))
+                        result["warnings"].append("scoped_style_reset_is_approximate")
+                        item["scope_accuracy"] = "approximate_reset"
+                    else:
+                        item["scope_accuracy"] = "starts_at_span"
             else:
                 starts.setdefault(a, []).append((1, f"<{tag}>"))
                 closes.setdefault(b, []).append((0, f"</{tag}>"))
