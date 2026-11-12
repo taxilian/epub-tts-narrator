@@ -373,8 +373,10 @@ class CastingSession:
         cast = self.bundle["cast"]
         character_names = {character["id"]: character["name"] for character in cast["characters"]}
         trait_overrides = speech_trait_overrides(self.bundle, self.config)
-        from .speech_traits import accent_overrides, suggest_accent
-        accents = accent_overrides(self.bundle, self.config)
+        from .speech_traits import accent_cues, accent_overrides, suggest_accent
+        # The cue a render uses: a person's choice, else the accent the voice's description names.
+        accents = accent_cues(self.bundle, self.config, store=self.store)
+        chosen_accents = accent_overrides(self.bundle, self.config, include_cleared=True)
         from .config import designer_records_several_clips
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
@@ -441,6 +443,7 @@ class CastingSession:
                 "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
                                   else speech_traits(profile)),
                 "accent": accents.get(voice_id, ""),
+                "accent_automatic": voice_id not in chosen_accents and bool(accents.get(voice_id)),
                 "reference_clips": dict(zip(("count", "source"), clip_choice(
                     self.bundle, self.config, voice_id, canonical_id=self.store.canonical_id,
                     overrides=clip_counts)), designer_records_several=several_clips),

@@ -326,7 +326,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             script = field("New script (Enter keeps current; B cancels): ")
             say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
             traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
-            say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)"))
+            say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)")
+                + (" (from the voice description)" if row.get("accent_automatic") else ""))
             suggestion = row.get("accent_suggestion") or ""
             if suggestion and suggestion != row.get("accent"):
                 say("From the description: " + suggestion)
@@ -610,7 +611,7 @@ def casting_command(args, bundle, config):
                 )
             print(f"Regenerated {len(results)} shared character voices.")
         elif action == "edit":
-            print("Casting edits saved. Vocal traits apply to the next render; "
+            print("Casting edits saved. Vocal traits and accent cues apply to the next render; "
                   "the voice description and script apply to the next generation.")
         elif action == "accept":
             candidate = session.accept(args.voice_id, args.candidate_id)

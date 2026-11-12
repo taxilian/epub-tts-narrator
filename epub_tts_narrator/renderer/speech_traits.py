@@ -81,17 +81,105 @@ def save_accent(bundle, config, voice_id, value):
 
 
 
-def suggest_accent(description):
-    """The last "<one to five words> accent" phrase in a voice description, as a starting cue, else ""."""
+# Words that join an accent phrase to the rest of a description ("voice with
+# a thick Welsh accent"); the cue starts after the last of them.
+_JOINING = frozenset("""a an the with and in of its his her their has having into to from for or but like by on at
+as any some voice speaks speaking spoken""".split())
+_NEGATING = frozenset({"no", "not", "without", "never", "lacking", "free", "none"})
+# Real-world words that do not name a place or people on their own ("neutral accent").
+_NOT_PLACES = frozenset({"general", "standard", "neutral", "east", "west", "north", "south", "central"})
+
+
+def _sentence_start(text, position):
+    before = text[:position].rstrip()
+    return not before or before[-1] in ".!?:;"
+
+
+def suggest_accent(description, terms=frozenset()):
+    """The cue a voice description names, e.g. "heavy Brooklyn accent", else "".
+
+    The last "<words> accent" phrase, from after its last joining word. It must
+    name a real place or people: a capitalized word not starting a sentence, a
+    known real-world accent word, or a lowercase -ian/-ese word ("italian").
+    A negated phrase ("no accent"), a bare manner ("heavy accent"), and one
+    naming a book's own term (``terms``, e.g. "Nyissan accent", which a speech
+    model cannot know) give no cue.
+    """
     import re
-    matches = list(re.finditer(r"((?:[^\W\d_][\w'’-]*\s+){1,5})accent\b", description or "", re.IGNORECASE))
-    if not matches:
+    from ..narrator_read import _REAL_WORLD
+    text = description or ""
+    found = list(re.finditer(r"\baccent\b", text, re.IGNORECASE))
+    if not found:
         return ""
-    words = matches[-1].group(1).split()
-    while words and words[0].casefold() in {"a", "an", "the", "with", "and", "in", "of", "its", "his", "her"}:
-        words.pop(0)
-    phrase = " ".join([*words, "accent"])
-    return phrase if words and len(phrase) <= MAX_ACCENT_CHARACTERS else ""
+    end = found[-1].start()
+    words = []
+    for match in reversed(list(re.finditer(r"[^\W\d_][\w'’-]*", text[:end]))):
+        if text[match.end():end].strip():
+            break  # Punctuation ends the phrase.
+        words.insert(0, match)
+        end = match.start()
+    if any(word.group().casefold() in _NEGATING for word in words):
+        return ""
+    joins = [index for index, word in enumerate(words) if word.group().casefold() in _JOINING]
+    words = words[joins[-1] + 1 if joins else 0:][-5:]
+    places = _REAL_WORLD - _NOT_PLACES
+    named = False
+    for word in words:
+        for part in re.split(r"[-'’]", word.group()):
+            if part.casefold() in terms:
+                return ""
+            named = named or (part[:1].isupper() and not _sentence_start(text, word.start())
+                              or part.casefold() in places or part.islower() and part.endswith(("ian", "ese")))
+    phrase = " ".join([*(word.group() for word in words), "accent"])
+    return phrase if named and len(phrase) <= MAX_ACCENT_CHARACTERS else ""
+
+
+_TERMS = {}
+
+
+def _book_terms(bundle):
+    """The book's own proper nouns (``narrator_read.book_terms``), once per bundle."""
+    key = bundle.get("bundle_hash") or id(bundle)
+    if key not in _TERMS:
+        from ..narrator_read import book_terms
+        characters = [{"name": character.get("name", ""), "aliases": character.get("aliases", [])}
+                      for character in bundle["cast"]["characters"]]
+        _TERMS.clear()  # One book at a time is enough; a queue renders books in turn.
+        _TERMS[key] = frozenset(book_terms(bundle.get("source") or {"blocks": []}, {"characters": characters}))
+    return _TERMS[key]
+
+
+def designed_description(store, profile):
+    """The description that designed a voice's saved recording, else the one that will."""
+    saved = store.load(profile["id"]) if store is not None else None
+    requested = ((saved or {}).get("creation") or {}).get("requested_description")
+    return requested if isinstance(requested, str) and requested else profile.get("description", "")
+
+
+def accent_cues(bundle, config, *, store=None):
+    """Every voice's accent cue for a render.
+
+    A person's choice (``voice-accents.json``, nearest book first; an empty
+    choice means no cue) wins. Any other voice uses the accent its description
+    names (``suggest_accent``): the description that designed its saved
+    recording, or, before it is made, the one that will.
+    """
+    chosen = accent_overrides(bundle, config, include_cleared=True)
+    if store is None:
+        from .book_context import voice_store
+        store = voice_store(bundle, config)
+    cues = {}
+    for profile in bundle["cast"]["voices"]:
+        voice_id = profile["id"]
+        if voice_id in chosen:
+            cue = chosen[voice_id]
+        else:
+            cue = suggest_accent(designed_description(store, profile))
+            if cue:
+                cue = suggest_accent(designed_description(store, profile), _book_terms(bundle))
+        if cue:
+            cues[voice_id] = cue
+    return cues
 
 
 def performance_direction(chunk, voice_id, *, scene_direction=None):

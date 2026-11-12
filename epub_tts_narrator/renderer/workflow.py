@@ -1473,11 +1473,12 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
     # delivery direction. A voice's short accent cue is the exception: Drama 3
     # does not reliably carry an accent from the reference alone (blind tests
     # preferred the cued take in 9 of 11 sets), so it opens every line in that
-    # voice, ahead of the line's delivery direction.
-    from .speech_traits import accent_overrides, bind_plan_speech_traits
+    # voice, ahead of the line's delivery direction. A voice nobody chose a
+    # cue for uses the accent its description names (speech_traits.accent_cues).
+    from .speech_traits import accent_cues, bind_plan_speech_traits
     accents = config.get("_accent_snapshot")
     if accents is None:
-        accents = accent_overrides(bundle, config)
+        accents = accent_cues(bundle, config)
     if accents:
         plan = bind_plan_speech_traits(plan, bundle["cast"], overrides=accents, profile_traits=False)
     from .performance_runtime import bind_traits
@@ -1536,10 +1537,11 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         config["_tagged_name_snapshot"] = named_pronunciation_snapshot(bundle)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
-    from .speech_traits import accent_overrides, speech_trait_overrides
+    from .speech_traits import accent_cues, speech_trait_overrides
     config["_speech_traits_snapshot"] = speech_trait_overrides(bundle, config)
+    store = voice_store(bundle, config) if voice_store_override is None else voice_store_override
     # Accent cues bind into every line of their voice (make_render_plan).
-    config["_accent_snapshot"] = accent_overrides(bundle, config)
+    config["_accent_snapshot"] = accent_cues(bundle, config, store=store)
     # Learned recognizer variants live beside the analysis (heard_variants.py).
     # Only the path is carried, so copies of this config stay plain data.
     config["_heard_variants_directory"] = (
@@ -1565,7 +1567,7 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         # The original EPUB, the latest update's EPUB, or the same book by content.
         if source_epub_digest(bundle, epub) != file_hash(epub):
             raise RenderBlocked("Configured EPUB does not match the analyzed book")
-    return config, plan, (voice_store(bundle, config) if voice_store_override is None else voice_store_override)
+    return config, plan, store
 
 
 def _check_analysis_update(bundle):

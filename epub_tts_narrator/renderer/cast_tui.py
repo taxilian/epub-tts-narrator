@@ -67,7 +67,7 @@ class CastApp(CapturePrintMixin, App):
         Binding("s", "edit('reference_text')", "Script", tooltip="Edit the audition script"),
         Binding("t", "edit('speech_traits')", "Traits", tooltip="Edit speech traits"),
         Binding("A", "edit('accent')", "Accent",
-                tooltip="Edit the accent cue said before every line in this voice (empty clears it)"),
+                tooltip="Edit the accent cue said before every line in this voice (empty means none)"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
@@ -354,7 +354,9 @@ class CastApp(CapturePrintMixin, App):
             help_text = "Empty text means no traits for this character. " + help_text
         elif field == "accent":
             help_text = ("A short cue such as \"heavy Brooklyn accent\", said before every line in this voice; "
-                         "empty clears it. " + ("Pre-filled from the voice description. " if not row.get("accent")
+                         "empty means no cue for this voice. "
+                         + ("Now taken from the voice description. " if row.get("accent_automatic") else "")
+                         + ("Pre-filled from the voice description. " if not row.get("accent")
                                                 and row.get("accent_suggestion") else "") + help_text)
         elif field in {"prompt", "reference_text"}:
             help_text = "Applies the next time this voice is generated. " + help_text

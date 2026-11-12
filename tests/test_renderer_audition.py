@@ -852,7 +852,7 @@ class CastingCLITests(unittest.TestCase):
                 self.assertEqual(code, 0, error)
                 self.assertEqual(session.events, [("edit", "v1", {"speech_traits": value})])
                 scripts.assert_not_called()
-                self.assertIn("Vocal traits apply to the next render", output)
+                self.assertIn("Vocal traits and accent cues apply to the next render", output)
                 session.close.assert_called_once_with()
 
     def test_generate_cli_applies_traits_before_regeneration(self):
