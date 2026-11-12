@@ -37,11 +37,13 @@ class ReferenceTextJudgingVerifier:
     def __init__(self, verifier, judge, phonetic_reviewer=None):
         self.verifier = verifier
         self.judge = judge
-        # Include the policy in chapter checkpoints as well as per-take keys.
-        self.identity = {**verifier.identity, "text_judge": judge.identity}
-        self.reference_judge_identity = judge.identity
+        self.identity = dict(verifier.identity)
+        self.reference_judge_identity = getattr(judge, "identity", None)
+        if self.reference_judge_identity is not None:
+            self.identity["text_judge"] = self.reference_judge_identity
         self.phonetic_reviewer = phonetic_reviewer
-        self.phonetic_review_identity = getattr(phonetic_reviewer, "identity", None)
+        self.phonetic_review_identity = getattr(phonetic_reviewer, "identity", None) if judge is not None else None
+        self.reference_phonetic_review_identity = getattr(phonetic_reviewer, "reference_identity", None)
         if self.phonetic_review_identity is not None:
             self.identity["phonetic_review"] = self.phonetic_review_identity
 
@@ -49,6 +51,8 @@ class ReferenceTextJudgingVerifier:
         return getattr(self.verifier, name)
 
     def judge_reference(self, expected_text, primary_transcript, secondary_transcript=None):
+        if self.judge is None:
+            return None
         return self.judge.judge(expected_text, primary_transcript, secondary_transcript)
 
     def judge_skipped_word(self, expected_text, transcript, word, context):
@@ -61,6 +65,11 @@ class ReferenceTextJudgingVerifier:
         if self.phonetic_reviewer is None:
             return None
         return self.phonetic_reviewer.review(expected_text, transcript)
+
+    def review_reference_phonetics(self, expected_text, transcript):
+        if self.phonetic_reviewer is None:
+            return None
+        return self.phonetic_reviewer.review_reference(expected_text, transcript)
 
     def close(self):
         for component in (self.verifier, self.judge, self.phonetic_reviewer):
@@ -122,10 +131,13 @@ def assemble_verifier(primary, settings, jev_settings, provider_settings, refere
     verifier = primary
     if settings.get("reference_model"):
         verifier = ReferenceCorroboratingVerifier(primary, reference_builder())
+    reviewer = create_phonetic_reviewer(settings, provider_settings)
+    judge = None
     if jev_settings and jev_settings.get("enabled"):
         from epub_tts_narrator.jev import JevTranscriptJudge
-        verifier = ReferenceTextJudgingVerifier(
-            verifier, JevTranscriptJudge(jev_settings), create_phonetic_reviewer(settings, provider_settings))
+        judge = JevTranscriptJudge(jev_settings)
+    if judge is not None or reviewer is not None:
+        verifier = ReferenceTextJudgingVerifier(verifier, judge, reviewer)
     resolver = create_speech_resolver(settings, provider_settings)
     if resolver is not None:
         verifier = RecurringSpeechVerifier(verifier, resolver)

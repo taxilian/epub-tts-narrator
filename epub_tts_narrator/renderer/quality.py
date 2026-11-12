@@ -32,7 +32,7 @@ QUALITY_DEFAULTS = {
     "max_wer": 0.0,
 }
 QUALITY_VERSION = 18
-REFERENCE_VARIATION_VERSION = 6
+REFERENCE_VARIATION_VERSION = 7
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -103,6 +103,9 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
     }
     if purpose == "reference":
         identity["reference_variation_version"] = REFERENCE_VARIATION_VERSION
+        reference_review = getattr(verifier, "reference_phonetic_review_identity", None)
+        if reference_review is not None:
+            identity["reference_phonetic_review"] = reference_review
     if performance is not None:
         from ..performance_plan import validate_performance
         from .performance_audio import PERFORMANCE_AUDIO_VERSION
@@ -841,25 +844,42 @@ def text_confirmation_unavailable(report):
                 isinstance(row, dict) and row.get("decision") == "unavailable" for row in reviews)))
 
 
-def _confirm_phonetics(verifier, report, transcript, source):
-    """Resolve a negative text score only within complete reviewable coverage."""
-    if report.get("text_judge", {}).get("decision") not in {"uncertain", "different"}:
-        return False
-    if report.get("text_judge_skipped") is not None:
-        return False
-    identity = getattr(verifier, "phonetic_review_identity", None)
-    review = getattr(verifier, "review_phonetics", None)
+def _confirm_phonetics(verifier, report, transcript, source, *, reference=False):
+    """Bind sound-review approval to strict coverage or reference-only nominations."""
+    reference_review = report.get("purpose") == "reference" and (
+        reference or report.get("text_judge_skipped") == "incomplete_spoken_coverage")
+    if not reference_review:
+        if report.get("text_judge", {}).get("decision") not in {"uncertain", "different"}:
+            return False
+        if report.get("text_judge_skipped") is not None:
+            return False
+    identity = getattr(verifier, "reference_phonetic_review_identity" if reference_review else "phonetic_review_identity", None)
+    review = getattr(verifier, "review_reference_phonetics" if reference_review else "review_phonetics", None)
     if not isinstance(identity, dict) or not callable(review):
         return False
     from .phonetic_review import substitution_pairs, validate_review
+    validate = validate_review
+    if reference_review:
+        from .phonetic_review import validate_reference_review
+        validate = validate_reference_review
     expected = report["expected_text"]
-    if substitution_pairs(expected, transcript) is None:
+    if not reference_review and substitution_pairs(expected, transcript) is None:
         return False
+    if reference_review:
+        from .speech_coverage import speech_coverage
+        coverage = speech_coverage(expected, transcript)
+        if coverage["passed"]:
+            return False
+        if not any(row.get("transcript") == transcript for row in report.get("speech_coverage", [])):
+            report.setdefault("speech_coverage", []).append(dict(coverage, transcript=transcript))
     unavailable = {"identity": identity, "decision": "unavailable", "source": source,
-                   "error_code": "invalid_phonetic_review"}
+                    "error_code": "invalid_phonetic_review"}
     try:
         result = review(expected, transcript)
-        accepted = validate_review(result, expected, transcript, identity)
+        if (reference_review and isinstance(result, dict) and result.get("identity") == identity
+                and result.get("decision") == "ineligible" and result.get("votes") == []):
+            return False
+        accepted = validate(result, expected, transcript, identity)
         # Retain rejected/unavailable records from the trusted local reviewer;
         # only the complete strictly validated consensus can approve audio.
         if not isinstance(result, dict) or result.get("identity") != identity:
@@ -872,6 +892,46 @@ def _confirm_phonetics(verifier, report, transcript, source):
         result, accepted = unavailable, False
     report.setdefault("phonetic_reviews", []).append({**result, "source": source})
     return accepted
+
+
+def _confirm_reference_variation(verifier, report):
+    """Adopt only the recognized transcript approved by a bound reference sound review."""
+    if (not isinstance(getattr(verifier, "reference_phonetic_review_identity", None), dict)
+            or not callable(getattr(verifier, "review_reference_phonetics", None))):
+        return False
+    corroboration = report.get("corroboration", {})
+    seen = set()
+    for source, transcript in (("primary", report["transcript"]),
+                               ("secondary", corroboration.get("transcript"))):
+        if transcript is None or transcript in seen:
+            continue
+        seen.add(transcript)
+        method = None
+        if source == "secondary":
+            spacing = word_spacing_equivalence(report["expected_text"], transcript)
+            phonetic = phonetic_equivalence(report["expected_text"], transcript) if spacing is None else None
+            if spacing is not None:
+                report["word_boundary_comparison"] = spacing
+                method = "secondary_word_spacing"
+            elif phonetic is not None:
+                report["phonetic_comparison"] = phonetic
+                method = "secondary_double_metaphone"
+        if method is not None or _confirm_phonetics(verifier, report, transcript, source, reference=True):
+            report["verified_transcript"] = transcript
+            report["text_confirmation_method"] = method or f"phonetic_{source}"
+            report.update(reference_text=transcript,
+                          reference_text_adjusted=transcript != report["expected_text"])
+            if corroboration:
+                corroboration["pre_phonetic_decision"] = corroboration.get("decision")
+                corroboration["decision"] = {
+                    None: "phonetic_confirmed_variations",
+                    "secondary_word_spacing": "secondary_matches_requested_spacing",
+                    "secondary_double_metaphone": "secondary_matches_requested_phonetically",
+                }[method]
+            return True
+        if text_confirmation_unavailable(report):
+            return False
+    return False
 
 
 def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
@@ -970,9 +1030,11 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
     report["corroboration"] = corroboration
     eligibility = (_reference_variation_eligibility(metrics)
                    or _reference_stylization_eligibility(metrics))
-    if eligibility is None:
+    review_only = eligibility is None
+    if (review_only and (not isinstance(getattr(verifier, "reference_phonetic_review_identity", None), dict)
+                         or not callable(getattr(verifier, "review_reference_phonetics", None)))):
         return False
-    corroboration["eligibility"] = eligibility
+    corroboration["eligibility"] = eligibility if eligibility is not None else {"method": "reference_sound_review"}
     decode = getattr(verifier, "corroborate_reference", None)
     if not callable(decode):
         corroboration["decision"] = "unavailable"
@@ -995,6 +1057,9 @@ def _corroborate_reference(path: Path, verifier, report: dict) -> bool:
     except Exception as exc:
         corroboration["decision"] = "verification_failed"
         corroboration["error"] = f"{type(exc).__name__}: {exc}"
+        return False
+    if review_only and requested_comparison["wer"] != 0:
+        corroboration["decision"] = "requires_reference_sound_review"
         return False
     if primary_comparison["wer"] == 0:
         corroboration["decision"] = "agreed_reference_transcript"
@@ -1181,7 +1246,8 @@ def _checked_audio_report(path, expected_text: str, verifier,
         if metrics["wer"] == 0:
             report["reference_text"] = expected_text
             report["reference_text_adjusted"] = False
-        elif not _corroborate_reference(Path(path), verifier, report):
+        elif (not _corroborate_reference(Path(path), verifier, report)
+              and not _confirm_reference_variation(verifier, report)):
             # A permissive speech WER policy must never allow a reference to
             # be saved with a transcript that does not match its actual words.
             reasons.append("text_mismatch")

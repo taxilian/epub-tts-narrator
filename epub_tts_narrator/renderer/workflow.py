@@ -213,10 +213,16 @@ def _verification_failure_detail(report):
     if (isinstance(reviews, list) and reviews and isinstance(reviews[-1], dict)
             and reviews[-1].get("decision") == "rejected"):
         details.append("phonetic reviewers rejected the pronunciation match; full votes are in the attempt report")
+    elif (isinstance(reviews, list) and reviews and isinstance(reviews[-1], dict)
+          and reviews[-1].get("decision") == "unavailable"):
+        details.append("phonetic review unavailable; saved audio is retained for retry")
     skipped = report.get("text_judge_skipped")
     if isinstance(skipped, str):
         if skipped == "incomplete_spoken_coverage":
-            details.append("coverage check failed: missing, extra, or nonmatching words; JEV cannot override this")
+            if isinstance(reviews, list) and reviews:
+                details.append("local coverage was not established; see the recorded sound review outcome")
+            else:
+                details.append("coverage check failed: missing, extra, or nonmatching words; JEV cannot override this")
         else:
             details.append("JEV not called: " + skipped.replace("_", " "))
     error = report.get("provider_error") or report.get("error")

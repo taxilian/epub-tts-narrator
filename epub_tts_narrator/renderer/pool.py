@@ -137,7 +137,7 @@ def pool_sampling(config):
 
 def _text_review_method(name, method):
     """Recognize our text-only adapters, never infer safety from a plugin name."""
-    if name not in {"judge_reference", "judge_skipped_word", "review_phonetics"}:
+    if name not in {"judge_reference", "judge_skipped_word", "review_phonetics", "review_reference_phonetics"}:
         return False
     from epub_tts_narrator.jev import JevTranscriptJudge
     from .phonetic_review import PronunciationReviewer
@@ -150,9 +150,9 @@ def _text_review_method(name, method):
     if name in {"judge_reference", "judge_skipped_word"}:
         return (function is getattr(ReferenceTextJudgingVerifier, name)
                 and type(owner.judge) is JevTranscriptJudge)
-    if name == "review_phonetics":
+    if name in {"review_phonetics", "review_reference_phonetics"}:
         reviewer = owner.phonetic_reviewer
-        return (function is ReferenceTextJudgingVerifier.review_phonetics
+        return (function is getattr(ReferenceTextJudgingVerifier, name)
                 and type(reviewer) is PronunciationReviewer
                 and type(reviewer._client) is RecoveryModelClient)
     return False

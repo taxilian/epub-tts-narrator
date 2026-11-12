@@ -502,6 +502,23 @@ class PipelineVerifierRoutingTests(unittest.TestCase):
         # Recognition runs on its own thread, never on the synthesis model thread.
         self.assertEqual(snapshot["model_thread"]["active_count"], 0)
 
+    def test_blocked_reference_sound_review_does_not_block_synthesis_or_recognition(self):
+        started, release = Event(), Event()
+        with patch.object(self.reviewer, "review_reference",
+                          side_effect=self.blocker("reference-review", started, release)):
+            with ThreadPoolExecutor(max_workers=3) as callers:
+                review = callers.submit(self.wrapped.review_reference_phonetics, "expected", "heard")
+                self.assertTrue(started.wait(5))
+                try:
+                    self.state["gate"].set()
+                    generated = callers.submit(self.pool.synthesize, "words", {}, "unused", seed=1).result(10)
+                    self.assertEqual(generated["worker_engine"], {"engine": "fixture-gate"})
+                    self.assertEqual(callers.submit(self.wrapped.transcribe, "unused").result(10), {"text": "words"})
+                    self.assertFalse(review.done())
+                finally:
+                    release.set()
+                self.assertEqual(review.result(10), {"decision": "fixture"})
+
 
 class PipelinePoolCloseTests(unittest.TestCase):
     def test_close_cancels_queued_synthesis_drains_and_closes_engines_once(self):

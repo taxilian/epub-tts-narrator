@@ -92,6 +92,32 @@ def substitution_pairs(expected_text, transcript):
     return pairs if pairs and len(pairs) <= min(allowed, _LIMITS["max_pairs"]) else None
 
 
+def reference_substitution_pairs(expected_text, transcript):
+    """Return reference-only replacement candidates, never an approval."""
+    from .quality import normalize_words
+    from .phonetic_match import _ALPHABETIC_WORD, _PROTECTED
+    from .reference_transcription import REFERENCE_NOMINATION, nominate_replacements
+    if (not isinstance(expected_text, str) or not isinstance(transcript, str)
+            or len(expected_text) > REFERENCE_NOMINATION["max_characters"]
+            or len(transcript) > REFERENCE_NOMINATION["max_characters"]):
+        return None
+    if speech_coverage(expected_text, transcript).get("passed") is not False:
+        return None
+    expected, heard = normalize_words(expected_text), normalize_words(transcript)
+    if (not expected or not heard
+            or max(len(expected), len(heard)) > REFERENCE_NOMINATION["max_words"]):
+        return None
+    expected_original = _original_words(expected_text, expected)
+    heard_original = _original_words(transcript, heard)
+    if expected_original is None or heard_original is None:
+        return None
+    return nominate_replacements(
+        {"text": expected_text, "words": expected, "originals": expected_original},
+        {"text": transcript, "words": heard, "originals": heard_original},
+        lambda word: bool(_ALPHABETIC_WORD.fullmatch(word)) and word.replace("'", "") not in _PROTECTED
+        and "n't" not in word)
+
+
 def _valid_answers(value, pairs):
     if not isinstance(value, dict) or set(value) != {"pairs"}:
         return False
@@ -131,27 +157,51 @@ def _valid_identity(identity):
         return False
 
 
+def _reference_identity(provider):
+    from .reference_transcription import REFERENCE_NOMINATION
+    identity = {"name": "reference_transcription_pronunciation_review", "version": 1,
+                "provider": deepcopy(provider), "prompt_sha256": digest(PHONETIC_PROMPT),
+                "coverage_version": SPEECH_COVERAGE_VERSION,
+                "nomination": deepcopy(REFERENCE_NOMINATION), "reviewers": 3, "required_votes": 2}
+    identity["policy_sha256"] = digest(identity)
+    return identity
+
+
+def _valid_reference_identity(identity):
+    try:
+        return (isinstance(identity, dict) and isinstance(identity.get("provider"), dict)
+                and identity == _reference_identity(identity["provider"]))
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+
+
 class PronunciationReviewer:
     """Three separate sound reviews of spans from a complete coverage alignment."""
 
     def __init__(self, client):
         self._client = client
         self._identity = _identity(client.identity)
+        self._reference_identity = _reference_identity(client.identity)
 
     @property
     def identity(self):
         return deepcopy(self._identity)
 
-    def review(self, expected_text, transcript):
-        pairs = substitution_pairs(expected_text, transcript)
-        record = {"identity": self.identity, "prompt": PHONETIC_PROMPT,
+    @property
+    def reference_identity(self):
+        return deepcopy(self._reference_identity)
+
+    def _review(self, identity, nomination, texts):
+        expected_text, transcript = texts
+        pairs = nomination(expected_text, transcript)
+        record = {"identity": deepcopy(identity), "prompt": PHONETIC_PROMPT,
                   "expected_text": expected_text, "transcript": transcript,
                   "pairs": pairs, "votes": [], "decision": "ineligible"}
         if pairs is None:
             return record
         for reviewer in range(1, 4):
             try:
-                if self._client.identity != self._identity["provider"]:
+                if self._client.identity != identity["provider"]:
                     return dict(record, decision="unavailable", error_code="provider_changed")
                 # No passage-level scores or previous answers are sent. Each
                 # completion sees only the same small, ordered word-pair payload.
@@ -164,16 +214,24 @@ class PronunciationReviewer:
         record["decision"] = _decision(record["votes"], pairs)
         return record
 
+    def review(self, expected_text, transcript):
+        return self._review(self._identity, substitution_pairs, (expected_text, transcript))
 
-def validate_review(record, expected_text, transcript, identity):
-    """Accept only a complete, correctly bound audit with a majority for every pair."""
-    if (not _valid_identity(identity) or not isinstance(record, dict) or set(record) != {
+    def review_reference(self, expected_text, transcript):
+        return self._review(self._reference_identity, reference_substitution_pairs,
+                            (expected_text, transcript))
+
+
+def _validate(record, route, texts):
+    identity, valid_identity, nomination = route
+    expected_text, transcript = texts
+    if (not valid_identity(identity) or not isinstance(record, dict) or set(record) != {
             "identity", "prompt", "expected_text", "transcript", "pairs", "votes", "decision"}
             or record["identity"] != identity or record["prompt"] != PHONETIC_PROMPT
             or record["expected_text"] != expected_text or record["transcript"] != transcript
             or record["decision"] != "accepted"):
         return False
-    pairs = substitution_pairs(expected_text, transcript)
+    pairs = nomination(expected_text, transcript)
     if pairs is None or record["pairs"] != pairs:
         return False
     votes = record["votes"]
@@ -185,3 +243,15 @@ def validate_review(record, expected_text, transcript, identity):
                 or not _valid_answers({"pairs": vote["pairs"]}, pairs)):
             return False
     return _decision(votes, pairs) == "accepted"
+
+
+def validate_review(record, expected_text, transcript, identity):
+    """Accept only a complete, correctly bound audit with a majority for every pair."""
+    route = (identity, _valid_identity, substitution_pairs)
+    return _validate(record, route, (expected_text, transcript))
+
+
+def validate_reference_review(record, expected_text, transcript, identity):
+    """Validate a reference audit independently of strict speech-review records."""
+    route = (identity, _valid_reference_identity, reference_substitution_pairs)
+    return _validate(record, route, (expected_text, transcript))

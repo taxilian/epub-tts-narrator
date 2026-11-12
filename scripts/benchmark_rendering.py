@@ -196,7 +196,7 @@ class TimedVerifier:
     def __getattr__(self, name):
         value = getattr(self._target, name)
         if name not in {"transcribe", "transcribe_reference", "corroborate_reference",
-                        "judge_reference", "review_phonetics"} or not callable(value):
+                        "judge_reference", "review_phonetics", "review_reference_phonetics"} or not callable(value):
             return value
 
         @wraps(value)
