@@ -193,6 +193,31 @@ class ReferenceTranscriptionReviewTests(unittest.TestCase):
         self.assertEqual(accepted["report"]["reference_text"], heard)
         self.assertEqual(len(client.calls), 3)
 
+    @unittest.skipUnless(FFMPEG, "FFmpeg is required for reference normalization")
+    def test_reference_only_approval_does_not_claim_strict_coverage_in_notifications(self):
+        root = Path(self.temp.name)
+        expected = "Dalley checked the records." + CONTEXT
+        heard = "Darling checked the records." + CONTEXT
+        for use_jev in (False, True):
+            with self.subTest(use_jev=use_jev):
+                verifier = ReferenceTextJudgingVerifier(
+                    PrimaryVerifier(heard), Judge() if use_jev else None, PronunciationReviewer(Client()))
+                notices = []
+
+                def generate(path, seed):
+                    shutil.copyfile(self.audio, path)
+                    return {"seed": seed, "description_applied": True}
+
+                _, accepted = verified_take(
+                    expected, generate, root / f"notification-{use_jev}",
+                    {"kind": "voice_design", "voice_id": "notification", "text": expected},
+                    verifier, renderer_config(root, series_id="notification", max_attempts=1),
+                    purpose="reference", notify=notices.append)
+
+                self.assertTrue(accepted["report"]["passed"])
+                self.assertFalse(accepted["report"]["speech_coverage"][0]["passed"])
+                self.assertFalse(any("full word coverage passed" in message for message in notices), notices)
+
     def test_missing_extra_reordered_and_protected_words_do_not_reach_sound_review(self):
         examples = (
             ("Please wait here.", "Please wait."),

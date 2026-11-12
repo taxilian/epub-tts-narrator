@@ -936,7 +936,15 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             if judgment.get("decision") == "equivalent":
                 notify("  JEV accepted the transcript as plausible recognition of the requested speech.")
             elif report.get("text_confirmation_method") in {"phonetic_primary", "phonetic_secondary"}:
-                notify("  Three pronunciation reviews resolved the spelling differences; full word coverage passed.")
+                covered = any(check.get("passed") is True
+                              and check.get("transcript") == report.get("verified_transcript")
+                              for check in report.get("speech_coverage", []))
+                if covered:
+                    notify("  Three pronunciation reviews resolved the spelling differences; full word coverage passed.")
+                elif purpose == "reference":
+                    notify("  Three sound reviews approved the reference transcription; local coverage was not established.")
+                else:
+                    notify("  Three pronunciation reviews resolved the spelling differences.")
             return finish(wav, record)
         stop_if_requested()
         if pending_confirmation(report):
