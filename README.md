@@ -13,17 +13,17 @@ Turn an EPUB into a **verified multi-voice audiobook**. The analyzer reads a boo
 git clone https://github.com/taxilian/epub-tts-narrator.git
 cd epub-tts-narrator
 
-# Analyzer (zero runtime deps)
+# Analyzer (core has zero runtime deps; the tui extra adds the full-screen interface)
 python3.11 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install -e ".[tui]"
 
 # Renderer (separate environment; details in RENDERER.md)
 uv venv --python 3.12 .venv-renderer
 uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
-# Optional: full-screen casting (Textual); commands keep their line output without it
-uv pip install --python .venv-renderer/bin/python -e ".[tui]"
 ```
+
+Both environments include [Textual](https://textual.textualize.io/) for the full-screen interfaces (casting and the run shell). An environment created before it was added gets it by rerunning the same install commands. Without it, or with `--plain`, or when output is redirected, every command prints plain lines as before.
 
 Two commands come from one package: `epub-tts-narrator` (analysis; `epub-audiobook` remains a legacy alias) and `audiobook-render` (rendering). The module forms `python -m epub_tts_narrator` and `python -m epub_tts_narrator.renderer` work without installing.
 

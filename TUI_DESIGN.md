@@ -2,7 +2,7 @@
 
 Status: approved 2026-11-12 with these decisions:
 
-- **Library:** Textual, as the optional `tui` extra. Without it (or with `--plain`, or off a terminal) every command keeps its line output unchanged.
+- **Library:** Textual, installed by the normal setup (`renderer.requirements.txt`; the analyzer installs `.[tui]`) while the core package keeps `dependencies = []`. Without it (or with `--plain`, or off a terminal) every command keeps its line output unchanged.
 - **Order:** casting TUI first, then the render shell, then the other commands. Build shared components first and compose screens from them.
 - **On failure:** the screen stays open on the errors view until `q`.
 - **Reference clips:** a per-voice override (`voice-clips.json`), nearest book first.

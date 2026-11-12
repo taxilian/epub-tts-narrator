@@ -7,3 +7,5 @@ Metaphone==0.6
 soundfile==0.13.1
 packaging>=24.0
 msgpack>=1.1,<2
+# Full-screen terminal interfaces (casting, run shell); same pin as the tui extra.
+textual>=8.2,<9

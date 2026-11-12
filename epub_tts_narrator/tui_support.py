@@ -1,7 +1,8 @@
 """Decide when a command uses its full-screen terminal UI (stdlib only).
 
-Full-screen UIs are built with Textual, an optional extra (``pip install -e
-".[tui]"``). A command uses one only on an interactive terminal, when Textual
+Full-screen UIs are built with Textual. The normal setup installs it
+(``renderer.requirements.txt``, or the analyzer's ``.[tui]`` extra) while the
+core package keeps no required dependencies. A command uses one only on an interactive terminal, when Textual
 is installed, and without ``--plain``; otherwise it keeps its line-based
 output exactly, so scripts, pipes and logs see what they always have.
 """
@@ -14,9 +15,9 @@ import os
 import sys
 
 
-INSTALL_HINT = ('The full-screen interface needs the optional "tui" extra: '
-                'uv pip install --python .venv-renderer/bin/python -e ".[tui]". '
-                "Using the line interface.")
+INSTALL_HINT = ("The full-screen interface needs Textual, which this environment lacks; rerun the "
+                "install steps (uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt, "
+                'or pip install -e ".[tui]" for the analyzer). Using the line interface.')
 
 
 def textual_available():

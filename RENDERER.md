@@ -17,7 +17,7 @@ uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
 ```
 
-FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
+The requirements include Textual for the full-screen casting screen and run shell. FFmpeg and FFprobe must also be installed. Their executable names or absolute paths belong in the configuration file. The environment commands follow [uv's environment documentation](https://docs.astral.sh/uv/pip/environments/).
 
 For development and the full offline test suite, install `test.requirements.txt` instead of only the runtime requirements. It includes the runtime plus server/storage and worker-decoder test dependencies, including `boto3` and `faster-whisper`:
 
@@ -326,7 +326,7 @@ The configured workers replace the default single renderer. Omit the `local` ent
 
 On an interactive terminal, `render` keeps one live row per active chapter at the bottom of the screen, plus a scheduler row, for example `Ch 39/92 | 12/110 blocks (11%) | 02:01 | #13 second-mac gen 2/6 00:37 | ~05:00 left`. Rows show which worker is generating, a generic worker wait when all slots are busy, and local normalization or verification with the audio's worker name. Synthesis takes start in FIFO submission order and each claims the first free worker; chapters have no worker affinity, and a queued take holds no lane thread or worker slot. Everything else scrolls above the rows, tagged with its chapter: chapters starting, reused or finished, rejections (`Ch 39: Chunk 2 (audio from second-mac): Attempt 1/6 rejected: …`), retries and recovery. Routine per-chunk completions appear only in the rows. Redirected output (a log file or pipe) keeps plain status lines every 30 seconds. Cache reuse does not report new worker activity.
 
-With the optional `tui` extra installed (`uv pip install --python .venv-renderer/bin/python -e ".[tui]"`), `render` (one book or a multi-book queue), `assemble`, `import-voices` and `create-voices` run inside a full-screen run shell instead. `--plain`, redirected input or output, or `TERM=dumb` keep the line output above unchanged. The shell has four views:
+On an interactive terminal, `render` (one book or a multi-book queue), `assemble`, `import-voices` and `create-voices` run inside a full-screen run shell instead (Textual, installed by `renderer.requirements.txt`). `--plain`, redirected input or output, `TERM=dumb`, or an environment without Textual keep the line output above unchanged. The shell has four views:
 
 - **Status** (`1`): one row per active chapter with its book, block count and percentage, elapsed time, estimated time left, and every active block with its worker and phase; the header sums up elapsed time, active and finished chapters, book outcomes and failures; the scheduler's `sched` gauges appear underneath.
 - **Workers** (`2`): what each local or remote worker is doing, by book, chapter and block.
@@ -809,13 +809,9 @@ Open the interactive casting tool:
   "runs/book-01"
 ```
 
-On an interactive terminal with the optional `tui` extra installed, `cast` opens a full-screen casting screen (Textual):
+On an interactive terminal, `cast` opens a full-screen casting screen (Textual, installed by `renderer.requirements.txt`; an older environment gets it by rerunning `uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt`).
 
-```sh
-uv pip install --python .venv-renderer/bin/python -e ".[tui]"
-```
-
-Without the extra, with `--plain`, or when input or output is not a terminal, `cast` keeps the numbered line menu described below, unchanged. The screen shows:
+Without Textual, with `--plain`, or when input or output is not a terminal, `cast` keeps the numbered line menu described below, unchanged. The screen shows:
 
 - **Voices:** every voice with its status (`accepted`, `missing`, `pending` (takes but none accepted), `inherited`, `derived`, `shared`, `failed` with its saved error, `needs regeneration`, and `queued`/`generating` while a job runs). `/` filters by name, voice ID or description; `f` cycles a status filter; `o` sorts what needs attention first.
 - **Detail:** the voice description (the clone direction for a derived voice), audition script and its source, speech traits, sharing, and reference clip count, each with the key that edits it.
