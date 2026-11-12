@@ -63,6 +63,16 @@ class AssignmentTests(unittest.TestCase):
             self.assertTrue(entry["intro"])
             self.assertTrue(any(character["name"] in text for text in entry["intro"]))
 
+    def test_a_voice_reading_the_authors_preface_is_named_as_the_author_not_the_narrator(self):
+        bundle = deepcopy(self.bundle)
+        bundle["source"]["book"]["authors"] = ["Ada Quill"]
+        voice_id = self.voices[0]
+        bundle["cast"]["characters"] = [c for c in bundle["cast"]["characters"] if c["voice_id"] != voice_id]
+        bundle["cast"]["roles"] = [role for role in bundle["cast"]["roles"] if role["voice_id"] != voice_id] + [
+            {"id": "role_author", "kind": "narration", "character_id": None, "voice_id": voice_id,
+             "description": "Author narration for the preface, read as the book's author."}]
+        self.assertEqual(voice_entries(bundle)[voice_id]["label"], "Ada Quill (author)")
+
     def test_a_returning_character_is_introduced_from_the_earliest_book_that_names_them(self):
         voice_id = self.voices[0]
         character = next(c for c in self.bundle["cast"]["characters"] if c["voice_id"] == voice_id)

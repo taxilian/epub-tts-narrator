@@ -187,7 +187,16 @@ def voice_entries(bundle, parents=()):
         narrates = any(role.get("kind") == "narration" for role in roles)
         label = ", ".join(character["name"] for character in characters)
         if not names:
-            label = "Narrator" if narrates else (roles[0]["id"] if roles else voice_id)
+            # A voice with no character: the author reading front/back matter, or a storyteller narrator.
+            from epub_tts_narrator.narration_identity import author_narrator_name
+            authors = list(dict.fromkeys(name for role in roles if role.get("kind") == "narration"
+                                         and (name := author_narrator_name(role, bundle["source"]["book"]))))
+            if authors:
+                label = ", ".join(authors) + " (author)"
+            elif narrates:
+                label = "Narrator (the story's storyteller, not a character)"
+            else:
+                label = roles[0]["id"] if roles else voice_id
             names = [label]
         about = "; ".join(character.get("description", "") for character in characters if character.get("description"))
         if not about:
@@ -382,7 +391,10 @@ def _ask_apply():
         print("[A] save these accents / [L] leave the book unchanged: ", end="", flush=True)
         try:
             answer = sys.stdin.readline()
-        except (EOFError, KeyboardInterrupt, OSError):
+        except KeyboardInterrupt:
+            print("\nInterrupted; leaving the book unchanged.")
+            return False
+        except (EOFError, OSError):
             answer = ""
         if answer == "":
             print("\nInput ended; leaving the book unchanged.")
