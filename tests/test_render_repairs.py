@@ -118,9 +118,11 @@ class GlanceTests(unittest.TestCase):
         self.assertIn("1 rendering", glance["Books"][1])
         self.assertIn("1 failed", glance["Books"][1])
         rows = {row[0]: row for row in self.model.book_rows()}
-        self.assertEqual(rows["b1"][1:5], ("rendering", 2, 9, 1))
-        self.assertEqual(rows["b3"][1], "failed")
-        self.assertEqual(rows["b3"][6], 1)
+        # 2 of 9 chapters ready plus a quarter of chapter 3: 25%.
+        self.assertEqual(rows["b1"][1:6], (25, "rendering", 2, 9, 1))
+        self.assertEqual(rows["b3"][2], "failed")
+        self.assertEqual(rows["b3"][7], 1)
+        self.assertIsNone(rows["b2"][1])
 
     def test_block_activity_counts_generating_verifying_and_waiting(self):
         self.snapshot("k", None, 1, 0, [
@@ -147,7 +149,7 @@ class GlanceTests(unittest.TestCase):
         self.bus.publish("book", "rendering", scope={"book": "solo"}, data={"key": "solo", "state": "rendering"})
         self.bus.log("Reusing completed chapter 1 / 4: One (x.m4a)")
         self.snapshot("k", None, 2, 1, [])
-        self.assertEqual(self.model.book_rows()[0][:4], ("solo", "rendering", 1, 4))
+        self.assertEqual(self.model.book_rows()[0][:5], ("solo", 25, "rendering", 1, 4))
         self.assertEqual(self.model.logs[-1][1].scope["book"], "solo")
 
     def test_a_failed_book_can_go_back_into_the_queue_and_clears_once_it_renders(self):
@@ -167,6 +169,29 @@ class GlanceTests(unittest.TestCase):
                          data={"key": "/books/b2", "state": "failed", "retry": lambda: True})
         self.assertEqual([entry["state"] for entry in self.model.failures], ["failed"])
         self.assertEqual(self.model.failures[0]["error"], "failed: fixture failure again")
+
+    def test_node_slots_list_every_slot_with_its_block_and_idle_ones(self):
+        from epub_tts_narrator.renderer.node_activity import NodeActivity, job
+        activity = NodeActivity(clock=self.clock)
+        owner = object()
+        activity.register(owner, "local", "speech", 2, local=True)
+        activity.register(owner, "local", "verify", 1, local=True)
+        activity.register(owner, "second-mac", "speech", 3, local=False)
+        with job("b1", 3, 7):
+            with activity.busy("second-mac", "speech"):
+                self.clock.now += 4
+                with activity.busy("local", "verify", {"book": "b2", "chapter": 1, "block": 2}):
+                    nodes = activity.snapshot()
+        self.assertEqual([(node["name"], node["role"]) for node in nodes],
+                         [("local", "speech"), ("local", "verify"), ("second-mac", "speech")])
+        rows = self.model.node_rows(nodes)
+        self.assertEqual(len(rows), 6)
+        busy = [(name, role, slot, item["book"], item["chapter"], item["block"]) for name, role, slot, item in rows if item]
+        self.assertEqual(busy, [("local", "verify", 1, "b2", 1, 2), ("second-mac", "speech", 1, "b1", 3, 7)])
+        self.assertEqual(self.model.node_summary(nodes)["second-mac"], {"speech": (1, 3)})
+        self.assertEqual(activity.snapshot()[2]["jobs"], [])
+        activity.unregister(owner)
+        self.assertEqual(activity.snapshot(), [])
 
     def test_repair_hints_name_the_likely_fix(self):
         def item(error, error_type="RenderBlocked", **extra):

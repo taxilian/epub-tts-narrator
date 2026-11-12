@@ -408,6 +408,37 @@ class PipelineLifecycleTests(unittest.TestCase):
         self.assertEqual(seen[1], "manual_take_selection")
         self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
+    def test_node_activity_shows_which_block_holds_each_speech_and_verify_slot(self):
+        from epub_tts_narrator.renderer.node_activity import ACTIVITY
+        self._four_chapter_bundle("nodes-bundle")
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        seen = {"speech": [], "verify": []}
+        original_synthesize, original_transcribe = self.engine.synthesize, self.verifier.transcribe
+
+        def jobs(role):
+            return [(node["name"], item["chapter"], item["block"]) for node in ACTIVITY.snapshot()
+                    if node["role"] == role for item in node["jobs"]]
+
+        def synthesize(*args, **kwargs):
+            seen["speech"].extend(jobs("speech"))
+            return original_synthesize(*args, **kwargs)
+
+        def transcribe(path):
+            seen["verify"].extend(jobs("verify"))
+            return original_transcribe(path)
+
+        with (patch.object(self.engine, "synthesize", side_effect=synthesize),
+              patch.object(self.verifier, "transcribe", side_effect=transcribe)):
+            render(self.bundle, self.config, pool, self.verifier, notify=lambda _: None)
+        self.assertIn(("local", 2, 2), seen["speech"])
+        self.assertTrue(all(name == "local" and chapter and block for name, chapter, block in seen["verify"]))
+        self.assertTrue(seen["verify"])
+        self.assertEqual({(node["name"], node["role"], node["slots"]) for node in ACTIVITY.snapshot()},
+                         {("local", "speech", 1), ("local", "verify", 1)})
+        pool.close()
+        self.assertEqual(ACTIVITY.snapshot(), [])
+
     def test_a_held_render_reports_its_failures_when_the_person_finishes(self):
         self._four_chapter_bundle("held-bundle")
         holds = []

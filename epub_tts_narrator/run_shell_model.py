@@ -445,7 +445,11 @@ class RunModel:
         return result
 
     def book_rows(self):
-        """``[(book, state, ready, total, active chapters, blocks done/total, failures)]``."""
+        """``[(book, percent or None, state, ready, total, active chapters, blocks done/total, failures)]``.
+
+        The percentage counts finished chapters plus the accepted share of
+        each active chapter's blocks; unknown until a chapter total is seen.
+        """
         with self._lock:
             rows = []
             for book, state in self.book_states.items():
@@ -453,9 +457,31 @@ class RunModel:
                 done = sum(row["snapshot"]["done"] for row in live)
                 blocks = sum(row["snapshot"]["blocks"] for row in live)
                 failed = sum(1 for item in self.current_failures() if item["scope"].get("book") == book)
-                rows.append((book, state["state"] or "starting", state["ready"], state["total"], len(live),
+                percent = None
+                if state["state"] == "done":
+                    percent = 100
+                elif state["total"]:
+                    partial = sum(row["snapshot"]["done"] / max(1, row["snapshot"]["blocks"]) for row in live)
+                    percent = min(99, int(100 * (state["ready"] + partial) / state["total"]))
+                rows.append((book, percent, state["state"] or "starting", state["ready"], state["total"], len(live),
                              f"{done}/{blocks}" if live else "", failed))
         return rows
+
+    def node_rows(self, nodes):
+        """Per node and role, one row per slot: ``(node, role, slot, job or None)``; idle slots too."""
+        rows = []
+        for node in nodes or []:
+            jobs = list(node["jobs"])
+            for slot in range(max(node["slots"], len(jobs))):
+                rows.append((node["name"], node["role"], slot + 1, jobs[slot] if slot < len(jobs) else None))
+        return rows
+
+    def node_summary(self, nodes):
+        """``{node: {role: (busy, slots)}}`` for the at-a-glance line."""
+        result = {}
+        for node in nodes or []:
+            result.setdefault(node["name"], {})[node["role"]] = (len(node["jobs"]), node["slots"])
+        return result
 
     def summary(self, now=None):
         now = self._clock() if now is None else now

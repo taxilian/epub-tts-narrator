@@ -368,6 +368,13 @@ class RenderPool:
             _Recognizer(worker["name"], worker.get("recognition_concurrency", 1), RemoteRecognizer(worker))
             for worker in settings["workers"] if "recognition" in worker.get("roles", ())]
         self._recognition_slots = _Slots(self._recognizers)
+        from .node_activity import ACTIVITY
+        for worker in self._workers:
+            ACTIVITY.register(self, worker.settings["name"], "speech", worker.settings.get("concurrency", 1),
+                              local=worker.local)
+        for recognizer in self._recognizers:
+            ACTIVITY.register(self, recognizer.settings["name"], "verify", recognizer.settings["concurrency"],
+                              local=recognizer.local)
         self._recognition_verified = None
         self._slots = _Slots(self._workers)
         self.max_parallel = self._slots.qsize()
@@ -496,7 +503,14 @@ class RenderPool:
 
     def _recognize(self, name, method, args, kwargs, *, initialize_mlx):
         """One recognizer model call in FIFO order on the first free slot."""
+        from .node_activity import ACTIVITY, current_job
+        job = current_job()
+
         def run_on(recognizer):
+            with ACTIVITY.busy(recognizer.settings["name"], "verify", job):
+                return transcribe_on(recognizer)
+
+        def transcribe_on(recognizer):
             if recognizer.local or kwargs or len(args) != 1:
                 def local():
                     with self._recognition_lock:
@@ -579,6 +593,8 @@ class RenderPool:
         if self._resources is not None:
             return self._execute_on_lane(method, args, kwargs)
         notify = generation_notifier()
+        from .node_activity import ACTIVITY, current_job
+        job = current_job()
         report_worker_activity(notify, "waiting")
         with METRICS.waiting("synthesis_slot"):
             worker = self._slots.acquire()
@@ -591,7 +607,7 @@ class RenderPool:
                 stop_if_requested()
                 started = monotonic()
                 report_worker_activity(notify, "started", name)
-                with METRICS.active("synthesis"):
+                with METRICS.active("synthesis"), ACTIVITY.busy(name, "speech", job):
                     try:
                         engine = worker.engine()
                         if worker.local and not worker.batched and requires_mlx(engine):
@@ -629,6 +645,8 @@ class RenderPool:
         from .interrupts import stop_if_requested
 
         notify = generation_notifier()
+        from .node_activity import ACTIVITY, current_job
+        job = current_job()
         claimed = []
         # Queued time until a worker slot is reserved. Ended once: an
         # interrupted caller may race a later reservation of its queued take.
@@ -664,10 +682,11 @@ class RenderPool:
                 started = monotonic()
                 report_worker_activity(notify, "started", name)
                 try:
-                    engine = worker.engine()
-                    if worker.local and not worker.batched and requires_mlx(engine):
-                        self._local_runtime.initialize_mlx()
-                    metadata = getattr(engine, method)(*args, **kwargs)
+                    with ACTIVITY.busy(name, "speech", job):
+                        engine = worker.engine()
+                        if worker.local and not worker.batched and requires_mlx(engine):
+                            self._local_runtime.initialize_mlx()
+                        metadata = getattr(engine, method)(*args, **kwargs)
                     if not isinstance(metadata, dict):
                         raise EngineError("TTS worker returned invalid generation metadata")
                     result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
@@ -723,6 +742,8 @@ class RenderPool:
         if self._closed:
             return
         self._closed = True
+        from .node_activity import ACTIVITY
+        ACTIVITY.unregister(self)
         try:
             if self._logical is not None:
                 # Stop logical admission, cancel queued transactions, and let

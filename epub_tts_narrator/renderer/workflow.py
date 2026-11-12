@@ -2793,6 +2793,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         if scheduler is not None:
             from .render_pipeline_config import effective_scheduling
             chapter_limit = effective_scheduling(config)["chapter_concurrency"]
+        from .node_activity import ACTIVITY
+        # How many chapters may render at once (shared by every book in a queue).
+        ACTIVITY.set_chapter_capacity(getattr(chapter_coordinators, "capacity", None) or chapter_limit)
         assembly_executor = ThreadPoolExecutor(
             max_workers=2 if scheduler is not None else 1, thread_name_prefix="audiobook-assemble")
         pending_assembly = {}  # manifest index -> (future, acceptance, label, started)

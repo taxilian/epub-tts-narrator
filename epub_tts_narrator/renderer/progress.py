@@ -705,7 +705,9 @@ class ChapterProgress:
             self._active[index] = _Task("checking saved audio", self._clock())
             if self._tty:
                 self._show(force=True)
-        with METRICS.active("clip"):
+        from .node_activity import job
+        book = _prefix_book(getattr(self._board, "prefix", None)) if self._board is not None else None
+        with METRICS.active("clip"), job(book, self.number, index + 1):
             try:
                 yield _TaskNotifier(self, index)
             except BaseException:

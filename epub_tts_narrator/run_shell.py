@@ -61,6 +61,9 @@ class RunApp(CapturePrintMixin, App):
     .tile.error { border: round $error; }
     #books { height: 1fr; }
     #rows, #workers, #errors { height: 1fr; }
+    #coordinators { height: auto; max-height: 18; }
+    .section-title { color: $text-muted; padding: 0 1; margin-top: 1; }
+    #nodes-line { height: auto; padding: 0 1; }
     #stages { height: auto; max-height: 12; }
     #sched { height: auto; color: $text-muted; padding: 0 1; }
     #progress { height: auto; padding: 0 1; }
@@ -79,7 +82,8 @@ class RunApp(CapturePrintMixin, App):
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
         Binding("1", "tab('summary')", "Summary", tooltip="At a glance: health, books, clips, verification"),
         Binding("2", "tab('chapters')", "Chapters", tooltip="Live chapters, blocks, timing and active work"),
-        Binding("3", "tab('workers')", "Workers", tooltip="Each worker's work, and the render pipeline's stages"),
+        Binding("3", "tab('workers')", "Nodes", tooltip="Chapter workers, each node's speech and verify slots and "
+                                                        "their blocks, and the pipeline's stages"),
         Binding("4", "tab('log')", "Log", tooltip="Every message, filtered"),
         Binding("5", "tab('errors')", "Errors", tooltip="Every failure with its detail and repairs"),
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
@@ -129,13 +133,17 @@ class RunApp(CapturePrintMixin, App):
                 with Grid(id="glance"):
                     for name in self.TILES:
                         yield Static("", classes="tile", id="tile-" + name.lower().replace(" ", "-"))
+                yield Static("", id="nodes-line")
                 yield Static("", id="progress")
                 yield DataTable(id="books", cursor_type="row", zebra_stripes=True)
             with TabPane("Chapters", id="chapters"):
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="sched")
-            with TabPane("Workers", id="workers-tab"):
-                yield DataTable(id="workers", cursor_type="row")
+            with TabPane("Nodes", id="workers-tab"):
+                yield Static("", id="coordinators-title", classes="section-title")
+                yield DataTable(id="coordinators", cursor_type="row")
+                yield Static("", id="nodes-title", classes="section-title")
+                yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
                 yield DataTable(id="stages", cursor_type="row")
             with TabPane("Log", id="log-tab"):
                 yield Static("", id="filters")
@@ -152,9 +160,10 @@ class RunApp(CapturePrintMixin, App):
             self.capture_prints(stdout_tty=True, tee=self.bridge.output)
         else:
             self.capture_prints()
-        self.query_one("#books", DataTable).add_columns("Book", "State", "Chapters", "Active", "Blocks", "Failures")
+        self.query_one("#books", DataTable).add_columns("Done", "Book", "State", "Chapters", "Active", "Blocks", "Failures")
+        self.query_one("#coordinators", DataTable).add_columns("Chapter worker", "Book", "Chapter", "Blocks", "Working on")
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
-        self.query_one("#workers", DataTable).add_columns("Worker", "Book", "Chapter", "Block", "Doing", "For")
+        self.query_one("#workers", DataTable).add_columns("Node", "Role", "Slot", "Book", "Chapter", "Block", "For")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
         self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
         self.start_command()
@@ -223,12 +232,7 @@ class RunApp(CapturePrintMixin, App):
             rows.append((str(key), cells))
         sync_table(self.query_one("#rows", DataTable), rows)
         self.query_one("#sched", Static).update(self._sched_line())
-        workers = []
-        for worker, tasks in sorted(model.workers().items()):
-            for book, chapter, block, phase, elapsed in tasks:
-                workers.append((f"{worker}:{book}:{chapter}:{block}",
-                                (worker, book or "", str(chapter or ""), f"#{block}", phase, format_seconds(elapsed))))
-        sync_table(self.query_one("#workers", DataTable), workers)
+        self._draw_nodes()
         stages = (model.sched or {}).get("stages") or {}
         sync_table(self.query_one("#stages", DataTable), [
             (name, (STAGE_NAMES.get(name, name), str(gauges.get("active_now", 0)), str(gauges.get("queued_now", 0))))
@@ -248,6 +252,51 @@ class RunApp(CapturePrintMixin, App):
         self.query_one("#filters", Static).update(
             "Filters: " + (model.filter.describe() or "none") + "   (b book · c chapter · w worker · V voice · v level · / text · x clear)")
 
+    def _draw_nodes(self):
+        """Chapter workers (not tied to a node) and every node's speech/verify slots."""
+        model = self.model
+        nodes, capacity = self._node_status()
+        live = [(key, scope, snapshot) for key, scope, snapshot, _ in model.visible_rows() if snapshot]
+        title = (f"Chapter workers: {len(live)} of {capacity} busy" if capacity
+                 else f"Chapter workers: {len(live)} busy")
+        self.query_one("#coordinators-title", Static).update(
+            Text(title + " — each runs one chapter, sending its blocks to any free node"))
+        coordinator_rows = [(str(key), (f"#{number}", scope.get("book") or "", f"{snapshot['chapter']}/{snapshot['total_chapters']}",
+                                        f"{snapshot['done']}/{snapshot['blocks']}", _active_text(snapshot)))
+                            for number, (key, scope, snapshot) in enumerate(live, 1)]
+        coordinator_rows += [(f"idle-{number}", (f"#{number}", "", "", "", Text("idle", style="dim")))
+                             for number in range(len(live) + 1, (capacity or 0) + 1)]
+        sync_table(self.query_one("#coordinators", DataTable), coordinator_rows)
+        rows = []
+        for name, role, slot, job in model.node_rows(nodes):
+            label = "speech" if role == "speech" else "verify"
+            if job is None:
+                cells = (name, label, str(slot), Text("idle", style="dim"), "", "", "")
+            else:
+                cells = (name, label, str(slot), str(job.get("book") or ""), str(job.get("chapter") or ""),
+                         f"#{job['block']}" if job.get("block") else "", format_seconds(job.get("elapsed", 0)))
+            rows.append((f"{name}:{role}:{slot}", cells))
+        self.query_one("#nodes-title", Static).update(Text(
+            "Render nodes: speech (TTS) and verify (transcription) slots, and the block each slot is working on"
+            if rows else "Render nodes: none reported (no worker pool; speech and verification run in this process)"))
+        sync_table(self.query_one("#workers", DataTable), rows)
+        summary = model.node_summary(nodes)
+        line = Text()
+        for name, roles in summary.items():
+            line.append(f"{name}: ", style="bold")
+            line.append(" · ".join(f"{'speech' if role == 'speech' else 'verify'} {busy}/{slots}"
+                                   for role, (busy, slots) in sorted(roles.items(), key=lambda item: item[0] != "speech")))
+            line.append("    ")
+        self.query_one("#nodes-line", Static).update(line)
+
+    @staticmethod
+    def _node_status():
+        try:
+            from .renderer.node_activity import ACTIVITY
+            return ACTIVITY.snapshot(), ACTIVITY.chapter_capacity
+        except Exception:
+            return [], None
+
     def _draw_glance(self):
         model = self.model
         for name, (value, detail, level) in model.glance().items():
@@ -266,10 +315,11 @@ class RunApp(CapturePrintMixin, App):
                 f"{progress['step_fraction']:.0%} · {progress['stage']}",
                 progress.get("activity", ""), progress.get("totals", "")) if line))
         sync_table(self.query_one("#books", DataTable), [
-            (str(book), (str(book or "this run"), Text(state, style=BOOK_STYLES.get(state, "")),
+            (str(book), (Text("" if percent is None else f"{percent:3d}%", style="bold"),
+                         str(book or "this run"), Text(state, style=BOOK_STYLES.get(state, "")),
                          f"{ready}/{total}" if total else (str(ready) if ready else ""),
                          str(active) if active else "", blocks, str(failed) if failed else ""))
-            for book, state, ready, total, active, blocks, failed in model.book_rows()])
+            for book, percent, state, ready, total, active, blocks, failed in model.book_rows()])
 
     def _draw_log(self):
         log = self.query_one("#log", RichLog)
