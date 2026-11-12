@@ -29,7 +29,7 @@ import re
 import sys
 import uuid
 
-from .accent_prompts import ASSIGN, NOTES
+from .accent_prompts import ASSIGN, NOTES, REVISE
 
 
 ASSIGNMENTS_FILENAME = "voice-accent-assignments.json"
@@ -332,14 +332,16 @@ def voice_clues(bundle, config=None, *, store=None):
 
 
 def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=frozenset(), clues=None,
-                       entries=None, origins=(), keep=None):
+                       entries=None, origins=(), keep=None, revise=None):
     """One request assigning ``voice_ids`` around ``fixed`` ({voice_id: cue}).
 
     ``clues`` ({voice_id: (voice description, traits)}, ``voice_clues``) go
     with each voice. ``origins`` (``series_origins``) are the series' earlier
     decisions: a group reusing one must keep its accent. ``keep``
     ({voice_id: cue}, voices among ``voice_ids``) must come back with exactly
-    that accent, so only their grouping and reasons are asked for. Returns
+    that accent, so only their grouping and reasons are asked for.
+    ``revise`` = (groups, instructions) asks for that plan changed as the
+    person's instructions say. Returns
     {"groups": [{"origin", "accent", "why", "voice_ids", "names"}],
     "accents": {voice_id: cue}}. A voice the reply leaves out gets no accent.
     """
@@ -368,6 +370,13 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     system = ASSIGN
     if notes:
         system, payload = system + NOTES, {**payload, "notes": notes}
+    if revise is not None:
+        plan, instructions = revise
+        system = system + REVISE
+        payload = {**payload, "revise": instructions,
+                   "plan": [[group["origin"], group["accent"], group.get("why", ""),
+                             [ids[voice_id] for voice_id in group["voice_ids"] if voice_id in ids]]
+                            for group in plan]}
 
     def validate(response):
         groups = response.get("g") if isinstance(response, dict) else None
@@ -487,87 +496,52 @@ def _report(result, entries, notify, origins=()):
             notify(f"      why: {group['why']}")
 
 
-def _ask_apply():
-    while True:
-        print("[A] save these accents / [L] leave the book unchanged: ", end="", flush=True)
-        try:
-            answer = sys.stdin.readline()
-        except KeyboardInterrupt:
-            print("\nInterrupted; leaving the book unchanged.")
-            return False
-        except (EOFError, OSError):
-            answer = ""
-        if answer == "":
-            print("\nInput ended; leaving the book unchanged.")
-            return False
-        answer = answer.strip().casefold()
-        if answer in {"a", "l", "q"}:
-            return answer == "a"
-        print("Please enter A or L.")
-
-
 def run_accents_command(bundle, config, args, config_path):
-    """``audiobook-render accents BOOK``: reassign the book's accents as a fresh run, with optional guidance."""
-    from .book_context import resolve_book_config
-    from .speech_traits import _book_terms, accent_cues
-    config = resolve_book_config(bundle, config)
-    instructions = args.instructions
-    if instructions is not None and not 1 <= len(instructions) <= MAX_NOTES:
-        raise ValueError(f"--instructions must contain from 1 to {MAX_NOTES} characters")
-    notes = instructions if instructions is not None else guidance(bundle, config)
-    entries = voice_entries(bundle, parent_bundles(config))
-    chosen, fixed = _fixed(bundle, config, entries, own_only=True)
-    pending = [voice_id for voice_id in entries if voice_id not in fixed]
-    keep = {}
-    if getattr(args, "keep", False):
-        # Record origins and reasons for the accents this book already has, changing none of them.
-        own = assigned_accents(bundle, config, own=True)
-        keep = {voice_id: own[voice_id] for voice_id in pending if own.get(voice_id)}
-    origins = series_origins(bundle, config, own=False)
-    print(f"Accent assignment: {len(pending)} voice(s) to assign; {len(fixed)} kept (cues or trait accents a person "
-          f"chose, and accents inherited from earlier books); {len(origins)} origin(s) decided earlier in the "
-          f"series; guidance={'yes' if notes else 'no'}"
-          + (f"; keeping this book's {len(keep)} current accent(s)" if keep else "") + ".")
-    if not pending:
+    """``audiobook-render accents BOOK``: propose this book's accents, review and revise them, then save.
+
+    On a terminal the plan opens in the full-screen accent screen
+    (``accent_tui.py``); elsewhere the plan is printed, and a terminal can
+    save it, type instructions for the model to revise it, or leave it.
+    """
+    from .accent_review import AccentPlanner, ask_line, report
+    planner = AccentPlanner(bundle, config, config_path, instructions=args.instructions,
+                            keep=getattr(args, "keep", False), resume=args.resume,
+                            progress=lambda message: print(message, file=sys.stderr))
+    print(f"Accent assignment: {len(planner.pending)} voice(s) to assign; {len(planner.fixed)} kept (cues or trait "
+          f"accents a person chose, and accents inherited from earlier books); {len(planner.origins)} origin(s) "
+          f"decided earlier in the series; guidance={'yes' if planner.base_notes else 'no'}"
+          + (f"; keeping this book's {len(planner.keep)} current accent(s)" if planner.keep else "") + ".")
+    if not planner.pending:
         print("Every voice's accent is already decided; nothing to assign.")
         return 0
-    root = _book_cache(bundle, config_path) / "accent-assignment"
-    run_id = args.resume if args.resume is not None else uuid.uuid4().hex
-    cache = root / run_id
-    if args.resume is None:
-        cache.mkdir(parents=True, exist_ok=False)
-        print(f"Fresh accent run: {run_id} (finish an interrupted run with --resume {run_id})", file=sys.stderr)
-    elif re.fullmatch(r"[0-9a-f]{32}", run_id) is None or not cache.is_dir():
-        raise ValueError("--resume must be an accent run ID printed by an earlier invocation for this book")
-    requests = _requests(bundle, config_path, cache, progress=lambda message: print(message, file=sys.stderr))
-    if requests is None:
-        raise ValueError("Set provider.model in the TOML configuration to assign accents")
-    from .book_context import voice_store
-    result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
-                                notes=notes, terms=_book_terms(bundle),
-                                clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
-                                entries=entries, origins=origins, keep=keep)
-    _report(result, entries, print, origins)
-    missing = [voice_id for voice_id in pending if voice_id not in result["accents"]]
-    if missing:
-        print(f"{len(missing)} voice(s) got no accent: " + ", ".join(entries[v]["label"] for v in missing[:8]))
-    before = accent_cues(bundle, config)
-    changed = sum(1 for voice_id in pending if result["accents"].get(voice_id, "") != before.get(voice_id, ""))
-    print(f"{changed} voice(s) would change accent; their lines render again on the next render of this book.")
-    write = args.apply or (sys.stdin.isatty() and sys.stdout.isatty())
-    if not args.apply:
-        if not write:
-            print("Report only: nothing saved. Run it in a terminal to be asked, or pass --apply.")
+    from epub_tts_narrator.tui_support import wants_tui
+    if not args.apply and wants_tui(args):
+        from .accent_tui import AccentApp
+        from .accent_review import AccentController
+        controller = AccentController(planner)
+        try:
+            AccentApp(controller, title=bundle["source"]["book"]["title"]).run()
+        finally:
+            controller.close()
+        print(f"Saved accents for {len(planner.pending)} voice(s)." if planner.saved else "Nothing saved.")
+        return 0
+    planner.propose()
+    report(planner)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    while not args.apply:
+        if not interactive:
+            print("Report only: nothing saved. Run it in a terminal to review it, or pass --apply.")
             return 0
-        if not _ask_apply():
+        choice, instructions = ask_line()
+        if choice == "leave":
             print("Nothing saved.")
             return 0
-    save_assignments(bundle, config, {voice_id: result["accents"].get(voice_id, "") for voice_id in pending},
-                     replace=True)
-    save_groups(bundle, result["groups"], replace=True)
-    if instructions is not None:
-        save_guidance(bundle, instructions)
-    print(f"Saved accents for {len(pending)} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and "
-          f"reason in {GROUPS_FILENAME}"
-          + (f" and the guidance in {GUIDANCE_FILENAME}" if instructions is not None else "") + ".")
+        if choice == "save":
+            break
+        planner.revise(instructions)
+        report(planner)
+    count = planner.save()
+    print(f"Saved accents for {count} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and reason in "
+          f"{GROUPS_FILENAME}" + (f" and the guidance in {GUIDANCE_FILENAME}"
+                                  if planner.explicit_guidance is not None or planner.revisions else "") + ".")
     return 0

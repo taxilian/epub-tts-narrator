@@ -156,6 +156,8 @@ def parser():
                                  "Scandinavian, Tolnedrans Italian\"; saved with the accents and reused for new voices")
             command.add_argument("--apply", action="store_true", help="Save without asking")
             command.add_argument("--resume", metavar="RUN_ID", help="Finish an interrupted run without new requests")
+            from epub_tts_narrator.tui_support import add_plain_option
+            add_plain_option(command)
             command.add_argument("--keep", action="store_true",
                                  help="Keep this book's current accents and only record each group's origin and "
                                       "reason (for books assigned before reasons were saved)")

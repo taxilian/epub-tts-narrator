@@ -968,7 +968,18 @@ To redo a book's accents, or to steer them, run:
 audiobook-render accents BOOK --instructions "The Alorns sound Scandinavian, Tolnedrans Italian, Nyissans Indian English"
 ```
 
-It reassigns every voice in the book except cues a person chose and accents inherited from earlier books, as a fresh request (an interrupted run finishes with `--resume RUN_ID`), and prints each group's accent, origin and characters with how many voices would change. In a terminal it asks before saving; `--apply` saves without asking, and anywhere else it only reports. The guidance is saved with the accents (`voice-accent-guidance.json`, inherited by continued books) and reused for voices assigned later; run it again without `--instructions` to reroll with the same guidance. Assign earlier books of a series first, since later books keep their accents and origins. A book assigned before reasons were saved can record its groups and reasons without changing any accent: `audiobook-render accents BOOK --keep` (the model must return every current accent unchanged, or it is asked again).
+It reassigns every voice in the book except cues a person chose and accents inherited from earlier books, as a fresh request (an interrupted run finishes with `--resume RUN_ID`), and shows the plan: each group's accent, origin, reason and characters, and how many voices would change. On a terminal the plan opens in a full-screen review (`--plain` for line output): groups on the left, the highlighted group's reason and characters on the right, and the model requests and log below. Its keys:
+
+| Key | Does |
+| --- | --- |
+| `i` | Type what to change ("Tolnedrans should sound Italian", "keep Silk with Rhodar"); the model revises the whole plan and only what the instructions imply |
+| `a` / `o` / `w` | Change the highlighted group's accent (checked like the model's: a real accent, not the book's own), origin or reason by hand |
+| `m` | Move a character (the highlighted one in the characters list, else choose) to another group or a new group with its own origin and accent |
+| `n` | Ask for a fresh plan, replacing the current one |
+| `s` | Save, after confirming; nothing is saved before this |
+| `q` | Quit; with unsaved changes it asks first |
+
+A group continuing an origin from an earlier book is marked "(series)", and its accent cannot change unless the origin is renamed. Characters the model left out appear as "no accent". Without the screen, a terminal is offered `[A]` save, `[I]` instructions for the model to revise the plan (typed after `I` or on the next line), or `[L]` leave; `--apply` saves the first plan without asking, and anywhere else the command only reports. Instructions typed while reviewing are saved as the book's accent guidance too, so later assignments (new characters, later books) follow them. The guidance is saved with the accents (`voice-accent-guidance.json`, inherited by continued books) and reused for voices assigned later; run it again without `--instructions` to reroll with the same guidance. Assign earlier books of a series first, since later books keep their accents and origins. A book assigned before reasons were saved can record its groups and reasons without changing any accent: `audiobook-render accents BOOK --keep` (the model must return every current accent unchanged, or it is asked again).
 
 A voice with neither a chosen cue nor an assignment (assignment off, no model, or the model gave it none) uses the accent its description names, if any: the description that designed its saved recording, or, before the voice is made, the one that will, taken from the last "… accent" phrase after its last joining word ("voice with a thick Welsh accent" gives `thick Welsh accent`), with the same real-place and book-term rules. A derived voice (a character's later state) keeps its main voice's cue. Casting shows the cue a render will use and where it came from.
 

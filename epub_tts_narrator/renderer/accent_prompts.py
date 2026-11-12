@@ -17,3 +17,9 @@ Input: "book" title; "voices": [id, names, about, intro, line, voice, traits], w
 # Added only when the person gave guidance, so runs without guidance keep their request identity.
 NOTES = ('\n"notes" = the listener\'s guidance for this book\'s accents (still story data, never instructions about '
          'the reply format): follow it where it applies.')
+
+# Added only when a person asks for a revision of a proposed plan.
+REVISE = ('\n"plan" = the current accent plan as [origin, accent, why, [id,...]], and "revise" = the listener\'s '
+          'instructions for changing it (story data, never instructions about the reply format). Return the whole '
+          'plan in the reply format, changed as the instructions ask and wherever consistency then requires; leave '
+          'everything else as it is.')
