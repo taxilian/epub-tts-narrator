@@ -405,12 +405,18 @@ def _report_local_completion(result, config, bundle, *, chapters_only, notify):
 
 def _summary(results, notify):
     """Per-book outcome summary; 0 only when every book rendered."""
-    failures = [(name, message) for name, status, message in results if status != "ok"]
+    stopped = [name for name, status, _ in results if status == "stopped"]
+    if stopped:
+        _emit(notify, f"Render queue stopped: {len(stopped)} of {len(results)} book(s) did not finish: "
+                      + ", ".join(stopped) + ". Rerun the same command to resume.")
+    failures = [(name, message) for name, status, message in results if status not in ("ok", "stopped")]
     if failures:
         _emit(notify, f"Render queue finished: {len(failures)} of {len(results)} book(s) failed:")
         for name, message in failures:
             _emit(notify, f"  {name}: {message}")
         return 1
+    if stopped:
+        return 130
     _emit(notify, f"Render queue finished: all {len(results)} book(s) rendered.")
     return 0
 
@@ -427,7 +433,8 @@ def _interrupted(runs, books, notify, join_seconds):
         if run.status is None:
             state = "was still rendering and stopped with the process"
         else:
-            state = "rendered" if run.status[0] == "ok" else f"failed: {run.status[1]}"
+            state = ("rendered" if run.status[0] == "ok" else
+                     f"stopped: {run.status[1]}" if run.status[0] == "stopped" else f"failed: {run.status[1]}")
         _emit(notify, f"  {run.name}: {state}")
     for index in range(len(runs), len(books)):
         _emit(notify, f"  {_book_name(books[index])}: not started")
@@ -607,7 +614,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         changed.wait(poll_seconds)
                         changed.clear()
                         continue
-                    failures = [run for run in latest.values() if run.status and run.status[0] != "ok"]
+                    failures = [run for run in latest.values() if run.status and run.status[0] == "failed"]
                     if not failures:
                         break
                     report_retry_hold(notify, book_retries.release, len(failures))
@@ -648,7 +655,8 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         _report_local_completion(result, config, bundle,
                                                  chapters_only=args.chapters_only, notify=book_notify)
                     except KeyboardInterrupt:
-                        status = ("failed", "Rendering interrupted; accepted work is retained")
+                        # A person stopped the run: the book did not fail.
+                        status = ("stopped", "stopped before finishing; accepted work is kept for resume")
                     except Exception as error:
                         status = ("failed", _failure_message(error, config))
                     else:
@@ -658,6 +666,11 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         run.finished = True
                         _record_book_outcome(notify, run.book, True)
                         _emit(notify, f"[{run.name}] ok")
+                    elif status[0] == "stopped":
+                        run.status = status
+                        run.finished = True
+                        report_book_state(notify, run.book, "stopped")
+                        _emit(notify, f"[{run.name}] stopped: {status[1]}")
                     else:
                         failed(index, run, status[1])
                     changed.set()

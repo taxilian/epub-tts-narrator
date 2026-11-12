@@ -2741,7 +2741,8 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
                              voice_store_override=voice_store_override, on_synthesis_ready=on_synthesis_ready,
                              chapter_coordinators=chapter_coordinators, queue_position=queue_position)
         except BaseException as error:
-            report_book_state(notify, book, "interrupted" if isinstance(error, KeyboardInterrupt) else "failed")
+            # A person stopping the run is not a failure of this book.
+            report_book_state(notify, book, "stopped" if isinstance(error, KeyboardInterrupt) else "failed")
             raise
         report_book_state(notify, book, "done")
         return result

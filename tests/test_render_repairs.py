@@ -269,6 +269,19 @@ class GlanceTests(unittest.TestCase):
         self.assertEqual(rebuilt, [2, 3])
         self.assertIsNone(self.model.request_rebuild("unknown", 1))
 
+    def test_stopping_marks_unfinished_books_stopped_never_failed(self):
+        for book, state in (("b1", "done"), ("b2", "rendering"), ("b3", "queued")):
+            self.bus.publish("book", state, scope={"book": book}, data={"key": book, "state": state})
+        self.bus.publish("book", "stopped", scope={"book": "b2"}, data={"key": "b2", "state": "stopped"})
+        self.assertEqual(self.model.current_failures(), [])
+        self.model.finish(130)
+        states = {row[0]: row[2] for row in self.model.book_rows()}
+        self.assertEqual(states, {"b1": "done", "b2": "stopped", "b3": "stopped"})
+        self.assertEqual(self.model.health(), ("warning", "Stopped — R resumes from where it stopped"))
+        self.assertIn("2 stopped", self.model.glance()["Books"][1])
+        self.assertNotIn("failed", self.model.glance()["Books"][1])
+        self.assertTrue(self.model.summary().endswith("stopped"))
+
     def test_repair_hints_name_the_likely_fix(self):
         def item(error, error_type="RenderBlocked", **extra):
             return {"kind": "chapter", "error": error, "record": {"error_type": error_type}, **extra}

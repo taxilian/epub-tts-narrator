@@ -727,6 +727,31 @@ class BookOutcomeBoardTests(QueueFixtureTests):
         self.assertEqual(self.run_in_shell_board(behavior, on_event, count=2), 1)
         self.assertEqual(holds, [1])
 
+    def test_a_stopped_book_reports_stopped_not_failed(self):
+        from epub_tts_narrator.renderer.interrupts import RenderInterrupted
+        states, lines = [], []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            if Path(config["render"]["work_dir"]).parent.name == "book-1":
+                raise RenderInterrupted()
+            return {"chapters": []}
+
+        def on_event(event):
+            if event.kind == "book":
+                states.append((event.scope["book"], event.data["state"]))
+            elif event.kind == "log":
+                lines.append(event.text)
+            elif event.kind == "outcome":
+                # A stopped book is not counted among the failed books.
+                self.assertNotEqual(event.scope.get("book"), "book-1")
+
+        self.assertEqual(self.run_in_shell_board(behavior, on_event, count=2), 130)
+        self.assertIn(("book-1", "stopped"), states)
+        self.assertNotIn(("book-1", "failed"), states)
+        self.assertTrue(any(line.startswith("stopped: stopped before finishing") for line in lines), lines)
+        self.assertTrue(any(line.startswith("Render queue stopped: 1 of 2 book(s) did not finish: book-1")
+                            for line in lines), lines)
+
     def test_a_preparation_failure_counts_as_a_failed_book(self):
         from test_renderer_live_board import TTY
         stream = TTY()

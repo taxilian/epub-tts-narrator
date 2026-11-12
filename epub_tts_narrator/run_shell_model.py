@@ -26,7 +26,7 @@ _READY = re.compile(r"\((\d+) / (\d+) selected chapters ready\)")
 _REUSED = re.compile(r"^Reusing completed chapter (\d+) / (\d+)")
 _REJECTED = re.compile(r"\brejected\b", re.IGNORECASE)
 _RETRYING = re.compile(r"\b(retrying|retry \d|attempt \d+/\d+)\b", re.IGNORECASE)
-FINAL_BOOK_STATES = ("done", "failed", "interrupted")
+FINAL_BOOK_STATES = ("done", "failed", "stopped")
 
 
 def repair_hint(item):
@@ -209,7 +209,7 @@ class RunModel:
                 book = event.scope.get("book")
                 state = event.data.get("state")
                 self._book(book, key=event.data.get("key"))["state"] = state
-                if state in ("failed", "interrupted"):
+                if state == "failed":
                     self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"))
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
@@ -282,6 +282,10 @@ class RunModel:
             self.rows.clear()
             if interrupted or exit_code == 130:
                 self.state = "interrupted"
+                # Whatever had not finished was stopped by the person, not failed.
+                for state in self.book_states.values():
+                    if state["state"] not in ("done", "failed"):
+                        state["state"] = "stopped"
             elif exit_code == 0 and error is None and not self.current_failures():
                 self.state = "finished"
             else:
@@ -438,7 +442,7 @@ class RunModel:
             if self.state == "finished":
                 return "ok", "Finished"
             if self.state == "interrupted":
-                return "warning", "Interrupted — R resumes"
+                return "warning", "Stopped — R resumes from where it stopped"
             if self.state == "failed":
                 return "error", f"Ended with {failures or 'an'} error{'s' if failures != 1 else ''} — R resumes"
             if self.stopping:
@@ -467,7 +471,7 @@ class RunModel:
         level, text = self.health(now)
         books = len(states)
         book_detail = ", ".join(f"{states.count(name)} {name}" for name in
-                                ("rendering", "assembling", "preparing", "queued", "done", "failed", "interrupted")
+                                ("rendering", "assembling", "preparing", "queued", "done", "stopped", "failed")
                                 if states.count(name))
         result = {
             "Health": (text, f"elapsed {_duration((self.finished_at or now) - self.started)}", level),
@@ -559,7 +563,7 @@ class RunModel:
             if self.holds and self.running:
                 parts.append("waiting for retries (r retries, F finishes)")
             parts.append({"running": "stopping…" if self.stopping else "running", "finished": "finished",
-                          "failed": "finished with errors", "interrupted": "interrupted"}[self.state])
+                          "failed": "finished with errors", "interrupted": "stopped"}[self.state])
             if self.attempt > 1:
                 parts.append(f"attempt {self.attempt}")
         return " · ".join(parts)

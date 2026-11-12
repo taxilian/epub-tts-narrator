@@ -211,6 +211,11 @@ class RunApp(CapturePrintMixin, App):
             self.exit()
             return
         self.refresh_view(force=True)
+        if self.model.state == "interrupted":
+            self.action_tab("errors" if self.model.current_failures() else "summary")
+            self.notify("Stopped. R resumes from where it stopped (completed work is reused); q quits.",
+                        severity="warning", timeout=10)
+            return
         self.action_tab("errors" if self.model.current_failures() else "log")
         self.notify("The run ended with problems. R resumes (completed work is reused); q quits.",
                     severity="warning", timeout=10)
@@ -694,7 +699,7 @@ STAGE_NAMES = {"synthesis": "Generating speech", "synthesis_slot": "Waiting for 
                "preparation": "Preparing audio", "admission": "Waiting to start",
                "review_coordination": "Review coordination", "model_thread": "Model thread"}
 BOOK_STYLES = {"rendering": "bold cyan", "assembling": "cyan", "preparing": "cyan", "queued": "dim",
-               "done": "green", "failed": "bold red", "interrupted": "yellow"}
+               "done": "green", "failed": "bold red", "stopped": "yellow"}
 
 
 def _active_text(snapshot):
