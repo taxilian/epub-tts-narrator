@@ -114,10 +114,12 @@ class SampleWorkflowTests(unittest.TestCase):
               patch("epub_tts_narrator.renderer.engines.create_engine", return_value=self.engine),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=self.verifier),
               patch("epub_tts_narrator.renderer.workflow.ensure_voice") as ensure,
-              patch("epub_tts_narrator.renderer.accent_assignment.prepare_accents") as accents,
+              patch("epub_tts_narrator.renderer.accent_readiness.require") as accents,
               redirect_stdout(io.StringIO())):
             result = main(["create-voices", str(EXAMPLE), "--config", "unused.toml"])
-        accents.assert_called_once()  # accents are assigned before any voice is made
+        # Every voice it would create must have its accent decided first.
+        accents.assert_called_once()
+        self.assertTrue(accents.call_args.args[2])
         self.assertEqual(result, 0)
         self.assertGreater(len(ensure.call_args_list), 0)
         self.assertTrue(all(call.kwargs["bundle"] is self.bundle for call in ensure.call_args_list))

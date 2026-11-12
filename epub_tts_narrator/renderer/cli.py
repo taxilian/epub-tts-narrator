@@ -614,10 +614,18 @@ def main(argv=None, *, in_shell=False):
         if args.command == "cast":
             from .audition import casting_command
             config = select_voice_designer(config, args.voice_designer)
-            if args.action in {"interactive", "generate", "generate-missing", "regenerate-all"}:
-                # Accents first, so new voices are designed with the accent their lines will carry.
-                from .accent_assignment import prepare_accents
-                prepare_accents(bundle, config, config_path)
+            if args.action in {"generate", "generate-missing", "regenerate-all"}:
+                # Voices are designed with their accent, so a person decides accents first
+                # (the menu checks each voice when it is generated).
+                from . import accent_readiness
+                targets = None  # regenerate-all: every voice
+                if args.action == "generate":
+                    targets = [args.voice_id]
+                elif args.action == "generate-missing":
+                    from .book_context import voice_store as book_voice_store
+                    saved = book_voice_store(bundle, config)
+                    targets = [voice["id"] for voice in bundle["cast"]["voices"] if saved.load(voice["id"]) is None]
+                accent_readiness.require(bundle, config, targets)
             return casting_command(args, bundle, config)
         if args.command == "cache-report":
             if not 1 <= args.max_examples <= 100:
@@ -644,8 +652,10 @@ def main(argv=None, *, in_shell=False):
         if args.command == "render":
             from .name_pronunciation_tags import prepare_name_pronunciations
             prepare_name_pronunciations(bundle, config_path)
-        if args.command in {"render", "create-voices"}:
+        if args.command == "render":
+            from . import accent_readiness
             from .accent_assignment import prepare_accents
+            accent_readiness.require_before_render(bundle, config)
             prepare_accents(bundle, config, config_path)
         plan = make_plan(bundle, config)
         if args.command == "plan":
@@ -739,6 +749,9 @@ def main(argv=None, *, in_shell=False):
         if args.command in {"render", "create-voices"}:
             missing = [voice for voice in plan["voice_ids"] if store.load(voice) is None]
             if missing:
+                # New voices are designed with their accent, so a person decides accents first.
+                from . import accent_readiness
+                accent_readiness.require(bundle, config, missing)
                 if remote_only:
                     from .config import resolve_voice_design
                     if resolve_voice_design(config)["type"] == "engine":

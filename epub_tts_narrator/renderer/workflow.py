@@ -1286,6 +1286,8 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
             text = sample["reference_text"]
             sample_source = sample["source"]
         prompt = default_voice_prompt(profile)
+        from . import accent_readiness
+        accent_readiness.require(bundle, config, [requested_id], error=RenderBlocked)
         if isinstance(bundle, dict) and {"directory", "cast", "source"} <= set(bundle):
             # Designed with the accent its lines will be cued with, so the recording and the cue agree.
             from .speech_traits import accent_cues, with_accent

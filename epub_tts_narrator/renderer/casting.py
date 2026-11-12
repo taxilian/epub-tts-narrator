@@ -1106,8 +1106,12 @@ class CastingSession:
                                             binding_identity, accepted["report"], metadata, candidate_id=nonce)
 
     def _generate_locked(self, voice_id, *, fresh=False):
-        self.prepare_models(generation=True)
         profile = self._profile(voice_id)
+        if not isinstance(profile.get("derived_from"), dict):
+            # Designed with its accent, so a person decides accents first (before any model loads).
+            from . import accent_readiness
+            accent_readiness.require(self.bundle, self.config, [voice_id])
+        self.prepare_models(generation=True)
         if isinstance(profile.get("derived_from"), dict):
             return self._clone_locked(voice_id, profile)
         draft = self._draft(voice_id, self.store.load(voice_id))
