@@ -534,14 +534,7 @@ def casting_command(args, bundle, config):
         )
     from epub_tts_narrator.tui_support import wants_tui
     use_tui = action == "interactive" and wants_tui(args)
-    setup_factory, bridge = ModelSetup, None
-    if use_tui:
-        from epub_tts_narrator.tui_widgets import PromptBridge
-        # Model download questions are answered in a dialog, never on the raw terminal.
-        bridge = PromptBridge(None)
-        setup_factory = lambda settings: ModelSetup(settings, input_stream=bridge.input,  # noqa: E731
-                                                    output_stream=bridge.output)
-    session = CastingSession(bundle, config, model_setup_factory=setup_factory)
+    session = CastingSession(bundle, config, model_setup_factory=ModelSetup)
     player = AudioPlayer(settings.get("player", ["/usr/bin/afplay"]), normalizer=normalizer)
     try:
         rows = session.rows()
@@ -563,7 +556,6 @@ def casting_command(args, bundle, config):
             from .cast_tui import run_cast_tui
             from .cast_tui_model import CastController
             controller = CastController(session, player, config_path=getattr(args, "config", None))
-            controller.prompt_bridge = bridge
             book = bundle.get("source", {}).get("book", {})
             run_cast_tui(controller, title=book.get("title") or Path(bundle["directory"]).name)
         elif action == "interactive":

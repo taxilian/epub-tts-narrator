@@ -90,6 +90,10 @@ class RenderInterrupts:
         except Exception:
             pass  # A closed output stream must not prevent stopping.
 
+    def request(self):
+        """One Ctrl-C delivered as a key by a full-screen UI (see ``keyboard_interrupts``)."""
+        self._handle(signal.SIGINT, None)
+
     def _handle(self, signum, frame):
         if not self.requested:
             self.requested = True
@@ -139,6 +143,24 @@ class RenderInterrupts:
             with self._defer_lock:
                 self._defer_count -= 1
             self._force_if_ready()
+
+
+@contextmanager
+def keyboard_interrupts(notify=None, *, force_exit=None):
+    """Render interruption for a full-screen UI, where Ctrl-C arrives as a key, not SIGINT.
+
+    Installs a controller from any thread (the command runs off the main
+    thread while the UI owns it); ``controller.request()`` behaves exactly
+    like one Ctrl-C: the first stops at safe boundaries, the second exits.
+    A render's own ``RenderInterrupts`` on a worker thread leaves it in place.
+    """
+    global _active
+    controller = RenderInterrupts(notify, force_exit=force_exit)
+    previous, _active = _active, controller
+    try:
+        yield controller
+    finally:
+        _active = previous
 
 
 def stop_requested() -> bool:

@@ -7,7 +7,7 @@ Status: approved 2026-11-12 with these decisions:
 - **On failure:** the screen stays open on the errors view until `q`.
 - **Reference clips:** a per-voice override (`voice-clips.json`), nearest book first.
 
-Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); shared components (`tui_support.py`, `tui_jobs.py`, `tui_widgets.py`); casting TUI (`renderer/cast_tui_model.py`, `renderer/cast_tui.py`). Next: Phase 1 (event model) and Phase 2 (run shell) for `render`.
+Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); shared components (`tui_support.py`, `tui_jobs.py`, `tui_widgets.py`); casting TUI (`renderer/cast_tui_model.py`, `renderer/cast_tui.py`). Run shell for `render` (single and multi-book), `assemble`, `import-voices`, `create-voices`: `run_events.py`, `run_shell_model.py`, `run_shell.py`, `progress.shell_board`, `interrupts.keyboard_interrupts`; it holds open on failure and resumes with `R` by rerunning the command. Next: in-place chapter retry while the rest keeps running (Phase 3), then the analyzer and other commands (Phase 6).
 
 ## What exists today (survey)
 
@@ -115,9 +115,8 @@ Retry never touches lock or lease artifacts, never skips verification, and stays
 
 1. Done: per-voice reference clip counts.
 2. Done: shared Textual components and the casting TUI.
-3. Event model plus plain-output golden tests (no visible change).
-4. Run shell for `render` (single book), with the errors view.
-5. Render retry lane and hold-on-failure; multi-book queue and remote workers.
-6. Analyzer commands, `verify-attribution`/`refresh-directions`, `assemble`, `import-voices`, cast bulk actions in the shell; prompt bridging.
+3. Done: event model and the render run shell with status, workers, log, errors, filters, hold-on-failure and resume. Plain output stays on the untouched code path; existing live-board, progress, queue and CLI tests guard it.
+4. In-place chapter retry on a retry lane while other chapters keep running (render and the multi-book queue).
+5. Analyzer commands (`analyze`, book updates, `resolve-speakers`), `verify-attribution`/`refresh-directions` (resume with `--resume RUN_ID`), `pronounce` labelling, and cast bulk actions in the shell.
 
 Documentation (`RENDERER.md`, `ANALYSIS.md`, `README.md` and the `AGENTS.md` files) is updated with each phase.

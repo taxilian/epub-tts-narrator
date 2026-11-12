@@ -121,7 +121,8 @@ class CastApp(CapturePrintMixin, App):
     # Updates -------------------------------------------------------------------
 
     def on_captured_line(self, text, stderr):
-        self.controller.log(text, "warning" if stderr else "info")
+        from epub_tts_narrator.run_events import classify
+        self.controller.log(text, classify(text))
 
     def _changed(self):
         """Controller callback from any thread: redraw on the UI thread."""
@@ -441,12 +442,14 @@ class CastApp(CapturePrintMixin, App):
 
 def run_cast_tui(controller, *, title="Cast"):
     """Open the casting screen; returns after the person quits and jobs settle."""
+    from epub_tts_narrator.tui_support import prompt_streams
+    from epub_tts_narrator.tui_widgets import PromptBridge
     app = CastApp(controller, title=title)
-    bridge = getattr(controller, "prompt_bridge", None)
-    if bridge is not None:
-        bridge.app = app
+    # Model download questions are answered in a dialog, never on the raw terminal.
+    bridge = PromptBridge(app)
     try:
-        app.run()
+        with prompt_streams(bridge.input, bridge.output):
+            app.run()
     finally:
         controller.close()
     return 0

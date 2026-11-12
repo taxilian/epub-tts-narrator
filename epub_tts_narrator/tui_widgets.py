@@ -18,6 +18,7 @@ optional extra, and nothing else in the package imports it at module level.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 
@@ -56,24 +57,47 @@ SEVERITY_STYLES = {"error": "bold red", "warning": "yellow", "info": "", "debug"
 JOB_STYLES = {QUEUED: "dim", RUNNING: "bold cyan", DONE: "green", FAILED: "bold red", CANCELLED: "yellow"}
 
 
+class _LineWriter:
+    """A text stream that hands each complete line to ``deliver(line)`` in the writing thread."""
+
+    def __init__(self, deliver):
+        self._deliver = deliver
+        self._partial = {}
+        self._lock = threading.Lock()
+        self.encoding = "utf-8"
+
+    def write(self, text):
+        key = threading.get_ident()
+        with self._lock:
+            pending = self._partial.pop(key, "") + str(text)
+            *lines, rest = pending.split("\n")
+            if rest:
+                self._partial[key] = rest
+        for line in lines:
+            if line.strip():
+                self._deliver(line.rstrip("\r"))
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
 class CapturePrintMixin:
     """For an ``App``: send ``print`` output from any thread to ``on_captured_line(text, stderr)``.
 
     Code written for a terminal prints freely; under a full-screen UI those
     lines would be lost or garble the screen, so they become log records.
+    Lines are delivered synchronously in the printing thread, so they keep
+    their order relative to other messages that thread reports. Textual
+    restores the original streams when the app exits.
     """
 
     def capture_prints(self):
-        self._print_partial = {False: "", True: ""}
-        self.begin_capture_print(self, stdout=True, stderr=True)
-
-    def on_print(self, event):
-        # print() arrives in pieces ("text", "\n"); log whole lines only.
-        text = self._print_partial[event.stderr] + event.text
-        *lines, self._print_partial[event.stderr] = text.split("\n")
-        for line in lines:
-            if line.strip():
-                self.on_captured_line(line.rstrip("\r"), event.stderr)
+        sys.stdout = _LineWriter(lambda line: self.on_captured_line(line, False))
+        sys.stderr = _LineWriter(lambda line: self.on_captured_line(line, True))
 
     def on_captured_line(self, text, stderr):  # pragma: no cover - overridden
         pass
@@ -239,7 +263,8 @@ class ChoiceScreen(ModalScreen):
     """Choose one of ``options`` (``[(value, label)]``); type to filter, Escape cancels."""
 
     DEFAULT_CSS = BASE_CSS
-    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True),
+                Binding("down", "move(1)", "Next", show=False), Binding("up", "move(-1)", "Previous", show=False)]
 
     def __init__(self, title, options, *, help_text="", filterable=True):
         super().__init__()
@@ -261,6 +286,13 @@ class ChoiceScreen(ModalScreen):
 
     def on_mount(self):
         self.query_one("#choice-filter" if self.filterable else "#choices").focus()
+
+    def action_move(self, delta):
+        """Up/Down while typing in the filter move the list's highlight."""
+        choices = self.query_one("#choices", OptionList)
+        if choices.option_count:
+            current = choices.highlighted if choices.highlighted is not None else -1 if delta > 0 else 0
+            choices.highlighted = max(0, min(choices.option_count - 1, current + delta))
 
     def on_input_changed(self, event):
         choices = self.query_one("#choices", OptionList)

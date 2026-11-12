@@ -235,6 +235,84 @@ def _colorize_books(line):
 
 
 _BOARD = None
+_SHELL_BOARD = None
+
+
+class BusBoard(TerminalBoard):
+    """The board a full-screen run shell installs: every update becomes an event.
+
+    It keeps the ``TerminalBoard`` interface (so ``ChapterProgress`` and the
+    render queue treat it as the run's board) but draws nothing; the shell
+    renders the events instead. ``set_status`` carries each chapter row's
+    numbers, and ``chapter_failure`` each chapter-scoped failure record.
+    """
+
+    structured_status = True
+
+    def __init__(self, bus):
+        super().__init__(stream=None)
+        self.bus = bus
+
+    def log(self, *values, sep=" ", end="\n", file=None, flush=False):
+        self.bus.log(sep.join(str(value) for value in values))
+
+    def set_row(self, key, order, text):
+        scope, body = _row_scope(order, text)
+        self.bus.publish("status", body, scope=scope, data={"key": key})
+
+    def set_status(self, key, order, snapshot, *, book=None):
+        scope = {"chapter": snapshot.get("chapter")}
+        if book:
+            scope["book"] = book
+        self.bus.publish("status", "", scope=scope, data={"key": key, "snapshot": snapshot})
+
+    def remove_row(self, key):
+        self.bus.publish("status_removed", data={"key": key})
+
+    def book_outcome(self, key, succeeded):
+        self.bus.publish("outcome", severity="info" if succeeded else "error",
+                         scope={"book": _book_label(key)}, data={"key": key, "succeeded": bool(succeeded)})
+
+    def chapter_failure(self, failure, *, book=None):
+        scope = {"chapter": failure.get("number")}
+        if book:
+            scope["book"] = book
+        self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope, data=dict(failure))
+
+    def close(self):
+        self._closed = True
+
+
+def _book_label(key):
+    from pathlib import Path
+    return Path(str(key)).name or str(key)
+
+
+def _prefix_book(prefix):
+    prefix = str(prefix or "").strip()
+    return prefix[1:-1] if prefix.startswith("[") and prefix.endswith("]") else (prefix or None)
+
+
+def _row_scope(order, text):
+    scope = {}
+    if isinstance(order, tuple) and order and isinstance(order[0], str):
+        book = _prefix_book(order[0])
+        if book:
+            scope["book"] = book
+            text = text[len(order[0]):] if text.startswith(order[0]) else text
+    return scope, text
+
+
+@contextmanager
+def shell_board(bus):
+    """Route this process's render boards to ``bus`` while a run shell is open."""
+    global _SHELL_BOARD
+    previous, board = _SHELL_BOARD, BusBoard(bus)
+    _SHELL_BOARD = board
+    try:
+        yield board
+    finally:
+        _SHELL_BOARD = previous
 
 
 @contextmanager
@@ -243,8 +321,12 @@ def live_board(notify, stream=None):
 
     Yields the notify callable to use: the board's print-compatible ``log``
     when output is a terminal, otherwise the original callable unchanged.
+    While a run shell is open (``shell_board``) ``print`` goes to its board.
     """
     global _BOARD
+    if _SHELL_BOARD is not None and notify is print:
+        yield _SHELL_BOARD.log
+        return
     stream = sys.stdout if stream is None else stream
     interactive = notify is print and _BOARD is None
     try:
@@ -283,12 +365,34 @@ class PrefixedBoardNotify:
     def book_outcome(self, key, succeeded):
         self.board.book_outcome(key, succeeded)
 
+    @property
+    def structured_status(self):
+        return getattr(self.board, "structured_status", False)
+
+    def set_status(self, key, order, snapshot):
+        self.board.set_status(key, (self.prefix, *order), snapshot, book=_prefix_book(self.prefix))
+
+    def chapter_failure(self, failure):
+        if getattr(self.board, "structured_status", False):
+            self.board.chapter_failure(failure, book=_prefix_book(self.prefix))
+
 
 def _board_of(notify):
     if isinstance(notify, PrefixedBoardNotify):
         return notify
     owner = getattr(notify, "__self__", None)
     return owner if isinstance(owner, TerminalBoard) else None
+
+
+def report_chapter_failure(notify, failure):
+    """Hand one chapter-scoped failure record to a run shell's board, if any.
+
+    The line output already carries the failure message; plain, terminal
+    boards and custom notify callbacks ignore this.
+    """
+    owner = _board_of(notify)
+    if owner is not None and getattr(owner, "structured_status", False):
+        owner.chapter_failure(failure)
 
 
 def report_book_outcome(notify, key, succeeded):
@@ -613,6 +717,27 @@ class ChapterProgress:
         # A large block cannot be divided between workers; account for that tail.
         return max(max(remaining), sum(remaining) / min(self._parallel, len(remaining)))
 
+    def snapshot(self):
+        """This chapter's numbers for a run shell: blocks, timing, and each active block."""
+        now = self._clock()
+        remaining = self._remaining(now)
+        active = []
+        for index, task in sorted(self._active.items()):
+            if task.worker_stage == "generating":
+                phase = _short_phase(task.phase)
+            elif task.worker_stage == "waiting":
+                phase = "waiting for a worker"
+            elif task.worker_stage == "failed":
+                phase = "generation failed"
+            else:
+                phase = _short_phase(task.phase)
+            active.append({"block": index + 1, "phase": phase, "worker": task.worker,
+                           "worker_stage": task.worker_stage, "elapsed": now - task.phase_started})
+        return {"chapter": self.number, "total_chapters": self.total_chapters,
+                "done": len(self._done), "blocks": len(self._weights),
+                "elapsed": now - self._started, "remaining": remaining,
+                "active": active, "row": self._row()}
+
     def _row(self):
         """This chapter's live board row: no book percentage or shared segment."""
         now = self._clock()
@@ -750,7 +875,10 @@ class ChapterProgress:
     def _show(self, *, force=False):
         now = self._clock()
         if self._board is not None:
-            self._board.set_row(id(self), (self.number, id(self)), self._row())
+            if getattr(self._board, "structured_status", False):
+                self._board.set_status(id(self), (self.number, id(self)), self.snapshot())
+            else:
+                self._board.set_row(id(self), (self.number, id(self)), self._row())
             self._last_display = now
             return
         if not force and self._last_display is not None and now - self._last_display < self._log_interval:

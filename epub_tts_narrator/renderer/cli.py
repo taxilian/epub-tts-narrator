@@ -19,6 +19,11 @@ from .diagnostics import configured_secrets, format_fatal
 from .runpod_api import RunpodAmbiguousOutcome
 
 
+# Long-running commands that open the full-screen run shell on an interactive
+# terminal (with the optional tui extra and without --plain).
+SHELL_COMMANDS = frozenset({"render", "assemble", "import-voices", "create-voices"})
+
+
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -30,6 +35,9 @@ def parser():
         else:
             command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+        if name in SHELL_COMMANDS:
+            from epub_tts_narrator.tui_support import add_plain_option
+            add_plain_option(command)
         if name in {"prepare-performance", "compare-performance"}:
             command.set_defaults(work_dir=None, output=None, epub=None)
             command.add_argument("--plan-file", type=Path, help="Performance-plan JSON (default: BOOK/performance-plan.json for preparation; COMPARISON/performance-plan.json for comparison)")
@@ -312,8 +320,18 @@ def doctor(config):
                      if faster_whisper else "Checks installed files; a real generation test is still needed to exercise Metal.")}
 
 
-def main(argv=None):
+def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
+    if not in_shell and args.command in SHELL_COMMANDS:
+        from epub_tts_narrator.tui_support import wants_tui
+        if wants_tui(args):
+            # The same command, inside the full-screen run shell; errors and
+            # their locations read exactly as they do in the line interface.
+            from epub_tts_narrator.run_shell import run_in_shell
+            books = args.bundle if isinstance(args.bundle, list) else [args.bundle]
+            title = f"{args.command} — " + ", ".join(Path(book).name for book in books)
+            return run_in_shell(lambda: main(argv, in_shell=True), title=title,
+                                graceful_render_stop=args.command == "render")
     engine = verifier = None
     config = None
     interrupts = None

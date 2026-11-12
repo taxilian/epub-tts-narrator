@@ -326,7 +326,12 @@ class ModelSetup:
         with ExitStack() as stack:
             source = self.input_stream if self.input_stream is not None else sys.stdin
             output = self.output_stream if self.output_stream is not None else sys.stderr
-            if self.input_stream is None and not getattr(source, "isatty", lambda: False)():
+            from epub_tts_narrator.tui_support import active_prompt_streams
+            bridged = active_prompt_streams() if self.input_stream is None else None
+            if bridged is not None:
+                # A full-screen UI owns the terminal; it shows the question as a dialog.
+                source, output = bridged
+            elif self.input_stream is None and not getattr(source, "isatty", lambda: False)():
                 try:
                     source = stack.enter_context(open("/dev/tty", "r", encoding="utf-8"))
                     if self.output_stream is None:

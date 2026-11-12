@@ -211,17 +211,12 @@ class CastCommandTests(unittest.TestCase):
                                                                          "normalize_samples": False}}), 0)
         return factory, screen, menu, session
 
-    def test_an_interactive_terminal_opens_the_casting_screen_with_dialog_model_prompts(self):
-        from epub_tts_narrator.renderer.model_setup import ModelSetup
+    def test_an_interactive_terminal_opens_the_casting_screen(self):
         factory, screen, menu, session = self.run_cast()
         menu.assert_not_called()
         controller = screen.call_args.args[0]
         self.assertIs(controller.session, session)
         self.assertEqual(screen.call_args.kwargs["title"], "Fixture Book")
-        setup = factory.call_args.kwargs["model_setup_factory"]({"engine": {}})
-        self.assertIsInstance(setup, ModelSetup)
-        self.assertIs(setup.input_stream, controller.prompt_bridge.input)
-        self.assertIs(setup.output_stream, controller.prompt_bridge.output)
         session.close.assert_called_once()
 
     def test_plain_and_non_terminal_runs_keep_the_line_menu(self):
@@ -230,8 +225,26 @@ class CastCommandTests(unittest.TestCase):
                 factory, screen, menu, _ = self.run_cast(*options, tui=tui)
                 screen.assert_not_called()
                 menu.assert_called_once()
-                from epub_tts_narrator.renderer.model_setup import ModelSetup
-                self.assertIs(factory.call_args.kwargs["model_setup_factory"], ModelSetup)
+
+
+class ModelPromptBridgeTests(unittest.TestCase):
+    """While a full-screen UI is open, model download questions use its streams, not the terminal."""
+
+    def test_model_setup_asks_through_the_open_ui(self):
+        from io import StringIO
+        from types import SimpleNamespace
+        from epub_tts_narrator.renderer.model_setup import ModelSetup
+        from epub_tts_narrator.tui_support import active_prompt_streams, prompt_streams
+
+        class Answer(StringIO):
+            def isatty(self):
+                return True
+        answer, question = Answer("y\n"), StringIO()
+        model = SimpleNamespace(label="Fixture model", repo="org/fixture", revision="abc", size="1 GB")
+        with prompt_streams(answer, question):
+            self.assertEqual(ModelSetup({})._confirm("/models/fixture", model, ["weights"]), (True, "Model download declined"))
+        self.assertIn("Download this model now?", question.getvalue())
+        self.assertIsNone(active_prompt_streams())
 
 
 if __name__ == "__main__":

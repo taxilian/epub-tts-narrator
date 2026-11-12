@@ -2879,6 +2879,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     with plan_lock:
                         chapter_failures[chapter["number"]] = failure
                     notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
+                    from .progress import report_chapter_failure
+                    report_chapter_failure(notify, failure)
                     return
                 if rendered_chapter != chapter:
                     with plan_lock:

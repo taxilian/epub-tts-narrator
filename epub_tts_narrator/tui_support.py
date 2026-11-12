@@ -8,6 +8,7 @@ output exactly, so scripts, pipes and logs see what they always have.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import importlib.util
 import os
 import sys
@@ -56,3 +57,28 @@ def wants_tui(args=None, *, stdin=None, stdout=None, environ=None, available=Non
         (warn or (lambda text: print(text, file=sys.stderr)))(INSTALL_HINT)
         return False
     return True
+
+
+_PROMPT_STREAMS = None
+
+
+@contextmanager
+def prompt_streams(input_stream, output_stream):
+    """While a full-screen UI is open, terminal questions use these streams.
+
+    Code that asks a person something on the terminal (model download
+    confirmation) reads ``active_prompt_streams()`` before touching the real
+    terminal, which the UI owns. Process-wide, because the asking code runs
+    on a worker thread.
+    """
+    global _PROMPT_STREAMS
+    previous, _PROMPT_STREAMS = _PROMPT_STREAMS, (input_stream, output_stream)
+    try:
+        yield
+    finally:
+        _PROMPT_STREAMS = previous
+
+
+def active_prompt_streams():
+    """``(input, output)`` of the open full-screen UI, or ``None``."""
+    return _PROMPT_STREAMS
