@@ -1726,14 +1726,24 @@ def _total_restore_context(saved, current):
     return dict(current, total_chapters=saved["total_chapters"])
 
 
-def _retag_chapter_total(work, composed, context, bundle, config, *, notify=print):
-    """Re-encode verified chapter PCM with the book's new chapter count."""
+def _display_restore_context(record, current, chapter):
+    """Reconstruct the saved title and track context before proving audio equality."""
+    restore = current
+    if record["title"] != chapter["title"]:
+        previous = dict(chapter, title=record["title"])
+        restore = dict(current, chapter_hash=digest(previous),
+                       plan_audio_hash=digest(_chapter_audio_plan(previous)))
+    return _total_restore_context(record["context"], restore)
+
+
+def _retag_chapter(work, composed, chapter, context, bundle, config, *, notify=print):
+    """Re-encode verified chapter PCM with the current display metadata."""
     from .chapter_cache import reencode_chapter
     return reencode_chapter(
         composed, Path(work) / "chapters", book=bundle["source"]["book"],
         render_settings=config["render"], context=context, notify=notify,
         censorship_policy=config.get("censorship") if config.get("censorship", {}).get("enabled", False) else None,
-        total_chapters=context["total_chapters"])
+        total_chapters=context["total_chapters"], title=chapter["title"])
 
 
 def _saved_chapter_engines_match(work, record, current_engine):
@@ -2792,9 +2802,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
             composed = None
-            # Chapters appended to the book change only this chapter's track
-            # total: restore its verified audio, then retag the encoding.
-            restore_context = (_total_restore_context(saved["context"], context)
+            # Display title and track-total changes restore under their proven
+            # saved plan context, then retag the same verified PCM.
+            restore_context = (_display_restore_context(saved, context, chapter)
                                if saved is not None else context)
             if (saved is not None and _same_chapter_audio_context(saved["context"], restore_context)
                     and _saved_chapter_clips_present(work, saved)
@@ -2807,7 +2817,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                            "reusing matching verified clips.")
                 else:
                     if restore_context is not context:
-                        composed = _retag_chapter_total(work, composed, context, bundle, config, notify=notify)
+                        composed = _retag_chapter(work, composed, chapter, context, bundle, config, notify=notify)
                         with plan_lock:
                             _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
                             _publish_work_chapter_link(config, composed, notify=notify)
@@ -2979,9 +2989,10 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                 restore_context["settings"]["censorship"] = saved["settings"]["censorship"]
             else:
                 restore_context["settings"].pop("censorship", None)
-            # Appended chapters change only the earlier chapters' track totals.
-            restore_context = _total_restore_context(record["context"], restore_context)
+            # Title and track-total metadata use the saved plan only for restoration.
+            restore_context = _display_restore_context(record, restore_context, chapter)
             total_changed = restore_context["total_chapters"] != context["total_chapters"]
+            title_changed = record["title"] != chapter["title"]
             composed, chapter_acceptance = _restore_chapter(
                 work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
             _publish_work_chapter_link(config, composed, notify=notify)
@@ -3001,14 +3012,15 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                     **({"censorship_policy": config["censorship"]}
                        if config.get("censorship", {}).get("enabled", False) else {}))
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
-            elif total_changed or any(context["settings"][key] != saved["settings"][key]
-                                      for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
+            elif title_changed or total_changed or any(context["settings"][key] != saved["settings"][key]
+                                                       for key in ("chapter_format", "aac_bitrate", "mp3_bitrate")):
                 from .chapter_cache import reencode_chapter
                 composed = reencode_chapter(
                     composed, work / "chapters", book=bundle["source"]["book"],
                     render_settings=config["render"], context=context, notify=notify,
                     censorship_policy=config.get("censorship"),
-                    total_chapters=context["total_chapters"] if total_changed else None)
+                    total_chapters=context["total_chapters"] if total_changed else None,
+                    title=chapter["title"])
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)

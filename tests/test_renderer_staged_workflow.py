@@ -309,6 +309,21 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.verifier.calls) - before[1], 1)
         self.assertEqual(self.package()["status"], "complete")
 
+    def test_title_retag_still_rejects_changed_accepted_audio(self):
+        self.chapters()
+        self.bundle["chapters"][0]["entry"]["title"] = "Chapter Eight"
+        record = read_json(self.checkpoint())
+        request_hash = record["acceptance"][0]["request_hash"]
+        clip_directory = self.root / "work" / "clips" / request_hash
+        accepted = read_json(clip_directory / "accepted.json")
+        wav = clip_directory / accepted["audio_file"]
+        wav.write_bytes(wav.read_bytes()[:-2] + b"xx")
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")):
+            for action in (self.package, self.chapters):
+                with self.subTest(action=action), self.assertRaisesRegex(RenderBlocked, "Cached audio changed"):
+                    action()
+
     def test_changed_constituent_clip_is_not_hidden_by_complete_chapter(self):
         self.chapters()
         clip_directory = next((self.root / "work" / "clips").iterdir())

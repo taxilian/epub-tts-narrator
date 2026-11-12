@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.narration_boundaries import repair_narration_boundaries
+from epub_tts_narrator.renderer.assembly import probe_audio
 from epub_tts_narrator.renderer import chapter_cache
 from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
 from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
@@ -89,6 +90,9 @@ class IncrementalRendererTests(unittest.TestCase):
 
     def model_counts(self):
         return len(self.engine.voice_calls), len(self.engine.speech_calls), len(self.verifier.calls)
+
+    def accepted_files(self):
+        return {path: path.read_bytes() for path in (self.work / "clips").rglob("*") if path.is_file()}
 
     def chapter_audio(self, number):
         return Path(read_json(self.checkpoint(number))["audio_file"])
@@ -272,6 +276,152 @@ class IncrementalRendererTests(unittest.TestCase):
             self.assertEqual(self.checkpoint(number).read_bytes(), checkpoints[number])
         self.assertTrue(any("Reusing completed chapter 1 / 2" in message
                             for message in self.messages), self.messages)
+
+    def test_title_only_revision_retags_saved_pcm_and_m4b_without_models(self):
+        # Given a complete publication and its original verified chapter artifacts.
+        original = self.run_render()
+        old_checkpoint, old_cache = self.chapter_record(1)
+        old_pcm = self.work / "chapters" / old_checkpoint["cache_key"] / old_cache["wav_file"]
+        old_pcm_bytes = old_pcm.read_bytes()
+        old_chapter_bytes = self.chapter_audio(1).read_bytes()
+        old_book_probe = probe_audio(self.book_path(original), ffprobe=FFPROBE)
+        old_sync = read_json(self.output / "sync.json")
+        accepted = self.accepted_files()
+        counts = self.model_counts()
+        new_title = "Chapter Eight"
+        self.bundle["chapters"][0]["entry"]["title"] = new_title
+
+        # When only the display title changes, ordinary resume re-encodes from saved PCM.
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")), \
+             patch("epub_tts_narrator.renderer.workflow._render_chapter_with_recovery",
+                   side_effect=AssertionError("No clip execution")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter",
+                   side_effect=AssertionError("No chapter composition")):
+            current = self.run_render()
+
+        # Then speech, PCM, timings and ordering are retained while every title surface advances.
+        self.assertEqual(self.model_counts(), counts)
+        self.assertEqual(self.accepted_files(), accepted)
+        self.assertEqual(old_pcm.read_bytes(), old_pcm_bytes)
+        self.assertEqual(old_chapter_bytes, Path(old_checkpoint["audio_file"]).read_bytes())
+        checkpoint, cache = self.chapter_record(1)
+        self.assertNotEqual(checkpoint["cache_key"], old_checkpoint["cache_key"])
+        self.assertEqual(checkpoint["title"], new_title)
+        self.assertEqual(checkpoint["acceptance"], old_checkpoint["acceptance"])
+        self.assertEqual(cache["chapter"]["title"], new_title)
+        self.assertEqual(cache["identity"]["chapter"]["title"], new_title)
+        self.assertEqual(cache["pcm_sha256"], old_cache["pcm_sha256"])
+        self.assertEqual(cache["chapter"]["frames"], old_cache["chapter"]["frames"])
+        self.assertEqual(cache["chapter"]["segments"], old_cache["chapter"]["segments"])
+        new_pcm = self.work / "chapters" / checkpoint["cache_key"] / cache["wav_file"]
+        self.assertEqual(new_pcm.read_bytes(), old_pcm_bytes)
+        ignored = {"bundle_hash", "chapter_hash", "plan_audio_hash"}
+        self.assertEqual({key: value for key, value in checkpoint["context"].items() if key not in ignored},
+                         {key: value for key, value in old_checkpoint["context"].items() if key not in ignored})
+        self.assertNotEqual(checkpoint["context"]["chapter_hash"], old_checkpoint["context"]["chapter_hash"])
+        self.assertNotEqual(checkpoint["context"]["plan_audio_hash"], old_checkpoint["context"]["plan_audio_hash"])
+        chapter_probe = probe_audio(self.chapter_audio(1), ffprobe=FFPROBE)
+        self.assertEqual(chapter_probe["format"]["tags"]["title"], new_title)
+        sync = read_json(self.output / "sync.json")
+        self.assertEqual(sync["segments"], old_sync["segments"])
+        self.assertEqual([chapter["id"] for chapter in sync["chapters"]],
+                         [chapter["id"] for chapter in old_sync["chapters"]])
+        self.assertEqual([chapter["title"] for chapter in sync["chapters"]],
+                         [new_title, old_sync["chapters"][1]["title"]])
+        self.assertEqual([(chapter["start_frame"], chapter["end_frame"], chapter["frames"])
+                          for chapter in sync["chapters"]],
+                         [(chapter["start_frame"], chapter["end_frame"], chapter["frames"])
+                          for chapter in old_sync["chapters"]])
+        book_probe = probe_audio(self.book_path(current), ffprobe=FFPROBE)
+        self.assertEqual([chapter["tags"]["title"] for chapter in book_probe["chapters"]],
+                         [new_title, old_sync["chapters"][1]["title"]])
+        self.assertEqual([(chapter["start"], chapter["end"]) for chapter in book_probe["chapters"]],
+                         [(chapter["start"], chapter["end"]) for chapter in old_book_probe["chapters"]])
+
+        # Then an unchanged rerun restores the new-title checkpoint and never restores the old title.
+        published = self.output_bytes()
+        checkpoint_bytes = self.checkpoint(1).read_bytes()
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.prepare_chapter", side_effect=AssertionError("No composition")), \
+             patch("epub_tts_narrator.renderer.workflow.package_audio", side_effect=AssertionError("No packaging")), \
+             patch.object(chapter_cache, "reencode_chapter", side_effect=AssertionError("No retagging")):
+            rerun = self.run_render()
+        self.assertEqual(rerun["audio"]["chapters"][0]["title"], new_title)
+        self.assertEqual(self.output_bytes(), published)
+        self.assertEqual(self.checkpoint(1).read_bytes(), checkpoint_bytes)
+        self.assertEqual(self.model_counts(), counts)
+
+    def test_assemble_retags_title_and_encoding_from_saved_pcm_without_models(self):
+        # Given saved chapters whose title and requested chapter encoding both change.
+        self.run_render()
+        old_checkpoint, old_cache = self.chapter_record(1)
+        old_pcm = self.work / "chapters" / old_checkpoint["cache_key"] / old_cache["wav_file"]
+        old_pcm_bytes = old_pcm.read_bytes()
+        accepted = self.accepted_files()
+        counts = self.model_counts()
+        new_title = "Chapter Eight"
+        self.bundle["chapters"][0]["entry"]["title"] = new_title
+        self.config["render"]["chapter_format"] = "mp3"
+
+        # When assembling without a synthesis model, the saved PCM supplies both changes.
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")), \
+             patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")):
+            result = self.package()
+
+        # Then the new encoding and title coexist with the original speech and timeline.
+        self.assertEqual(self.model_counts(), counts)
+        self.assertEqual(self.accepted_files(), accepted)
+        checkpoint, cache = self.chapter_record(1)
+        self.assertEqual(checkpoint["acceptance"], old_checkpoint["acceptance"])
+        self.assertEqual(cache["identity"]["settings"]["chapter_format"], "mp3")
+        self.assertEqual(cache["chapter"]["title"], new_title)
+        self.assertEqual(cache["identity"]["chapter"]["title"], new_title)
+        self.assertEqual(cache["pcm_sha256"], old_cache["pcm_sha256"])
+        self.assertEqual(cache["chapter"]["segments"], old_cache["chapter"]["segments"])
+        new_pcm = self.work / "chapters" / checkpoint["cache_key"] / cache["wav_file"]
+        self.assertEqual(new_pcm.read_bytes(), old_pcm_bytes)
+        chapter_probe = probe_audio(self.chapter_audio(1), ffprobe=FFPROBE)
+        self.assertEqual(chapter_probe["format"]["tags"]["title"], new_title)
+        self.assertEqual(next(stream for stream in chapter_probe["streams"]
+                              if stream["codec_type"] == "audio")["codec_name"], "mp3")
+        book_probe = probe_audio(self.book_path(result), ffprobe=FFPROBE)
+        self.assertEqual([chapter["tags"]["title"] for chapter in book_probe["chapters"]],
+                         [new_title, "CHAPTER TWO"])
+
+    def test_title_retag_rejects_combined_speech_or_normalization_changes(self):
+        # Given a rendered book, a title edit must not authorize any audio-input change.
+        self.run_render()
+        original_document = deepcopy(self.document)
+        original_lufs = self.config["render"]["target_lufs"]
+        counts = self.model_counts()
+        for change in ("spoken", "normalization"):
+            with self.subTest(change=change):
+                self.document = deepcopy(original_document)
+                self.config["render"]["target_lufs"] = original_lufs
+                if change == "spoken":
+                    from epub_tts_narrator.pipeline import fingerprint
+                    self.document["provenance"].setdefault(
+                        "chunk_identity_source_fingerprint", fingerprint(self.document["source"]))
+                    new_text = "Let us leave before the evening bell."
+                    self.document["source"]["blocks"][1]["text"] = new_text
+                    self.document["segments"][1].update(text=new_text, end=len(new_text))
+                self.save_revision()
+                self.bundle["chapters"][0]["entry"]["title"] = "Chapter Eight"
+                if change == "normalization":
+                    self.config["render"]["target_lufs"] = -22
+
+                with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
+                     patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")), \
+                     patch("epub_tts_narrator.renderer.workflow.verified_take",
+                           side_effect=AssertionError("No TTS/ASR")):
+                    with self.assertRaisesRegex(RenderBlocked, "is stale"):
+                        self.package()
+                self.assertEqual(self.model_counts(), counts)
 
     def test_delivery_direction_change_rerenders_its_chapter(self):
         self.run_render()
