@@ -83,7 +83,8 @@ class Fixture:
 
     def run(self, session=None, action="ensure_ready"):
         with patch("epub_tts_narrator.renderer.workflow.validate_audio", side_effect=self.report), \
-                patch("epub_tts_narrator.renderer.casting.validate_audio", side_effect=self.report):
+                patch("epub_tts_narrator.renderer.casting.validate_audio", side_effect=self.report), \
+                patch("epub_tts_narrator.renderer.quality.validate_audio", side_effect=self.report):
             return getattr(session or self.session, action)(self.voice)
 
     def pending(self, *, action="ensure_ready"):
