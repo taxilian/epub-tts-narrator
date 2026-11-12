@@ -28,11 +28,21 @@ is a reasonable basis. Unknown traits may remain unspecified.
 Keep persistent vocal identity separate from a passage's local delivery.
 """
 
+DELIVERY_RESTRAINT_POLICY = """
+Emotion, delivery (tone, volume, pace), and audible events (laugh, sob, sigh,
+gasp, breath) are separate decisions; each needs its own support in the source.
+A feeling does not imply an event or a volume change: sadness is not sobbing,
+fear is not screaming, amusement is not a separate laugh, intimacy is not
+whispering. A feeling alone does not justify changing volume or pace or adding
+a sound. When uncertain whether a line needs any special delivery, leave
+ordinary conversational delivery.
+"""
+
 WHISPER_DELIVERY_POLICY = """
 Use whisper only for explicit whispering. Gentle, quiet, low, soft, or breathy
 speech (including 'she breathed') calls for a soft tone, not an inferred whisper;
-when delivery is uncertain, choose soft. Ordinary breathing actions and deep
-breaths are not speech-tone controls.
+when choosing between a soft delivery and a whisper, choose soft. Ordinary
+breathing actions and deep breaths are not speech-tone controls.
 """
 
 VOICE_PROFILE_GUIDANCE = """

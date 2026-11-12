@@ -36,7 +36,7 @@ _SOUNDS = (
     ("gasp", r"gasp(?:s|ed|ing)?"),
     ("sob", r"sob(?:s|bed|bing)?|wept|weep(?:s|ing)?"),
     ("groan", r"groan(?:s|ed|ing)?|moan(?:s|ed|ing)?"),
-    ("pant", r"pant(?:s|ed|ing)|panting|wheez\w*|out of breath|breathless\w*"),
+    ("pant", r"pant(?:s|ed|ing)|panting|wheez\w*"),
     ("yawn", r"yawn(?:s|ed|ing)?"),
     ("cough", r"cough(?:s|ed|ing)?"),
 )
@@ -66,10 +66,20 @@ TONE_WORDS = {"screaming": ("screaming", r"scream|shriek"),
               "hurried": ("hurried, quick", r"hurr|quick|fast|rush|blurt|rapid|breathless")}
 _SOUND = [(name, re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE)) for name, pattern in _SOUNDS]
 _TONE = [(name, re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE)) for name, pattern in _TONES]
-_NEGATION = re.compile(r"\b(?:not|never|no|without|stopped|ceased|refused to|tried not to)\s+(?:\w+\s+){0,2}$|n['’]t\s+(?:\w+\s+){0,1}$",
+_NEGATION = re.compile(r"\b(?:not|never|no|without|stopped|ceased|refused to|tried not to)\s+(?:\w+\s+){0,2}$|"
+                       r"\bwithout\s+(?:so\s+much\s+as|any)\s+(?:\w+\s+){0,2}$|n['’]t\s+(?:\w+\s+){0,1}$",
                        re.IGNORECASE)
+_UNREALIZED = re.compile(r"\b(?:almost|nearly|about\s+to|started\s+to|began\s+to)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
+_SILENT = re.compile(r"^\s*,?\s*(?:silently|in\s+silence|without\s+a\s+sound|noiselessly)\b", re.IGNORECASE)
+_INDIRECT = re.compile(r"\b(?:hear(?:s|d)?|see(?:s|d)?|saw|watch(?:es|ed)?|listen(?:s|ed)?|notic\w+|observ\w+|remember\w+|recall\w+|report\w+|describ\w+)\b",
+                       re.IGNORECASE)
+_INDIRECT_BREAK = re.compile(r"\b(?:and|but|then|so|or|nor)\b|[;,]", re.IGNORECASE)
+_LAUGHTER = re.compile(r"^\s+with\s+(?:[\w'’-]+\s+){0,2}laughter\b", re.IGNORECASE)
+_MANNER_BEFORE = re.compile(rf"(?:{SPEECH_VERBS})\s*,\s*$", re.IGNORECASE)
+_MANNER_AFTER = re.compile(rf"^\s*,\s*(?:{SPEECH_VERBS})\b", re.IGNORECASE)
 _SENTENCES = re.compile(r"(?<=[.!?…])[\"”’']?\s+")
 _LEAD = re.compile(r"^[\s,;:\-—–]*(?:(?:and|then|but|so)\s+)?", re.IGNORECASE)
+_INVERTED_TAG = re.compile(rf"^(?:{SPEECH_VERBS})\s+", re.IGNORECASE)
 _PRONOUNS = {"he": "m", "him": "m", "his": "m", "she": "f", "her": "f", "i": "i", "my": "i"}
 _GENDER = (("m", re.compile(r"\b(?:male|man|boy|masculine)\b", re.IGNORECASE)),
            ("f", re.compile(r"\b(?:female|woman|girl|feminine)\b", re.IGNORECASE)))
@@ -104,7 +114,7 @@ def speakers(cast):
 
 def _about(clause, speaker):
     """True when the clause's subject is this speaker."""
-    text = _LEAD.sub("", clause)
+    text = _INVERTED_TAG.sub("", _LEAD.sub("", clause), count=1)
     words = re.findall(r"[^\W\d_][\w'’-]*", text)
     if not words:
         return False
@@ -114,9 +124,6 @@ def _about(clause, speaker):
         if pronoun == "i":
             return speaker["narrator"]
         return speaker["sex"] in (None, pronoun)
-    if first.casefold() in {"said", "asked", "replied", "answered", "whispered", "called", "cried", "shouted"} and len(words) > 1:
-        words = words[1:]
-        first = words[0]
     if first.casefold() == "the":
         # "the old man laughed": a descriptive alias.
         phrase = " ".join(words[:4]).casefold()
@@ -147,11 +154,30 @@ def _informative(clause, speaker):
     return any(word not in _PLAIN and word not in _PRONOUNS and word not in speaker["tokens"] for word in words)
 
 
-def _find(patterns, clause):
+def _produced(prefix, speaker):
+    """True when the speaker performs the cue, rather than perceiving or reporting it."""
+    sentence = re.split(r"[.!?…]", prefix)[-1]
+    for match in _INDIRECT.finditer(sentence):
+        if not _INDIRECT_BREAK.search(sentence[match.end():]):
+            return False
+    named = re.search(r"([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*){0,2})(?:\s+(?:had|has|was|is|could|would|should|might|must))?\s+$", prefix)
+    return not named or all(word.casefold().removesuffix("'s").removesuffix("’s") in speaker["tokens"]
+                            for word in named.group(1).split())
+
+
+def _find(patterns, clause, speaker):
     for name, pattern in patterns:
         for match in pattern.finditer(clause):
-            if not _NEGATION.search(clause[:match.start()]):
-                return name
+            prefix, suffix = clause[:match.start()], clause[match.end():]
+            if _NEGATION.search(prefix) or _UNREALIZED.search(prefix) or not _produced(prefix, speaker):
+                continue
+            if patterns is _SOUND and _SILENT.match(suffix):
+                continue
+            if name == "pant" and match.group().casefold().endswith("ing") and (_MANNER_BEFORE.search(prefix) or _MANNER_AFTER.match(suffix)):
+                continue
+            if name in {"screaming", "shouting"} and _LAUGHTER.match(suffix):
+                continue
+            return name
     return None
 
 
@@ -179,10 +205,11 @@ def _clauses(text, rows):
 
 
 def line_cues(rows, text, people):
-    """id(row) -> {"clause", "sound", "tone"} for spoken rows whose own speaker the narration describes.
+    """id(row) -> {"clause", "sound", "tone", "side"} for spoken rows whose own speaker the narration describes.
 
     ``rows`` are all of one block's segments in order, with offsets into ``text``;
-    ``people`` comes from ``speakers(cast)``.
+    ``people`` comes from ``speakers(cast)``. ``side`` locates the clause that
+    produced the sound, defaulting to ``before`` when there is no sound.
     """
     cues = {}
     clauses = _clauses(text, rows)
@@ -197,16 +224,17 @@ def line_cues(rows, text, people):
             if side == "between" and clause in claimed:
                 continue
             if _about(clause, speaker):
-                kept.append(_own(clause))
+                kept.append((_own(clause), side))
                 if side == "after":
                     claimed.add(clause)
-        kept = [clause for clause in kept if _informative(clause, speaker)]
+        kept = [(clause, side) for clause, side in kept if _informative(clause, speaker)]
         if not kept:
             continue
-        joined = " ".join(kept)
-        sound = _find(_SOUND, joined) if row["kind"] == "dialogue" else None
-        tone = _find(_TONE, joined) if row["kind"] == "dialogue" else None
-        cues[id(row)] = {"clause": " / ".join(kept), "sound": sound, "tone": tone}
+        joined = " ".join(clause for clause, _ in kept)
+        sound = _find(_SOUND, joined, speaker) if row["kind"] == "dialogue" else None
+        tone = _find(_TONE, joined, speaker) if row["kind"] == "dialogue" else None
+        side = next((side for clause, side in kept if _find(_SOUND, clause, speaker) == sound), "before") if sound else "before"
+        cues[id(row)] = {"clause": " / ".join(clause for clause, _ in kept), "sound": sound, "tone": tone, "side": side}
     return cues
 
 
@@ -218,6 +246,6 @@ def tone_direction(direction, tone):
         direction = ", ".join(part for part in (piece.strip() for piece in direction.split(","))
                               if part and not re.search(r"\bwhisper\w*\b", part, re.IGNORECASE))
     word, present = TONE_WORDS[tone]
-    if re.search(present, direction, re.IGNORECASE):
+    if re.search(rf"\b(?:{present})", direction, re.IGNORECASE):
         return direction
     return f"{word}, {direction}" if direction else word

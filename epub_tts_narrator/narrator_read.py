@@ -1713,7 +1713,8 @@ def _cue_controls(rows, cues, notes, by_qid, stats):
 
     Shouting, screaming, soft and hurried go into the line's direction; whispering
     and drawling become scoped tags over the line; a sound becomes a point event
-    before its first word, unless the model already placed a sound on that line.
+    beside its first or last word to match the narration, unless the model already
+    placed a sound on that line.
     Returns {id(row): (row, [("controls", raw), ...])}, listed before other notes so
     the book's own words win a conflict.
     """
@@ -1731,14 +1732,15 @@ def _cue_controls(rows, cues, notes, by_qid, stats):
             items.append({"kind": "delivery", "tag": SCOPED_TONES[tone], "original": text, "left": "", "right": "",
                           "reason": CUE_REASON})
         elif tone:
-            direction = _direction(tone_direction(row["delivery"]["direction"], tone))
+            direction = _direction(tone_direction(row["delivery"]["direction"], tone), 120)
             if direction != row["delivery"]["direction"]:
                 row["delivery"] = dict(row["delivery"], direction=direction)
                 stats["cue_tones"] = stats.get("cue_tones", 0) + 1
         words = list(_WORD.finditer(text))
         if cue["sound"] and words and id(row) not in voiced and len(text) <= 2000:
-            word = words[0]
-            items.append({"kind": "vocalization", "sound": cue["sound"], "position": "before",
+            after = cue.get("side") == "after"
+            word = words[-1] if after else words[0]
+            items.append({"kind": "vocalization", "sound": cue["sound"], "position": "after" if after else "before",
                           "original": word.group(), "left": text[:word.start()], "right": text[word.end():],
                           "reason": CUE_REASON})
         if items:

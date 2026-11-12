@@ -1,6 +1,6 @@
 """Versioned compact attribution prompts. Prompt bytes are cache identity."""
 
-from .prompts import COMMON, PERFORMANCE_POLICY_GUIDANCE, WHISPER_DELIVERY_POLICY
+from .prompts import COMMON, DELIVERY_RESTRAINT_POLICY, PERFORMANCE_POLICY_GUIDANCE, WHISPER_DELIVERY_POLICY
 
 
 COMPACT_ATTRIBUTION_PROTOCOL = "compact-attribution-v1"
@@ -141,7 +141,7 @@ phonemes, pronunciation keys, or dictionary guidance. Keep proposals sparse;
 omit the whole object when the passage needs none.
 """
 
-ATTRIBUTE_COMPACT = ATTRIBUTE_COMPACT_V1 + WHISPER_DELIVERY_POLICY + """
+ATTRIBUTE_COMPACT = ATTRIBUTE_COMPACT_V1 + DELIVERY_RESTRAINT_POLICY + WHISPER_DELIVERY_POLICY + """
 COMPACT ATTRIBUTION WIRE CLARIFICATION v2
 The prohibition on echoing source text means never copy a complete source unit
 or segment and never include a segment "text" field. It does not prohibit the

@@ -791,12 +791,49 @@ class NarratedAnalyzeTests(unittest.TestCase):
         lines = {row["text"]: row for row in document["segments"] if row["kind"] == "dialogue"}
         self.assertEqual(lines['"Run!"']["delivery"]["direction"], "shouting")
         self.assertEqual(lines['"Fine,"']["delivery"]["direction"], "wry")
-        self.assertIn({"kind": "vocalization", "offset": 1, "sound": "laugh"},
+        self.assertIn({"kind": "vocalization", "offset": len('"Fine'), "sound": "laugh"},
                       lines['"Fine,"']["performance_controls"]["controls"])
         self.assertEqual([(c["tag"], c["text"]) for c in lines['"Hush,"']["performance_controls"]["controls"]],
                          [("whisper", '"Hush,"')])
         stats = document["provenance"]["narrator_read"]["segments"]
         self.assertEqual((stats["cue_sounds"], stats["cue_scoped"], stats["cue_tones"]), (1, 1, 1))
+
+    def test_automatic_cue_sounds_follow_their_clause_around_the_line(self):
+        self.source = make_source([[('"Robbers?" Faldor laughed.', "p"),
+                                    ('Silk laughed. "Durnik," he said.', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Robbers?"], "1"], [qids["Durnik,"], "2"]]
+            result.pop("p", None)
+
+        document = self.markup_with(rewrite, names={"Faldor": "m", "Silk": "m"}, review_answer="remove")
+        self.assertEqual(readiness(document)["errors"], [])
+        rows = self.by_text(document)
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        for text, word, position in (('"Robbers?"', "Robbers", "after"),
+                                     ('"Durnik,"', "Durnik", "before")):
+            with self.subTest(text=text, position=position):
+                controls = rows[text]["performance_controls"]["controls"]
+                self.assertEqual(controls, [{"kind": "vocalization", "sound": "laugh",
+                                             "offset": text.index(word) + (len(word) if position == "after" else 0)}])
+                _, compiled, _ = prepare_synthesis(text, rows[text]["delivery"]["direction"],
+                                                   performance=rows[text]["performance_controls"])
+                assert isinstance(compiled, str)
+                sound = compiled.index("[laughs]")
+                self.assertEqual(compiled.index(word) < sound, position == "after")
+
+    def test_a_cue_tone_keeps_the_tail_of_a_long_delivery_direction(self):
+        self.source = make_source([[('"Wait," Faldor said softly.', "p")]])
+        original = "calm but firm, with each careful word building toward a resolute final warning"
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Wait,"], "1", "", original]]
+            result.pop("p", None)
+
+        document = self.markup_with(rewrite, names={"Faldor": "m"}, review_answer="remove")
+        direction = self.by_text(document)['"Wait,"']["delivery"]["direction"]
+        self.assertEqual(direction, f"soft and quiet, {original}")
+        self.assertLessEqual(len(direction), 120)
 
     def test_soft_cues_compile_softly_while_explicit_whispering_stays_scoped(self):
         self.source = make_source([[('"Amazing," Mara breathed.', "p"), ('"Stay," Mara said softly.', "p"),
