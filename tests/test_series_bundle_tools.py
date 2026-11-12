@@ -154,16 +154,24 @@ class SeriesBundleToolsTests(unittest.TestCase):
         document["segments"] = segments
         document["cast"]["characters"][0]["evidence"] = []
         document["cast"]["voices"][1]["traits"] = []
-        folder = self.root / "logical"
-        export_bundle(document, folder)
-        entries = validation.load_bundle(folder)
-        result = validation.validate_native_bundle(entries, "", document)
-        self.assertEqual(result["script_files"], 2)
-        scripts = json.loads(entries["manifest.json"])["files"]["scripts"]
-        self.assertEqual([row["chapter_id"] for row in scripts], ["ch1", "ch1"])
-        self.assertEqual([row["heading_block_id"] for row in scripts], ["b1", "b3"])
-        self.assertEqual([(row["sequence_start"], row["sequence_end"]) for row in scripts], [(0, 2), (2, 4)])
-        self.assertEqual(migration.script_rows(entries), validation.rendered_rows(document))
+        cases = (
+            ("Unknown", ["CHAPTER FIVE", "CHAPTER SIX"], ["b1", "b3"]),
+            ("Chapter Five: The Valley", ["Chapter Five: The Valley", "CHAPTER SIX"], [None, "b3"]),
+        )
+        for number, (source_title, titles, heading_ids) in enumerate(cases):
+            with self.subTest(source_title=source_title):
+                source_chapter["title"] = source_title
+                folder = self.root / f"logical-{number}"
+                export_bundle(document, folder)
+                entries = validation.load_bundle(folder)
+                result = validation.validate_native_bundle(entries, "", document)
+                self.assertEqual(result["script_files"], 2)
+                scripts = json.loads(entries["manifest.json"])["files"]["scripts"]
+                self.assertEqual([row["chapter_id"] for row in scripts], ["ch1", "ch1"])
+                self.assertEqual([row["title"] for row in scripts], titles)
+                self.assertEqual([row["heading_block_id"] for row in scripts], heading_ids)
+                self.assertEqual([(row["sequence_start"], row["sequence_end"]) for row in scripts], [(0, 2), (2, 4)])
+                self.assertEqual(migration.script_rows(entries), validation.rendered_rows(document))
 
     def test_directory_rejects_stale_monolithic_script_and_symlink(self):
         folder, entries = self.exported()
