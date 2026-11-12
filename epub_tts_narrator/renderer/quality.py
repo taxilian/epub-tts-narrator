@@ -1048,6 +1048,35 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
             ticket.release()
 
 
+def acoustic_check(path, policy: dict | None = None, *, planned_pauses: bool = False) -> tuple[dict, list[str]]:
+    """``(metrics, reasons)`` from the hard acoustic gates every take passes before recognition.
+
+    An empty ``reasons`` list passes. Planned pauses relax only the silence
+    gates. Unreadable audio raises (OSError, EOFError, ValueError, wave.Error).
+    """
+    settings = validate_policy(policy)
+    metrics = (_audio_metrics(Path(path), settings, include_silences=True)
+               if planned_pauses else _audio_metrics(Path(path), settings))
+    reasons = []
+    duration = metrics["duration_seconds"]
+    if duration < settings["min_duration_seconds"]:
+        reasons.append("audio_too_short")
+    if duration > settings["max_duration_seconds"]:
+        reasons.append("audio_too_long")
+        return metrics, reasons
+    if metrics["rms_dbfs"] is None:
+        reasons.append("silent_audio")
+    elif metrics["rms_dbfs"] < settings["min_rms_dbfs"]:
+        reasons.append("audio_too_quiet")
+    if not planned_pauses and metrics["silence_fraction"] > settings["max_silence_fraction"]:
+        reasons.append("excessive_silence")
+    if not planned_pauses and metrics["longest_internal_silence_seconds"] > settings["max_internal_silence_seconds"]:
+        reasons.append("internal_silence_stall")
+    if metrics["clipped_fraction"] > settings["max_clipped_fraction"]:
+        reasons.append("excessive_clipping")
+    return metrics, reasons
+
+
 def _checked_audio_report(path, expected_text: str, verifier,
                           policy: dict | None = None, *, purpose: str = "speech",
                           performance=None, ticket=None) -> dict:
@@ -1066,28 +1095,13 @@ def _checked_audio_report(path, expected_text: str, verifier,
         report["reasons"].append("empty_expected_text")
         return report
     try:
-        report["metrics"] = (_audio_metrics(Path(path), settings, include_silences=True)
-                             if planned_pauses else _audio_metrics(Path(path), settings))
+        report["metrics"], acoustic = acoustic_check(path, settings, planned_pauses=planned_pauses)
     except (OSError, EOFError, ValueError, wave.Error) as exc:
         report["reasons"].append(f"invalid_audio: {exc}")
         return report
     metrics, reasons = report["metrics"], report["reasons"]
     duration = metrics["duration_seconds"]
-    if duration < settings["min_duration_seconds"]:
-        reasons.append("audio_too_short")
-    if duration > settings["max_duration_seconds"]:
-        reasons.append("audio_too_long")
-        return report
-    if metrics["rms_dbfs"] is None:
-        reasons.append("silent_audio")
-    elif metrics["rms_dbfs"] < settings["min_rms_dbfs"]:
-        reasons.append("audio_too_quiet")
-    if not planned_pauses and metrics["silence_fraction"] > settings["max_silence_fraction"]:
-        reasons.append("excessive_silence")
-    if not planned_pauses and metrics["longest_internal_silence_seconds"] > settings["max_internal_silence_seconds"]:
-        reasons.append("internal_silence_stall")
-    if metrics["clipped_fraction"] > settings["max_clipped_fraction"]:
-        reasons.append("excessive_clipping")
+    reasons.extend(acoustic)
     if reasons:
         return report
     try:

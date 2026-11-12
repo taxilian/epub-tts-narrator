@@ -12,15 +12,19 @@ as before (the voice's audition script), then for up to two more clips of the
 same voice speaking other book excerpts by the same character, or, when the
 book has too few, scripts the text model wrote in that character's style while
 the auditions were prepared (``audition_scripts``). Every clip is
-verified like any reference, the clips are joined in order with a short pause,
-and the joined recording is verified again before it is saved as the reference.
+verified like any reference, and the clips are joined in order with a short
+pause. The joined recording passes the same hard acoustic gates as any take;
+its words are the verified clips' words, so it is not transcribed again (a
+long recording mostly measures the recognizer: invented closing words, other
+spellings of names). Its report records ``basis: joined_verified_clips`` and
+each clip's audio checksum and take request.
 
 Only the Gemini designer keeps one voice across several scripts (one hosted
 voice per creation request); other designers would design a new voice for each
 clip, so their voices keep one clip. A character without enough clean book
 speech and no prepared invented scripts keeps fewer clips. An extra clip that fails verification is left out,
-and a joined recording that fails verification leaves the first clip alone as
-the reference. Once the hosted voice is deleted (an interrupted creation),
+and a joined recording that fails an acoustic gate leaves the first clip alone
+as the reference. Once the hosted voice is deleted (an interrupted creation),
 missing clips cannot come from the same voice, so creation starts again with a
 fresh voice (``FreshVoiceRequired``).
 """
@@ -30,7 +34,6 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 from pathlib import Path
-import shutil
 import wave
 
 from .audio_naming import descriptive_audio_filename
@@ -166,25 +169,35 @@ def add_clips(first_wav, first_accepted, scripts, *, designer, prompt, directory
         from .common import write_json
         write_json(marker, {"clips_sha256": hashes, "pause_seconds": PAUSE_SECONDS})
     text = " ".join(clip["text"].strip() for clip in clips)
-    joined_request = dict(request, text=text, joined_clips=hashes, joined_pause_seconds=PAUSE_SECONDS)
-    joined_request.pop("sample_source", None)
-    single = deepcopy(config)
-    single["render"]["max_attempts"] = 1  # The same joined audio would fail again.
-
-    def copy_joined(path, seed):
-        shutil.copyfile(joined, path)
-        return {**clips[0]["accepted"].get("engine_metadata", {}), "joined_reference_clips": len(clips)}
+    # Every word was verified clip by clip, and joining only adds silence
+    # between unchanged PCM; transcribing the long recording again mostly
+    # measures the recognizer (invented closing words, other name spellings).
+    # The joined recording still passes every hard acoustic gate.
+    from .quality import acoustic_check
     try:
-        wav, accepted = verified_take(text, copy_joined, joined_directory, joined_request, verifier, single,
-                                      notify=notify, purpose="reference")
-    except SpeechVerificationFailed:
-        notify("  The joined reference clips failed verification; the voice is saved with its first clip only.")
+        metrics, reasons = acoustic_check(joined, config.get("quality"))
+    except (OSError, EOFError, ValueError, wave.Error) as exc:
+        metrics, reasons = {}, [f"invalid_audio: {exc}"]
+    if reasons:
+        notify("  The joined reference clips failed an audio check (" + ", ".join(reasons)
+               + "); the voice is saved with its first clip only.")
         return first_wav, first_accepted, []
-    provenance = [{"index": clip["index"], "reference_text": clip["text"], "audio_sha256": file_hash(clip["wav"]),
+    provenance = [{"index": clip["index"], "reference_text": clip["text"], "audio_sha256": hashes[number],
                    "request_hash": clip["accepted"].get("request_hash"),
                    **({"sample_source": deepcopy(clip["source"])} if clip["source"] is not None else {})}
-                  for clip in clips]
-    return wav, accepted, provenance
+                  for number, clip in enumerate(clips)]
+    joined_request = dict(request, text=text, joined_clips=hashes, joined_pause_seconds=PAUSE_SECONDS)
+    joined_request.pop("sample_source", None)
+    report = {"passed": True, "purpose": "reference", "basis": "joined_verified_clips",
+              "expected_text": text, "reference_text": text, "reasons": [], "metrics": metrics,
+              "clips": [{"index": clip["index"], "audio_sha256": clip["audio_sha256"],
+                         "request_hash": clip["request_hash"]} for clip in provenance],
+              "pause_seconds": PAUSE_SECONDS}
+    accepted = {"report": report, "seed": clips[0]["accepted"].get("seed"),
+                "request_hash": digest(joined_request), "audio_sha256": file_hash(joined),
+                "engine_metadata": {**clips[0]["accepted"].get("engine_metadata", {}),
+                                    "joined_reference_clips": len(clips)}}
+    return joined, accepted, provenance
 
 
 def creation_metadata(clips):

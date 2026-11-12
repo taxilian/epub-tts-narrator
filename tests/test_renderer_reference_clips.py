@@ -8,6 +8,7 @@ from unittest.mock import patch
 import wave
 
 from epub_tts_narrator.renderer import reference_clips, workflow
+from epub_tts_narrator.renderer.common import file_hash
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
@@ -108,7 +109,8 @@ class AddClipsTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.directory = Path(temp.name)
-        self.first = write_tone(self.directory / "first.wav", 1)
+        # Accepted clips are normalized PCM16 mono at the render rate.
+        self.first = write_tone(self.directory / "first.wav", 1, rate=44100)
         self.first_accepted = {"report": {"passed": True, "reference_text": "first words"},
                                "engine_metadata": {"description_applied": True}, "request_hash": "h1"}
         self.request = {"voice_id": "v1", "text": "first words", "sample_source": {"kind": "user"}}
@@ -123,10 +125,7 @@ class AddClipsTests(unittest.TestCase):
             raise SpeechVerificationFailed("failed", request=request, report={})
         Path(directory).mkdir(parents=True, exist_ok=True)
         wav = Path(directory) / "accepted-take.wav"
-        if "joined_clips" in request:
-            generate(wav, 1)
-        else:
-            write_tone(wav, 1)
+        write_tone(wav, 1, rate=44100)
         return wav, {"report": {"passed": True, "reference_text": text}, "request_hash": "h-" + text,
                      "engine_metadata": {"description_applied": True}}
 
@@ -137,13 +136,18 @@ class AddClipsTests(unittest.TestCase):
                 request=self.request, verifier=None, config={"render": {"max_attempts": 4}}, label="Mara",
                 notify=lambda message: None)
 
-    def test_every_clip_is_joined_and_the_joined_recording_is_verified_once(self):
+    def test_every_clip_is_joined_from_verified_clips_without_transcribing_the_long_recording(self):
         wav, accepted, clips = self.add()
-        self.assertEqual(accepted["report"]["reference_text"], "first words second words third words")
+        report = accepted["report"]
+        self.assertEqual(report["reference_text"], "first words second words third words")
+        self.assertEqual((report["passed"], report["basis"], report["reasons"]), (True, "joined_verified_clips", []))
+        self.assertEqual([clip["audio_sha256"] for clip in report["clips"]], [clip["audio_sha256"] for clip in clips])
         self.assertEqual([clip["index"] for clip in clips], [1, 2, 3])
-        self.assertEqual(self.calls[-1], ("first words second words third words", 1))
+        # Only the two extra clips were generated and verified; the joined recording was not transcribed.
+        self.assertEqual([text for text, _attempts in self.calls], ["second words", "third words"])
+        self.assertEqual(accepted["audio_sha256"], file_hash(wav))
         with wave.open(str(wav), "rb") as audio:
-            self.assertEqual(audio.getnframes(), 3 * 24000 + 2 * 12000)
+            self.assertEqual(audio.getnframes(), 3 * 44100 + 2 * 22050)
 
     def test_an_extra_clip_that_fails_verification_is_left_out(self):
         self.failing.add("second words")
@@ -151,9 +155,10 @@ class AddClipsTests(unittest.TestCase):
         self.assertEqual([clip["index"] for clip in clips], [1, 3])
         self.assertEqual(accepted["report"]["reference_text"], "first words third words")
 
-    def test_a_joined_recording_that_fails_verification_leaves_the_first_clip_alone(self):
-        self.failing.add("first words second words third words")
-        wav, accepted, clips = self.add()
+    def test_a_joined_recording_that_fails_an_audio_check_leaves_the_first_clip_alone(self):
+        with patch("epub_tts_narrator.renderer.quality.acoustic_check",
+                   return_value=({"duration_seconds": 4.0}, ["internal_silence_stall"])):
+            wav, accepted, clips = self.add()
         self.assertEqual((wav, accepted, clips), (self.first, self.first_accepted, []))
 
     def test_missing_clips_after_the_hosted_voice_was_removed_need_a_fresh_voice(self):
