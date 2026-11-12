@@ -136,7 +136,7 @@ class AnalyzeCheckpointTests(unittest.TestCase):
         return wrapper, calls
 
     def analyze_command(self, output):
-        return ("analyze", self.epub, "-o", output, "--config", self.config)
+        return ("analyze", self.epub, "-o", output, "--config", self.config, "--strategy", "consensus")
 
     def test_pending_directory_is_created_before_the_first_model_request(self):
         output = self.root / "book"
@@ -380,7 +380,7 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
         return wrapper, calls
 
     def analyze_command(self, output):
-        return ("analyze", self.epub, "-o", output, "--config", self.config)
+        return ("analyze", self.epub, "-o", output, "--config", self.config, "--strategy", "consensus")
 
     @staticmethod
     def model_calls(made):
@@ -422,7 +422,8 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
                 wrapper, analysis_calls = self.spy("epub_tts_narrator.cli.analyze")
                 with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=factory), \
                         patch("epub_tts_narrator.cli.analyze", side_effect=wrapper):
-                    status, _, stderr = self.run_cli("analyze", corrected, "-o", output, "--config", self.config)
+                    status, _, stderr = self.run_cli("analyze", corrected, "-o", output, "--config", self.config,
+                                             "--strategy", "consensus")
                 self.assertEqual(status, 0, stderr)
                 self.assertEqual(analysis_calls, [1], "The corrected source must not resume an old-source snapshot")
                 modes = {payload.get("mode") for payload in self.model_calls(made)}

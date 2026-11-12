@@ -96,14 +96,14 @@ class DirectoryCLITests(unittest.TestCase):
     def seed_book(self):
         source, output = self.make_epub(), self.root / "book-one"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client):
-            status, _, stderr = self.run_cli("analyze", source, "-o", output)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", source, "-o", output)
         self.assertEqual(status, 0, stderr)
         return source, output
 
     def seed_second_book(self, prior):
         output = self.root / "book-two"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client):
-            status, _, stderr = self.run_cli("analyze", self.make_epub(2), "-o", output,
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.make_epub(2), "-o", output,
                                            "--continue-from", prior)
         self.assertEqual(status, 0, stderr)
         return output
@@ -128,7 +128,7 @@ class DirectoryCLITests(unittest.TestCase):
                 patch("epub_tts_narrator.cli.analyze", wraps=analyze) as pipeline:
             for number in range(1, 4):
                 output = self.root / f"book-{number}"
-                args = ["analyze", self.make_epub(number), "-o", output]
+                args = ["analyze", self.make_epub(number), "-o", output, "--strategy", "consensus"]
                 if outputs:
                     args += ["--continue-from", outputs[-1]]
                 status, _, stderr = self.run_cli(*args)
@@ -154,7 +154,7 @@ class DirectoryCLITests(unittest.TestCase):
     def test_default_output_is_a_ready_to_load_book_directory(self):
         epub = self.make_epub()
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client):
-            status, _, stderr = self.run_cli("analyze", epub)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub)
         self.assertEqual(status, 0, stderr)
         self.assert_bundle(self.root / "Book 1.audiobook", 1)
 
@@ -169,7 +169,7 @@ class DirectoryCLITests(unittest.TestCase):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=unresolved_client), \
                 patch("sys.stdin", io.StringIO()), \
                 patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
-            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
         self.assertEqual(status, 2, stderr)
         document, _ = self.assert_bundle(output, 1)
         self.assertFalse(document["readiness"]["ready"])
@@ -190,7 +190,7 @@ class DirectoryCLITests(unittest.TestCase):
 
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=advisory_analysis):
-            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
         self.assertEqual(status, 0, stderr)
         document, _ = self.assert_bundle(output, 1)
         self.assertTrue(document["readiness"]["ready"])
@@ -232,12 +232,12 @@ class DirectoryCLITests(unittest.TestCase):
             return client
 
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=fail_once):
-            status, _, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
             self.assertEqual(status, 1, stderr)
             self.assertIn("Fixture connection interrupted", stderr)
             self.assertFalse((output / "manifest.json").exists())
             self.assertFalse((output / "series-cast.json").exists())
-            status, _, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
             self.assertEqual(status, 0, stderr)
         self.assertEqual(len(self.clients), 2)
         self.assertTrue(any(payload.get("mode") == "casting_discovery" for _, payload in self.clients[0].calls))
@@ -247,7 +247,7 @@ class DirectoryCLITests(unittest.TestCase):
     def test_legacy_json_output_remains_supported(self):
         epub, output = self.make_epub(), self.root / "legacy.json"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client):
-            status, _, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(read_json(output)["format"], "epub-audiobook-analysis")
         self.assertFalse((self.root / "manifest.json").exists())
@@ -264,7 +264,7 @@ class DirectoryCLITests(unittest.TestCase):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=unresolved_client), \
                 patch("sys.stdin", io.StringIO()), \
                 patch("epub_tts_narrator.speaker_decisions.open", side_effect=OSError("No controlling terminal")):
-            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+            status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output)
         self.assertEqual(status, 2, stderr)
         document = read_json(output)
         self.assertEqual(document["format"], "epub-audiobook-analysis")
@@ -284,7 +284,7 @@ class DirectoryCLITests(unittest.TestCase):
         for extra in cases:
             with self.subTest(extra=extra), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
                 before = snapshot(self.root)
-                status, _, stderr = self.run_cli("analyze", epub, "--continue-from", prior, *extra)
+                status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "--continue-from", prior, *extra)
                 self.assertNotEqual(status, 0, stderr)
                 provider.assert_not_called()
                 self.assertEqual(snapshot(self.root), before)
@@ -292,7 +292,7 @@ class DirectoryCLITests(unittest.TestCase):
             stream.write('series_registry = "other-series.json"\n')
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
             before = snapshot(self.root)
-            status, _, stderr = self.run_cli("analyze", epub, "--continue-from", prior,
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "--continue-from", prior,
                                            "-o", self.root / "new-book")
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()
@@ -320,7 +320,7 @@ class DirectoryCLITests(unittest.TestCase):
         epub, prior = self.seed_book()
         before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-            status, _, stderr = self.run_cli("analyze", epub, "-o", self.root / "duplicate",
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", self.root / "duplicate",
                                            "--continue-from", prior)
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()
@@ -332,7 +332,7 @@ class DirectoryCLITests(unittest.TestCase):
         for output in (prior, prior / "nested-output", prior.parent):
             with self.subTest(output=output), patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
                 before = snapshot(self.root)
-                status, _, stderr = self.run_cli("analyze", epub, "-o", output, "--continue-from", prior)
+                status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", output, "--continue-from", prior)
                 self.assertNotEqual(status, 0, stderr)
                 provider.assert_not_called()
                 self.assertEqual(snapshot(self.root), before)
@@ -344,7 +344,7 @@ class DirectoryCLITests(unittest.TestCase):
             stream.write(f'cache_dir = "{prior / "new-cache"}"\n')
         before = snapshot(self.root)
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-            status, _, stderr = self.run_cli("analyze", epub, "-o", self.root / "new-book",
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", epub, "-o", self.root / "new-book",
                                            "--continue-from", prior)
         self.assertNotEqual(status, 0, stderr)
         provider.assert_not_called()

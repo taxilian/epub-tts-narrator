@@ -58,7 +58,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
         return code, output.getvalue()
 
     def test_fresh_analysis_creates_no_pronunciation_candidates_and_resume_needs_no_model(self):
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         entries = load_pronunciations(self.book)
         self.assertEqual(entries, [])
@@ -73,7 +73,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
 
     def test_discovery_outage_cannot_fail_analysis_or_trigger_backfill_on_resume(self):
         CandidateClient.fail_scan = True
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         analysis = (self.book / "analysis.json").read_bytes()
         self.assertTrue(discovery_pending(self.book, json.loads(analysis)))
@@ -86,7 +86,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
 
     def test_proposal_outage_cannot_fail_analysis_or_trigger_suggestions_on_resume(self):
         CandidateClient.fail_proposal = True
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         analysis = (self.book / "analysis.json").read_bytes()
         document = json.loads(analysis)
@@ -103,7 +103,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
 
     def test_readable_correction_proposer_is_lazy_cached_and_never_confirms_a_guess(self):
         from epub_tts_narrator.pronunciation_workflow import create_pronunciation_proposer
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         before = snapshot(self.book)
         CandidateClient.modes = []
@@ -119,7 +119,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
 
     def test_resume_preserves_user_cmu_choice_without_pronunciation_backfill(self):
         CandidateClient.fail_scan = True
-        self.run_cli("analyze", self.epub, "-o", self.book)
+        self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         document = json.loads((self.book / "analysis.json").read_text())
         value = {"alphabet": "cmu_arpabet", "value": "K W AO1 R M"}
         set_pronunciation(self.book, document, "Qarm", value)
@@ -138,7 +138,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
 
     def test_public_renderer_cli_saves_cmu_correction_without_engine_or_asr_configuration(self):
         from epub_tts_narrator.renderer.cli import main as render_main
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         calls = list(CandidateClient.modes)
         output = io.StringIO()
@@ -154,7 +154,7 @@ class PronunciationWorkflowTests(unittest.TestCase):
     def test_resume_preserves_legacy_pending_entries_and_discovery_marker_without_model_work(self):
         from epub_tts_narrator.pipeline import write_json
         from epub_tts_narrator.pronunciations import DISCOVERY_VERSION, save_candidates, word_id
-        code, output = self.run_cli("analyze", self.epub, "-o", self.book)
+        code, output = self.run_cli("analyze", self.epub, "-o", self.book, "--strategy", "consensus")
         self.assertEqual(code, 0, output)
         document = json.loads((self.book / "analysis.json").read_text())
         block = document["source"]["blocks"][0]

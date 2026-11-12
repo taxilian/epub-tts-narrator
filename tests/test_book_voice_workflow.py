@@ -199,7 +199,7 @@ class SharedGlobalConfigurationWorkflowTests(BookFixture):
         client.base_url = client.identity["base_url"]
         with contextlib.chdir(self.root):
             with patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client):
-                status, _, error = self.run_cli(analyzer_main, "analyze", source, "-o", output)
+                status, _, error = self.run_cli(analyzer_main, "analyze", source, "-o", output, "--strategy", "consensus")
             self.assertEqual(status, 0, error)
             self.assertGreater(len(client.calls), 0)
             status, report, error = self.run_cli(renderer_main, "plan", output)

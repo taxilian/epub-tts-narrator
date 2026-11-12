@@ -223,12 +223,13 @@ class TimeoutResumeTests(unittest.TestCase):
 
         first_book, second_book = self.root / "book-one", self.root / "book-two"
         status, error = command(TimeoutClient(duplicate=False),
-                               ["analyze", sources[0], "-o", first_book, "--config", config])
+                               ["analyze", sources[0], "-o", first_book, "--config", config,
+                                "--strategy", "consensus"])
         self.assertEqual(status, 0, error)
         original_parent = {str(path.relative_to(first_book)): path.read_bytes()
                            for path in first_book.rglob("*") if path.is_file()}
         arguments = ["analyze", sources[1], "-o", second_book, "--continue-from", first_book,
-                     "--config", config]
+                     "--config", config, "--strategy", "consensus"]
         durable = DurableReplies("attribute")
         first = TimeoutClient(fail_stage="attribute", durable=durable, duplicate=False)
         with patch("epub_tts_narrator.pipeline.write_json", side_effect=durable.write):

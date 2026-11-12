@@ -102,7 +102,7 @@ class CLITests(unittest.TestCase):
     def test_fresh_analyze_preserves_stylized_spelling_without_automatic_cleanup(self):
         output = self.root / "styled-book"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", StyledNarrativeClient):
-            status, _, stderr = self.run_cli("analyze", self.make_epub("Nooooooo!"),
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.make_epub("Nooooooo!"),
                                            "-o", output, "--config", self.config)
         self.assertEqual(status, 0, stderr)
         analysis = read_json(output / "analysis.json")
@@ -122,7 +122,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(rendered["text"], "Nooooooo!")
         self.assertNotIn("spoken_text", rendered)
 
-    def test_cli_extract_analyze_cached_export_round_trip(self):
+    def test_explicit_consensus_cli_extract_analyze_cached_export_round_trip(self):
         epub = self.make_epub()
         source = self.root / "source.json"
         output = self.root / "new-analysis.json"
@@ -137,10 +137,10 @@ class CLITests(unittest.TestCase):
         self.assertTrue(json.loads(stdout)["baseline_assumptions"]["ensemble_design_needed"])
         NarrativeClient.calls = 0
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
-            status, _, stderr = self.run_cli("analyze", source, "-o", output, "--config", self.config)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", source, "-o", output, "--config", self.config)
             self.assertEqual(status, 0, stderr)
             self.assertEqual(NarrativeClient.calls, 5)
-            status, _, stderr = self.run_cli("analyze", source, "-o", self.root / "second.json", "--config", self.config)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", source, "-o", self.root / "second.json", "--config", self.config)
             self.assertEqual(status, 0, stderr)
             self.assertEqual(NarrativeClient.calls, 5)
         self.assertEqual(self.run_cli("validate", output, "--ready")[0], 0)
@@ -193,7 +193,7 @@ class CLITests(unittest.TestCase):
                                '[analysis]\nidentity_consensus = false\n')
         NarrativeClient.calls = 0
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
-            status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config,
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.make_epub(), "--config", self.config,
                                            "-o", self.root / "without-consensus.json")
         self.assertEqual(status, 0, stderr)
         self.assertEqual(NarrativeClient.calls, 4)
@@ -231,7 +231,7 @@ class CLITests(unittest.TestCase):
         NarrativeClient.calls = 0
         output = self.root / "cumulative.json"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient):
-            status, _, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config, "-o", output)
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.make_epub(), "--config", self.config, "-o", output)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(NarrativeClient.calls, 5)
         self.assertEqual(read_json(output)["provenance"]["casting"]["strategy"], "adaptive_evidence_first")
@@ -297,7 +297,7 @@ class CLITests(unittest.TestCase):
 
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
                 patch("epub_tts_narrator.attribution_review.audit_attribution", side_effect=review):
-            status, _, stderr = self.run_cli("analyze", source, "--config", self.config,
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", source, "--config", self.config,
                                            "-o", self.root / "review-enabled.json")
         self.assertEqual(status, 0, stderr)
         self.assertEqual(observed["workers"], 5)
@@ -525,7 +525,7 @@ class CLITests(unittest.TestCase):
 
     def test_existing_output_prevents_any_model_calls(self):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-            status, _, _ = self.run_cli("analyze", self.root / "missing.epub", "-o", self.analysis, "--config", self.config)
+            status, _, _ = self.run_cli("analyze", "--strategy", "consensus", self.root / "missing.epub", "-o", self.analysis, "--config", self.config)
         self.assertEqual(status, 1)
         provider.assert_not_called()
 
@@ -534,7 +534,7 @@ class CLITests(unittest.TestCase):
         output = self.root / "configured.json"
         with patch.dict("os.environ", {"EPUB_ANALYZER_MODEL": "wrong-model", "EPUB_ANALYZER_API_KEY": "wrong-secret"}):
             with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=NarrativeClient) as factory:
-                status, stdout, stderr = self.run_cli("analyze", self.make_epub(), "--config", self.config, "-o", output)
+                status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", self.make_epub(), "--config", self.config, "-o", output)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(factory.call_args.kwargs["model"], "file-model")
         self.assertEqual(factory.call_args.kwargs["api_key"], "file-only-secret")

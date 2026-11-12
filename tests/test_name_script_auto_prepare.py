@@ -97,7 +97,7 @@ class AnalysisWithoutPronunciationTests(unittest.TestCase):
         client = FakeClient()
         client.model, client.base_url = "fixture", "https://offline.invalid"
         directory = self.root / "fresh"
-        code, output = self.run_cli("analyze", epub, "-o", directory, client=client)
+        code, output = self.run_cli("analyze", epub, "-o", directory, "--strategy", "consensus", client=client)
 
         self.assertEqual(code, 0, output)
         self.assert_no_sidecars(directory)
@@ -115,7 +115,7 @@ class AnalysisWithoutPronunciationTests(unittest.TestCase):
                          '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>The rain stopped.</p></body></html>')
         directory = self.root / "empty"
         client = NarrativeClient("test-model", "http://127.0.0.1:8000/v1")
-        code, output = self.run_cli("analyze", epub, "-o", directory, client=client)
+        code, output = self.run_cli("analyze", epub, "-o", directory, "--strategy", "consensus", client=client)
         self.assertEqual(code, 0, output)
         self.assert_no_sidecars(directory)
 

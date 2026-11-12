@@ -192,7 +192,31 @@ def normalize_words(text: str) -> list[str]:
             # A signed form such as "-7th" keeps its literal spelling.
             expanded = None if sign else ordinal_words(token, _integer_words)
             words.extend(expanded if expanded is not None else [token])
-    return words
+    return _spoken_cardinals(words)
+
+
+_SCALES = frozenset({"hundred", "thousand"})
+_UNDER_HUNDRED = frozenset(_SMALL[1:] + _TENS[1:])
+
+
+def _spoken_cardinals(words: list[str]) -> list[str]:
+    """One spelling for the two common spoken forms of the same cardinal.
+
+    Digits expand to "one hundred twenty", while speech and prose often say
+    "a hundred and twenty". "a" directly before "hundred"/"thousand" counts as
+    "one", and "and" between a scale word and a following number word under a
+    hundred is dropped. Other uses of "a" and "and" are unchanged.
+    """
+    result = []
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else None
+        if word == "a" and following in _SCALES:
+            result.append("one")
+        elif word == "and" and result and result[-1] in _SCALES and following in _UNDER_HUNDRED:
+            continue
+        else:
+            result.append(word)
+    return result
 
 
 def compare_words(expected_text: str, actual_text: str) -> dict:

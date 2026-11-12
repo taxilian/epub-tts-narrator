@@ -600,7 +600,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("sys.stdin", input_stream), \
                 patch("sys.stdout", new_callable=StringIO) as output, \
                 patch("sys.stderr", new_callable=StringIO) as diagnostics:
-            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), expected_status)
+            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book", "--strategy", "consensus"]), expected_status)
         self.assertEqual(len(published), 1)
         # The refresh after user input must have no request client available.
         self.assertEqual([no_requests for _, no_requests in preparations], [False, True])
@@ -713,7 +713,7 @@ class SpeakerDecisionTests(unittest.TestCase):
                 patch("epub_tts_narrator.audition_scripts.prepare_document_samples", side_effect=prepare), \
                 patch("epub_tts_narrator.cli.publish_directory", side_effect=publish), \
                 patch("sys.stdout", new_callable=StringIO), patch("sys.stderr", new_callable=StringIO):
-            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book"]), 2)
+            self.assertEqual(main(["analyze", "input.epub", "-o", "fresh-book", "--strategy", "consensus"]), 2)
         self.assertEqual(events, ["automatic", "auditions", "decisions", "auditions", "publish"])
         self.assertEqual(prepared_roles, [None, "mara"])
         self.assertEqual(published[0]["segments"][1]["role_id"], "mara")

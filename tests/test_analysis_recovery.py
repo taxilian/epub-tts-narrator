@@ -224,14 +224,14 @@ class AnalysisRecoveryTests(unittest.TestCase):
     def test_analyze_backs_up_stale_drift_and_reconciles_the_baseline_epub(self):
         parent = self.root / "baseline-parent"
         original_epub = self.epub("baseline-original", [CHAPTER_ONE, CHAPTER_THREE], "baseline-book")
-        status, _, stderr = self.run_cli("analyze", original_epub, "-o", parent)
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", original_epub, "-o", parent)
         self.assertEqual(status, 0, stderr)
         self.make_snapshot(parent)
         baseline = self.managed(parent)
         self.drift(parent)
         drift_bytes = self.managed(parent)
 
-        status, stdout, stderr = self.run_cli("analyze", original_epub, "-o", parent)
+        status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", original_epub, "-o", parent)
 
         self.assertEqual(status, 0, stderr + stdout)
         transaction = next((parent / RECOVERY_DIRNAME).iterdir())
@@ -245,7 +245,7 @@ class AnalysisRecoveryTests(unittest.TestCase):
     def test_directory_only_recovery_failure_requests_an_authoritative_epub(self):
         self.drift()
 
-        status, _, stderr = self.run_cli("analyze", self.book, "-o", self.book)
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.book, "-o", self.book)
 
         self.assertEqual(status, 1)
         self.assertIn("supply the authoritative EPUB", stderr)
@@ -256,12 +256,12 @@ class AnalysisRecoveryTests(unittest.TestCase):
         parent = self.root / "epub-parent"
         child = self.root / "epub-child"
         original_epub = self.epub("original", [CHAPTER_ONE, CHAPTER_THREE], "book-one")
-        status, _, stderr = self.run_cli("analyze", original_epub, "-o", parent)
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", original_epub, "-o", parent)
         self.assertEqual(status, 0, stderr)
         self.make_snapshot(parent)
         status, _, stderr = self.run_cli(
             "analyze", self.epub("continuation", [("Four", ["Mara said, “Morning.”"])], "book-two"),
-            "-o", child, "--continue-from", parent)
+            "-o", child, "--continue-from", parent, "--strategy", "consensus")
         self.assertEqual(status, 0, stderr)
         original = _completed_directory(parent)[0]
         child_before = {name: (child / name).read_bytes() for name in
@@ -270,7 +270,7 @@ class AnalysisRecoveryTests(unittest.TestCase):
         drift_bytes = self.managed(parent)
         fixed_epub = self.epub("fixed", [("One", [CHAPTER_ONE[1][0], "They leIt."]), CHAPTER_THREE], "book-one-fixed")
 
-        status, stdout, stderr = self.run_cli("analyze", fixed_epub, "-o", parent)
+        status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", fixed_epub, "-o", parent)
 
         self.assertEqual(status, 0, stderr + stdout)
         transaction = next((parent / RECOVERY_DIRNAME).iterdir())

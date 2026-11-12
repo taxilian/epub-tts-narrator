@@ -62,7 +62,7 @@ class CLIResumeMessageTests(unittest.TestCase):
             clients.append(instance)
             return instance
 
-        command = ("analyze", self.source, "-o", output)
+        command = ("analyze", self.source, "-o", output, "--strategy", "consensus")
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=client):
             status, stdout, stderr = self.run_cli(*command)
             self.assertEqual(status, 1)
@@ -108,7 +108,7 @@ class CLIResumeMessageTests(unittest.TestCase):
         output = self.root / "interrupted-book"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=KeyboardInterrupt):
-            status, stdout, stderr = self.run_cli("analyze", self.source, "-o", output)
+            status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", self.source, "-o", output)
         self.assertEqual(status, 130)
         self.assertIn("Interrupted. Completed model requests remain cached; checkpointed analysis "
                       "progress is kept in the output directory; rerun the same command to resume.", stderr)
@@ -122,14 +122,14 @@ class CLIResumeMessageTests(unittest.TestCase):
     def test_validation_failure_during_model_work_has_recovery_guidance(self):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", NarrativeClient), \
                 patch("epub_tts_narrator.cli.analyze", side_effect=ValueError("Fixture validation failure")):
-            status, _, stderr = self.run_cli("analyze", self.source, "-o", self.root / "invalid-book")
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.source, "-o", self.root / "invalid-book")
         self.assertEqual(status, 1)
         self.assertIn("Fixture validation failure", stderr)
         self.assertIn("Resume cache:", stderr)
 
     def test_preflight_errors_and_plan_do_not_announce_model_work(self):
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient") as provider:
-            status, _, stderr = self.run_cli("analyze", self.root / "absent.epub", "-o", self.root / "book")
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.root / "absent.epub", "-o", self.root / "book")
             self.assertEqual(status, 1)
             self.assertNotIn("Request cache:", stderr)
             self.assertNotIn("Resume cache:", stderr)
@@ -141,7 +141,7 @@ class CLIResumeMessageTests(unittest.TestCase):
 
     def test_early_interrupt_does_not_invent_a_cache_path(self):
         with patch("epub_tts_narrator.cli.load_config", side_effect=KeyboardInterrupt):
-            status, _, stderr = self.run_cli("analyze", self.source, "-o", self.root / "book")
+            status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.source, "-o", self.root / "book")
         self.assertEqual(status, 130)
         self.assertIn("Interrupted.", stderr)
         self.assertNotIn("Request cache:", stderr)

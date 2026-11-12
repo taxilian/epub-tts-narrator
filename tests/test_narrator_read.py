@@ -1318,12 +1318,12 @@ class NarratorCliTests(unittest.TestCase):
             os.chdir(previous)
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def test_narrator_strategy_publishes_a_book_directory_without_consensus_requests(self):
+    def test_narrator_is_the_default_strategy_for_a_new_book(self):
         epub = make_serial_epub(self.root / "book.epub", "Fixture", "fixture-book", [
             ("One", ['"You never listen," Jon said.', '"I heard you," Mara said.'])])
         output = self.root / "book"
         with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client):
-            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output, "--strategy", "narrator")
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
         self.assertEqual(status, 0, stderr)
         self.assertTrue((output / "manifest.json").is_file())
         analysis = json.loads((output / "analysis.json").read_text(encoding="utf-8"))

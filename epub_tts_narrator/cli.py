@@ -301,8 +301,8 @@ def parser():
                      help="Replace legacy .json output only; completed directories are never overwritten")
     run.add_argument("--edits", type=Path, help="Reapply source-bound human corrections after analysis")
     run.add_argument("--strategy", choices=("consensus", "narrator"), default=None,
-                     help="Analysis strategy: consensus (default for a new book) or the experimental "
-                          "narrator read (one sequential prep read, then terse chapter markup). "
+                     help="Analysis strategy: narrator (default for a new book) or consensus. "
+                          "Narrator uses one sequential prep read, then terse chapter markup. "
                           "Updating a saved book from a new EPUB defaults to the strategy it was analyzed with")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
@@ -644,6 +644,10 @@ def main(argv=None):
         if (args.command in {"extract", "analyze", "apply", "review-attribution"}
                 and not directory_mode and args.output.exists() and not args.force):
             raise FileExistsError(f"Output already exists: {args.output}; choose another path or use --force")
+        if args.command == "analyze" and args.strategy is None:
+            # Completed books returned above with their saved strategy; only
+            # new analyses receive the new-book default.
+            args.strategy = "narrator"
         if args.command in {"extract", "plan", "analyze"}:
             config = load_config(args.config)
             include_auxiliary = config["extraction"]["include_auxiliary"] if args.input.suffix.lower() == ".epub" else False

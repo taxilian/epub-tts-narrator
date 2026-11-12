@@ -180,12 +180,15 @@ class BookUpdateTests(unittest.TestCase):
     def epub(self, name, chapters, identifier):
         return make_serial_epub(self.root / f"{name}.epub", "The Serial", identifier, chapters)
 
-    def analyze(self, epub):
-        return self.run_cli("analyze", epub, "-o", self.book)
+    def analyze(self, epub, *, fresh=False):
+        args = ["analyze", epub, "-o", self.book]
+        if fresh:
+            args += ["--strategy", "consensus"]
+        return self.run_cli(*args)
 
     def seed(self):
         first = self.epub("serial-v1", [CHAPTER_ONE, CHAPTER_TWO], "download-1")
-        status, stdout, stderr = self.analyze(first)
+        status, stdout, stderr = self.analyze(first, fresh=True)
         self.assertEqual(status, 0, stderr)
         return first
 
@@ -231,6 +234,7 @@ class BookUpdateTests(unittest.TestCase):
         self.assertTrue(any("Wait for me" in payload for payload in sent))
         # Update provenance, render identity and series snapshot.
         update = document["provenance"]["book_updates"][-1]
+        self.assertEqual(update["strategy"], "consensus")
         self.assertEqual(update["previous_source_fingerprint"], fingerprint(original["source"]))
         self.assertEqual([chapter["title"] for chapter in update["added_chapters"]], ["Three"])
         self.assertEqual(update["new_characters"], [tobin["id"]])
@@ -261,7 +265,7 @@ class BookUpdateTests(unittest.TestCase):
 
     def seed_long(self):
         self.seed_epub = self.epub("serial-v1", [LONG_ONE, CHAPTER_TWO], "download-1")
-        status, _, stderr = self.analyze(self.seed_epub)
+        status, _, stderr = self.analyze(self.seed_epub, fresh=True)
         self.assertEqual(status, 0, stderr)
         return read_json(self.book / "analysis.json")
 
@@ -500,7 +504,7 @@ class BookUpdateTests(unittest.TestCase):
         self.config.write_text(self.config.read_text(encoding="utf-8")
                                + "[extraction]\ninclude_auxiliary = true\n", encoding="utf-8")
         analyzed = with_auxiliary_chapter(self.epub("auxiliary-v1", [CHAPTER_ONE, CHAPTER_TWO], "download-1"))
-        status, _, stderr = self.analyze(analyzed)
+        status, _, stderr = self.analyze(analyzed, fresh=True)
         self.assertEqual(status, 0, stderr)
         bundle = load_bundle(self.book)
         saved = bundle["source"]
@@ -592,11 +596,11 @@ class BookUpdateTests(unittest.TestCase):
 
     def test_character_from_an_earlier_book_returns_with_that_books_voice(self):
         earlier = self.root / "book-one"
-        status, _, stderr = self.run_cli("analyze", self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"),
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"),
                                          "-o", earlier)
         self.assertEqual(status, 0, stderr)
         morning = ("Four", ["Mara, the lighthouse keeper, said, “Morning.”"])
-        status, _, stderr = self.run_cli("analyze", self.epub("serial-v1", [morning], "serial-1"),
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.epub("serial-v1", [morning], "serial-1"),
                                          "-o", self.book, "--continue-from", earlier)
         self.assertEqual(status, 0, stderr)
         tobin = next(character for character in read_json(earlier / "analysis.json")["cast"]["characters"]
@@ -629,18 +633,18 @@ class BookUpdateTests(unittest.TestCase):
 
     def test_source_typo_updates_parent_and_rebinds_descendant_without_reanalysis(self):
         earlier = self.root / "book-one"
-        status, _, stderr = self.run_cli("analyze", self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"),
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus", self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"),
                                          "-o", earlier)
         self.assertEqual(status, 0, stderr)
         status, _, stderr = self.run_cli(
             "analyze", self.epub("serial-typo-source", [("Four", ["Mara said, “Morning.”"])], "serial-typo-1"),
-            "-o", self.book, "--continue-from", earlier)
+            "-o", self.book, "--continue-from", earlier, "--strategy", "consensus")
         self.assertEqual(status, 0, stderr)
         script_names = [f"scripts/{path.name}" for path in (self.book / "scripts").glob("*.jsonl")]
         before = {name: (self.book / name).read_bytes() for name in ["analysis.json", *script_names]}
         fixed = self.epub("book-one-fixed", [
             ("One", [CHAPTER_ONE[1][0], "They leIt."]), CHAPTER_THREE], "book-one-2")
-        status, stdout, stderr = self.run_cli("analyze", fixed, "-o", earlier)
+        status, stdout, stderr = self.run_cli("analyze", "--strategy", "consensus", fixed, "-o", earlier)
         self.assertEqual(status, 0, stderr)
         self.assertIn("Original analysis files and revision journal", stdout)
         for name, data in before.items():

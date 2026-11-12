@@ -61,7 +61,8 @@ class AuditionAnalysisCompletionTests(unittest.TestCase):
 
     def command(self, client, *, resume=False):
         output, error = StringIO(), StringIO()
-        arguments = ["analyze", str(self.output)] if resume else ["analyze", str(self.source), "-o", str(self.output)]
+        arguments = (["analyze", str(self.output)] if resume else
+                     ["analyze", str(self.source), "-o", str(self.output), "--strategy", "consensus"])
         arguments.extend(["--config", str(self.config)])
         with (contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
               patch("sys.stdin", StringIO()),

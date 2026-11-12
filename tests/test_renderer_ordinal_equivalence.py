@@ -175,5 +175,24 @@ class OrdinalEquivalenceTests(unittest.TestCase):
         self.assertEqual(len(keys), 2)
 
 
+
+class SpokenCardinalTests(unittest.TestCase):
+    def test_a_and_and_in_spoken_cardinals_match_their_digit_spelling(self):
+        for expected, heard in (("if a hundred and twenty came", "if 120 came"),
+                                ("a thousand and five men", "1005 men"),
+                                ("two hundred and fifty", "250"),
+                                ("a hundred men", "100 men")):
+            with self.subTest(expected=expected):
+                self.assertEqual(quality.compare_words(expected, heard)["wer"], 0.0)
+
+    def test_other_uses_of_a_and_and_still_count(self):
+        for expected, heard in (("rock and roll", "rock roll"),
+                                ("a man came", "one man came"),
+                                ("a hundred and the rest", "100 the rest"),
+                                ("one hundred twenty", "one hundred and twenty one")):
+            with self.subTest(expected=expected):
+                self.assertGreater(quality.compare_words(expected, heard)["wer"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
