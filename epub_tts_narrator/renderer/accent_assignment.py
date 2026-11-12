@@ -35,6 +35,11 @@ from .accent_prompts import ASSIGN, NOTES
 ASSIGNMENTS_FILENAME = "voice-accent-assignments.json"
 GUIDANCE_FILENAME = "voice-accent-guidance.json"
 GUIDANCE_FORMAT = "audiobook-book-accent-guidance"
+GROUPS_FILENAME = "voice-accent-groups.json"
+GROUPS_FORMAT = "audiobook-book-accent-groups"
+MAX_ORIGIN = 80
+MAX_WHY = 200
+MAX_EXAMPLES = 6
 MAX_NOTES = 2000
 MAX_INTRO = 2
 INTRO_BEFORE = 80
@@ -101,6 +106,75 @@ def save_guidance(bundle, notes):
     from .common import write_json
     write_json(Path(bundle["directory"]) / GUIDANCE_FILENAME,
                {"format": GUIDANCE_FORMAT, "version": 1, "notes": notes})
+
+
+def _origin_key(origin):
+    return " ".join(str(origin).casefold().split())
+
+
+def read_groups(directory, book_id):
+    """A book's saved accent groups: [{"origin", "accent", "why", "voice_ids", "names"}], or []."""
+    from .common import read_json, regular_file
+    path = Path(directory) / GROUPS_FILENAME
+    if not (path.exists() or path.is_symlink()):
+        return []
+    record = read_json(regular_file(path))
+    groups = record.get("groups") if isinstance(record, dict) else None
+    if (not isinstance(record, dict) or set(record) != {"format", "version", "book_id", "groups"}
+            or record.get("format") != GROUPS_FORMAT or record.get("version") != 1
+            or record.get("book_id") != book_id or not isinstance(groups, list)
+            or not all(isinstance(group, dict) and set(group) == {"origin", "accent", "why", "voice_ids", "names"}
+                       and all(isinstance(group[key], str) for key in ("origin", "accent", "why"))
+                       and all(isinstance(group[key], list) and all(isinstance(item, str) for item in group[key])
+                               for key in ("voice_ids", "names"))
+                       for group in groups)):
+        raise ValueError(f"Invalid accent groups file: {path}")
+    return groups
+
+
+def save_groups(bundle, groups, *, replace=False):
+    """Save this book's accent groups, merging new members into a saved origin unless ``replace``."""
+    from .common import write_json
+    book_id = bundle["source"]["book"]["id"]
+    saved = [] if replace else read_groups(bundle["directory"], book_id)
+    by_origin = {_origin_key(group["origin"]): group for group in saved}
+    for group in groups:
+        current = by_origin.get(_origin_key(group["origin"]))
+        if current is None:
+            current = {"origin": group["origin"], "accent": group["accent"], "why": group.get("why", ""),
+                       "voice_ids": [], "names": []}
+            saved.append(current)
+            by_origin[_origin_key(group["origin"])] = current
+        for voice_id, name in zip(group["voice_ids"], group["names"]):
+            if voice_id not in current["voice_ids"]:
+                current["voice_ids"].append(voice_id)
+                current["names"].append(name)
+    write_json(Path(bundle["directory"]) / GROUPS_FILENAME,
+               {"format": GROUPS_FORMAT, "version": 1, "book_id": book_id, "groups": saved})
+
+
+def series_origins(bundle, config, *, own=True):
+    """Origins the series already decided, nearest book first: [{"origin", "accent", "why", "names"}].
+
+    ``own=False`` leaves out this book's own groups (when it is being redone).
+    """
+    from .book_context import resolve_book_config
+    from .common import read_json, regular_file
+    config = resolve_book_config(bundle, config)
+    books = [(bundle["directory"], bundle["source"]["book"]["id"])] if own else []
+    for directory in config.get("_voice_parents", []):
+        manifest = read_json(regular_file(Path(directory) / "manifest.json"))
+        books.append((directory, manifest["book"]["id"]))
+    origins, seen = [], set()
+    for directory, book_id in books:
+        for group in read_groups(directory, book_id):
+            key = _origin_key(group["origin"])
+            if key in seen or not group["accent"]:
+                continue
+            seen.add(key)
+            origins.append({"origin": group["origin"], "accent": group["accent"], "why": group["why"],
+                            "names": group["names"][:MAX_EXAMPLES]})
+    return origins
 
 
 def accent_cue(accent, terms=frozenset()):
@@ -258,13 +332,18 @@ def voice_clues(bundle, config=None, *, store=None):
 
 
 def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=frozenset(), clues=None,
-                       entries=None):
+                       entries=None, origins=(), keep=None):
     """One request assigning ``voice_ids`` around ``fixed`` ({voice_id: cue}).
 
     ``clues`` ({voice_id: (voice description, traits)}, ``voice_clues``) go
-    with each voice. Returns {"groups": [{"origin", "accent", "voice_ids"}],
+    with each voice. ``origins`` (``series_origins``) are the series' earlier
+    decisions: a group reusing one must keep its accent. ``keep``
+    ({voice_id: cue}, voices among ``voice_ids``) must come back with exactly
+    that accent, so only their grouping and reasons are asked for. Returns
+    {"groups": [{"origin", "accent", "why", "voice_ids", "names"}],
     "accents": {voice_id: cue}}. A voice the reply leaves out gets no accent.
     """
+    keep = keep or {}
     entries = entries if entries is not None else voice_entries(bundle)
     clues = clues if clues is not None else voice_clues(bundle)
     short, rows, fixed_rows = {}, [], []
@@ -277,9 +356,15 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     for voice_id, cue in fixed.items():
         if voice_id in entries:
             fixed_rows.append([f"f{len(fixed_rows) + 1}", entries[voice_id]["names"], cue])
-    payload = {"mode": "accent_assignment", "v": 3, "book": bundle["source"]["book"]["title"], "voices": rows}
+    payload = {"mode": "accent_assignment", "v": 4, "book": bundle["source"]["book"]["title"], "voices": rows}
     if fixed_rows:
         payload["fixed"] = fixed_rows
+    decided = {_origin_key(item["origin"]): item["accent"] for item in origins}
+    if origins:
+        payload["origins"] = [[item["origin"], item["accent"], item["why"], item["names"]] for item in origins]
+    ids = {voice_id: short_id for short_id, voice_id in short.items()}
+    if keep:
+        payload["keep"] = [[ids[voice_id], cue] for voice_id, cue in keep.items() if voice_id in ids]
     system = ASSIGN
     if notes:
         system, payload = system + NOTES, {**payload, "notes": notes}
@@ -287,23 +372,34 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     def validate(response):
         groups = response.get("g") if isinstance(response, dict) else None
         if not isinstance(groups, list):
-            raise ValueError('response must be {"g":[[origin,accent,[id,...]]]}')
+            raise ValueError('response must be {"g":[[origin,accent,why,[id,...]]]}')
         accents, found, problems = {}, [], []
         for group in groups:
             if not (isinstance(group, list) and len(group) >= 3 and isinstance(group[0], str)
-                    and isinstance(group[2], list)):
+                    and isinstance(group[-1], list)):
                 continue
+            why = group[2] if len(group) >= 4 and isinstance(group[2], str) else ""
             try:
                 cue = accent_cue(group[1], terms)
             except ValueError as exc:
                 problems.append(str(exc))
                 continue
-            members = [short[item] for item in group[2] if isinstance(item, str) and item in short
+            origin = " ".join(group[0].split())[:MAX_ORIGIN]
+            series_accent = decided.get(_origin_key(origin))
+            if series_accent and series_accent.casefold() != cue.casefold():
+                problems.append(f"origin {origin!r} already has the accent {series_accent!r} in this series; "
+                                "keep it, or name a different origin")
+                continue
+            members = [short[item] for item in group[-1] if isinstance(item, str) and item in short
                        and short[item] not in accents]
+            for voice_id in members:
+                if voice_id in keep and keep[voice_id].casefold() != cue.casefold():
+                    problems.append(f"voice {ids[voice_id]} must keep the accent {keep[voice_id]!r}")
             for voice_id in members:
                 accents[voice_id] = cue
             if members:
-                found.append({"origin": " ".join(group[0].split())[:80], "accent": cue, "voice_ids": members})
+                found.append({"origin": origin, "accent": cue, "why": " ".join(why.split())[:MAX_WHY],
+                              "voice_ids": members, "names": [entries[voice_id]["label"] for voice_id in members]})
         if problems:
             raise ValueError("; ".join(dict.fromkeys(problems)))
         return {"groups": found, "accents": accents}
@@ -374,16 +470,21 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
                                 notes=guidance(bundle, config), terms=_book_terms(bundle),
                                 clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
-                                entries=entries)
+                                entries=entries, origins=series_origins(bundle, config))
+    save_groups(bundle, result["groups"])
     save_assignments(bundle, config, {voice_id: result["accents"].get(voice_id, "") for voice_id in pending})
-    _report(result, entries, notify)
+    _report(result, entries, notify, series_origins(bundle, config, own=False))
     return result
 
 
-def _report(result, entries, notify):
+def _report(result, entries, notify, origins=()):
+    inherited = {_origin_key(item["origin"]) for item in origins}
     for group in result["groups"]:
         names = ", ".join(entries[voice_id]["label"] for voice_id in group["voice_ids"])
-        notify(f"  {group['accent']} ({group['origin']}): {names}")
+        series = " [as earlier in the series]" if _origin_key(group["origin"]) in inherited else ""
+        notify(f"  {group['accent']} ({group['origin']}){series}: {names}")
+        if group.get("why"):
+            notify(f"      why: {group['why']}")
 
 
 def _ask_apply():
@@ -417,8 +518,16 @@ def run_accents_command(bundle, config, args, config_path):
     entries = voice_entries(bundle, parent_bundles(config))
     chosen, fixed = _fixed(bundle, config, entries, own_only=True)
     pending = [voice_id for voice_id in entries if voice_id not in fixed]
+    keep = {}
+    if getattr(args, "keep", False):
+        # Record origins and reasons for the accents this book already has, changing none of them.
+        own = assigned_accents(bundle, config, own=True)
+        keep = {voice_id: own[voice_id] for voice_id in pending if own.get(voice_id)}
+    origins = series_origins(bundle, config, own=False)
     print(f"Accent assignment: {len(pending)} voice(s) to assign; {len(fixed)} kept (cues or trait accents a person "
-          f"chose, and accents inherited from earlier books); guidance={'yes' if notes else 'no'}.")
+          f"chose, and accents inherited from earlier books); {len(origins)} origin(s) decided earlier in the "
+          f"series; guidance={'yes' if notes else 'no'}"
+          + (f"; keeping this book's {len(keep)} current accent(s)" if keep else "") + ".")
     if not pending:
         print("Every voice's accent is already decided; nothing to assign.")
         return 0
@@ -437,8 +546,8 @@ def run_accents_command(bundle, config, args, config_path):
     result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
                                 notes=notes, terms=_book_terms(bundle),
                                 clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
-                                entries=entries)
-    _report(result, entries, print)
+                                entries=entries, origins=origins, keep=keep)
+    _report(result, entries, print, origins)
     missing = [voice_id for voice_id in pending if voice_id not in result["accents"]]
     if missing:
         print(f"{len(missing)} voice(s) got no accent: " + ", ".join(entries[v]["label"] for v in missing[:8]))
@@ -455,8 +564,10 @@ def run_accents_command(bundle, config, args, config_path):
             return 0
     save_assignments(bundle, config, {voice_id: result["accents"].get(voice_id, "") for voice_id in pending},
                      replace=True)
+    save_groups(bundle, result["groups"], replace=True)
     if instructions is not None:
         save_guidance(bundle, instructions)
-    print(f"Saved accents for {len(pending)} voice(s) in {ASSIGNMENTS_FILENAME}"
+    print(f"Saved accents for {len(pending)} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and "
+          f"reason in {GROUPS_FILENAME}"
           + (f" and the guidance in {GUIDANCE_FILENAME}" if instructions is not None else "") + ".")
     return 0

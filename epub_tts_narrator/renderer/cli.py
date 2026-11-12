@@ -156,6 +156,9 @@ def parser():
                                  "Scandinavian, Tolnedrans Italian\"; saved with the accents and reused for new voices")
             command.add_argument("--apply", action="store_true", help="Save without asking")
             command.add_argument("--resume", metavar="RUN_ID", help="Finish an interrupted run without new requests")
+            command.add_argument("--keep", action="store_true",
+                                 help="Keep this book's current accents and only record each group's origin and "
+                                      "reason (for books assigned before reasons were saved)")
         if name == "import-voices":
             command.description = ("Reuse another book's chosen voices for the same characters (matched by name, "
                                    "not voice ID), e.g. after re-analyzing a book from a cleaner EPUB. Voices this "

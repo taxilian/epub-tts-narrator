@@ -12,8 +12,8 @@ from unittest.mock import patch
 from audition_fixtures import prepare_bundle
 from epub_tts_narrator.renderer import accent_assignment
 from epub_tts_narrator.renderer.accent_assignment import (
-    ASSIGNMENTS_FILENAME, GUIDANCE_FILENAME, accent_cue, assigned_accents, guidance, prepare_accents,
-    request_assignment, run_accents_command, voice_entries,
+    ASSIGNMENTS_FILENAME, GUIDANCE_FILENAME, accent_cue, assigned_accents, guidance, prepare_accents, read_groups,
+    request_assignment, run_accents_command, series_origins, voice_entries,
 )
 from epub_tts_narrator.renderer.book_context import resolve_book_config
 from epub_tts_narrator.renderer.bundle import load_bundle
@@ -35,11 +35,13 @@ class FakeRequests:
         return validate(self.reply(payload))
 
 
-def everyone(accent):
-    return lambda payload: {"g": [["the town", accent, [row[0] for row in payload["voices"]]]]}
+def everyone(accent, origin="the town"):
+    return lambda payload: {"g": [[origin, accent, [row[0] for row in payload["voices"]]]]}
 
 
-class AssignmentTests(unittest.TestCase):
+class BookTestCase(unittest.TestCase):
+    """A copy of the example book, its config and voices; no tests of its own."""
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -55,6 +57,17 @@ class AssignmentTests(unittest.TestCase):
                 patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"):
             return prepare_accents(self.bundle, self.config, None, notify=lambda _: None, **kwargs)
 
+    def run_command(self, requests, *, instructions=None, apply=False):
+        args = SimpleNamespace(instructions=instructions, apply=apply, resume=None, keep=False)
+        output = io.StringIO()
+        with patch.object(accent_assignment, "_requests", return_value=requests), \
+                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"), \
+                patch("sys.stdout", output), patch("sys.stderr", io.StringIO()):
+            code = run_accents_command(self.bundle, self.config, args, None)
+        return code, output.getvalue()
+
+
+class AssignmentTests(BookTestCase):
     def test_each_speaking_voice_is_described_by_its_names_and_where_the_story_introduces_it(self):
         self.assertTrue(self.voices)
         for voice_id, entry in self.entries.items():
@@ -108,7 +121,7 @@ class AssignmentTests(unittest.TestCase):
         # Traits that name no accent are only a clue: the next assignment places that voice too.
         save_speech_traits(self.bundle, self.config, voice_id, "cool measured pace, clipped consonants")
         self.assertNotIn(voice_id, accent_cues(self.bundle, self.config))
-        again = FakeRequests(everyone("Irish"))
+        again = FakeRequests(everyone("Irish", "the coast"))
         self.prepare(again)
         row = next(row for row in again.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
         self.assertEqual(row[-1], "cool measured pace, clipped consonants")
@@ -178,15 +191,6 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual(requests.calls, [])
         self.assertFalse((self.directory / ASSIGNMENTS_FILENAME).exists())
 
-    def run_command(self, requests, *, instructions=None, apply=False):
-        args = SimpleNamespace(instructions=instructions, apply=apply, resume=None)
-        output = io.StringIO()
-        with patch.object(accent_assignment, "_requests", return_value=requests), \
-                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"), \
-                patch("sys.stdout", output), patch("sys.stderr", io.StringIO()):
-            code = run_accents_command(self.bundle, self.config, args, None)
-        return code, output.getvalue()
-
     def test_the_command_reports_without_saving_unless_applied_and_keeps_guidance_for_later(self):
         self.prepare(FakeRequests(everyone("Welsh")))
         code, output = self.run_command(FakeRequests(everyone("Yorkshire")), instructions="They are all from Leeds")
@@ -207,6 +211,48 @@ class AssignmentTests(unittest.TestCase):
         system, payload = requests.calls[0]
         self.assertNotIn("notes", payload)
         self.assertNotIn('"notes"', system)
+
+
+class SeriesOriginTests(BookTestCase):
+    """Groups are saved with their reasons; later books keep the series' origins."""
+
+    def reasoned(self, origin, accent, why="They are islanders"):
+        return lambda payload: {"g": [[origin, accent, why, [row[0] for row in payload["voices"]]]]}
+
+    def test_groups_are_saved_with_their_origin_and_reason(self):
+        self.prepare(FakeRequests(self.reasoned("the harbor town", "broad Scottish")))
+        [group] = read_groups(self.directory, self.bundle["source"]["book"]["id"])
+        self.assertEqual((group["origin"], group["accent"], group["why"]),
+                         ("the harbor town", "broad Scottish accent", "They are islanders"))
+        self.assertEqual(sorted(group["voice_ids"]), self.voices)
+        self.assertEqual(series_origins(self.bundle, self.config)[0]["accent"], "broad Scottish accent")
+
+    def test_a_series_origin_keeps_its_accent_and_a_mismatch_is_asked_again(self):
+        origins = [{"origin": "the harbor town", "accent": "broad Scottish accent", "why": "", "names": ["Old Tam"]}]
+        requests = FakeRequests(self.reasoned("The Harbor  Town", "Irish"))
+        with self.assertRaisesRegex(ValueError, "already has the accent"):
+            request_assignment(self.bundle, requests, self.voices, {}, origins=origins)
+        self.assertEqual(requests.calls[0][1]["origins"], [["the harbor town", "broad Scottish accent", "", ["Old Tam"]]])
+        result = request_assignment(self.bundle, FakeRequests(self.reasoned("the harbor town", "broad Scottish")),
+                                    self.voices, {}, origins=origins)
+        self.assertEqual(set(result["accents"].values()), {"broad Scottish accent"})
+
+    def test_keep_records_reasons_without_changing_an_accent(self):
+        self.prepare(FakeRequests(everyone("Welsh")))
+        own = assigned_accents(self.bundle, self.config, own=True)
+        changed = FakeRequests(self.reasoned("the valley", "Irish"))
+        with self.assertRaisesRegex(ValueError, "must keep the accent"):
+            request_assignment(self.bundle, changed, self.voices, {}, keep=own)
+        args = SimpleNamespace(instructions=None, apply=True, resume=None, keep=True)
+        requests = FakeRequests(self.reasoned("the valley", "Welsh", "Valley miners"))
+        with patch.object(accent_assignment, "_requests", return_value=requests), \
+                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"), \
+                patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
+            run_accents_command(self.bundle, self.config, args, None)
+        self.assertEqual(sorted(cue for _, cue in requests.calls[0][1]["keep"]), sorted(own.values()))
+        self.assertEqual(assigned_accents(self.bundle, self.config, own=True), own)
+        [group] = read_groups(self.directory, self.bundle["source"]["book"]["id"])
+        self.assertEqual((group["origin"], group["why"]), ("the valley", "Valley miners"))
 
 
 class ConfigTests(unittest.TestCase):
