@@ -365,9 +365,9 @@ def _ensure_missing_voices(bundle, config, plan, args):
     from .model_setup import ModelSetup
     ModelSetup(config).ensure("voice_design")
     from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
-    from .config import extra_reference_clips
+    from .voice_clip_counts import extra_clip_plan
     return ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing,
-                                 extra_clips=extra_reference_clips(config))
+                                 extra_clips=extra_clip_plan(bundle, config, canonical_id=store.canonical_id))
 
 
 def _build_render_components(config):

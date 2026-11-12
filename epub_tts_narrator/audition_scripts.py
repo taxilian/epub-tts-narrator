@@ -171,7 +171,8 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
     every older inline/provenance copy without rewriting the analysis bundle.
 
     ``extra_clips`` asks for that many further reference scripts per voice (a
-    voice recorded as several joined clips). Book speech supplies them first;
+    voice recorded as several joined clips): one count for every voice, or a
+    mapping from voice ID to its own count (casting's per-voice choice). Book speech supplies them first;
     the model writes the rest in the voice's own style, saved as
     ``extra_scripts``. A failed request leaves that voice with fewer clips.
     """
@@ -179,7 +180,8 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
         MissingSampleScript, select_book_sample, select_extra_samples, select_sample)
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("Audition workers must be between one and five")
-    if type(extra_clips) is not int or not 0 <= extra_clips <= 2:
+    per_voice = extra_clips.values() if isinstance(extra_clips, dict) else (extra_clips,)
+    if any(type(value) is not int or not 0 <= value <= 2 for value in per_voice):
         raise ValueError("Extra reference clips must be an integer from zero through two")
     if type(allow_incomplete) is not bool:
         raise ValueError("allow_incomplete must be a boolean")
@@ -247,7 +249,7 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
                     pending.update({value: deepcopy(failure) for value in aliases})
                 else:
                     scripts.update({value: deepcopy(script) for value in aliases})
-    if extra_clips:
+    if any(per_voice):
         extras = _prepare_extras(dict(working, audition_scripts=scripts, audition_extra_scripts=extras),
                                  requests, groups, profiles, pending, extras, extra_clips,
                                  canonical_id=canonical_id, workers=workers, progress=progress,
@@ -279,13 +281,16 @@ def _prepare_extras(working, requests, groups, profiles, pending, extras, count,
         aliases = [value for value in profiles if canonical_id(value) == canonical]
         if any(value in pending for value in aliases):
             continue
+        wanted = count.get(voice, 0) if isinstance(count, dict) else count
+        if not wanted:
+            continue
         try:
             first = select_sample(working, voice, canonical_id=canonical_id)
         except MissingSampleScript:
             continue
         book = select_extra_samples(working, voice, canonical_id=canonical_id,
-                                    exclude_segments=first["source"].get("segment_ids", []), count=count)
-        missing = count - len(book)
+                                    exclude_segments=first["source"].get("segment_ids", []), count=wanted)
+        missing = wanted - len(book)
         saved = next((extras[value] for value in [canonical, *aliases] if extras.get(value)), [])
         if missing <= len(saved):
             continue

@@ -616,13 +616,17 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     return result
 
 
-def extra_reference_clips(config):
-    """Clips beyond the first that a new voice records: only Gemini keeps one voice across scripts."""
+def designer_records_several_clips(config):
+    """Whether new voices can record several clips: only Gemini keeps one voice across scripts."""
     try:
-        designer = resolve_voice_design(config)["type"]
+        return resolve_voice_design(config)["type"] == "gemini"
     except ValueError:
-        return 0
-    return (config.get("casting") or {}).get("reference_clips", 3) - 1 if designer == "gemini" else 0
+        return False
+
+
+def extra_reference_clips(config):
+    """Clips beyond the first that a new voice records by default."""
+    return (config.get("casting") or {}).get("reference_clips", 3) - 1 if designer_records_several_clips(config) else 0
 
 
 def resolve_voice_design(config):

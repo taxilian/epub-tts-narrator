@@ -57,13 +57,17 @@ def keeps_one_voice(designer_identity):
 def plan_scripts(config, designer_identity, bundle, voice_id, canonical_id, first_source):
     """The extra clips' scripts for one creation request, as ``[{"text", "source"}]``.
 
-    Empty when the setting asks for one clip, the designer cannot keep one voice,
+    The count is the voice's own casting choice (``voice_clip_counts``), else
+    ``casting.reference_clips``. Empty when that count is one clip, the designer cannot keep one voice,
     there is no book to choose from, or the character has neither more suitable
     speech nor prepared invented scripts.
     """
-    wanted = (config.get("casting") or {}).get("reference_clips", 3) - 1
-    if (wanted < 1 or not isinstance(bundle, dict) or not {"cast", "chapters"} <= set(bundle)
+    if (not isinstance(bundle, dict) or not {"cast", "chapters"} <= set(bundle)
             or not keeps_one_voice(designer_identity)):
+        return []
+    from .voice_clip_counts import clip_choice
+    wanted = clip_choice(bundle, config, voice_id, canonical_id=canonical_id)[0] - 1
+    if wanted < 1:
         return []
     from .samples import prepared_extra_samples, select_extra_samples
     present = next((voice["id"] for voice in bundle["cast"]["voices"]

@@ -1,5 +1,4 @@
 from copy import deepcopy
-from pathlib import Path
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS, effective_delivery
 from .bundle import chunk_speakers
@@ -8,31 +7,15 @@ from .bundle import chunk_speakers
 TRAITS_FILENAME = "voice-traits.json"
 
 
-def _parent_context(directory):
-    """Read only checked identity/cast metadata, never parse chapter scripts on redraw."""
-    from ..voice_profile_guard import _require_ready
-    from .common import file_hash, read_json, regular_file
-
-    directory = Path(directory)
-    # resolve_book_config already validated the continuation chain. Reread its
-    # live pending markers without reloading the entire analysis and scripts.
-    _require_ready(directory)
-    manifest = read_json(regular_file(directory / "manifest.json"))
-    if (not isinstance(manifest, dict) or manifest.get("format") != "epub-audiobook-bundle" or manifest.get("version") != 2
-            or manifest.get("files", {}).get("cast") != "cast.json"
-            or file_hash(regular_file(directory / "cast.json")) != manifest.get("sha256", {}).get("cast.json")):
-        raise ValueError("Parent cast identity changed while reading voice traits")
-    return {"directory": str(directory), "source": {"book": manifest["book"]},
-            "cast": read_json(directory / "cast.json")}
+def _validate(value):
+    # An explicit empty value disables traits and shadows ancestor choices.
+    if value != "":
+        from ..speech_traits import validate_speech_traits
+        validate_speech_traits(value)
 
 
 ACCENTS_FILENAME = "voice-accents.json"
 MAX_ACCENT_CHARACTERS = 80
-# Book-local per-voice choices: field -> (sidecar file, record format, edit lock directory).
-_SIDECARS = {
-    "speech_traits": (TRAITS_FILENAME, "audiobook-book-voice-traits", ".voice-traits.lock"),
-    "accents": (ACCENTS_FILENAME, "audiobook-book-voice-accents", ".voice-accents.lock"),
-}
 
 
 def validate_accent(value):
@@ -48,104 +31,54 @@ def validate_accent(value):
     return value
 
 
-def _validator(field):
-    if field == "accents":
-        return validate_accent
-    from ..speech_traits import validate_speech_traits
-    return validate_speech_traits
+def _validate_accent_choice(value):
+    # An explicit empty value clears an inherited cue.
+    if value != "":
+        validate_accent(value)
 
 
-def _read_overrides(bundle, series_id, field="speech_traits"):
-    from .common import read_json, regular_file
+# Book-local per-voice choices: field -> (sidecar file, record format, validation).
+_SIDECARS = {
+    "speech_traits": (TRAITS_FILENAME, "audiobook-book-voice-traits", _validate),
+    "accents": (ACCENTS_FILENAME, "audiobook-book-voice-accents", _validate_accent_choice),
+}
 
-    filename, record_format, _lock = _SIDECARS[field]
-    path = Path(bundle["directory"]) / filename
-    if not path.exists() and not path.is_symlink():
-        return {}
-    record = read_json(regular_file(path))
-    fields = {"format", "version", "series_id", "book_id", field}
+
+def _setting(field="speech_traits"):
+    from .book_voice_settings import VoiceSetting
+    filename, record_format, validate = _SIDECARS[field]
     label = field.replace("_", " ")
-    if (not isinstance(record, dict) or set(record) != fields
-            or record.get("format") != record_format
-            or type(record.get("version")) is not int or record["version"] != 1
-            or record.get("series_id") != series_id
-            or record.get("book_id") != bundle["source"]["book"]["id"]
-            or not isinstance(record.get(field), dict)):
-        raise ValueError(f"Invalid book voice {label} or {label} belong to another book/series")
-    values = record[field]
-    if set(values) - {voice["id"] for voice in bundle["cast"]["voices"]}:
-        raise ValueError(f"Book voice {label} must use voice IDs from this book")
-    validate = _validator(field)
-    for value in values.values():
-        # An explicit empty value disables the choice and shadows ancestor choices.
-        if value != "":
-            validate(value)
-    return dict(values)
-
-
-def _overrides(bundle, config, field):
-    from .book_context import resolve_book_config
-
-    config = resolve_book_config(bundle, config)
-    series_id = config["voices"]["series_id"]
-    result = _read_overrides(bundle, series_id, field)
-    for directory in config.get("_voice_parents", []):
-        path = Path(directory) / _SIDECARS[field][0]
-        if not path.exists() and not path.is_symlink():
-            continue
-        for voice_id, value in _read_overrides(_parent_context(directory), series_id, field).items():
-            result.setdefault(voice_id, value)
-    allowed = {voice["id"] for voice in bundle["cast"]["voices"]}
-    return {voice_id: value for voice_id, value in result.items() if voice_id in allowed}
+    return VoiceSetting(
+        filename=filename, record_format=record_format, field=field, validate=validate,
+        invalid_message=f"Invalid book voice {label} or {label} belong to another book/series",
+        unknown_voice_message=f"Book voice {label} must use voice IDs from this book",
+        busy_message=f"Book voice {label} are being edited; retry after the current edit")
 
 
 def speech_trait_overrides(bundle, config):
     """Resolve deliberate book-local choices nearest first, independent of audio aliases."""
-    return _overrides(bundle, config, "speech_traits")
+    from .book_voice_settings import nearest_book_settings
+    return nearest_book_settings(_setting("speech_traits"), bundle, config)
 
 
 def accent_overrides(bundle, config, *, include_cleared=False):
     """Each voice's accent cue, nearest book first; an empty value clears an inherited cue."""
-    values = _overrides(bundle, config, "accents")
+    from .book_voice_settings import nearest_book_settings
+    values = nearest_book_settings(_setting("accents"), bundle, config)
     return values if include_cleared else {voice_id: value for voice_id, value in values.items() if value}
-
-
-def _save(bundle, config, voice_id, value, field):
-    from .common import write_json
-
-    if voice_id not in {voice["id"] for voice in bundle["cast"]["voices"]}:
-        raise ValueError("Voice ID is not in the bundle cast")
-    if value != "":
-        _validator(field)(value)
-    filename, record_format, lock_name = _SIDECARS[field]
-    label = field.replace("_", " ")
-    directory = Path(bundle["directory"])
-    lock = directory / lock_name
-    try:
-        lock.mkdir()
-    except FileExistsError:
-        raise ValueError(f"Book voice {label} are being edited; retry after the current edit") from None
-    try:
-        series_id = config["voices"]["series_id"]
-        overrides = _read_overrides(bundle, series_id, field)
-        overrides[voice_id] = value
-        write_json(directory / filename, {
-            "format": record_format, "version": 1,
-            "series_id": series_id, "book_id": bundle["source"]["book"]["id"],
-            field: overrides,
-        })
-    finally:
-        lock.rmdir()
 
 
 def save_speech_traits(bundle, config, voice_id, value):
     """Save an explicit performance choice without rewriting analyzed profiles or audio."""
-    _save(bundle, config, voice_id, value, "speech_traits")
+    from .book_voice_settings import save_book_setting
+    save_book_setting(_setting("speech_traits"), bundle, config, voice_id, value)
 
 
 def save_accent(bundle, config, voice_id, value):
     """Save a voice's accent cue for this book (and books continuing it); empty text clears it here."""
-    _save(bundle, config, voice_id, value, "accents")
+    from .book_voice_settings import save_book_setting
+    save_book_setting(_setting("accents"), bundle, config, voice_id, value)
+
 
 
 def suggest_accent(description):

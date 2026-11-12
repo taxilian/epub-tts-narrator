@@ -375,6 +375,10 @@ class CastingSession:
         trait_overrides = speech_trait_overrides(self.bundle, self.config)
         from .speech_traits import accent_overrides, suggest_accent
         accents = accent_overrides(self.bundle, self.config)
+        from .config import designer_records_several_clips
+        from .voice_clip_counts import clip_choice, clip_overrides
+        clip_counts = clip_overrides(self.bundle, self.config)
+        several_clips = designer_records_several_clips(self.config)
         rows = []
         for voice_id, profile in self._profiles.items():
             selected = self.store.load(voice_id)
@@ -437,6 +441,9 @@ class CastingSession:
                 "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
                                   else speech_traits(profile)),
                 "accent": accents.get(voice_id, ""),
+                "reference_clips": dict(zip(("count", "source"), clip_choice(
+                    self.bundle, self.config, voice_id, canonical_id=self.store.canonical_id,
+                    overrides=clip_counts)), designer_records_several=several_clips),
                 **draft,
                 "accent_suggestion": suggest_accent(draft.get("prompt") or profile["description"]),
                 "selected": selected,
@@ -475,6 +482,36 @@ class CastingSession:
         return {**result, "voice_id": voice_id, "target_voice_id": target_voice_id,
                 "canonical_voice_id": after[voice_id],
                 "affected_voice_ids": [item for item in self._profiles if before[item] != after[item]]}
+
+    def stop_sharing(self, voice_id):
+        """Remove this book's own link from ``voice_id`` to another voice's recording.
+
+        Links saved by an earlier book or the series stay; recordings, drafts,
+        and character identities are unchanged, as with ``share_voice``.
+        """
+        from .book_aliases import edit_book_aliases
+        from ..voice_profile_guard import require_valid_profiles
+
+        self._validate_paths()
+        self._profile(voice_id)
+        local = dict(edit_book_aliases(self.bundle, self.config)["local"] or {})
+        if voice_id not in local:
+            raise ValueError("This voice has no sharing link chosen in this book; "
+                             "a link saved by an earlier book stays in that book")
+        require_valid_profiles(self.bundle["directory"])
+        before = {item: self.store.canonical_id(item) for item in self._profiles}
+        result = edit_book_aliases(self.bundle, self.config, removals=(voice_id,))
+        self._samples.clear()
+        after = {item: self.store.canonical_id(item) for item in self._profiles}
+        return {**result, "voice_id": voice_id, "canonical_voice_id": after[voice_id],
+                "affected_voice_ids": [item for item in self._profiles if before[item] != after[item]]}
+
+    def set_reference_clips(self, voice_id, count):
+        """Choose how many clips this voice records next time; ``None`` uses the default."""
+        from .voice_clip_counts import save_clip_count
+        self._profile(voice_id)
+        canonical = self.store.canonical_id(voice_id)
+        save_clip_count(self.bundle, self.config, canonical if canonical in self._profiles else voice_id, count)
 
     def update_prompt(self, voice_id, prompt=None, reference_text=None, speech_traits=None, accent=None):
         self._profile(voice_id)
