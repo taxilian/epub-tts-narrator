@@ -1369,7 +1369,13 @@ def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, no
             close()
 
 
-def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
+def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier, *, verification=None):
+    """Save a supplied recording as a voice's reference after verifying it.
+
+    ``verification`` is the source voice's saved report when the recording is
+    another book's voice; a joined multi-clip reference then passes the
+    acoustic gates instead of being transcribed whole (``reference_clips.recheck``).
+    """
     from .book_context import resolve_book_config, voice_store
     config = resolve_book_config(bundle, config)
     expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
@@ -1396,7 +1402,8 @@ def import_voice(bundle, voice_id, audio, transcript, config, engine, verifier):
             wav = Path(temp) / descriptive_audio_filename(
                 "import-normalized-reference", voice_id, Path(audio).stem, suffix=".wav")
             normalize_clip(audio, wav, sample_rate=config["render"]["sample_rate"], ffmpeg=config["render"]["ffmpeg"])
-            report = validate_audio(wav, transcript, verifier, config["quality"], purpose="reference")
+            from .reference_clips import recheck
+            report = recheck(wav, transcript, verification, verifier, config["quality"])
             if not report["passed"]:
                 raise RenderBlocked("Reference recording failed verification: " + ", ".join(report["reasons"]))
             reference_text = report.get("reference_text", transcript)

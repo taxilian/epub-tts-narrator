@@ -104,7 +104,7 @@ def import_voices(bundle, config, global_config, source_directory, engine, verif
             counts["imported"] += 1
             continue
         result = import_voice(bundle, voice_id, saved["reference_audio"], saved["reference_text"],
-                              config, engine, verifier)
+                              config, engine, verifier, verification=saved.get("verification"))
         if their_id in their_traits and voice_id not in our_traits:
             save_speech_traits(bundle, config, voice_id, their_traits[their_id])
         output(f"  imported {label}: {result['reference_audio']}")

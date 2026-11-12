@@ -47,7 +47,9 @@ class ImportTests(unittest.TestCase):
     def test_matched_voices_import_their_reference_and_traits_and_existing_choices_stay(self):
         old = book("/books/old", [("Mara", [], "o1"), ("Tom", [], "o2"), ("Ned", [], "o3")], narrator_voice="on")
         new = book("/books/new", [("Mara", [], "n1"), ("Tom", [], "n2"), ("Ned", [], "n3")])
-        stores = {"/books/old": FakeStore({"o1": {"reference_audio": "/v/mara-reference.wav", "reference_text": "Hi."},
+        joined = {"passed": True, "basis": "joined_verified_clips"}
+        stores = {"/books/old": FakeStore({"o1": {"reference_audio": "/v/mara-reference.wav", "reference_text": "Hi.",
+                                                  "verification": joined},
                                            "o2": {"reference_audio": "/v/tom-reference.wav", "reference_text": "Yo."},
                                            "o3": {"reference_audio": "/v/same.wav", "reference_text": "Ok.",
                                                   "reference_sha256": "abc"},
@@ -58,7 +60,7 @@ class ImportTests(unittest.TestCase):
                                                   "inherited": True},
                                            "n3": {"reference_audio": "/v/same.wav", "reference_sha256": "abc",
                                                   "inherited": True}})}
-        imported, traits, lines = [], [], []
+        imported, traits, lines, verifications = [], [], [], []
         with (patch.object(voice_transfer, "load_bundle", return_value=old),
               patch("epub_tts_narrator.renderer.book_context.resolve_book_config", side_effect=lambda b, c: c),
               patch("epub_tts_narrator.renderer.book_context.voice_store",
@@ -68,13 +70,17 @@ class ImportTests(unittest.TestCase):
               patch("epub_tts_narrator.renderer.speech_traits.save_speech_traits",
                     side_effect=lambda b, c, voice, value: traits.append((voice, value))),
               patch("epub_tts_narrator.renderer.workflow.import_voice",
-                    side_effect=lambda b, voice, audio, text, c, e, v: imported.append((voice, audio, text))
+                    side_effect=lambda b, voice, audio, text, c, e, v, verification=None:
+                    imported.append((voice, audio, text)) or verifications.append((voice, verification))
                     or {"reference_audio": f"/new/{voice}.wav"})):
             counts = voice_transfer.import_voices(new, {}, {}, Path("/books/old"), "engine", "verifier",
                                                   output=lines.append)
         self.assertEqual(sorted(imported), [("n1", "/v/mara-reference.wav", "Hi."),
                                             ("vn", "/v/narrator-reference.wav", "Once.")])
         self.assertEqual(traits, [("n1", "Light Irish accent.")])
+        # The source voice's saved verification travels with it, so a joined
+        # multi-clip reference is rechecked by its audio, not transcribed whole.
+        self.assertEqual(sorted(verifications, key=lambda item: item[0]), [("n1", joined), ("vn", None)])
         self.assertEqual(counts, {"imported": 2, "kept": 2, "missing": 0, "unmatched": 0})
         self.assertIn("  kept     Tom: this book already chose its voice", lines)
         # The same recording inherited through the series needs no copy.

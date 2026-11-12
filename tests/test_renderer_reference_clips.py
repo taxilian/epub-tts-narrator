@@ -168,6 +168,44 @@ class AddClipsTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class RecheckTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.wav = write_tone(Path(temp.name) / "joined.wav", 2, rate=44100)
+        self.joined = {"passed": True, "basis": "joined_verified_clips", "reference_text": "words",
+                       "clips": [{"index": 1, "audio_sha256": "a"}], "reasons": []}
+
+    def test_a_joined_reference_is_rechecked_by_its_audio_and_keeps_its_clip_evidence(self):
+        with patch("epub_tts_narrator.renderer.quality.validate_audio",
+                   side_effect=AssertionError("a joined reference is not transcribed again")):
+            report = reference_clips.recheck(self.wav, "words", self.joined, None, None)
+        self.assertEqual((report["passed"], report["reasons"], report["clips"]), (True, [], self.joined["clips"]))
+        self.assertAlmostEqual(report["metrics"]["duration_seconds"], 2.0)
+
+    def test_a_joined_reference_that_fails_a_current_audio_gate_fails_the_recheck(self):
+        with patch("epub_tts_narrator.renderer.quality.acoustic_check",
+                   return_value=({"duration_seconds": 2.0}, ["audio_too_quiet"])):
+            report = reference_clips.recheck(self.wav, "words", self.joined, None, None)
+        self.assertEqual((report["passed"], report["reasons"]), (False, ["audio_too_quiet"]))
+
+    def test_an_ordinary_reference_is_verified_in_full(self):
+        with patch("epub_tts_narrator.renderer.quality.validate_audio", return_value={"passed": True}) as full:
+            reference_clips.recheck(self.wav, "words", {"passed": True}, "verifier", {"x": 1})
+        full.assert_called_once_with(self.wav, "words", "verifier", {"x": 1}, purpose="reference")
+
+
+class SummaryTests(unittest.TestCase):
+    def test_the_summary_names_the_clip_count_and_says_when_a_gemini_voice_kept_fewer(self):
+        config = {"casting": {"reference_clips": 3}}
+        three = {"creation": {"designer": GEMINI, "reference_clips": [{}, {}, {}]}}
+        one = {"creation": {"designer": GEMINI}}
+        local = {"creation": {"designer": {"engine": "drama3_mlx"}}}
+        self.assertEqual(reference_clips.clip_summary(three, config), "3 reference clips")
+        self.assertTrue(reference_clips.clip_summary(one, config).startswith("1 reference clip (fewer than the 3"))
+        self.assertEqual(reference_clips.clip_summary(local, config), "1 reference clip")
+
+
 @unittest.skipUnless(FFMPEG, "FFmpeg is required for reference verification")
 class AutomaticCreationTests(unittest.TestCase):
     """Render-time voice creation with the real Gemini request-state and cleanup lifecycle."""

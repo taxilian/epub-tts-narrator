@@ -42,6 +42,7 @@ from .workflow import RenderBlocked, SpeechVerificationFailed, verified_take
 
 
 PAUSE_SECONDS = 0.5
+JOINED_BASIS = "joined_verified_clips"
 
 
 class FreshVoiceRequired(RenderBlocked):
@@ -188,7 +189,7 @@ def add_clips(first_wav, first_accepted, scripts, *, designer, prompt, directory
                   for number, clip in enumerate(clips)]
     joined_request = dict(request, text=text, joined_clips=hashes, joined_pause_seconds=PAUSE_SECONDS)
     joined_request.pop("sample_source", None)
-    report = {"passed": True, "purpose": "reference", "basis": "joined_verified_clips",
+    report = {"passed": True, "purpose": "reference", "basis": JOINED_BASIS,
               "expected_text": text, "reference_text": text, "reasons": [], "metrics": metrics,
               "clips": [{"index": clip["index"], "audio_sha256": clip["audio_sha256"],
                          "request_hash": clip["request_hash"]} for clip in provenance],
@@ -206,3 +207,37 @@ def creation_metadata(clips):
         return {}
     return {"reference_clips": clips, "reference_clip_pause_seconds": PAUSE_SECONDS,
             "reference_clips_sha256": digest([clip["audio_sha256"] for clip in clips])}
+
+
+def recheck(path, reference_text, verification, verifier, policy):
+    """A saved reference's report under the current settings.
+
+    A joined reference (``basis: joined_verified_clips``) passes the current
+    acoustic gates and keeps its clips' verification evidence; its words were
+    verified clip by clip and are not transcribed again. Any other reference
+    is verified in full.
+    """
+    if isinstance(verification, dict) and verification.get("basis") == JOINED_BASIS:
+        from .quality import acoustic_check
+        metrics, reasons = acoustic_check(path, policy)
+        return {**verification, "passed": not reasons, "reasons": reasons, "metrics": metrics}
+    from .quality import validate_audio
+    return validate_audio(path, reference_text, verifier, policy, purpose="reference")
+
+
+def clip_count(voice):
+    """How many reference clips a saved voice's recording joins (1 for an ordinary recording)."""
+    creation = (voice or {}).get("creation") or {}
+    return len(creation.get("reference_clips") or []) or 1
+
+
+def clip_summary(voice, config):
+    """One line saying how many clips a new voice kept, and whether that is fewer than it could have."""
+    count = clip_count(voice)
+    line = f"{count} reference clip{'s' if count != 1 else ''}"
+    wanted = (config.get("casting") or {}).get("reference_clips", 3)
+    designer = ((voice or {}).get("creation") or {}).get("designer")
+    if keeps_one_voice(designer) and count < wanted:
+        line += (f" (fewer than the {wanted} requested: the character has too little speech, or a clip "
+                 "failed its check; the notes above say which)")
+    return line

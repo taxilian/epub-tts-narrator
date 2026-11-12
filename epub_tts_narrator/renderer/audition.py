@@ -442,7 +442,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     say(f"Generating and verifying {_label(row)}…")
                     voice = session.regenerate(row["voice_id"], voice_designer=voice_designer)
                     last_voice_id = row["voice_id"]
-                    say("New voice saved and selected.")
+                    from .reference_clips import clip_summary
+                    say(f"New voice saved and selected: {clip_summary(voice, session.config)}.")
                     play(row, voice)
                 else:
                     row = choose(rows, action)
@@ -542,7 +543,9 @@ def casting_command(args, bundle, config):
             print(json.dumps([row] if row else rows, ensure_ascii=False, indent=2))
         elif action == "generate":
             candidate = session.regenerate(args.voice_id)
-            print(f"Voice saved and selected: {candidate['candidate_id']}\n{candidate['reference_audio']}")
+            from .reference_clips import clip_summary
+            print(f"Voice saved and selected: {candidate['candidate_id']} ({clip_summary(candidate, session.config)})\n"
+                  f"{candidate['reference_audio']}")
         elif action == "generate-missing":
             print(f"Prepared {len(session.generate_missing())} voices for use.")
         elif action == "prepare-samples":

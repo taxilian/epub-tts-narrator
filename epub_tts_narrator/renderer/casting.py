@@ -1485,9 +1485,9 @@ class CastingSession:
             report = candidate["verification"]
         else:
             self.notify(f"Rechecking {voice_id} against the current verification settings")
-            report = validate_audio(
-                candidate["reference_audio"], candidate["reference_text"], verifier,
-                self.config["quality"], purpose="reference")
+            from .reference_clips import recheck
+            report = recheck(candidate["reference_audio"], candidate["reference_text"],
+                             candidate.get("verification"), verifier, self.config["quality"])
             if not report.get("passed"):
                 _require_available_confirmation(report)
                 raise RenderBlocked("Voice candidate failed current verification: " + ", ".join(report["reasons"]))
