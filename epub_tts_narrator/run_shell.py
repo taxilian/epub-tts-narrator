@@ -74,7 +74,7 @@ class RunApp(CapturePrintMixin, App):
     """
     TILES = ("Health", "Books", "Generating", "Verifying", "Accepted", "Rejected takes", "Failures", "Left")
     TABS = {"summary": "summary", "chapters": "chapters", "workers": "workers-tab", "log": "log-tab",
-            "errors": "errors-tab"}
+            "errors": "errors-tab", "rejected": "rejected-tab"}
     BINDINGS = [
         Binding("q", "quit_run", "Quit", tooltip="Quit; while running this asks before stopping anything"),
         # Textual's own Ctrl-Q would close the screen at once; it asks here too.
@@ -86,6 +86,9 @@ class RunApp(CapturePrintMixin, App):
                                                         "their blocks, and the pipeline's stages"),
         Binding("4", "tab('log')", "Log", tooltip="Every message, filtered"),
         Binding("5", "tab('errors')", "Errors", tooltip="Every failure with its detail and repairs"),
+        Binding("6", "tab('rejected')", "Rejected", tooltip="Every rejected take: listen, judge it, or use it"),
+        Binding("e", "export_feedback", "Export", show=False,
+                tooltip="Write the takes you judged differently from verification, for detection work"),
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
         Binding("c", "pick('chapter')", "Chapter", tooltip="Filter by chapter"),
         Binding("w", "pick('worker')", "Worker", tooltip="Filter by worker"),
@@ -151,6 +154,12 @@ class RunApp(CapturePrintMixin, App):
                 yield RichLog(id="log", wrap=True, markup=False, highlight=False)
             with TabPane("Errors", id="errors-tab"):
                 yield DataTable(id="errors", cursor_type="row")
+            with TabPane("Rejected", id="rejected-tab"):
+                yield Static(Text("Every take verification rejected in this run. Enter opens all takes of the "
+                                  "passage: listen, mark each good (wrongly rejected) or bad, or change which one "
+                                  "is used. e writes the takes you marked differently from verification to "
+                                  "render-work/take-feedback-review.json for later study."), classes="section-title")
+                yield DataTable(id="rejected", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self):
@@ -166,6 +175,7 @@ class RunApp(CapturePrintMixin, App):
         self.query_one("#workers", DataTable).add_columns("Node", "Role", "Slot", "Book", "Chapter", "Block", "For")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
         self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
+        self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take", "Why")
         self.start_command()
         self.set_interval(0.5, self.refresh_view)
         self.refresh_view(force=True)
@@ -245,7 +255,15 @@ class RunApp(CapturePrintMixin, App):
                                           item["record"].get("error_type") or item["kind"],
                                           (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
         sync_table(self.query_one("#errors", DataTable), failures)
+        sync_table(self.query_one("#rejected", DataTable), [
+            (f"{item['request_hash']}:{item['attempt']}",
+             (format_seconds(item["time"] - model.started), str(item["scope"].get("book") or ""),
+              str(item["scope"].get("chapter") or ""), f"#{item['scope']['block']}" if item["scope"].get("block") else "",
+              str(item["attempt"]), (", ".join(item["reasons"]) + (f" ({item['detail']})" if item["detail"] else ""))[:160]))
+            for item in model.visible_rejections()[:2000]])
         tabs = self.query_one("#tabs", TabbedContent)
+        rejected = len(model.rejections)
+        tabs.get_tab("rejected-tab").label = f"Rejected ({rejected})" if rejected else "Rejected"
         current = len(model.current_failures())
         tabs.get_tab("errors-tab").label = f"Errors ({current})" if current else "Errors"
         self._draw_log()
@@ -418,6 +436,10 @@ class RunApp(CapturePrintMixin, App):
             item = self._failure_at(event.row_key.value)
             if item is not None:
                 self._open_failure(item)
+        elif table == "rejected":
+            item = self._highlighted_rejection()
+            if item is not None:
+                self._open_rejection(item)
 
     def _chapter_detail(self, key):
         row = next((item for item in self.model.visible_rows() if str(item[0]) == key), None)
@@ -491,45 +513,103 @@ class RunApp(CapturePrintMixin, App):
         self._retry(item)
 
     def action_takes(self):
+        tab = self.query_one("#tabs", TabbedContent).active
+        if tab == "rejected-tab":
+            item = self._highlighted_rejection()
+            if item is not None:
+                self._open_rejection(item)
+            return
         item = self._highlighted_failure()
         if item is None or item.get("repair") is None:
-            self.notify("Highlight a chapter that failed on one passage in Errors (5)", severity="warning")
+            self.notify("Highlight a chapter that failed on one passage in Errors (5), or a take in Rejected (6)",
+                        severity="warning")
             return
         self._takes(item)
 
     def _takes(self, item):
+        self._open_takes(item["scope"], item["repair"], failure=item,
+                         title_tail="takes of the passage that failed")
+
+    def _open_takes(self, scope, review, *, failure=None, highlight=None, title_tail="every take of this passage"):
         from .run_shell_screens import TakesScreen
-        repair = item["repair"]
         if self._player is None:
             from .renderer.audition import AudioPlayer
-            self._player = AudioPlayer(repair.player_command)
-        scope = item["scope"]
+            self._player = AudioPlayer(review.player_command)
         title = ((f"[{scope['book']}] " if scope.get("book") else "") +
-                 f"Chapter {scope.get('chapter')}: takes of the passage that failed")
+                 f"Chapter {scope.get('chapter')}" + (f", block {scope['block']}" if scope.get("block") else "") +
+                 f": {title_tail}")
 
         def chosen(choice):
             if choice is not None:
-                self.run_worker(lambda: self._accept_take(item, choice), thread=True, group="accept-take")
-        self.push_screen(TakesScreen(title, repair, self._player), chosen)
+                self.run_worker(lambda: self._use_take(scope, review, choice, failure), thread=True,
+                                group="use-take")
+        self.push_screen(TakesScreen(title, review, self._player, highlight=highlight), chosen)
 
-    def _accept_take(self, item, choice):
-        chapter = item["scope"].get("chapter")
+    def _use_take(self, scope, review, choice, failure=None):
+        chapter = scope.get("chapter")
         try:
-            outcome = item["repair"].accept(choice["attempt"], learn=choice["learn"])
+            outcome = review.accept(choice["attempt"], learn=choice["learn"])
         except (ValueError, OSError) as error:
-            self.call_from_thread(self.notify, f"Could not accept take {choice['attempt']}: {error}", severity="error")
-            self.bus.log(f"Could not accept take {choice['attempt']} for chapter {chapter}: {error}",
-                         scope=dict(item["scope"]), severity="error")
+            self.call_from_thread(self.notify, f"Could not use take {choice['attempt']}: {error}", severity="error")
+            self.bus.log(f"Could not use take {choice['attempt']} for chapter {chapter}: {error}",
+                         scope=dict(scope), severity="error")
             return
         learned = "; ".join(f"{expected} → {heard}" for expected, heard in outcome["learned"])
-        self.bus.log(f"Accepted take {outcome['attempt']} for chapter {chapter} after listening "
+        self.bus.log(f"Using take {outcome['attempt']} for chapter {chapter} after listening "
                      f"({outcome['basis']})" + (f"; the recognizer learned: {learned}" if learned else ""),
-                     scope=dict(item["scope"]), severity="warning")
-        retried = self.model.retry(item)
-        message = (f"Take {outcome['attempt']} accepted; chapter {chapter} renders again with it."
-                   if retried else f"Take {outcome['attempt']} accepted; R resumes the book with it.")
+                     scope=dict(scope), severity="warning")
+        if failure is None:
+            # A failed chapter whose passage this is retries with the take; any other chapter is rebuilt.
+            failure = next((item for item in self.model.current_failures()
+                            if item["record"].get("request_hash") == review.request_hash), None)
+        if failure is not None and self.model.retry(failure):
+            message = f"Take {outcome['attempt']} is used; chapter {chapter} renders again with it, first in line."
+        else:
+            when = self.model.request_rebuild(scope.get("book"), chapter)
+            message = {"now": f"Take {outcome['attempt']} is used; chapter {chapter} is rebuilt with it, first in line.",
+                       "after": f"Take {outcome['attempt']} is used; chapter {chapter} is rebuilt with it as soon as "
+                                "it finishes rendering."}.get(
+                when, f"Take {outcome['attempt']} is used; R (or the next render) rebuilds chapter {chapter} with it.")
         self.call_from_thread(self.notify, message)
         self.call_from_thread(self.refresh_view, True)
+
+    # Rejected takes ----------------------------------------------------------------
+
+    def _highlighted_rejection(self):
+        table = self.query_one("#rejected", DataTable)
+        key = highlighted_key(table)
+        return next((item for item in self.model.visible_rejections()
+                     if f"{item['request_hash']}:{item['attempt']}" == key), None)
+
+    def _open_rejection(self, item):
+        if item.get("review") is None:
+            self.notify("This take cannot be reviewed here", severity="warning")
+            return
+        self._open_takes(item["scope"], item["review"], highlight=item["attempt"])
+
+    def action_export_feedback(self):
+        works = {}
+        for item in self.model.rejections:
+            review = item.get("review")
+            if review is not None:
+                works.setdefault(str(review.work), review.work)
+        for failure in self.model.failures:
+            review = failure.get("repair")
+            if review is not None:
+                works.setdefault(str(review.work), review.work)
+        if not works:
+            self.notify("No reviewed takes yet", severity="warning")
+            return
+        from .renderer.take_feedback import export
+        for work in works.values():
+            try:
+                path, counts = export(work)
+            except (ValueError, OSError) as error:
+                self.notify(f"Could not write the feedback review: {error}", severity="error")
+                continue
+            self.bus.log(f"Feedback review written: {path} ({counts['false_rejection']} wrongly rejected, "
+                         f"{counts['false_acceptance']} wrongly passed)", severity="warning")
+            self.notify(f"Wrote {path}")
 
     def action_finish(self):
         if not self.model.holds:

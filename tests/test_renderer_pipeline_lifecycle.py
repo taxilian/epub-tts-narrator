@@ -439,6 +439,56 @@ class PipelineLifecycleTests(unittest.TestCase):
         pool.close()
         self.assertEqual(ACTIVITY.snapshot(), [])
 
+    def test_changing_a_finished_chapter_s_take_rebuilds_it_before_the_book_is_assembled(self):
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        self._four_chapter_bundle("rebuild-bundle")
+        self.verifier = FirstAttemptFailsVerifier(self.fixtures, "The second boat crossed the harbor.")
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        original = self.engine.synthesize
+        broken = {"The fourth boat crossed the harbor."}
+
+        class PermanentFailure(RuntimeError):
+            retryable = False
+
+        def generate(*args, **kwargs):
+            if args[0] in broken:
+                raise PermanentFailure("Fixture permanent generation error")
+            return original(*args, **kwargs)
+
+        state, lines = {}, []
+
+        def on_event(event):
+            if event.kind == "log":
+                lines.append(event.text)
+            elif event.kind == "rejected":
+                state["review"] = event.data["review"]
+            elif event.kind == "rebuild":
+                state["rebuild"] = event.data["handler"]
+            elif event.kind == "failure":
+                state["retry"] = event.data["retry"]
+            elif event.kind == "hold" and event.data["release"] is not None and "done" not in state:
+                # While chapter 4 waits for a retry: a person prefers chapter 2's rejected take.
+                state["done"] = True
+                takes = state["review"].takes()
+                self.assertEqual([(row["attempt"], row["passed"], row["accepted"]) for row in takes],
+                                 [(1, False, False), (2, True, True)])
+                self.assertEqual(state["review"].accept(1)["basis"], "manual_take_selection")
+                self.assertTrue(state["rebuild"](2))
+                broken.clear()
+                self.assertTrue(state["retry"]())
+
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with patch.object(self.engine, "synthesize", side_effect=generate), shell_board(bus) as board:
+            result = render(self.bundle, self.config, pool, self.verifier, notify=board.log)
+        self.assertEqual(result["status"], "complete")
+        # Chapter 2 was assembled again, with the take the person chose (no new generation).
+        self.assertEqual(sum(line.startswith("Assembling chapter 2 / 4") for line in lines), 2)
+        self.assertEqual([(row["attempt"], row["accepted"]) for row in state["review"].takes()], [(1, True), (2, False)])
+        self.assertEqual(state["review"].used()["attempt"], 1)
+
     def test_a_held_render_reports_its_failures_when_the_person_finishes(self):
         self._four_chapter_bundle("held-bundle")
         holds = []

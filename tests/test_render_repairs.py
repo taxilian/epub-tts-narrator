@@ -6,7 +6,8 @@ import time
 import unittest
 
 from epub_tts_narrator.renderer.common import read_json, write_json
-from epub_tts_narrator.renderer.failed_take_repair import FailedTakeRepair
+from epub_tts_narrator.renderer.take_feedback import export, load as load_feedback
+from epub_tts_narrator.renderer.take_review import FailedTakeRepair, TakeReview
 from epub_tts_narrator.renderer.heard_variants import effective_variants, recognizer_key, trust_basis
 from epub_tts_narrator.run_events import EventBus
 from epub_tts_narrator.run_shell_model import STALL_SECONDS, RunModel, repair_hint
@@ -63,6 +64,8 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.assertEqual(outcome["learned"], [("kvothe", "quote")])
         accepted = read_json(self.directory / "accepted.json")
         self.assertEqual(accepted["audio_sha256"], record["audio_sha256"])
+        # The chosen take shows as the one used, although the manual selection keeps its own audio copy.
+        self.assertEqual([row["accepted"] for row in self.repair().takes()], [True])
         variants = effective_variants(self.book, recognizer_key(FixtureRecognizer()))
         self.assertEqual(trust_basis(variants[("kvothe", "quote")]), "listened")
 
@@ -78,6 +81,62 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.config["_heard_variants_directory"] = None
         self.assertFalse(self.repair().takes()[0]["learnable"])
         self.assertEqual(self.repair().accept(1, learn=True)["learned"], [])
+
+    def test_marks_are_saved_per_take_and_shown_without_changing_the_take_used(self):
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        self.failed_take(2, "Kvothe smiled at the fire.")
+        review = TakeReview(self.work, self.config, FixtureRecognizer(), self.fixture.request_hash)
+        self.assertEqual(review.mark(1, "good")["learned"], [])
+        review.mark(2, "bad")
+        self.assertEqual([row["verdict"] for row in review.takes()], ["good", "bad"])
+        self.assertFalse((self.directory / "accepted.json").exists())
+        review.mark(2, None)
+        self.assertEqual([row["verdict"] for row in review.takes()], ["good", None])
+        self.assertEqual(review.mark(1, "good", learn=True)["learned"], [("kvothe", "quote")])
+        with self.assertRaisesRegex(ValueError, "good, bad or none"):
+            review.mark(1, "maybe")
+
+    def test_using_a_take_also_records_it_as_judged_good(self):
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        self.repair().accept(1)
+        entry = load_feedback(self.work)["takes"][f"{self.fixture.request_hash}:1"]
+        self.assertEqual((entry["verdict"], entry["passed"], entry["reasons"]), ("good", False, ["text_mismatch"]))
+
+    def test_the_export_lists_every_disagreement_with_what_was_expected_and_heard(self):
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        passed = self.fixture.attempt(self.directory, 2, passed=True)
+        review = TakeReview(self.work, self.config, FixtureRecognizer(), self.fixture.request_hash)
+        review.mark(1, "good")
+        review.mark(2, "bad")
+        path, counts = export(self.work)
+        self.assertEqual(path, self.work / "take-feedback-review.json")
+        self.assertEqual((counts["false_rejection"], counts["false_acceptance"], counts["agreed"]), (1, 1, 0))
+        takes = read_json(path)["takes"]
+        rejected = next(item for item in takes if item["kind"] == "false_rejection")
+        self.assertEqual(rejected["verification"]["transcript"], "quote smiled at the fire tonight.")
+        self.assertEqual(rejected["verification"]["expected_text"], "Kvothe smiled at the fire tonight.")
+        self.assertEqual(rejected["chunk_id"], "chunk-042")
+        self.assertTrue(rejected["audio_matches_judgement"])
+        self.assertTrue(rejected["audio_file"].endswith(".wav"))
+        review.mark(2, "good")
+        _, counts = export(self.work, self.work / "custom.json")
+        self.assertEqual((counts["false_acceptance"], counts["agreed"]), (0, 1))
+        self.assertEqual(len(read_json(self.work / "custom.json")["takes"]), 1)
+        self.assertEqual(passed["attempt"], 2)
+
+    def test_the_take_feedback_command_writes_the_review_for_a_book(self):
+        from unittest.mock import patch
+        import contextlib, io
+        from epub_tts_narrator.renderer import cli
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        TakeReview(self.work, self.config, FixtureRecognizer(), self.fixture.request_hash).mark(1, "good")
+        output = io.StringIO()
+        with (patch.object(cli, "load_config", return_value={}), patch.object(cli, "load_bundle", return_value={}),
+              patch.object(cli, "resolve_book_config", return_value={"render": {"work_dir": str(self.work)}}),
+              contextlib.redirect_stdout(output)):
+            self.assertEqual(cli.main(["take-feedback", "book"]), 0)
+        self.assertIn("1 take(s) rejected but judged good, 0 passed but judged bad", output.getvalue())
+        self.assertTrue((self.work / "take-feedback-review.json").is_file())
 
     def test_a_missing_take_is_refused(self):
         self.failed_take(1, "quote smiled at the fire tonight.")
@@ -193,6 +252,23 @@ class GlanceTests(unittest.TestCase):
         activity.unregister(owner)
         self.assertEqual(activity.snapshot(), [])
 
+    def test_rejected_takes_are_listed_once_and_changed_takes_rebuild_their_chapter(self):
+        rebuilt = []
+        self.bus.publish("rebuild", scope={"book": "b1"}, data={"handler": lambda number: rebuilt.append(number) or True})
+        for _ in range(2):
+            self.bus.publish("rejected", "text_mismatch", scope={"book": "b1", "chapter": 3, "block": 4},
+                             data={"request_hash": "a" * 64, "attempt": 1, "reasons": ["text_mismatch"],
+                                   "detail": "", "review": object()})
+        self.assertEqual(len(self.model.visible_rejections()), 1)
+        self.assertEqual(self.model.request_rebuild("b1", 2), "now")
+        self.assertEqual(rebuilt, [2])
+        self.snapshot("k3", "b1", 3, 1, [])
+        self.assertEqual(self.model.request_rebuild("b1", 3), "after")
+        self.assertEqual(rebuilt, [2])
+        self.bus.publish("status_removed", data={"key": "k3"})
+        self.assertEqual(rebuilt, [2, 3])
+        self.assertIsNone(self.model.request_rebuild("unknown", 1))
+
     def test_repair_hints_name_the_likely_fix(self):
         def item(error, error_type="RenderBlocked", **extra):
             return {"kind": "chapter", "error": error, "record": {"error_type": error_type}, **extra}
@@ -206,21 +282,29 @@ class GlanceTests(unittest.TestCase):
 class FakeRepair:
     player_command = ["fixture-player"]
 
-    def __init__(self):
-        self.accepted = []
-
     def takes(self):
         return [{"attempt": 1, "passed": False, "accepted": False, "eligible": True, "ineligible_reason": None,
                  "reasons": ["text_mismatch"], "duration_seconds": 2.5, "transcript": "quote smiled",
-                 "expected_text": "Kvothe smiled", "audio_path": "/clips/take-1.wav", "learnable": True},
+                 "expected_text": "Kvothe smiled", "audio_path": "/clips/take-1.wav", "learnable": True,
+                 "verdict": None},
                 {"attempt": 2, "passed": False, "accepted": False, "eligible": False,
                  "ineligible_reason": "history echo", "reasons": ["text_mismatch"], "duration_seconds": 2.0,
                  "transcript": "earlier line", "expected_text": "Kvothe smiled", "audio_path": "/clips/take-2.wav",
-                 "learnable": False}]
+                 "learnable": False, "verdict": "bad"}]
 
     def accept(self, attempt, *, learn=False):
         self.accepted.append((attempt, learn))
         return {"attempt": attempt, "basis": "manual_take_selection", "learned": [("kvothe", "quote")] if learn else []}
+
+    request_hash = "f" * 64
+    work = Path("/books/fixture-book/render-work")
+
+    def __init__(self):
+        self.accepted, self.marks = [], []
+
+    def mark(self, attempt, verdict, *, learn=False):
+        self.marks.append((attempt, verdict, learn))
+        return {"attempt": attempt, "verdict": verdict, "learned": []}
 
 
 class FakePlayer:
@@ -311,6 +395,50 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requested, [True])
         self.assertTrue(any("the recognizer learned: kvothe → quote" in event.text for _, event in self.model.logs))
         self.assertEqual(self.model.book_states["fixture-book"]["state"], "done")
+
+    async def test_a_rejected_take_opens_every_take_to_mark_and_change_which_is_used(self):
+        from epub_tts_narrator.renderer.progress import live_board, report_book_state, report_rebuild_handler
+        from epub_tts_narrator.run_shell_screens import TakesScreen
+        from epub_tts_narrator.tui_widgets import ChoiceScreen
+        review, player, rebuilt, release = FakeRepair(), FakePlayer(), [], __import__("threading").Event()
+        board = []
+
+        def command():
+            with live_board(print) as notify:
+                board.append(notify.__self__)
+                report_book_state(notify, "/books/fixture-book", "rendering")
+                report_rebuild_handler(notify, lambda number: rebuilt.append(number) or True)
+                notify.__self__.rejected_take({"request_hash": "f" * 64, "attempt": 1, "reasons": ["text_mismatch"],
+                                               "detail": "wer 0.33"}, review)
+                release.wait(10)
+            return 0
+
+        app = self.make_app(command)
+        app._player = player
+        async with app.run_test(size=(160, 45)) as pilot:
+            await self.wait_for(pilot, lambda: bool(self.model.rejections))
+            self.model.rejections[0]["scope"].update(chapter=4, block=9)
+            await pilot.press("6")
+            await pilot.pause()
+            table = app.query_one("#rejected")
+            self.assertEqual(table.row_count, 1)
+            table.focus()
+            await pilot.press("enter")
+            await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
+            await pilot.press("g")  # learnable: asks whether to teach the recognizer
+            self.assertIsInstance(app.screen, ChoiceScreen)
+            await pilot.press("down", "enter")
+            await self.wait_for(pilot, lambda: review.marks == [(1, "good", False)])
+            await pilot.press("down", "b")
+            await self.wait_for(pilot, lambda: len(review.marks) == 2)
+            await pilot.press("up", "u")
+            self.assertIsInstance(app.screen, ChoiceScreen)
+            await pilot.press("down", "enter")  # use it, without teaching
+            await self.wait_for(pilot, lambda: rebuilt == [4])
+            self.assertEqual(review.accepted, [(1, False)])
+            self.assertEqual(review.marks[1], (2, "bad", False))
+            release.set()
+            await self.wait_for(pilot, lambda: not app.is_running)
 
     async def test_the_summary_drills_into_a_book_and_quitting_always_asks(self):
         from epub_tts_narrator.tui_widgets import ConfirmScreen

@@ -289,6 +289,20 @@ class BusBoard(TerminalBoard):
         self.bus.publish("book", state, scope={"book": _book_label(key)},
                          data={"key": str(key), "state": state, "retry": retry})
 
+    def rejected_take(self, take, review, *, book=None):
+        """One rejected take; ``review`` builds its ``TakeReview`` when a person opens it."""
+        from .node_activity import current_job
+        job = current_job()
+        scope = {key: job.get(key) for key in ("chapter", "block") if job.get(key) is not None}
+        if book or job.get("book"):
+            scope["book"] = book or job.get("book")
+        self.bus.publish("rejected", ", ".join(take.get("reasons") or []), scope=scope,
+                         data={**take, "review": review})
+
+    def rebuild_handler(self, handler, *, book=None):
+        """``handler(chapter_number)`` rebuilds one chapter of this book from its clips while it renders."""
+        self.bus.publish("rebuild", scope={"book": book} if book else {}, data={"handler": handler})
+
     def retry_hold(self, release, failed, *, book=None):
         """The run waits for retries (``release`` finishes it), or stopped waiting (``None``)."""
         self.bus.publish("hold", scope={"book": book} if book else {},
@@ -395,6 +409,14 @@ class PrefixedBoardNotify:
         if getattr(self.board, "structured_status", False):
             self.board.book_state(key, state, retry=retry)
 
+    def rejected_take(self, take, review):
+        if getattr(self.board, "structured_status", False):
+            self.board.rejected_take(take, review, book=_prefix_book(self.prefix))
+
+    def rebuild_handler(self, handler):
+        if getattr(self.board, "structured_status", False):
+            self.board.rebuild_handler(handler, book=_prefix_book(self.prefix))
+
     def retry_hold(self, release, failed):
         if getattr(self.board, "structured_status", False):
             self.board.retry_hold(release, failed, book=_prefix_book(self.prefix))
@@ -411,6 +433,26 @@ def offers_chapter_retries(notify):
     """Whether this run's output is a run shell that can ask for failed chapters again."""
     owner = _board_of(notify)
     return owner is not None and bool(getattr(owner, "structured_status", False))
+
+
+def _structured_board(notify):
+    """The run shell's board behind ``notify`` (also a chapter task's notifier), or None."""
+    owner = notify._progress._board if isinstance(notify, _TaskNotifier) else _board_of(notify)
+    return owner if owner is not None and getattr(owner, "structured_status", False) else None
+
+
+def report_rejected_take(notify, take, review_factory):
+    """List one rejected take in a run shell; the review handle is built only when one is shown."""
+    board = _structured_board(notify)
+    if board is not None:
+        board.rejected_take(take, review_factory())
+
+
+def report_rebuild_handler(notify, handler):
+    """Let a run shell ask this render to rebuild one chapter (after a person changed a take)."""
+    board = _structured_board(notify)
+    if board is not None:
+        board.rebuild_handler(handler)
 
 
 def report_book_state(notify, key, state, retry=None):

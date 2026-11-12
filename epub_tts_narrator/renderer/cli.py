@@ -31,7 +31,7 @@ CAST_SHELL_ACTIONS = {"generate-missing": True, "prepare-samples": True, "normal
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name", "take-feedback"):
         command = commands.add_parser(name)
         if name == "render":
             command.add_argument("bundle", type=Path, nargs="+",
@@ -140,6 +140,14 @@ def parser():
             command.add_argument("--list", action="store_true", help="Show defined names and their tagging status")
             command.add_argument("--remove", action="store_true",
                                  help="Remove this book's own pronunciation (and draft) for NAME; books continued from it stop inheriting it")
+        if name == "take-feedback":
+            command.description = ("Write the takes a person judged differently from automatic verification "
+                                   "(rejected but good, or passed but bad), with what was expected and heard, "
+                                   "for work on detection.")
+            command.add_argument("--file", type=Path, dest="feedback_file",
+                                 help="Where to write the review (default: BOOK/render-work/take-feedback-review.json)")
+            command.add_argument("--all", action="store_true", dest="feedback_all",
+                                 help="Also include takes where the person agreed with verification")
         if name == "import-voices":
             command.description = ("Reuse another book's chosen voices for the same characters (matched by name, "
                                    "not voice ID), e.g. after re-analyzing a book from a cleaner EPUB. Voices this "
@@ -370,7 +378,7 @@ def main(argv=None, *, in_shell=False):
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
         if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
-                            "history-echoes"}:
+                            "history-echoes", "take-feedback"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report"}:
             config = load_config(config_path, require_verifier=False)
@@ -428,6 +436,15 @@ def main(argv=None, *, in_shell=False):
         global_config = config
         config = resolve_book_config(bundle, config, output=args.output,
                                      work_dir=args.work_dir, epub=args.epub)
+        if args.command == "take-feedback":
+            from .take_feedback import export
+            path, counts = export(config["render"]["work_dir"], args.feedback_file, include_agreements=args.feedback_all)
+            print(f"Wrote {path}: {counts['false_rejection']} take(s) rejected but judged good, "
+                  f"{counts['false_acceptance']} passed but judged bad"
+                  + (f", {counts['agreed']} agreeing" if args.feedback_all else "")
+                  + (f"; {counts['audio_changed']} take(s) changed since they were judged" if counts["audio_changed"] else "")
+                  + ".")
+            return 0
         if args.command in {"pronounce", "pronounce-name"} and (args.replace or args.local_only) \
                 and not (args.export or args.import_file):
             raise ValueError("--replace needs --import, and --local-only needs --export")

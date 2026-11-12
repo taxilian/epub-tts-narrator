@@ -45,6 +45,10 @@ pronounce-name *args:
 import-voices *args:
     @"{{ python }}" -m epub_tts_narrator.renderer import-voices "$@"
 
+# BOOK: write the takes you judged differently from verification, for detection work.
+take-feedback *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer take-feedback "$@"
+
 # BOOK FILE: write BOOK's confirmed pronunciations to a YAML file.
 export-pronunciations book file *args:
     @book="$1"; file="$2"; shift 2; "{{ python }}" -m epub_tts_narrator.renderer pronounce "$book" --export "$file" "$@"

@@ -15,7 +15,8 @@ import re
 import threading
 import time
 
-from .run_events import BOOK, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
+from .run_events import (BOOK, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, REBUILD, REJECTED, SEVERITIES,
+                         STATUS, STATUS_REMOVED)
 
 
 SEVERITY_LEVELS = ("info", "warning", "error", "debug")  # cycle order; "debug" shows everything
@@ -124,13 +125,18 @@ class RunModel:
         self.rejected = deque()   # times of rejected takes
         self.rejected_total = 0
         self.last_progress = clock()
+        self.rejections = deque(maxlen=5000)   # rejected takes, newest last
+        self._rejected_keys = set()
+        self.rebuild_handlers = {}             # book -> handler(chapter number) while it renders
+        self.pending_rebuilds = set()          # (book, chapter) to rebuild once its chapter finishes
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
 
     def on_event(self, event):
         with self._lock:
-            if "book" not in event.scope and len(self.book_states) == 1 and event.kind in (LOG, STATUS, FAILURE):
+            if ("book" not in event.scope and len(self.book_states) == 1
+                    and event.kind in (LOG, STATUS, FAILURE, REJECTED, REBUILD)):
                 # A single-book render's lines carry no book prefix; they are that book's.
                 event.scope["book"] = next(iter(self.book_states))
             self._remember(event.scope)
@@ -163,9 +169,28 @@ class RunModel:
                 if event.text:
                     row["text"] = event.text
                 row["updated"] = event.time
+            elif event.kind == REJECTED:
+                data = dict(event.data or {})
+                key = (data.get("request_hash"), data.get("attempt"))
+                if key not in self._rejected_keys:
+                    self._rejected_keys.add(key)
+                    self.rejections.append({"scope": dict(event.scope), "time": event.time,
+                                            "request_hash": data.get("request_hash"), "attempt": data.get("attempt"),
+                                            "reasons": data.get("reasons") or [], "detail": data.get("detail") or "",
+                                            "review": data.get("review")})
+            elif event.kind == REBUILD:
+                self.rebuild_handlers[event.scope.get("book")] = event.data.get("handler")
             elif event.kind == STATUS_REMOVED:
                 self._done_by_key.pop(event.data.get("key"), None)
                 row = self.rows.pop(event.data.get("key"), None)
+                if row is not None:
+                    place = (row["scope"].get("book"), row["scope"].get("chapter"))
+                    if place in self.pending_rebuilds:
+                        # The chapter that was rendering when its take changed has finished.
+                        self.pending_rebuilds.discard(place)
+                        handler = self.rebuild_handlers.get(place[0])
+                        if callable(handler):
+                            handler(place[1])
                 if row is not None:
                     book = row["scope"].get("book")
                     self.completed[book] = self.completed.get(book, 0) + 1
@@ -274,6 +299,8 @@ class RunModel:
             self.stopping = False
             self.progress = None
             self.holds.clear()
+            self.rebuild_handlers.clear()
+            self.pending_rebuilds.clear()
             self.book_states = {book: dict(state, state="queued") for book, state in self.book_states.items()
                                 if state["state"] != "done"}
             self._done_by_key.clear()
@@ -307,6 +334,26 @@ class RunModel:
             item["state"] = "retrying"
         self.changed.set()
         return True
+
+    def request_rebuild(self, book, chapter):
+        """Rebuild one chapter with a newly chosen take: ``"now"``, ``"after"`` it finishes, or ``None``."""
+        with self._lock:
+            handler = self.rebuild_handlers.get(book)
+            if not callable(handler) or not self.running or chapter is None:
+                return None
+            if any(row["scope"].get("book") == book and row["scope"].get("chapter") == chapter
+                   for row in self.rows.values()):
+                self.pending_rebuilds.add((book, chapter))
+                return "after"
+        return "now" if handler(chapter) else None
+
+    def visible_rejections(self):
+        """Rejected takes passing the book/chapter/text filters, newest first."""
+        with self._lock:
+            items = list(self.rejections)
+        flt = self.filter
+        return [item for item in reversed(items)
+                if flt.matches(item["scope"], text=" ".join(item["reasons"]) + " " + item["detail"])]
 
     def release_holds(self):
         """Finish every render that waits for retries; it then reports what still failed."""

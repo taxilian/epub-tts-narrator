@@ -334,6 +334,12 @@ def verified_take(text, generate, directory, request, verifier, config, *, gener
                generate_plan_part=generate_plan_part, **options)
 
 
+def _take_review(directory, config, verifier, request_hash):
+    """The person's review handle for one passage's takes (``directory`` is its clip folder)."""
+    from .take_review import TakeReview
+    return TakeReview(Path(directory).parent.parent, config, verifier, request_hash)
+
+
 def _verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
@@ -961,6 +967,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         else:
             label = f"Attempt {attempt}/{attempts}"
         notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
+        if purpose == "speech":
+            # A run shell lists every rejected take for a person to review.
+            from .progress import report_rejected_take
+            report_rejected_take(notify, {"request_hash": record["request_hash"], "attempt": attempt,
+                                          "reasons": list(report.get("reasons", [])), "detail": detail},
+                                 lambda: _take_review(directory, config, verifier, record["request_hash"]))
         stop_if_requested()
         if purpose == "speech" and isinstance(report.get("history_echo"), dict):
             from .history_echo import RUNG_DESCRIPTIONS, applied_mode, ladder_mode
@@ -2896,8 +2908,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     repair = None
                     if retries is not None and failure.get("request_hash"):
                         # The shell can play this passage's takes and accept one a person judges good.
-                        from .failed_take_repair import FailedTakeRepair
-                        repair = FailedTakeRepair(work, config, verifier, failure["request_hash"])
+                        from .take_review import TakeReview
+                        repair = TakeReview(work, config, verifier, failure["request_hash"])
                     report_chapter_failure(notify, failure, retry=(
                         None if retries is None else lambda index=chapter_index: retries.request(index)),
                         repair=repair)
@@ -2966,6 +2978,12 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     if retry_errors:
                         raise retry_errors[0]
 
+            # A person who changes the take a finished chapter uses asks for
+            # that chapter to be rebuilt from its clips; it goes to the front too.
+            index_by_number = {chapter["number"]: index for index, chapter in enumerate(plan["chapters"])}
+            from .progress import report_rebuild_handler
+            report_rebuild_handler(notify, lambda number: number in index_by_number
+                                   and retries.request(index_by_number[number]))
             if not sequential:
                 import contextvars
                 retry_thread = Thread(target=contextvars.copy_context().run, args=(dispatch_retries,),
