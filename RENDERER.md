@@ -914,12 +914,12 @@ Drama 3 clones a voice more closely from more reference speech: its technical re
 reference_clips = 3  # 1 through 3; 1 records a single clip as before
 ```
 
-The first clip speaks the voice's audition script (the one `E` edits). Each further clip speaks other book speech by the same character, chosen by the same audition rules and never repeating a passage already used. Every clip is verified like any reference. The clips are joined in order with half-second pauses, and the joined recording is verified again, then saved as the voice's reference with the clips' transcripts joined in the same order. Its creation metadata lists each clip (`reference_clips`: transcript, audio checksum, take request and book source).
+The first clip speaks the voice's audition script (the one `E` edits). Each further clip speaks other book speech by the same character, chosen by the same audition rules and never repeating a passage already used. When the book has too little suitable speech by that character, the configured text model writes the remaining scripts. It sees the character's description, a few of their lines and the scripts already chosen, and writes new speech in the same style, following the audition script rules. These invented scripts are prepared along with the audition scripts, before any speech model loads, and saved under `extra_scripts` in `audition-scripts.json`, so later runs reuse them. Like an invented audition, they never enter the audiobook. Every clip is verified like any reference. The clips are joined in order with half-second pauses, and the joined recording is verified again, then saved as the voice's reference with the clips' transcripts joined in the same order. Its creation metadata lists each clip (`reference_clips`: transcript, audio checksum, take request and book source).
 
 Rendering needs nothing new: the joined recording is one longer reference, so every engine, `serve` worker, chapter service and Runpod worker uses it as it is. Existing voices keep their single clip until you regenerate them, and each regenerated voice re-renders only its own lines.
 
 Fewer clips are kept in these cases:
-- **Not enough book speech:** a character without enough other clean speech gets fewer clips. A first audition can use all of a minor character's lines.
+- **No invented scripts:** a character without enough other clean speech gets fewer clips when the text model's request fails. The next run asks again.
 - **A clip fails verification:** that clip is left out.
 - **The joined recording fails verification:** the voice keeps its first clip alone.
 

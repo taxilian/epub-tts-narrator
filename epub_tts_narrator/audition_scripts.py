@@ -8,7 +8,7 @@ import unicodedata
 
 from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
-from .audition_prompts import PROMPT_VERSION, SYSTEM
+from .audition_prompts import EXTRA_PROMPT_VERSION, EXTRA_SYSTEM, PROMPT_VERSION, SYSTEM
 from .pipeline import CachedRequests, fingerprint, write_json
 from .provider import ProviderError
 
@@ -44,6 +44,63 @@ def validate_script(value, *, require_plain_prose=True):
                          "Remove the surrounding quotation marks from each statement; preserve only "
                          "meaningful quotations within speech and normal apostrophes.")
     return {"text": text, "basis": "casting", "reason": reason}
+
+
+def _normalized(text):
+    return " ".join(WORDS.findall(text.casefold()))
+
+
+def validate_extra_scripts(value, *, count, existing):
+    """Exactly ``count`` new audition-rule scripts, none repeating ``existing`` or each other."""
+    if not isinstance(value, dict) or set(value) != {"scripts"} or not isinstance(value["scripts"], list):
+        raise ValueError('Extra reference scripts require exactly {"scripts": [{"text": ..., "reason": ...}]}')
+    if len(value["scripts"]) != count:
+        raise ValueError(f"Write exactly {count} extra reference script(s); received {len(value['scripts'])}")
+    seen = {_normalized(text) for text in existing}
+    scripts = []
+    for index, item in enumerate(value["scripts"], 1):
+        try:
+            script = validate_script(item)
+        except ValueError as error:
+            raise ValueError(f"Extra reference script {index}: {error}") from None
+        key = _normalized(script["text"])
+        if key in seen:
+            raise ValueError(f"Extra reference script {index} repeats an existing or earlier script; write different speech")
+        seen.add(key)
+        scripts.append(script)
+    return scripts
+
+
+def _saved_extras(bundle):
+    saved = bundle.get("audition_extra_scripts", {})
+    known = {voice["id"] for voice in bundle["cast"]["voices"]}
+    if not isinstance(saved, dict):
+        raise ValueError("Saved extra reference scripts must be an object keyed by voice ID")
+    for voice, scripts in saved.items():
+        if voice not in known or not isinstance(scripts, list) or not scripts:
+            raise ValueError("Invalid saved extra reference scripts")
+        for script in scripts:
+            if not isinstance(script, dict) or script.get("basis") != "casting":
+                raise ValueError("Invalid saved extra reference script")
+            validate_script({key: script.get(key) for key in ("text", "reason")})
+    return deepcopy(saved)
+
+
+def _voice_context(bundle, aliases):
+    """The characters, roles and short attributed lines behind one voice group."""
+    people = [character for character in bundle["cast"]["characters"] if character["voice_id"] in aliases]
+    roles = [role for role in bundle["cast"]["roles"] if role["voice_id"] in aliases]
+    examples = []
+    for chapter in bundle["chapters"]:
+        for row in chapter["rows"]:
+            performers = [row.get("voice_id"), *[item["voice_id"] for item in row.get("simultaneous_speakers", [])]]
+            attribution = row.get("attribution", {})
+            if (any(value in aliases for value in performers)
+                    and attribution.get("basis") in {"explicit", "context", "user"}
+                    and attribution.get("review_required") is False
+                    and len(examples) < 8):
+                examples.append(row["text"][:500])
+    return people, roles, examples
 
 
 def _pending(bundle):
@@ -105,19 +162,29 @@ def _overrides(bundle):
 
 
 def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice_ids=None,
-                    workers=5, progress=lambda message: None, refresh=False, allow_incomplete=False):
+                    workers=5, progress=lambda message: None, refresh=False, allow_incomplete=False,
+                    extra_clips=0):
     """Prefer source auditions; explicitly refresh selected groups when requested.
 
     Refresh drops creative fallbacks only for the selected canonical groups.
     Their replacement scripts (or absence, when source speech suffices) override
     every older inline/provenance copy without rewriting the analysis bundle.
+
+    ``extra_clips`` asks for that many further reference scripts per voice (a
+    voice recorded as several joined clips). Book speech supplies them first;
+    the model writes the rest in the voice's own style, saved as
+    ``extra_scripts``. A failed request leaves that voice with fewer clips.
     """
-    from epub_tts_narrator.renderer.samples import select_book_sample, select_sample
+    from epub_tts_narrator.renderer.samples import (
+        MissingSampleScript, select_book_sample, select_extra_samples, select_sample)
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("Audition workers must be between one and five")
+    if type(extra_clips) is not int or not 0 <= extra_clips <= 2:
+        raise ValueError("Extra reference clips must be an integer from zero through two")
     if type(allow_incomplete) is not bool:
         raise ValueError("allow_incomplete must be a boolean")
     scripts = _saved(bundle)
+    extras = _saved_extras(bundle)
     prior_pending = _pending(bundle)
     pending = {}
     profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
@@ -132,6 +199,7 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
         targets = {voice for voice in profiles if canonical_id(voice) in groups}
         replaced.update(targets)
         scripts = {voice: script for voice, script in scripts.items() if voice not in targets}
+        extras = {voice: value for voice, value in extras.items() if voice not in targets}
     working = dict(bundle, audition_scripts=scripts, audition_script_overrides=sorted(replaced))
     tasks = []
     for canonical, voices in groups.items():
@@ -143,18 +211,7 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
         if prior is not None:
             scripts.update({value: deepcopy(prior) for value in aliases})
             continue
-        people = [character for character in bundle["cast"]["characters"] if character["voice_id"] in aliases]
-        roles = [role for role in bundle["cast"]["roles"] if role["voice_id"] in aliases]
-        examples = []
-        for chapter in bundle["chapters"]:
-            for row in chapter["rows"]:
-                performers = [row.get("voice_id"), *[item["voice_id"] for item in row.get("simultaneous_speakers", [])]]
-                attribution = row.get("attribution", {})
-                if (any(value in aliases for value in performers)
-                        and attribution.get("basis") in {"explicit", "context", "user"}
-                        and attribution.get("review_required") is False
-                        and len(examples) < 8):
-                    examples.append(row["text"][:500])
+        people, roles, examples = _voice_context(bundle, aliases)
         profile = deepcopy(profiles[voice])
         if refresh:
             profile.pop("sample_script", None)
@@ -190,17 +247,80 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
                     pending.update({value: deepcopy(failure) for value in aliases})
                 else:
                     scripts.update({value: deepcopy(script) for value in aliases})
+    if extra_clips:
+        extras = _prepare_extras(dict(working, audition_scripts=scripts, audition_extra_scripts=extras),
+                                 requests, groups, profiles, pending, extras, extra_clips,
+                                 canonical_id=canonical_id, workers=workers, progress=progress,
+                                 allow_incomplete=allow_incomplete,
+                                 selectors=(MissingSampleScript, select_extra_samples, select_sample))
     samples = {voice: select_sample(working, voice, canonical_id=canonical_id, fallback_text="")
                for voice in selected if voice not in pending}
     result = {"version": VERSION, "source_fingerprint": bundle["manifest"]["source_fingerprint"],
               "cast_fingerprint": fingerprint(bundle["cast"]), "scripts": scripts, "samples": samples}
     if replaced:
         result["replaced_voice_ids"] = sorted(replaced)
+    if extras:
+        result["extra_scripts"] = extras
     if pending:
         result["pending"] = pending
         progress(f"{len(pending)} voice audition(s) still need preparation; analysis can be saved. "
                  "Rerun analyze or open casting to retry the missing auditions.")
     return result
+
+
+def _prepare_extras(working, requests, groups, profiles, pending, extras, count, *, canonical_id,
+                    workers, progress, allow_incomplete, selectors):
+    """Ask the model for the extra reference scripts the book's speech cannot supply."""
+    MissingSampleScript, select_extra_samples, select_sample = selectors
+    extras = deepcopy(extras)
+    tasks = []
+    for canonical, voices in groups.items():
+        voice = canonical if canonical in profiles else voices[0]
+        aliases = [value for value in profiles if canonical_id(value) == canonical]
+        if any(value in pending for value in aliases):
+            continue
+        try:
+            first = select_sample(working, voice, canonical_id=canonical_id)
+        except MissingSampleScript:
+            continue
+        book = select_extra_samples(working, voice, canonical_id=canonical_id,
+                                    exclude_segments=first["source"].get("segment_ids", []), count=count)
+        missing = count - len(book)
+        saved = next((extras[value] for value in [canonical, *aliases] if extras.get(value)), [])
+        if missing <= len(saved):
+            continue
+        people, roles, examples = _voice_context(working, aliases)
+        existing = [first["reference_text"], *[sample["reference_text"] for sample in book]]
+        payload = {"mode": "extra_reference_scripts", "version": EXTRA_PROMPT_VERSION,
+                   "book": working["source"]["book"], "voice": deepcopy(profiles[voice]),
+                   "characters": people, "roles": roles, "short_speech_examples": examples,
+                   "existing_scripts": existing, "count": missing,
+                   "source_fingerprint": working["manifest"]["source_fingerprint"]}
+        tasks.append((aliases, payload, _voice_name(people, roles, voice)))
+    if not tasks:
+        return extras
+    if requests is None:
+        if allow_incomplete:
+            return extras
+        raise ValueError("Character-specific audition scripts need the configured analysis model")
+
+    def create(task, cancelled):
+        aliases, payload, name = task
+        def validate(value):
+            return validate_extra_scripts(value, count=payload["count"], existing=payload["existing_scripts"])
+        try:
+            created = requests.run(EXTRA_SYSTEM, payload, validate, cancelled=cancelled)
+        except (ProviderError, ValueError) as error:
+            detail = str(error)[:2000] or type(error).__name__
+            progress(f"Extra reference scripts not prepared for {name}; its voice will have fewer clips: {detail}")
+            return aliases, None
+        progress(f"Prepared {len(created)} extra reference script(s): {name} ({payload['voice']['id']})")
+        return aliases, created
+    progress(f"Preparing extra reference scripts for {len(tasks)} voice(s) with too little book speech")
+    for aliases, created in _bounded_map(tasks, create, workers):
+        if created is not None:
+            extras.update({value: deepcopy(created) for value in aliases})
+    return extras
 
 
 def prepare_document_samples(document, requests, *, workers=5, progress=lambda message: None,
@@ -221,7 +341,7 @@ def prepare_document_samples(document, requests, *, workers=5, progress=lambda m
 
 
 def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value: value,
-                          voice_ids=None, progress=print, refresh=False):
+                          voice_ids=None, progress=print, refresh=False, extra_clips=0):
     """Prepare or explicitly refresh auditions without editing signed analysis."""
     from .config import load_config
     from .provider import OpenAICompatibleClient
@@ -241,19 +361,22 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
                 raise ValueError("Saved audition scripts do not match this book's source and cast")
             working["audition_scripts"] = record["scripts"]
             working["audition_script_overrides"] = record.get("replaced_voice_ids", [])
+            working["audition_extra_scripts"] = record.get("extra_scripts", {})
         _overrides(working)
         return working
 
     def prepared_bundle(working, prepared):
         return dict(working, audition_scripts=prepared["scripts"],
-                    audition_script_overrides=prepared.get("replaced_voice_ids", []))
+                    audition_script_overrides=prepared.get("replaced_voice_ids", []),
+                    audition_extra_scripts=prepared.get("extra_scripts", {}))
 
     working = load_working()
     # Fast path: no configuration or network is needed for prepared books.
     # Explicit refresh always persists its overrides, including source-only runs.
     if not refresh:
         try:
-            prepared = prepare_samples(working, None, canonical_id=canonical_id, voice_ids=voice_ids)
+            prepared = prepare_samples(working, None, canonical_id=canonical_id, voice_ids=voice_ids,
+                                       extra_clips=extra_clips)
         except ValueError as error:
             if str(error) != "Character-specific audition scripts need the configured analysis model":
                 raise
@@ -269,7 +392,7 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
         working = load_working()
         try:
             prepared = prepare_samples(working, None, canonical_id=canonical_id, voice_ids=voice_ids,
-                                       refresh=refresh)
+                                       refresh=refresh, extra_clips=extra_clips)
         except ValueError as error:
             if str(error) != "Character-specific audition scripts need the configured analysis model":
                 raise
@@ -282,7 +405,7 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
                                       max_request_chars=settings["max_request_chars"], progress=progress)
             prepared = prepare_samples(working, requests, canonical_id=canonical_id, voice_ids=voice_ids,
                                        workers=min(5, settings["attribution_workers"]), progress=progress,
-                                       refresh=refresh)
+                                       refresh=refresh, extra_clips=extra_clips)
         write_json(path, prepared, overwrite=True)
         return prepared_bundle(working, prepared)
     finally:

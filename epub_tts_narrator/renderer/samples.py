@@ -381,6 +381,33 @@ def select_extra_samples(bundle, voice_id, *, canonical_id, exclude_segments=(),
     return chosen
 
 
+def prepared_extra_samples(bundle, voice_id, *, canonical_id, count):
+    """Up to ``count`` invented extra reference scripts saved for this voice's group.
+
+    They fill the clips the book's own speech cannot (``select_extra_samples``
+    comes first). Each is original casting text, never a quotation.
+    """
+    if count < 1:
+        return []
+    source_base = _candidate_data(bundle, voice_id, canonical_id)[0]
+    target = source_base["canonical_voice_id"]
+    saved = bundle.get("audition_extra_scripts", {})
+    keys = [target, *sorted(voice["id"] for voice in bundle["cast"]["voices"]
+                            if voice["id"] != target and canonical_id(voice["id"]) == target)]
+    script_voice_id = next((key for key in keys if saved.get(key)), None)
+    if script_voice_id is None:
+        return []
+    chosen = []
+    for script in saved[script_voice_id][:count]:
+        validate_casting_script(script)
+        chosen.append({"reference_text": script["text"], "source": {
+            **source_base, "kind": "casting_script", "basis": "casting", "voice_id": script_voice_id,
+            "reason": script["reason"], "word_count": len(_WORDS.findall(script["text"])),
+            "detail": "Original character-specific reference text; not a quotation from the book.",
+        }})
+    return chosen
+
+
 def validate_casting_script(script):
     """Use the same audition safety limits during model validation and selection."""
     if (not isinstance(script, dict) or script.get("basis") != "casting"

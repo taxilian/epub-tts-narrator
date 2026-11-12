@@ -506,8 +506,9 @@ def casting_command(args, bundle, config):
                          if not (store.load(voice["id"]) or store.regeneration_status(voice["id"])
                                  or {}).get("inherited", False)]
         if voice_ids is None or voice_ids:
+            from .config import extra_reference_clips
             bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
-                                           voice_ids=voice_ids)
+                                           voice_ids=voice_ids, extra_clips=extra_reference_clips(config))
     normalizer = None
     if enabled and action in {"interactive", "play", "normalize-samples"}:
         from .loudness import SampleNormalizer

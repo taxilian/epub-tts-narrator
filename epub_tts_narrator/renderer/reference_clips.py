@@ -9,14 +9,16 @@ worker or transport: it is one longer recording with its exact transcript.
 
 Casting and automatic voice creation ask the voice designer for the first clip
 as before (the voice's audition script), then for up to two more clips of the
-same voice speaking other book excerpts by the same character. Every clip is
+same voice speaking other book excerpts by the same character, or, when the
+book has too few, scripts the text model wrote in that character's style while
+the auditions were prepared (``audition_scripts``). Every clip is
 verified like any reference, the clips are joined in order with a short pause,
 and the joined recording is verified again before it is saved as the reference.
 
 Only the Gemini designer keeps one voice across several scripts (one hosted
 voice per creation request); other designers would design a new voice for each
 clip, so their voices keep one clip. A character without enough clean book
-speech keeps fewer clips. An extra clip that fails verification is left out,
+speech and no prepared invented scripts keeps fewer clips. An extra clip that fails verification is left out,
 and a joined recording that fails verification leaves the first clip alone as
 the reference. Once the hosted voice is deleted (an interrupted creation),
 missing clips cannot come from the same voice, so creation starts again with a
@@ -52,13 +54,14 @@ def plan_scripts(config, designer_identity, bundle, voice_id, canonical_id, firs
     """The extra clips' scripts for one creation request, as ``[{"text", "source"}]``.
 
     Empty when the setting asks for one clip, the designer cannot keep one voice,
-    there is no book to choose from, or the character has no more suitable speech.
+    there is no book to choose from, or the character has neither more suitable
+    speech nor prepared invented scripts.
     """
     wanted = (config.get("casting") or {}).get("reference_clips", 3) - 1
     if (wanted < 1 or not isinstance(bundle, dict) or not {"cast", "chapters"} <= set(bundle)
             or not keeps_one_voice(designer_identity)):
         return []
-    from .samples import select_extra_samples
+    from .samples import prepared_extra_samples, select_extra_samples
     present = next((voice["id"] for voice in bundle["cast"]["voices"]
                     if canonical_id(voice["id"]) == canonical_id(voice_id)), None)
     if present is None:
@@ -66,6 +69,8 @@ def plan_scripts(config, designer_identity, bundle, voice_id, canonical_id, firs
     exclude = (first_source or {}).get("segment_ids", []) if isinstance(first_source, dict) else []
     samples = select_extra_samples(bundle, present, canonical_id=canonical_id,
                                    exclude_segments=exclude, count=wanted)
+    # Book speech first; invented scripts prepared with the auditions fill the rest.
+    samples += prepared_extra_samples(bundle, present, canonical_id=canonical_id, count=wanted - len(samples))
     return [{"text": sample["reference_text"], "source": deepcopy(sample["source"])} for sample in samples]
 
 

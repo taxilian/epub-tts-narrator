@@ -658,7 +658,9 @@ def main(argv=None):
                                          "add a local renderer, or prepare the voices with cast first")
                 setup.ensure("voice_design")
                 from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
-                bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing)
+                from .config import extra_reference_clips
+                bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing,
+                                               extra_clips=extra_reference_clips(config))
         if workers:
             print("Rendering with " + ", ".join(
                 f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))

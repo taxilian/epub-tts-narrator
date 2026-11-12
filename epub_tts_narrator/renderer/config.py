@@ -616,6 +616,15 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     return result
 
 
+def extra_reference_clips(config):
+    """Clips beyond the first that a new voice records: only Gemini keeps one voice across scripts."""
+    try:
+        designer = resolve_voice_design(config)["type"]
+    except ValueError:
+        return 0
+    return (config.get("casting") or {}).get("reference_clips", 3) - 1 if designer == "gemini" else 0
+
+
 def resolve_voice_design(config):
     """Prefer configured Gemini for creation; never change the speech engine.
 

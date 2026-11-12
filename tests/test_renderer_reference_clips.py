@@ -46,6 +46,30 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(len(segments), len(set(segments)))
         self.assertFalse({"s0", "s1"} & set(segments))
 
+    def test_invented_scripts_fill_only_the_clips_book_speech_cannot(self):
+        invented = [{"text": text, "basis": "casting", "reason": "Same manner, new subject."} for text in (
+            "The lanterns along the harbor wall are lit early tonight, and the fog is rolling in slowly. "
+            "Stay near the boats and listen for the bell, because the tide will turn soon.",
+            "Have you noticed how quiet the market becomes after the rain? I like walking there before "
+            "dawn, when the stalls are empty and every footstep echoes against the stone arches.")]
+        config = {"casting": {"reference_clips": 3}}
+        scarce = dict(speech_bundle(lines=1), audition_extra_scripts={"v1": invented})
+        scripts = reference_clips.plan_scripts(config, GEMINI, scarce, "v1", lambda value: value, {"segment_ids": ["s0"]})
+        self.assertEqual([script["text"] for script in scripts], [script["text"] for script in invented])
+        self.assertTrue(all(script["source"]["kind"] == "casting_script" for script in scripts))
+        plenty = dict(speech_bundle(), audition_extra_scripts={"v1": invented})
+        scripts = reference_clips.plan_scripts(config, GEMINI, plenty, "v1", lambda value: value, {"segment_ids": ["s0"]})
+        self.assertEqual([script["source"]["kind"] for script in scripts], ["book_excerpts", "book_excerpts"])
+
+    def test_only_a_designer_that_keeps_one_voice_asks_for_extra_scripts(self):
+        from epub_tts_narrator.renderer.config import extra_reference_clips
+        self.assertEqual(extra_reference_clips({"gemini": {"api_key": "fixture-key"}}), 2)
+        self.assertEqual(extra_reference_clips({"gemini": {"api_key": "fixture-key"},
+                                                "casting": {"reference_clips": 1}}), 0)
+        self.assertEqual(extra_reference_clips({}), 0)
+        self.assertEqual(extra_reference_clips({"voice_design": {"type": "elevenlabs"},
+                                                "elevenlabs": {"api_key": "fixture-key"}}), 0)
+
     def test_no_extra_scripts_for_one_clip_another_designer_or_too_little_speech(self):
         data = speech_bundle()
         cases = (({"casting": {"reference_clips": 1}}, GEMINI, data),

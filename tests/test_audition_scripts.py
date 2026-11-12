@@ -11,7 +11,8 @@ import unittest
 
 from epub_tts_narrator.audition_prompts import PROMPT_VERSION, SYSTEM
 from epub_tts_narrator.audition_scripts import (
-    FILENAME, VERSION, ensure_bundle_scripts, prepare_document_samples, prepare_samples, validate_script,
+    FILENAME, VERSION, ensure_bundle_scripts, prepare_document_samples, prepare_samples, validate_extra_scripts,
+    validate_script,
 )
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
@@ -69,6 +70,69 @@ class Client:
             self.fail_once = None
             raise ProviderError("Temporary interruption")
         return {"text": SCRIPT, "reason": "A character-specific original audition for " + voice_id + "."}
+
+
+EXTRA = ("The lanterns along the harbor wall are lit early tonight, and the fog is rolling in slowly. "
+         "Stay near the boats and listen for the bell, because the tide will turn sooner than you expect.",
+         "Have you noticed how quiet the market becomes after the rain? I like walking there before dawn, "
+         "when the stalls are empty and every footstep echoes against the old stone arches nearby.")
+
+
+class ExtraRequests(Requests):
+    """Answers audition requests as before and extra-script requests with distinct speech."""
+
+    def __init__(self, fail=False):
+        super().__init__()
+        self.fail = fail
+
+    def run(self, system, payload, validate, *, cancelled=None):
+        if payload["mode"] != "extra_reference_scripts":
+            return super().run(system, payload, validate, cancelled=cancelled)
+        self.calls.append(deepcopy(payload))
+        if self.fail:
+            raise ProviderError("Temporary interruption")
+        return validate({"scripts": [{"text": text, "reason": "Same cautious manner, new subject."}
+                                     for text in EXTRA[:payload["count"]]]})
+
+
+class ExtraReferenceScriptTests(unittest.TestCase):
+    def test_voices_without_enough_book_speech_get_invented_extra_scripts_in_their_style(self):
+        requests = ExtraRequests()
+        result = prepare_samples(bundle(), requests, workers=1, extra_clips=2)
+        extra_calls = [call for call in requests.calls if call["mode"] == "extra_reference_scripts"]
+        self.assertEqual(sorted(call["voice"]["id"] for call in extra_calls), ["v1", "vn"])
+        call = next(call for call in extra_calls if call["voice"]["id"] == "v1")
+        self.assertEqual((call["count"], call["existing_scripts"]), (2, [SCRIPT]))
+        self.assertEqual(call["characters"][0]["name"], "Mara")
+        self.assertEqual(call["short_speech_examples"], ["“Hello.”"])
+        self.assertEqual([script["text"] for script in result["extra_scripts"]["v1"]], list(EXTRA))
+        self.assertTrue(all(script["basis"] == "casting" for script in result["extra_scripts"]["v1"]))
+
+    def test_saved_extra_scripts_need_no_model_and_missing_ones_ask_for_it(self):
+        prepared = prepare_samples(bundle(), ExtraRequests(), workers=1, extra_clips=2)
+        saved = dict(bundle(), audition_scripts=prepared["scripts"], audition_extra_scripts=prepared["extra_scripts"])
+        self.assertEqual(prepare_samples(saved, None, extra_clips=2)["extra_scripts"], prepared["extra_scripts"])
+        without = dict(saved, audition_extra_scripts={})
+        with self.assertRaisesRegex(ValueError, "need the configured analysis model"):
+            prepare_samples(without, None, extra_clips=2)
+        self.assertNotIn("extra_scripts", prepare_samples(without, None, extra_clips=0))
+
+    def test_a_failed_request_leaves_fewer_clips_instead_of_blocking(self):
+        messages = []
+        result = prepare_samples(bundle(), ExtraRequests(fail=True), workers=1, extra_clips=2,
+                                 progress=messages.append)
+        self.assertNotIn("extra_scripts", result)
+        self.assertEqual(set(result["scripts"]), {"v1", "vn"})
+        self.assertTrue(any("fewer clips" in message for message in messages))
+
+    def test_extra_scripts_must_be_new_speech(self):
+        good = {"scripts": [{"text": text, "reason": "New subject."} for text in EXTRA]}
+        self.assertEqual(len(validate_extra_scripts(good, count=2, existing=[SCRIPT])), 2)
+        for value, problem in (({"scripts": good["scripts"][:1]}, "exactly 2"),
+                               ({"scripts": [good["scripts"][0]] * 2}, "repeats"),
+                               ({"scripts": [{"text": SCRIPT.replace(",", ";"), "reason": "Same."}, good["scripts"][0]]}, "repeats")):
+            with self.subTest(problem=problem), self.assertRaisesRegex(ValueError, problem):
+                validate_extra_scripts(value, count=2, existing=[SCRIPT])
 
 
 class AuditionScriptTests(unittest.TestCase):
