@@ -212,3 +212,87 @@ def run_units(units, limit, admission, *, coordinator_pool=None, priority=0, on_
     if failure is not None:
         raise failure
     return results
+
+
+class ChapterRetries:
+    """Failed chapters a person asked to render again during this run.
+
+    A run shell offers each chapter-scoped failure a ``request`` callback;
+    one retry worker takes requests in order and re-runs those chapters
+    while the other chapters keep rendering. After the main pass a held run
+    waits in ``wait_for_request`` until the person retries more chapters or
+    releases it. Plain runs never create requests, so nothing here runs.
+    """
+
+    def __init__(self):
+        self._condition = Condition()
+        self._queue = deque()
+        self._closed = False
+        self._released = False
+        self._busy = 0
+
+    def request(self, index):
+        """Queue one chapter (manifest index); False once the run stopped taking retries."""
+        with self._condition:
+            if self._closed:
+                return False
+            if index not in self._queue:
+                self._queue.append(index)
+            self._condition.notify_all()
+            return True
+
+    def take(self):
+        """The next requested chapter, or None once closed and empty (marks the worker busy)."""
+        with self._condition:
+            while not self._queue and not self._closed:
+                self._condition.wait()
+            if not self._queue:
+                return None
+            self._busy += 1
+            return self._queue.popleft()
+
+    def done(self):
+        with self._condition:
+            self._busy -= 1
+            self._condition.notify_all()
+
+    def idle(self):
+        with self._condition:
+            return not self._queue and not self._busy
+
+    def wait_idle(self, *, stop_check=None, poll=0.2):
+        """Block until no retry is queued or running; ``stop_check`` may raise to stop."""
+        with self._condition:
+            while self._queue or self._busy:
+                self._condition.wait(poll)
+                if stop_check is not None:
+                    self._condition.release()
+                    try:
+                        stop_check()
+                    finally:
+                        self._condition.acquire()
+
+    def release(self):
+        """The person is done retrying: let the held run finish."""
+        with self._condition:
+            self._released = True
+            self._condition.notify_all()
+
+    def wait_for_request(self, *, stop_check=None, poll=0.2):
+        """Block until a retry is requested (True) or the run is released (False)."""
+        with self._condition:
+            while not self._queue and not self._busy and not self._released and not self._closed:
+                self._condition.wait(poll)
+                if stop_check is not None:
+                    self._condition.release()
+                    try:
+                        stop_check()
+                    finally:
+                        self._condition.acquire()
+            return bool(self._queue or self._busy) and not self._released
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._queue.clear()
+            self._condition.notify_all()

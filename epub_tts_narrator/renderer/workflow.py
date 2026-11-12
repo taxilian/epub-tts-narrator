@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from threading import Lock
+from threading import Lock, Thread
 from time import monotonic
 import unicodedata
 
@@ -2747,6 +2747,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     book_lock = None
     voice_lock = None
     assembly_executor = None
+    retries = retry_thread = None
     try:
         book_lock = _lock_book_audio(bundle)
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
@@ -2825,7 +2826,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 _publish_work_chapter_link(config, composed, notify=notify)
             return composed
 
-        def process(chapter_index):
+        def process(chapter_index, budget=None):
             chapter = plan["chapters"][chapter_index]
             stop_if_requested()
             chapter_started = monotonic()
@@ -2858,7 +2859,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 try:
                     rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                         bundle, chapter, voices, engine, engine_identity, verifier, config, work,
-                        notify=notify, retry_budget=retry_budget, speech_cache=speech_cache,
+                        notify=notify, retry_budget=budget or retry_budget, speech_cache=speech_cache,
                         take_locks=take_locks, take_locks_guard=take_locks_guard,
                         scheduler_owner=(run_key, chapter["number"]))
                 except RenderBlocked as exc:
@@ -2880,7 +2881,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                         chapter_failures[chapter["number"]] = failure
                     notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
                     from .progress import report_chapter_failure
-                    report_chapter_failure(notify, failure)
+                    report_chapter_failure(notify, failure, retry=(
+                        None if retries is None else lambda index=chapter_index: retries.request(index)))
                     return
                 if rendered_chapter != chapter:
                     with plan_lock:
@@ -2898,6 +2900,38 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             else:
                 completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started)
 
+        # A run shell can ask to render a failed chapter again while the run
+        # continues (plain and custom notify never offer retries). Retries run
+        # on their own coordinator with a fresh retry allowance, as a rerun
+        # would; the sequential legacy path runs them after its main pass.
+        from .progress import offers_chapter_retries
+        retry_errors = []
+        if offers_chapter_retries(notify):
+            from .render_chapter_flow import ChapterRetries
+            retries = ChapterRetries()
+
+            def retry_worker():
+                while (index := retries.take()) is not None:
+                    try:
+                        number = plan["chapters"][index]["number"]
+                        with plan_lock:
+                            chapter_failures.pop(number, None)
+                        notify(f"Retrying chapter {number} / {len(bundle['chapters'])} with a fresh retry allowance.")
+                        process(index, budget=SpeechRetryBudget())
+                    except BaseException as error:  # noqa: BLE001 - re-raised by the run after the drain
+                        retry_errors.append(error)
+                        retries.close()
+                    finally:
+                        retries.done()
+
+            def start_retries():
+                import contextvars
+                thread = Thread(target=contextvars.copy_context().run, args=(retry_worker,),
+                                name="chapter-retries", daemon=True)
+                thread.start()
+                return thread
+            if scheduler is not None or chapter_coordinators is not None:
+                retry_thread = start_retries()
         if scheduler is None and chapter_coordinators is None:
             for chapter_index in range(len(plan["chapters"])):
                 stop_if_requested()
@@ -2913,6 +2947,25 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                       priority=queue_position,
                       on_submitted=on_synthesis_ready if chapter_coordinators is not None else None)
         finish_completed(final=True)
+        if retries is not None:
+            # Hold while the person retries failed chapters; finishing (or a
+            # stop) lets the run report what still failed, as it always has.
+            from .progress import report_retry_hold
+            if retry_thread is None:
+                retry_thread = start_retries()
+            while True:
+                retries.wait_idle(stop_check=stop_if_requested)
+                finish_completed(final=True)
+                if retry_errors:
+                    raise retry_errors[0]
+                if not chapter_failures:
+                    break
+                report_retry_hold(notify, retries.release, len(chapter_failures))
+                if not retries.wait_for_request(stop_check=stop_if_requested):
+                    break
+            retries.wait_idle(stop_check=stop_if_requested)
+            finish_completed(final=True)
+            report_retry_hold(notify, None, 0)
         rendered = [composed_records[index][0] for index in sorted(composed_records)]
         acceptance = [record for index in sorted(composed_records)
                       for record in composed_records[index][1]]
@@ -2941,6 +2994,10 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         _failed_run(work, exc, notify)
         raise
     finally:
+        if retries is not None:
+            retries.close()
+            if retry_thread is not None:
+                retry_thread.join()
         if assembly_executor is not None:
             assembly_executor.shutdown(wait=True, cancel_futures=True)
         if voice_lock is not None:

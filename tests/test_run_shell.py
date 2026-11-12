@@ -99,7 +99,7 @@ class ShellBoardTests(unittest.TestCase):
             notify("done")
         self.assertEqual(self.kinds("status")[0].scope["book"], "book-1")
         failure = self.kinds("failure")[0]
-        self.assertEqual((failure.scope, failure.data["error_type"]),
+        self.assertEqual((failure.scope, failure.data["record"]["error_type"]),
                          ({"chapter": 1, "book": "book-1"}, "SpeechVerificationFailed"))
         self.assertEqual(self.kinds("outcome")[0].scope, {"book": "book-1"})
         self.assertEqual(self.kinds("log")[-1].scope, {"book": "book-1"})
@@ -112,6 +112,38 @@ class ShellBoardTests(unittest.TestCase):
         self.assertFalse(notify.structured_status)
         report_chapter_failure(board.log, {"number": 1, "error": "x"})
         self.assertEqual(stream.getvalue(), "")
+
+
+class ChapterRetriesTests(unittest.TestCase):
+    def test_requests_queue_once_and_a_closed_lane_refuses_them(self):
+        from epub_tts_narrator.renderer.render_chapter_flow import ChapterRetries
+        retries = ChapterRetries()
+        self.assertTrue(retries.request(3))
+        self.assertTrue(retries.request(3))
+        self.assertEqual(retries.take(), 3)
+        self.assertFalse(retries.idle())
+        retries.done()
+        self.assertTrue(retries.idle())
+        retries.close()
+        self.assertFalse(retries.request(4))
+        self.assertIsNone(retries.take())
+
+    def test_a_hold_ends_on_a_request_a_release_or_a_stop(self):
+        from epub_tts_narrator.renderer.render_chapter_flow import ChapterRetries
+        retries = ChapterRetries()
+        threading.Timer(0.05, retries.request, args=(1,)).start()
+        self.assertTrue(retries.wait_for_request(poll=0.01))
+        retries = ChapterRetries()
+        threading.Timer(0.05, retries.release).start()
+        self.assertFalse(retries.wait_for_request(poll=0.01))
+
+        class Stop(Exception):
+            pass
+
+        def stop():
+            raise Stop()
+        with self.assertRaises(Stop):
+            ChapterRetries().wait_for_request(stop_check=stop, poll=0.01)
 
 
 class RunModelTests(unittest.TestCase):
@@ -307,6 +339,38 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("R")
             await self.wait_for(pilot, lambda: not app.is_running)
         self.assertEqual(calls, ["first", "resume"])
+
+    def held_command(self, outcome):
+        from epub_tts_narrator.renderer.progress import report_retry_hold
+        from epub_tts_narrator.renderer.render_chapter_flow import ChapterRetries
+
+        def command():
+            retries = ChapterRetries()
+            with live_board(print) as notify:
+                report_chapter_failure(notify, {"number": 2, "error_type": "RenderBlocked", "error": "fixture"},
+                                       retry=lambda: retries.request(1))
+                report_retry_hold(notify, retries.release, 1)
+                outcome.append(retries.wait_for_request())
+                report_retry_hold(notify, None, 0)
+            return 0 if outcome[-1] else 2
+        return command
+
+    async def test_r_retries_a_held_chapter_and_f_finishes_the_wait(self):
+        for key, expected, still_open in (("r", True, False), ("F", False, True)):
+            with self.subTest(key=key):
+                outcome = []
+                app = self.make_app(self.held_command(outcome))
+                async with app.run_test(size=(150, 40)) as pilot:
+                    await self.wait_for(pilot, lambda: bool(self.model.holds))
+                    self.assertIn("waiting for retries", self.model.summary())
+                    await pilot.press("4")
+                    app.query_one("#errors").focus()
+                    await pilot.press(key)
+                    await self.wait_for(pilot, lambda: not self.model.running)
+                    await pilot.pause()
+                    self.assertEqual(app.is_running, still_open)
+                self.assertEqual(outcome, [expected])
+                self.board.__exit__(None, None, None)
 
     async def test_filters_and_tabs(self):
         release = threading.Event()

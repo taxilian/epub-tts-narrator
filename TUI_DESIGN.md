@@ -7,7 +7,7 @@ Status: approved 2026-11-12 with these decisions:
 - **On failure:** the screen stays open on the errors view until `q`.
 - **Reference clips:** a per-voice override (`voice-clips.json`), nearest book first.
 
-Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); shared components (`tui_support.py`, `tui_jobs.py`, `tui_widgets.py`); casting TUI (`renderer/cast_tui_model.py`, `renderer/cast_tui.py`). Run shell for `render` (single and multi-book), `assemble`, `import-voices`, `create-voices`: `run_events.py`, `run_shell_model.py`, `run_shell.py`, `progress.shell_board`, `interrupts.keyboard_interrupts`; it holds open on failure and resumes with `R` by rerunning the command. Analyzer model commands and bulk casting run in the shell too, with their terminal questions as dialogs. Next: in-place chapter retry while the rest keeps running. `pronounce` stays a line tool: its listening loop reads raw keys.
+Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); shared components (`tui_support.py`, `tui_jobs.py`, `tui_widgets.py`); casting TUI (`renderer/cast_tui_model.py`, `renderer/cast_tui.py`). Run shell for `render` (single and multi-book), `assemble`, `import-voices`, `create-voices`: `run_events.py`, `run_shell_model.py`, `run_shell.py`, `progress.shell_board`, `interrupts.keyboard_interrupts`; it holds open on failure and resumes with `R` by rerunning the command. Analyzer model commands and bulk casting run in the shell too, with their terminal questions as dialogs. In-place chapter retry (`r`) while the rest keeps running, with the render holding for retries until `F`. `pronounce` stays a line tool: its listening loop reads raw keys.
 
 ## What exists today (survey)
 
@@ -116,7 +116,7 @@ Retry never touches lock or lease artifacts, never skips verification, and stays
 1. Done: per-voice reference clip counts.
 2. Done: shared Textual components and the casting TUI.
 3. Done: event model and the render run shell with status, workers, log, errors, filters, hold-on-failure and resume. Plain output stays on the untouched code path; existing live-board, progress, queue and CLI tests guard it.
-4. In-place chapter retry on a retry lane while other chapters keep running (render and the multi-book queue).
+4. Done: in-place chapter retry on a retry lane while other chapters keep running (render and the multi-book queue), with a hold for retries before the run reports its failures.
 5. Done: analyzer commands (`analyze`, book updates, `resolve-speakers`, `review-attribution`, `refresh-voice-profiles`), `verify-attribution`/`refresh-directions` (resume with `--resume RUN_ID`) and cast bulk actions in the shell. `pronounce` stays a line tool.
 
 Documentation (`RENDERER.md`, `ANALYSIS.md`, `README.md` and the `AGENTS.md` files) is updated with each phase.

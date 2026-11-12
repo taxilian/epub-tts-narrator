@@ -273,11 +273,17 @@ class BusBoard(TerminalBoard):
         self.bus.publish("outcome", severity="info" if succeeded else "error",
                          scope={"book": _book_label(key)}, data={"key": key, "succeeded": bool(succeeded)})
 
-    def chapter_failure(self, failure, *, book=None):
+    def chapter_failure(self, failure, *, book=None, retry=None):
         scope = {"chapter": failure.get("number")}
         if book:
             scope["book"] = book
-        self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope, data=dict(failure))
+        self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope,
+                         data={"record": dict(failure), "retry": retry})
+
+    def retry_hold(self, release, failed, *, book=None):
+        """The run waits for retries (``release`` finishes it), or stopped waiting (``None``)."""
+        self.bus.publish("hold", scope={"book": book} if book else {},
+                         data={"release": release, "failed": failed})
 
     def close(self):
         self._closed = True
@@ -372,9 +378,13 @@ class PrefixedBoardNotify:
     def set_status(self, key, order, snapshot):
         self.board.set_status(key, (self.prefix, *order), snapshot, book=_prefix_book(self.prefix))
 
-    def chapter_failure(self, failure):
+    def chapter_failure(self, failure, retry=None):
         if getattr(self.board, "structured_status", False):
-            self.board.chapter_failure(failure, book=_prefix_book(self.prefix))
+            self.board.chapter_failure(failure, book=_prefix_book(self.prefix), retry=retry)
+
+    def retry_hold(self, release, failed):
+        if getattr(self.board, "structured_status", False):
+            self.board.retry_hold(release, failed, book=_prefix_book(self.prefix))
 
 
 def _board_of(notify):
@@ -384,15 +394,26 @@ def _board_of(notify):
     return owner if isinstance(owner, TerminalBoard) else None
 
 
-def report_chapter_failure(notify, failure):
-    """Hand one chapter-scoped failure record to a run shell's board, if any.
+def offers_chapter_retries(notify):
+    """Whether this run's output is a run shell that can ask for failed chapters again."""
+    owner = _board_of(notify)
+    return owner is not None and bool(getattr(owner, "structured_status", False))
+
+
+def report_chapter_failure(notify, failure, retry=None):
+    """Hand one chapter-scoped failure record (and its retry callback) to a run shell's board.
 
     The line output already carries the failure message; plain, terminal
     boards and custom notify callbacks ignore this.
     """
-    owner = _board_of(notify)
-    if owner is not None and getattr(owner, "structured_status", False):
-        owner.chapter_failure(failure)
+    if offers_chapter_retries(notify):
+        _board_of(notify).chapter_failure(failure, retry=retry)
+
+
+def report_retry_hold(notify, release, failed):
+    """Tell a run shell the run is waiting for retries (``release`` finishes it); ``None`` ends the wait."""
+    if offers_chapter_retries(notify):
+        _board_of(notify).retry_hold(release, failed)
 
 
 def report_book_outcome(notify, key, succeeded):

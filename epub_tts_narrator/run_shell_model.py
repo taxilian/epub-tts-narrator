@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import threading
 import time
 
-from .run_events import FAILURE, FINISHED, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
+from .run_events import FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
 
 
 SEVERITY_LEVELS = ("info", "warning", "error", "debug")  # cycle order; "debug" shows everything
@@ -82,6 +82,7 @@ class RunModel:
         self.seen = {"book": set(), "chapter": set(), "worker": set()}
         self.stopping = False
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
+        self.holds = {}           # book (or None) -> release callable while a render waits for retries
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
@@ -118,8 +119,16 @@ class RunModel:
                     self.failures.append({"kind": "book", "scope": {"book": book}, "error": last,
                                           "record": {"book": event.data.get("key")}, "attempt": self.attempt})
             elif event.kind == FAILURE:
+                data = dict(event.data or {})
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
-                                      "record": dict(event.data or {}), "attempt": self.attempt})
+                                      "record": dict(data.get("record") or {}), "retry": data.get("retry"),
+                                      "state": "failed", "attempt": self.attempt})
+            elif event.kind == HOLD:
+                book = event.scope.get("book")
+                if event.data.get("release") is None:
+                    self.holds.pop(book, None)
+                else:
+                    self.holds[book] = event.data["release"]
             elif event.kind == PROGRESS:
                 self.progress = dict(event.data or {})
             elif event.kind == FINISHED:
@@ -157,6 +166,7 @@ class RunModel:
             self.rows.clear()
             self.stopping = False
             self.progress = None
+            self.holds.clear()
         self.changed.set()
 
     @property
@@ -170,8 +180,31 @@ class RunModel:
     # Reading ---------------------------------------------------------------------
 
     def current_failures(self):
+        """This attempt's failures that have not been sent for a retry."""
         with self._lock:
-            return [item for item in self.failures if item["attempt"] == self.attempt]
+            return [item for item in self.failures
+                    if item["attempt"] == self.attempt and item.get("state", "failed") == "failed"]
+
+    def retry(self, item):
+        """Render one failed chapter again in the running render; False when it no longer can."""
+        callback = item.get("retry")
+        if not callable(callback) or item.get("state", "failed") != "failed" or not self.running:
+            return False
+        if not callback():
+            return False
+        with self._lock:
+            item["state"] = "retrying"
+        self.changed.set()
+        return True
+
+    def release_holds(self):
+        """Finish every render that waits for retries; it then reports what still failed."""
+        with self._lock:
+            releases, self.holds = list(self.holds.values()), {}
+        for release in releases:
+            release()
+        self.changed.set()
+        return len(releases)
 
     def visible_failures(self):
         with self._lock:
@@ -239,6 +272,8 @@ class RunModel:
             failures = len(self.current_failures())
             if failures:
                 parts.append(f"{failures} failure(s)")
+            if self.holds and self.running:
+                parts.append("waiting for retries (r retries a chapter, F finishes)")
             parts.append({"running": "stopping…" if self.stopping else "running", "finished": "finished",
                           "failed": "finished with errors", "interrupted": "interrupted"}[self.state])
             if self.attempt > 1:

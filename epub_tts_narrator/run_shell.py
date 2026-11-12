@@ -74,6 +74,9 @@ class RunApp(CapturePrintMixin, App):
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
+        Binding("r", "retry", "Retry", tooltip="Render the highlighted failed chapter again while the run continues"),
+        Binding("F", "finish", "Finish", show=False,
+                tooltip="Stop waiting for retries; the run reports what still failed"),
         Binding("R", "resume", "Resume", tooltip="Run the same command again; completed work is reused"),
         Binding("ctrl+c", "interrupt", "Stop", priority=True, show=False,
                 tooltip="Stop at safe boundaries (press again to stop immediately)"),
@@ -92,6 +95,7 @@ class RunApp(CapturePrintMixin, App):
         self.interrupt_scope = interrupt_scope
         self.run_title = title
         self.request_stop = None
+        self.exit_when_done = False
         self.result = None
         self.raised = None
         self._log_seen = 0
@@ -124,7 +128,7 @@ class RunApp(CapturePrintMixin, App):
             self.capture_prints()
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
         self.query_one("#workers", DataTable).add_columns("Worker", "Book", "Chapter", "Block", "Doing", "For")
-        self.query_one("#errors", DataTable).add_columns("Run", "Book", "Chapter", "Kind", "Error")
+        self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
         self.start_command()
         self.set_interval(0.5, self.refresh_view)
         self.refresh_view(force=True)
@@ -156,7 +160,7 @@ class RunApp(CapturePrintMixin, App):
         if error:
             self.bus.log(error, severity="error")
         self.model.finish(130 if interrupted else (result if raised is None else 1), error, interrupted=interrupted)
-        if not self.model.should_hold():
+        if not self.model.should_hold() or self.exit_when_done:
             self.exit()
             return
         self.refresh_view(force=True)
@@ -207,7 +211,8 @@ class RunApp(CapturePrintMixin, App):
         failures = []
         for index, item in enumerate(model.visible_failures()):
             scope = item["scope"]
-            failures.append((str(index), (str(item["attempt"]), scope.get("book") or "", str(scope.get("chapter") or ""),
+            failures.append((str(index), (str(item["attempt"]), item.get("state", "failed"),
+                                          scope.get("book") or "", str(scope.get("chapter") or ""),
                                           item["record"].get("error_type") or item["kind"],
                                           (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
         sync_table(self.query_one("#errors", DataTable), failures)
@@ -318,9 +323,40 @@ class RunApp(CapturePrintMixin, App):
         self.notify("Stopping at safe boundaries; press Ctrl-C again to stop immediately.", severity="warning")
         self.request_stop()
 
+    def action_retry(self):
+        errors = self.query_one("#errors", DataTable)
+        failures = self.model.visible_failures()
+        key = None
+        if errors.row_count:
+            try:
+                key = errors.coordinate_to_cell_key(errors.cursor_coordinate).row_key.value
+            except Exception:
+                key = None
+        item = failures[int(key)] if key is not None and int(key) < len(failures) else None
+        if item is None:
+            self.notify("Highlight a failed chapter in Errors (4) to retry it", severity="warning")
+        elif self.model.retry(item):
+            self.notify(f"Retrying chapter {item['scope'].get('chapter')}; other chapters keep going.")
+        elif self.model.running:
+            self.notify("This failure cannot be retried in place; R resumes the whole command after the run.",
+                        severity="warning")
+        else:
+            self.notify("The run has ended; R resumes the whole command, reusing completed work.",
+                        severity="warning")
+        self.refresh_view(force=True)
+
+    def action_finish(self):
+        if not self.model.release_holds():
+            self.notify("Nothing is waiting for retries", severity="warning")
+
     def action_quit_run(self):
         if not self.model.running:
             self.exit()
+            return
+        if self.model.holds:
+            # Waiting only for the person: finish the run, then close.
+            self.exit_when_done = True
+            self.model.release_holds()
             return
         self.push_screen(ConfirmScreen("The command is still running. Stop it at safe boundaries and quit when it "
                                        "has stopped? Rerunning the same command resumes from what was saved.",

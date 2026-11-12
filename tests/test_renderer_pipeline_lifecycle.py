@@ -312,6 +312,79 @@ class PipelineLifecycleTests(unittest.TestCase):
         self.assertEqual(len(failed_attempts), 1)
         self.assertFalse((self.root / "output").exists())
 
+    def _four_chapter_bundle(self, name):
+        document = chapter_document([
+            ("CHAPTER ONE", "heading", "p"),
+            ("The first boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER TWO", "heading", "p"),
+            ("The second boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER THREE", "heading", "p"),
+            ("The third boat crossed the harbor.", "narration", "p"),
+            ("CHAPTER FOUR", "heading", "p"),
+            ("The fourth boat crossed the harbor.", "narration", "p"),
+        ])
+        export_bundle(document, self.root / name)
+        self.bundle = prepare_bundle(load_bundle(self.root / name))
+
+    def _render_in_shell(self, scheduler, on_event):
+        """Render with a run shell's board; ``on_event`` sees each run event as it happens."""
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+
+        class PermanentFailure(RuntimeError):
+            retryable = False
+
+        pool = self.pool_for(scheduler)
+        self.publish_voices(pool)
+        original = self.engine.synthesize
+        self.broken = True
+
+        def generate(*args, **kwargs):
+            if self.broken and args[0] == "The second boat crossed the harbor.":
+                raise PermanentFailure("Fixture permanent generation error")
+            return original(*args, **kwargs)
+
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with patch.object(self.engine, "synthesize", side_effect=generate), shell_board(bus) as board:
+            return render(self.bundle, self.config, pool, self.verifier, notify=board.log)
+
+    def _retry_in_place(self, scheduler):
+        self._four_chapter_bundle("retry-bundle")
+        events = []
+
+        def on_event(event):
+            events.append(event.kind)
+            if event.kind == "failure":
+                self.broken = False  # the person fixed the cause, then pressed r
+                self.assertTrue(event.data["retry"]())
+
+        result = self._render_in_shell(scheduler, on_event)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(events.count("failure"), 1)
+        self.assertEqual(read_json(self.root / "work" / "status.json")["status"], "complete")
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
+
+    def test_a_shell_retries_a_failed_chapter_while_the_pipeline_continues(self):
+        self._retry_in_place("pipeline")
+
+    def test_the_sequential_scheduler_retries_after_its_main_pass(self):
+        self._retry_in_place("legacy")
+
+    def test_a_held_render_reports_its_failures_when_the_person_finishes(self):
+        self._four_chapter_bundle("held-bundle")
+        holds = []
+
+        def on_event(event):
+            if event.kind == "hold" and event.data["release"] is not None:
+                holds.append(event.data["failed"])
+                event.data["release"]()
+
+        with self.assertRaises(ChaptersRenderFailed) as raised:
+            self._render_in_shell("pipeline", on_event)
+        self.assertEqual(holds, [1])
+        self.assertEqual([chapter["number"] for chapter in raised.exception.failed_chapters], [2])
+
     def test_cache_integrity_failure_keeps_failed_request_linkage(self):
         document = chapter_document([
             ("CHAPTER ONE", "heading", "p"),
