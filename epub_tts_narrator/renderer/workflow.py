@@ -2720,11 +2720,19 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
            voice_store_override=None, on_synthesis_ready=None,
            chapter_coordinators=None, queue_position=0):
     """Render a book; on a terminal, chapters keep live rows below scrolling logs."""
-    from .progress import live_board
+    from .progress import live_board, report_book_state
     with live_board(notify) as notify:
-        return _render(bundle, config, engine, verifier, notify=notify, chapters_only=chapters_only,
-                       voice_store_override=voice_store_override, on_synthesis_ready=on_synthesis_ready,
-                       chapter_coordinators=chapter_coordinators, queue_position=queue_position)
+        book = Path(bundle["directory"]).name
+        report_book_state(notify, book, "rendering")
+        try:
+            result = _render(bundle, config, engine, verifier, notify=notify, chapters_only=chapters_only,
+                             voice_store_override=voice_store_override, on_synthesis_ready=on_synthesis_ready,
+                             chapter_coordinators=chapter_coordinators, queue_position=queue_position)
+        except BaseException as error:
+            report_book_state(notify, book, "interrupted" if isinstance(error, KeyboardInterrupt) else "failed")
+            raise
+        report_book_state(notify, book, "done")
+        return result
 
 
 def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_store_override,
@@ -2881,8 +2889,14 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                         chapter_failures[chapter["number"]] = failure
                     notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
                     from .progress import report_chapter_failure
+                    repair = None
+                    if retries is not None and failure.get("request_hash"):
+                        # The shell can play this passage's takes and accept one a person judges good.
+                        from .failed_take_repair import FailedTakeRepair
+                        repair = FailedTakeRepair(work, config, verifier, failure["request_hash"])
                     report_chapter_failure(notify, failure, retry=(
-                        None if retries is None else lambda index=chapter_index: retries.request(index)))
+                        None if retries is None else lambda index=chapter_index: retries.request(index)),
+                        repair=repair)
                     return
                 if rendered_chapter != chapter:
                     with plan_lock:
@@ -2983,6 +2997,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             notify(f"Saved {len(rendered)} chapter checkpoint(s) in {work / 'completed-chapters'}. "
                    "Use assemble to create the M4B.")
         else:
+            from .progress import report_book_state
+            report_book_state(notify, Path(bundle["directory"]).name, "assembling")
             result = _package(bundle, config, plan, store, voices, rendered, acceptance,
                               engine_identity, verifier_identity, notify=notify)
         write_json(work / "status.json", {

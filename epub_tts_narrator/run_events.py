@@ -19,8 +19,8 @@ import time
 from typing import Any
 
 
-LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED, PROGRESS, HOLD = (
-    "log", "status", "status_removed", "outcome", "failure", "finished", "progress", "hold")
+LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED, PROGRESS, HOLD, BOOK = (
+    "log", "status", "status_removed", "outcome", "failure", "finished", "progress", "hold", "book")
 SEVERITIES = ("debug", "info", "warning", "error")
 
 

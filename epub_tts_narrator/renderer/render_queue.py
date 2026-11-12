@@ -536,6 +536,9 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
     coordinators = None
     runs = []
     changed = threading.Event()
+    from .progress import report_book_state
+    for book in books:
+        report_book_state(notify, book, "queued")
     with RenderInterrupts():
         try:
             for index, book in enumerate(books):
@@ -562,6 +565,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
 
                 run = _BookRun(index, book)
                 book_notify = _prefixed(f"[{run.name}] ", notify)
+                report_book_state(notify, book, "preparing")
                 try:
                     bundle, config, plan = _prepare_book(book, args, notify=book_notify)
                     run.config = config
@@ -578,6 +582,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                     run.status = ("failed", message)
                     run.finished = True
                     runs.append(run)
+                    report_book_state(notify, book, "failed")
                     _record_book_outcome(notify, run.book, False)
                     _emit(notify, f"[{run.name}] failed: {message}")
                     continue

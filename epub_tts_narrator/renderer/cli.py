@@ -324,6 +324,23 @@ def doctor(config):
                      if faster_whisper else "Checks installed files; a real generation test is still needed to exercise Metal.")}
 
 
+def _resume_books(argv, books):
+    """For the run shell's R after a multi-book render: render again only the books that did not finish."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(books) < 2:
+        return None
+    paths = {Path(book) for book in books}
+    options = [token for token in argv[1:] if token.startswith("-") or Path(token) not in paths]
+
+    def resume(model, chosen=None):
+        names = set(chosen or [name for name, state in model.book_states.items() if state["state"] != "done"])
+        selected = [str(book) for book in books if Path(book).name in names]
+        if not selected or len(selected) == len(books):
+            return None
+        return lambda: main([argv[0], *selected, *options], in_shell=True)
+    return resume
+
+
 def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
     cast_bulk = args.command == "cast" and getattr(args, "action", None) in CAST_SHELL_ACTIONS
@@ -339,7 +356,8 @@ def main(argv=None, *, in_shell=False):
                 title = f"cast {args.action} — " + Path(args.bundle).name
             return run_in_shell(lambda: main(argv, in_shell=True), title=title,
                                 graceful_render_stop=args.command == "render",
-                                resumable=CAST_SHELL_ACTIONS.get(args.action, True) if cast_bulk else True)
+                                resumable=CAST_SHELL_ACTIONS.get(args.action, True) if cast_bulk else True,
+                                resume_command=_resume_books(argv, books) if args.command == "render" else None)
     engine = verifier = None
     config = None
     interrupts = None

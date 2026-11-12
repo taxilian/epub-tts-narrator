@@ -254,9 +254,11 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(errors.row_count, 1)
             errors.focus()
             await pilot.press("enter")
-            from epub_tts_narrator.tui_widgets import DetailScreen
-            self.assertIsInstance(app.screen, DetailScreen)
-            self.assertIn('"chunk_id": "c-7"', app.screen.text)
+            from epub_tts_narrator.run_shell_screens import FailureScreen, failure_text
+            self.assertIsInstance(app.screen, FailureScreen)
+            self.assertIn('"chunk_id": "c-7"', failure_text(app.screen.item, app.screen.hint)[1])
+            # After the run, the repair on offer is resuming the book; Escape just closes.
+            self.assertEqual(app.screen.actions, ["close"])
             await pilot.press("escape")
             await pilot.press("R")
             await self.wait_for(pilot, lambda: not app.is_running)
@@ -275,7 +277,16 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(command)
         async with app.run_test(size=(150, 40)) as pilot:
             await self.wait_for(pilot, started.is_set)
+            from epub_tts_narrator.tui_widgets import ConfirmScreen
+            # Escape (however often) and Enter on the stop question never stop the run.
+            await pilot.press("escape", "escape", "ctrl+c")
+            self.assertIsInstance(app.screen, ConfirmScreen)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertTrue(self.model.running)
             await pilot.press("ctrl+c")
+            self.assertIsInstance(app.screen, ConfirmScreen)
+            await pilot.press("y")
             await self.wait_for(pilot, lambda: not self.model.running)
             self.assertEqual(self.model.state, "interrupted")
             self.assertTrue(app.is_running)
@@ -335,7 +346,7 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             return 1
 
         app = self.make_app(command)
-        app.resume_command = lambda model: (lambda: calls.append("resume") or 0)
+        app.resume_command = lambda model, books=None: (lambda: calls.append("resume") or 0)
         async with app.run_test(size=(150, 40)) as pilot:
             await self.wait_for(pilot, lambda: not self.model.running)
             app.resumable = False
@@ -357,7 +368,12 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                 report_chapter_failure(notify, {"number": 2, "error_type": "RenderBlocked", "error": "fixture"},
                                        retry=lambda: retries.request(1))
                 report_retry_hold(notify, retries.release, 1)
-                outcome.append(retries.wait_for_request())
+                deadline = time.monotonic() + 10
+
+                def give_up():  # a failing test must not leave this thread waiting forever
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("no retry decision")
+                outcome.append(retries.wait_for_request(stop_check=give_up, poll=0.05))
                 report_retry_hold(notify, None, 0)
             return 0 if outcome[-1] else 2
         return command
@@ -370,9 +386,11 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(150, 40)) as pilot:
                     await self.wait_for(pilot, lambda: bool(self.model.holds))
                     self.assertIn("waiting for retries", self.model.summary())
-                    await pilot.press("4")
+                    await pilot.press("5")
                     app.query_one("#errors").focus()
                     await pilot.press(key)
+                    if key == "F":
+                        await pilot.press("y")  # finishing the wait is confirmed
                     await self.wait_for(pilot, lambda: not self.model.running)
                     await pilot.pause()
                     self.assertEqual(app.is_running, still_open)
@@ -391,7 +409,7 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         app = self.make_app(command)
         async with app.run_test(size=(150, 40)) as pilot:
             await self.wait_for(pilot, lambda: len(self.model.logs) >= 3)
-            await pilot.press("3")
+            await pilot.press("4")
             self.assertEqual(app.query_one("#tabs").active, "log-tab")
             await pilot.press("b")
             await pilot.press("down", "enter")
@@ -411,8 +429,15 @@ class RendererCliShellTests(unittest.TestCase):
         with (patch("epub_tts_narrator.tui_support.wants_tui", return_value=True),
               patch("epub_tts_narrator.run_shell.run_in_shell", return_value=0) as shell):
             self.assertEqual(cli.main(["render", "book-a", "book-b"]), 0)
-            self.assertEqual(shell.call_args.kwargs, {"title": "render — book-a, book-b", "graceful_render_stop": True,
-                                                      "resumable": True})
+            kwargs = shell.call_args.kwargs
+            self.assertEqual((kwargs["title"], kwargs["graceful_render_stop"], kwargs["resumable"]),
+                             ("render — book-a, book-b", True, True))
+            model = RunModel("render")
+            model.book_states = {"book-a": {"state": "done"}, "book-b": {"state": "failed"}}
+            with patch.object(cli, "main", return_value=0) as rerun:
+                kwargs["resume_command"](model)()
+                rerun.assert_called_once_with(["render", "book-b"], in_shell=True)
+            self.assertIsNone(kwargs["resume_command"](RunModel("x")))
             cli.main(["assemble", "book-a"])
             self.assertFalse(shell.call_args.kwargs["graceful_render_stop"])
             with patch.object(cli, "load_config", side_effect=RuntimeError("stop here")):

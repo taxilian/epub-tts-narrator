@@ -371,6 +371,34 @@ class PipelineLifecycleTests(unittest.TestCase):
     def test_the_sequential_scheduler_retries_after_its_main_pass(self):
         self._retry_in_place("legacy")
 
+    def test_a_person_accepts_a_failed_take_and_the_chapter_continues_from_it(self):
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        self._four_chapter_bundle("listened-bundle")
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        self.verifier.wrong_texts = {"The second boat crossed the harbor."}
+        seen = []
+
+        def on_event(event):
+            if event.kind == "failure":
+                repair = event.data["repair"]
+                takes = repair.takes()
+                seen.append([(row["attempt"], row["passed"], row["eligible"]) for row in takes])
+                outcome = repair.accept(takes[0]["attempt"])
+                seen.append(outcome["basis"])
+                self.assertTrue(event.data["retry"]())
+
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with shell_board(bus) as board:
+            result = render(self.bundle, self.config, pool, self.verifier, notify=board.log)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(seen[0][0], (1, False, True))
+        self.assertTrue(all(not passed for _, passed, _ in seen[0]))
+        self.assertEqual(seen[1], "manual_take_selection")
+        self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
+
     def test_a_held_render_reports_its_failures_when_the_person_finishes(self):
         self._four_chapter_bundle("held-bundle")
         holds = []

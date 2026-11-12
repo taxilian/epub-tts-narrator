@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes
-import json
 import os
 import sys
 import threading
@@ -23,14 +22,15 @@ import threading
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Grid
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from .run_events import EventBus
-from .run_shell_model import RunModel, next_severity
+from .run_shell_model import RunModel, next_severity, repair_hint
 from .tui_support import prompt_streams
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
-    SEVERITY_STYLES, format_seconds, sync_table,
+    SEVERITY_STYLES, format_seconds, highlighted_key, sync_table,
 )
 
 
@@ -50,10 +50,18 @@ def raise_interrupts():
 
 
 class RunApp(CapturePrintMixin, App):
-    """Status, workers, log and errors for one command run (and its resumes)."""
+    """At-a-glance health, books, chapters, workers, log and errors for one command run (and its resumes)."""
 
     CSS = BASE_CSS + """
+    #glance { height: 10; grid-size: 4 2; grid-rows: 5 5; grid-gutter: 0 1; padding: 0 1; }
+    .tile { height: 5; border: round $primary-background; padding: 0 1; }
+    .tile.ok { border: round $success; }
+    .tile.busy { border: round $accent; }
+    .tile.warning { border: round $warning; }
+    .tile.error { border: round $error; }
+    #books { height: 1fr; }
     #rows, #workers, #errors { height: 1fr; }
+    #stages { height: auto; max-height: 12; }
     #sched { height: auto; color: $text-muted; padding: 0 1; }
     #progress { height: auto; padding: 0 1; }
     #filters { height: auto; color: $text-muted; padding: 0 1; }
@@ -61,13 +69,19 @@ class RunApp(CapturePrintMixin, App):
     #search.visible { display: block; }
     #log { height: 1fr; }
     """
+    TILES = ("Health", "Books", "Generating", "Verifying", "Accepted", "Rejected takes", "Failures", "Left")
+    TABS = {"summary": "summary", "chapters": "chapters", "workers": "workers-tab", "log": "log-tab",
+            "errors": "errors-tab"}
     BINDINGS = [
-        Binding("q", "quit_run", "Quit", tooltip="Quit; while running, stop at safe boundaries first"),
+        Binding("q", "quit_run", "Quit", tooltip="Quit; while running this asks before stopping anything"),
+        # Textual's own Ctrl-Q would close the screen at once; it asks here too.
+        Binding("ctrl+q", "quit_run", "Quit", show=False, priority=True, tooltip="Same as q"),
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
-        Binding("1", "tab('status')", "Status", tooltip="Live chapters, blocks, timing and active work"),
-        Binding("2", "tab('workers')", "Workers", tooltip="What each local and remote worker is doing"),
-        Binding("3", "tab('log')", "Log", tooltip="Every message, filtered"),
-        Binding("4", "tab('errors')", "Errors", tooltip="Every failure with its saved detail"),
+        Binding("1", "tab('summary')", "Summary", tooltip="At a glance: health, books, clips, verification"),
+        Binding("2", "tab('chapters')", "Chapters", tooltip="Live chapters, blocks, timing and active work"),
+        Binding("3", "tab('workers')", "Workers", tooltip="Each worker's work, and the render pipeline's stages"),
+        Binding("4", "tab('log')", "Log", tooltip="Every message, filtered"),
+        Binding("5", "tab('errors')", "Errors", tooltip="Every failure with its detail and repairs"),
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
         Binding("c", "pick('chapter')", "Chapter", tooltip="Filter by chapter"),
         Binding("w", "pick('worker')", "Worker", tooltip="Filter by worker"),
@@ -77,11 +91,13 @@ class RunApp(CapturePrintMixin, App):
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
         Binding("r", "retry", "Retry", tooltip="Render the highlighted failed chapter again while the run continues"),
+        Binding("t", "takes", "Takes", tooltip="Listen to the failed passage's takes and accept a good one"),
         Binding("F", "finish", "Finish", show=False,
-                tooltip="Stop waiting for retries; the run reports what still failed"),
-        Binding("R", "resume", "Resume", tooltip="Run the same command again; completed work is reused"),
+                tooltip="Stop waiting for retries; the run reports what still failed (asks first)"),
+        Binding("R", "resume", "Resume", tooltip="Run again (only the failed books when one is highlighted); "
+                                                 "completed work is reused"),
         Binding("ctrl+c", "interrupt", "Stop", priority=True, show=False,
-                tooltip="Stop at safe boundaries (press again to stop immediately)"),
+                tooltip="Stop at safe boundaries, after confirming (again: stop immediately)"),
     ]
 
     def __init__(self, model, bus, command, *, interrupt_scope=raise_interrupts, title="Run",
@@ -103,16 +119,23 @@ class RunApp(CapturePrintMixin, App):
         self._log_seen = 0
         self._log_filter = None
         self._thread = None
+        self._player = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with TabbedContent(initial="status", id="tabs"):
-            with TabPane("Status", id="status"):
+        with TabbedContent(initial="summary", id="tabs"):
+            with TabPane("Summary", id="summary"):
+                with Grid(id="glance"):
+                    for name in self.TILES:
+                        yield Static("", classes="tile", id="tile-" + name.lower().replace(" ", "-"))
                 yield Static("", id="progress")
+                yield DataTable(id="books", cursor_type="row", zebra_stripes=True)
+            with TabPane("Chapters", id="chapters"):
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="sched")
             with TabPane("Workers", id="workers-tab"):
                 yield DataTable(id="workers", cursor_type="row")
+                yield DataTable(id="stages", cursor_type="row")
             with TabPane("Log", id="log-tab"):
                 yield Static("", id="filters")
                 yield Input(placeholder="Filter messages by text", id="search")
@@ -128,8 +151,10 @@ class RunApp(CapturePrintMixin, App):
             self.capture_prints(stdout_tty=True, tee=self.bridge.output)
         else:
             self.capture_prints()
+        self.query_one("#books", DataTable).add_columns("Book", "State", "Chapters", "Active", "Blocks", "Failures")
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
         self.query_one("#workers", DataTable).add_columns("Worker", "Book", "Chapter", "Block", "Doing", "For")
+        self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
         self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
         self.start_command()
         self.set_interval(0.5, self.refresh_view)
@@ -181,35 +206,32 @@ class RunApp(CapturePrintMixin, App):
             return
         self.model.changed.clear()
         model = self.model
+        model.sched = self._sched_status()
         self.sub_title = model.summary()
+        self._draw_glance()
         rows = []
         for key, scope, snapshot, text in model.visible_rows():
             if snapshot:
-                active = "; ".join(
-                    f"#{task['block']} {(task.get('worker') + ' ') if task.get('worker') else ''}{task['phase']} "
-                    f"{format_seconds(task.get('elapsed', 0))}" for task in snapshot.get("active", [])) or "idle"
                 cells = (scope.get("book") or "", f"{snapshot['chapter']}/{snapshot['total_chapters']}",
                          f"{snapshot['done']}/{snapshot['blocks']} ({round(100 * snapshot['done'] / max(1, snapshot['blocks']))}%)",
                          format_seconds(snapshot.get("elapsed", 0)),
                          f"~{format_seconds(snapshot['remaining'])}" if snapshot.get("remaining") else "",
-                         active)
+                         _active_text(snapshot))
             else:
                 cells = (scope.get("book") or "", "", "", "", "", text)
             rows.append((str(key), cells))
         sync_table(self.query_one("#rows", DataTable), rows)
         self.query_one("#sched", Static).update(self._sched_line())
-        progress = model.progress if model.running else None
-        self.query_one("#progress", Static).update(
-            "" if not progress else "\n".join(line for line in (
-                f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
-                f"{progress['step_fraction']:.0%} · {progress['stage']}",
-                progress.get("activity", ""), progress.get("totals", "")) if line))
         workers = []
         for worker, tasks in sorted(model.workers().items()):
             for book, chapter, block, phase, elapsed in tasks:
                 workers.append((f"{worker}:{book}:{chapter}:{block}",
                                 (worker, book or "", str(chapter or ""), f"#{block}", phase, format_seconds(elapsed))))
         sync_table(self.query_one("#workers", DataTable), workers)
+        stages = (model.sched or {}).get("stages") or {}
+        sync_table(self.query_one("#stages", DataTable), [
+            (name, (STAGE_NAMES.get(name, name), str(gauges.get("active_now", 0)), str(gauges.get("queued_now", 0))))
+            for name, gauges in sorted(stages.items()) if name in STAGE_NAMES])
         failures = []
         for index, item in enumerate(model.visible_failures()):
             scope = item["scope"]
@@ -219,10 +241,34 @@ class RunApp(CapturePrintMixin, App):
                                           (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
         sync_table(self.query_one("#errors", DataTable), failures)
         tabs = self.query_one("#tabs", TabbedContent)
-        tabs.get_tab("errors-tab").label = f"Errors ({len(model.current_failures())})" if model.current_failures() else "Errors"
+        current = len(model.current_failures())
+        tabs.get_tab("errors-tab").label = f"Errors ({current})" if current else "Errors"
         self._draw_log()
         self.query_one("#filters", Static).update(
             "Filters: " + (model.filter.describe() or "none") + "   (b book · c chapter · w worker · V voice · v level · / text · x clear)")
+
+    def _draw_glance(self):
+        model = self.model
+        for name, (value, detail, level) in model.glance().items():
+            tile = self.query_one("#tile-" + name.lower().replace(" ", "-"), Static)
+            text = Text(name + "\n", style="dim")
+            text.append(value, style="bold")
+            if detail:
+                text.append("\n" + detail, style="dim")
+            tile.update(text)
+            for other in ("ok", "busy", "warning", "error"):
+                tile.set_class(other == level, other)
+        progress = model.progress if model.running else None
+        self.query_one("#progress", Static).update(
+            "" if not progress else "\n".join(line for line in (
+                f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
+                f"{progress['step_fraction']:.0%} · {progress['stage']}",
+                progress.get("activity", ""), progress.get("totals", "")) if line))
+        sync_table(self.query_one("#books", DataTable), [
+            (str(book), (str(book or "this run"), Text(state, style=BOOK_STYLES.get(state, "")),
+                         f"{ready}/{total}" if total else (str(ready) if ready else ""),
+                         str(active) if active else "", blocks, str(failed) if failed else ""))
+            for book, state, ready, total, active, blocks, failed in model.book_rows()])
 
     def _draw_log(self):
         log = self.query_one("#log", RichLog)
@@ -244,6 +290,14 @@ class RunApp(CapturePrintMixin, App):
             self._log_seen = sequence
 
     @staticmethod
+    def _sched_status():
+        try:
+            from .renderer.render_schedule_status import scheduling_status
+            return scheduling_status()
+        except Exception:
+            return None
+
+    @staticmethod
     def _sched_line():
         try:
             from .renderer.progress import _scheduling_segment
@@ -251,14 +305,13 @@ class RunApp(CapturePrintMixin, App):
         except Exception:
             return ""
 
-    # Actions -------------------------------------------------------------------
+    # Navigation and filters ------------------------------------------------------
 
     def action_keys(self):
         self.push_screen(KeysScreen(self.BINDINGS, title="Run shell keys"))
 
     def action_tab(self, name):
-        ids = {"status": "status", "workers": "workers-tab", "log": "log-tab", "errors": "errors-tab"}
-        self.query_one("#tabs", TabbedContent).active = ids[name]
+        self.query_one("#tabs", TabbedContent).active = self.TABS[name]
 
     def action_pick(self, dimension):
         values = self.model.choices(dimension)
@@ -301,87 +354,220 @@ class RunApp(CapturePrintMixin, App):
         self.refresh_view(force=True)
 
     def on_data_table_row_selected(self, event):
-        if event.data_table.id != "errors":
-            return
-        failures = self.model.visible_failures()
-        index = int(event.row_key.value)
-        if 0 <= index < len(failures):
-            item = failures[index]
-            scope = item["scope"]
-            title = " ".join(part for part in (f"[{scope['book']}]" if scope.get("book") else "",
-                                               f"Chapter {scope['chapter']}" if scope.get("chapter") else "",
-                                               item["kind"]) if part)
-            detail = json.dumps(item["record"], indent=2, ensure_ascii=False, default=str)
-            self.push_screen(DetailScreen(title or "Failure", (item["error"] or "") + "\n\nSaved record:\n" + detail))
+        table = event.data_table.id
+        if table == "books":
+            # Drill into one book: its chapters, workers, log and errors.
+            key = event.row_key.value
+            self.model.filter.book = None if key == "None" else key
+            self.action_tab("chapters")
+            self.refresh_view(force=True)
+        elif table == "rows":
+            self._chapter_detail(event.row_key.value)
+        elif table == "errors":
+            item = self._failure_at(event.row_key.value)
+            if item is not None:
+                self._open_failure(item)
 
-    def action_interrupt(self):
-        if not self.model.running:
-            self.action_quit_run()
+    def _chapter_detail(self, key):
+        row = next((item for item in self.model.visible_rows() if str(item[0]) == key), None)
+        if row is None or not row[2]:
+            return
+        _, scope, snapshot, _ = row
+        lines = [f"{snapshot['done']} of {snapshot['blocks']} blocks accepted, {format_seconds(snapshot['elapsed'])} so far"
+                 + (f", about {format_seconds(snapshot['remaining'])} left" if snapshot.get("remaining") else "") + ".", ""]
+        for task in snapshot.get("active", []):
+            lines.append(f"Block {task['block']}: {task['phase']} for {format_seconds(task.get('elapsed', 0))}"
+                         + (f" on {task['worker']}" if task.get("worker") else "")
+                         + (f" (voices: {', '.join(task['voices'])})" if task.get("voices") else ""))
+        recent = [event.text for _, event in self.model.visible_logs()
+                  if event.scope.get("chapter") == snapshot["chapter"]
+                  and event.scope.get("book") == scope.get("book")][-15:]
+        if recent:
+            lines += ["", "Recent messages:", *recent]
+        title = (f"[{scope['book']}] " if scope.get("book") else "") + f"Chapter {snapshot['chapter']}"
+        self.push_screen(DetailScreen(title, "\n".join(lines)))
+
+    # Failures and repairs ------------------------------------------------------
+
+    def _failure_at(self, key):
+        failures = self.model.visible_failures()
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            return None
+        return failures[index] if 0 <= index < len(failures) else None
+
+    def _highlighted_failure(self):
+        errors = self.query_one("#errors", DataTable)
+        return self._failure_at(highlighted_key(errors))
+
+    def _open_failure(self, item):
+        from .run_shell_screens import FailureScreen
+        actions = []
+        if item["kind"] == "chapter" and item.get("state", "failed") == "failed" and self.model.running \
+                and callable(item.get("retry")):
+            actions.append("retry")
+        if item.get("repair") is not None:
+            actions.append("takes")
+        if item["scope"].get("book") is not None and self.resumable:
+            actions.append("resume_book")
+
+        def chosen(action):
+            if action == "retry":
+                self._retry(item)
+            elif action == "takes":
+                self._takes(item)
+            elif action == "resume_book":
+                self._resume(books=[item["scope"]["book"]])
+        self.push_screen(FailureScreen(item, repair_hint(item), actions), chosen)
+
+    def _retry(self, item):
+        if self.model.retry(item):
+            self.notify(f"Retrying chapter {item['scope'].get('chapter')}; other chapters keep going.")
+        elif self.model.running:
+            self.notify("This failure cannot be retried in place; R resumes after the run.", severity="warning")
+        else:
+            self.notify("The run has ended; R resumes, reusing completed work.", severity="warning")
+        self.refresh_view(force=True)
+
+    def action_retry(self):
+        item = self._highlighted_failure()
+        if item is None:
+            self.notify("Highlight a failed chapter in Errors (5) to retry it", severity="warning")
+            return
+        self._retry(item)
+
+    def action_takes(self):
+        item = self._highlighted_failure()
+        if item is None or item.get("repair") is None:
+            self.notify("Highlight a chapter that failed on one passage in Errors (5)", severity="warning")
+            return
+        self._takes(item)
+
+    def _takes(self, item):
+        from .run_shell_screens import TakesScreen
+        repair = item["repair"]
+        if self._player is None:
+            from .renderer.audition import AudioPlayer
+            self._player = AudioPlayer(repair.player_command)
+        scope = item["scope"]
+        title = ((f"[{scope['book']}] " if scope.get("book") else "") +
+                 f"Chapter {scope.get('chapter')}: takes of the passage that failed")
+
+        def chosen(choice):
+            if choice is not None:
+                self.run_worker(lambda: self._accept_take(item, choice), thread=True, group="accept-take")
+        self.push_screen(TakesScreen(title, repair, self._player), chosen)
+
+    def _accept_take(self, item, choice):
+        chapter = item["scope"].get("chapter")
+        try:
+            outcome = item["repair"].accept(choice["attempt"], learn=choice["learn"])
+        except (ValueError, OSError) as error:
+            self.call_from_thread(self.notify, f"Could not accept take {choice['attempt']}: {error}", severity="error")
+            self.bus.log(f"Could not accept take {choice['attempt']} for chapter {chapter}: {error}",
+                         scope=dict(item["scope"]), severity="error")
+            return
+        learned = "; ".join(f"{expected} → {heard}" for expected, heard in outcome["learned"])
+        self.bus.log(f"Accepted take {outcome['attempt']} for chapter {chapter} after listening "
+                     f"({outcome['basis']})" + (f"; the recognizer learned: {learned}" if learned else ""),
+                     scope=dict(item["scope"]), severity="warning")
+        retried = self.model.retry(item)
+        message = (f"Take {outcome['attempt']} accepted; chapter {chapter} renders again with it."
+                   if retried else f"Take {outcome['attempt']} accepted; R resumes the book with it.")
+        self.call_from_thread(self.notify, message)
+        self.call_from_thread(self.refresh_view, True)
+
+    def action_finish(self):
+        if not self.model.holds:
+            self.notify("Nothing is waiting for retries", severity="warning")
+            return
+        self.push_screen(ConfirmScreen(
+            "Stop waiting for retries? The run then reports the chapters that still failed (no audiobook "
+            "is assembled for those books); R resumes them later.", title="Finish the run?", danger=True,
+            yes="Finish"), lambda yes: yes and self.model.release_holds())
+
+    # Stopping (always confirmed) --------------------------------------------------
+
+    def _stop(self, *, then_exit=False):
+        """Ask the running command to stop at safe boundaries (a second request stops at once)."""
+        self.exit_when_done = self.exit_when_done or then_exit
+        if self.model.holds:
+            self.model.release_holds()
             return
         if self.request_stop is None:
             return
         self.model.stopping = True
         self.model.changed.set()
-        self.notify("Stopping at safe boundaries; press Ctrl-C again to stop immediately.", severity="warning")
         self.request_stop()
 
-    def action_retry(self):
-        errors = self.query_one("#errors", DataTable)
-        failures = self.model.visible_failures()
-        key = None
-        if errors.row_count:
-            try:
-                key = errors.coordinate_to_cell_key(errors.cursor_coordinate).row_key.value
-            except Exception:
-                key = None
-        item = failures[int(key)] if key is not None and int(key) < len(failures) else None
-        if item is None:
-            self.notify("Highlight a failed chapter in Errors (4) to retry it", severity="warning")
-        elif self.model.retry(item):
-            self.notify(f"Retrying chapter {item['scope'].get('chapter')}; other chapters keep going.")
-        elif self.model.running:
-            self.notify("This failure cannot be retried in place; R resumes the whole command after the run.",
-                        severity="warning")
-        else:
-            self.notify("The run has ended; R resumes the whole command, reusing completed work.",
-                        severity="warning")
-        self.refresh_view(force=True)
-
-    def action_finish(self):
-        if not self.model.release_holds():
-            self.notify("Nothing is waiting for retries", severity="warning")
+    def action_interrupt(self):
+        if not self.model.running:
+            self.action_quit_run()
+            return
+        if self.model.stopping:
+            self.push_screen(ConfirmScreen(
+                "The run is already stopping at safe boundaries. Stop immediately instead? Takes in progress are "
+                "lost; everything verified and saved stays and is reused on resume.",
+                title="Stop immediately?", danger=True, yes="Stop now"), lambda yes: yes and self._stop())
+            return
+        self.push_screen(ConfirmScreen(
+            "Stop the run? Active takes finish verification and are saved first; R or rerunning the same "
+            "command resumes from there.", title="Stop the run?", danger=True, yes="Stop"),
+            lambda yes: yes and (self._stop(), self.notify("Stopping at safe boundaries…", severity="warning")))
 
     def action_quit_run(self):
         if not self.model.running:
             self.exit()
             return
         if self.model.holds:
-            # Waiting only for the person: finish the run, then close.
-            self.exit_when_done = True
-            self.model.release_holds()
-            return
-        self.push_screen(ConfirmScreen("The command is still running. Stop it at safe boundaries and quit when it "
-                                       "has stopped? Rerunning the same command resumes from what was saved.",
-                                       title="Stop the run?"),
-                         lambda yes: yes and self.action_interrupt())
+            message = ("The run is waiting for you to retry failed chapters. Quit? It reports what still failed "
+                       "and closes.")
+        else:
+            message = ("The command is still running. Stop it at safe boundaries and quit when it has stopped? "
+                       "Rerunning the same command resumes from what was saved.")
+        self.push_screen(ConfirmScreen(message, title="Quit and stop the run?", danger=True, yes="Stop and quit"),
+                         lambda yes: yes and self._stop(then_exit=True))
+
+    # Resuming ------------------------------------------------------------------
 
     def action_resume(self):
+        item = self._highlighted_failure() if self.query_one("#tabs", TabbedContent).active == "errors-tab" else None
+        books = [item["scope"]["book"]] if item is not None and item["scope"].get("book") else None
+        self._resume(books=books)
+
+    def _resume(self, books=None):
         if self.model.running:
-            self.notify("Still running; resume is for a run that ended with problems", severity="warning")
+            self.notify("Still running; resume is for a run that has ended", severity="warning")
             return
         if not self.resumable:
             self.notify("Running this command again would redo finished work; rerun it yourself if you mean to.",
                         severity="warning", timeout=8)
             return
-        command = self.resume_command(self.model) if self.resume_command is not None else None
+        command = self.resume_command(self.model, books) if self.resume_command is not None else None
         self.model.restart()
-        self.bus.log(f"Resuming: attempt {self.model.attempt}", severity="warning")
-        self.action_tab("status")
+        self.bus.log(f"Resuming: attempt {self.model.attempt}" + (f" ({', '.join(books)})" if books else ""),
+                     severity="warning")
+        self.action_tab("summary")
         if command is not None:
-            # Commands that start fresh on rerun resume the run they printed.
+            # Commands that start fresh on rerun resume the run they printed; a
+            # multi-book render resumes only the books that did not finish.
             self.command = command
-            self.resume_command = None
         self.start_command()
+
+
+STAGE_NAMES = {"synthesis": "Generating speech", "synthesis_slot": "Waiting for a speech slot",
+               "recognition": "Transcribing (verification)", "review": "Reviewing transcripts",
+               "preparation": "Preparing audio", "admission": "Waiting to start",
+               "review_coordination": "Review coordination", "model_thread": "Model thread"}
+BOOK_STYLES = {"rendering": "bold cyan", "assembling": "cyan", "preparing": "cyan", "queued": "dim",
+               "done": "green", "failed": "bold red", "interrupted": "yellow"}
+
+
+def _active_text(snapshot):
+    return "; ".join(
+        f"#{task['block']} {(task.get('worker') + ' ') if task.get('worker') else ''}{task['phase']} "
+        f"{format_seconds(task.get('elapsed', 0))}" for task in snapshot.get("active", [])) or "idle"
 
 
 def _render_interrupts(app):

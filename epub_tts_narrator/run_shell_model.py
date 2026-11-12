@@ -11,13 +11,42 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import re
 import threading
 import time
 
-from .run_events import FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
+from .run_events import BOOK, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
 
 
 SEVERITY_LEVELS = ("info", "warning", "error", "debug")  # cycle order; "debug" shows everything
+RATE_WINDOW = 300.0         # seconds of recent history behind "per minute" figures
+STALL_SECONDS = 900.0       # running chapters with no accepted block for this long look stalled
+_READY = re.compile(r"\((\d+) / (\d+) selected chapters ready\)")
+_REUSED = re.compile(r"^Reusing completed chapter (\d+) / (\d+)")
+_REJECTED = re.compile(r"\brejected\b", re.IGNORECASE)
+_RETRYING = re.compile(r"\b(retrying|retry \d|attempt \d+/\d+)\b", re.IGNORECASE)
+FINAL_BOOK_STATES = ("done", "failed", "interrupted")
+
+
+def repair_hint(item):
+    """One plain-language suggestion for a failure, from its saved type and message."""
+    text = f"{item['record'].get('error_type') or ''} {item.get('error') or ''}".casefold()
+    if "history echo" in text or "history_echo" in text:
+        return "A take repeated an earlier line. Retrying usually succeeds with another layout; or listen and accept a good take."
+    if "verificationunavailable" in text or "unavailable" in text:
+        return "The verifier or its model service was unavailable. Check it, then resume."
+    if re.search(r"\block(ed)?\b|\blease\b", text) or "another render" in text:
+        return "Another render, assembly or cleanup holds this book's lock. Resume when it has finished."
+    if "voice" in text and ("missing" in text or "no active" in text):
+        return "Choose the missing voices with cast for this book, then resume."
+    if "pronunciation" in text or "untagged" in text or "unsure" in text:
+        return "Confirm the listed words with pronounce, then resume."
+    if item.get("repair") is not None:
+        return ("No take passed verification. Listen to the takes (t) and accept one that sounds right, "
+                "or retry the chapter (r).")
+    if item["kind"] == "chapter":
+        return "Retry the chapter (r); the retry reuses every verified clip."
+    return "Resume this book (R) after the run; completed work is reused."
 
 
 @dataclass
@@ -87,22 +116,46 @@ class RunModel:
         self.stopping = False
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
+        self.book_states = {}     # book -> {"state", "ready", "total", "key"}
+        self.sched = None         # latest render_schedule_status snapshot (polled by the screen)
+        self._done_by_key = {}    # board key -> blocks done last seen
+        self.accepted = deque()   # (time, blocks) accepted while chapters ran
+        self.accepted_total = 0
+        self.rejected = deque()   # times of rejected takes
+        self.rejected_total = 0
+        self.last_progress = clock()
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
 
     def on_event(self, event):
         with self._lock:
+            if "book" not in event.scope and len(self.book_states) == 1 and event.kind in (LOG, STATUS, FAILURE):
+                # A single-book render's lines carry no book prefix; they are that book's.
+                event.scope["book"] = next(iter(self.book_states))
             self._remember(event.scope)
             if event.kind == LOG:
                 self.log_total += 1
                 self.logs.append((self.log_total, event))
+                self._count_log(event)
             elif event.kind == STATUS:
                 key = event.data.get("key")
                 row = self.rows.setdefault(key, {"scope": {}, "snapshot": None, "text": ""})
                 row["scope"] = {**row["scope"], **event.scope}
                 if event.data.get("snapshot") is not None:
                     row["snapshot"] = event.data["snapshot"]
+                    done = row["snapshot"].get("done", 0)
+                    gained = done - self._done_by_key.get(key, done)
+                    self._done_by_key[key] = done
+                    if gained > 0:
+                        self.accepted.append((event.time, gained))
+                        self.accepted_total += gained
+                        self.last_progress = event.time
+                    book = row["scope"].get("book")
+                    state = self._book(book)
+                    state["total"] = row["snapshot"].get("total_chapters") or state["total"]
+                    if state["state"] in ("queued", "preparing", None):
+                        state["state"] = "rendering"
                     for task in row["snapshot"].get("active", []):
                         if task.get("worker"):
                             self.seen["worker"].add(task["worker"])
@@ -111,6 +164,7 @@ class RunModel:
                     row["text"] = event.text
                 row["updated"] = event.time
             elif event.kind == STATUS_REMOVED:
+                self._done_by_key.pop(event.data.get("key"), None)
                 row = self.rows.pop(event.data.get("key"), None)
                 if row is not None:
                     book = row["scope"].get("book")
@@ -118,16 +172,20 @@ class RunModel:
             elif event.kind == OUTCOME:
                 book = event.scope.get("book")
                 self.books[book] = bool(event.data.get("succeeded"))
+                self._book(book, key=event.data.get("key"))["state"] = "done" if self.books[book] else "failed"
                 if not self.books[book]:
-                    last = next((item.text for _, item in reversed(self.logs)
-                                 if item.severity == "error" and item.scope.get("book") == book), "")
-                    self.failures.append({"kind": "book", "scope": {"book": book}, "error": last,
-                                          "record": {"book": event.data.get("key")}, "attempt": self.attempt})
+                    self._book_failure(book, event.data.get("key"))
+            elif event.kind == BOOK:
+                book = event.scope.get("book")
+                state = event.data.get("state")
+                self._book(book, key=event.data.get("key"))["state"] = state
+                if state in ("failed", "interrupted"):
+                    self._book_failure(book, event.data.get("key"))
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(data.get("record") or {}), "retry": data.get("retry"),
-                                      "state": "failed", "attempt": self.attempt})
+                                      "repair": data.get("repair"), "state": "failed", "attempt": self.attempt})
             elif event.kind == HOLD:
                 book = event.scope.get("book")
                 if event.data.get("release") is None:
@@ -139,6 +197,37 @@ class RunModel:
             elif event.kind == FINISHED:
                 self.finish(event.data.get("exit_code"), event.data.get("error"))
         self.changed.set()
+
+    def _book(self, book, *, key=None):
+        state = self.book_states.setdefault(book, {"state": None, "ready": 0, "total": 0, "key": key})
+        if key and not state["key"]:
+            state["key"] = key
+        return state
+
+    def _book_failure(self, book, key):
+        """One book-level failure per book and attempt, carrying its last error message."""
+        if any(item["kind"] == "book" and item["scope"].get("book") == book and item["attempt"] == self.attempt
+               for item in self.failures):
+            return
+        last = next((item.text for _, item in reversed(self.logs)
+                     if item.severity == "error" and item.scope.get("book") in (book, None)), "")
+        self.failures.append({"kind": "book", "scope": {"book": book}, "error": last,
+                              "record": {"book": key}, "state": "failed", "attempt": self.attempt})
+
+    def _count_log(self, event):
+        match = _READY.search(event.text) or _REUSED.match(event.text)
+        if match:
+            state = self._book(event.scope.get("book"))
+            ready, total = int(match.group(1)), int(match.group(2))
+            if _READY.search(event.text):
+                state["ready"] = max(state["ready"], ready)
+            else:
+                state["ready"] += 1
+            state["total"] = total
+            self.last_progress = event.time
+        if _REJECTED.search(event.text):
+            self.rejected.append(event.time)
+            self.rejected_total += 1
 
     def _remember(self, scope):
         for key in ("book", "chapter", "worker", "voice"):
@@ -172,6 +261,10 @@ class RunModel:
             self.stopping = False
             self.progress = None
             self.holds.clear()
+            self.book_states = {book: dict(state, state="queued") for book, state in self.book_states.items()
+                                if state["state"] != "done"}
+            self._done_by_key.clear()
+            self.last_progress = self._clock()
         self.changed.set()
 
     @property
@@ -252,6 +345,104 @@ class RunModel:
     def choices(self, dimension):
         with self._lock:
             return sorted(self.seen[dimension], key=lambda value: (str(type(value)), value))
+
+    def _recent(self, now):
+        cutoff = now - RATE_WINDOW
+        while self.accepted and self.accepted[0][0] < cutoff:
+            self.accepted.popleft()
+        while self.rejected and self.rejected[0] < cutoff:
+            self.rejected.popleft()
+
+    def activity(self):
+        """Blocks by what they are doing now, from every live chapter row."""
+        counts = {"generating": 0, "verifying": 0, "waiting": 0, "other": 0}
+        with self._lock:
+            tasks = [task for row in self.rows.values() for task in (row["snapshot"] or {}).get("active", [])]
+        for task in tasks:
+            phase = (task.get("phase") or "").casefold()
+            if task.get("worker_stage") == "waiting" or phase.startswith("waiting"):
+                counts["waiting"] += 1
+            elif task.get("worker_stage") == "generating" or phase.startswith(("gen", "prepare")):
+                counts["generating"] += 1
+            elif phase.startswith(("verify", "normalize", "cache")):
+                counts["verifying"] += 1
+            else:
+                counts["other"] += 1
+        return counts
+
+    def health(self, now=None):
+        """``(level, text)``: ok, busy, warning or error, for the at-a-glance view."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            failures = len(self.current_failures())
+            if self.state == "finished":
+                return "ok", "Finished"
+            if self.state == "interrupted":
+                return "warning", "Interrupted — R resumes"
+            if self.state == "failed":
+                return "error", f"Ended with {failures or 'an'} error{'s' if failures != 1 else ''} — R resumes"
+            if self.stopping:
+                return "warning", "Stopping at safe boundaries"
+            if self.holds:
+                return "error", f"Waiting for retries: {failures} failed chapter(s)"
+            if self.rows and now - self.last_progress > STALL_SECONDS:
+                return "warning", f"No block accepted for {_duration(now - self.last_progress)}"
+            if failures:
+                return "warning", f"Running with {failures} failure(s)"
+            return "ok", "Running normally"
+
+    def glance(self, now=None):
+        """The at-a-glance figures, as ``{name: (value, detail, level)}``."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            self._recent(now)
+            states = [state["state"] for state in self.book_states.values()]
+            per_minute = sum(blocks for _, blocks in self.accepted) * 60 / RATE_WINDOW
+            rejected_recent = len(self.rejected)
+            failures = len(self.current_failures())
+            remaining = [row["snapshot"].get("remaining") for row in self.rows.values()
+                         if row["snapshot"] and row["snapshot"].get("remaining")]
+            stages = (self.sched or {}).get("stages") or {}
+        activity = self.activity()
+        level, text = self.health(now)
+        books = len(states)
+        book_detail = ", ".join(f"{states.count(name)} {name}" for name in
+                                ("rendering", "assembling", "preparing", "queued", "done", "failed", "interrupted")
+                                if states.count(name))
+        result = {
+            "Health": (text, f"elapsed {_duration((self.finished_at or now) - self.started)}", level),
+            "Books": (str(books) if books else "—", book_detail,
+                      "error" if states.count("failed") else "ok"),
+            "Generating": (str(activity["generating"]), f"{activity['waiting']} waiting for a worker", "busy"),
+            "Verifying": (str(activity["verifying"]), "normalize, check and transcribe", "busy"),
+            "Accepted": (str(self.accepted_total), f"{per_minute:.1f} blocks/min (last 5 min)", "ok"),
+            "Rejected takes": (str(self.rejected_total), f"{rejected_recent} in the last 5 min",
+                               "warning" if rejected_recent else "ok"),
+            "Failures": (str(failures), "r retries · t listens to takes" if failures else "none",
+                         "error" if failures else "ok"),
+            "Left": (f"~{_duration(max(remaining))}" if remaining and self.running else "—",
+                     f"{len(self.rows)} chapter(s) active", "ok"),
+        }
+        for stage, label in (("synthesis", "Generating"), ("recognition", "Verifying")):
+            gauges = stages.get(stage)
+            if gauges:
+                value, detail, level = result[label]
+                result[label] = (value, detail + f" · pipeline {gauges.get('active_now', 0)} active, "
+                                 f"{gauges.get('queued_now', 0)} queued", level)
+        return result
+
+    def book_rows(self):
+        """``[(book, state, ready, total, active chapters, blocks done/total, failures)]``."""
+        with self._lock:
+            rows = []
+            for book, state in self.book_states.items():
+                live = [row for row in self.rows.values() if row["scope"].get("book") == book and row["snapshot"]]
+                done = sum(row["snapshot"]["done"] for row in live)
+                blocks = sum(row["snapshot"]["blocks"] for row in live)
+                failed = sum(1 for item in self.current_failures() if item["scope"].get("book") == book)
+                rows.append((book, state["state"] or "starting", state["ready"], state["total"], len(live),
+                             f"{done}/{blocks}" if live else "", failed))
+        return rows
 
     def summary(self, now=None):
         now = self._clock() if now is None else now

@@ -49,6 +49,8 @@ class CastApp(CapturePrintMixin, App):
     """
     BINDINGS = [
         Binding("q", "quit_cast", "Quit"),
+        # Textual's own Ctrl-Q would close at once, even mid-generation.
+        Binding("ctrl+q", "quit_cast", "Quit", show=False, priority=True),
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
         Binding("slash", "filter", "Filter", tooltip="Filter by name, voice ID or description"),
         Binding("f", "status_filter", "Status", tooltip="Cycle the status filter"),

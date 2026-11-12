@@ -133,20 +133,25 @@ class ConfirmScreen(ModalScreen[bool]):
     DEFAULT_CSS = BASE_CSS
     BINDINGS = [Binding("y", "answer(True)", "Yes"), Binding("n,escape", "answer(False)", "No")]
 
-    def __init__(self, message, *, title="Confirm", yes="Yes", no="No"):
+    def __init__(self, message, *, title="Confirm", yes="Yes", no="No", danger=False):
+        """``danger``: something that stops work; No is focused, so Enter or Escape keeps it running."""
         super().__init__()
         self.message, self.title_text, self.yes, self.no = message, title, yes, no
+        self.danger = danger
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label(self.title_text, classes="dialog-title")
-            yield Static(self.message)
+            yield Label(Text(self.title_text), classes="dialog-title")
+            yield Static(Text(self.message))
             with Horizontal(classes="dialog-buttons"):
-                yield Button(self.no, id="no")
-                yield Button(self.yes, id="yes", variant="primary")
+                yield Button(self.no, id="no", variant="primary" if self.danger else "default")
+                yield Button(self.yes, id="yes", variant="error" if self.danger else "primary")
+            if self.danger:
+                yield Static("Press y (or choose the button) to confirm; Enter or Escape keeps running.",
+                             classes="dialog-help")
 
     def on_mount(self):
-        self.query_one("#yes", Button).focus()
+        self.query_one("#no" if self.danger else "#yes", Button).focus()
 
     def action_answer(self, value):
         self.dismiss(bool(value))
@@ -180,7 +185,7 @@ class KeysScreen(ModalScreen):
             text.append(keys.ljust(width + 2), style="bold")
             text.append(description + "\n")
         with Vertical(classes="dialog"):
-            yield Label(self.title_text, classes="dialog-title")
+            yield Label(Text(self.title_text), classes="dialog-title")
             yield Static(text)
             yield Static("Escape closes", classes="dialog-help")
 
@@ -201,7 +206,7 @@ class DetailScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         from textual.containers import VerticalScroll
         with Vertical(classes="dialog"):
-            yield Label(self.title_text, classes="dialog-title")
+            yield Label(Text(self.title_text), classes="dialog-title")
             with VerticalScroll():
                 yield Static(Text(self.text), id="detail-text")
             yield Static("Escape closes", classes="dialog-help")
@@ -242,13 +247,13 @@ class TextEditScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label(self.title_text, classes="dialog-title")
+            yield Label(Text(self.title_text), classes="dialog-title")
             if self.single_line:
                 yield Input(self.value, id="editor")
             else:
                 yield TextArea(self.value, id="editor", soft_wrap=True)
             yield Static("", id="error", classes="dialog-error")
-            yield Static(self.help_text or "Ctrl+S saves · Escape cancels", classes="dialog-help")
+            yield Static(Text(self.help_text or "Ctrl+S saves · Escape cancels"), classes="dialog-help")
 
     def on_mount(self):
         self.query_one("#editor").focus()
@@ -265,7 +270,7 @@ class TextEditScreen(ModalScreen):
             try:
                 self.validate(text)
             except ValueError as error:
-                self.query_one("#error", Static).update(str(error))
+                self.query_one("#error", Static).update(Text(str(error)))
                 return
         self.dismiss(text)
 
@@ -290,15 +295,15 @@ class ChoiceScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label(self.title_text, classes="dialog-title")
+            yield Label(Text(self.title_text), classes="dialog-title")
             if self.filterable:
                 yield Input(placeholder="Type to filter", id="choice-filter")
             yield OptionList(*self._options(""), id="choices")
-            yield Static(self.help_text or "Enter chooses · Escape cancels", classes="dialog-help")
+            yield Static(Text(self.help_text or "Enter chooses · Escape cancels"), classes="dialog-help")
 
     def _options(self, text):
         words = text.casefold().split()
-        return [Option(label, id=str(index)) for index, (_, label) in enumerate(self.options)
+        return [Option(Text(label), id=str(index)) for index, (_, label) in enumerate(self.options)
                 if all(word in label.casefold() for word in words)]
 
     def on_mount(self):
@@ -435,7 +440,8 @@ def sync_table(table: DataTable, rows):
             current = None
     table.clear()
     for key, cells in rows:
-        table.add_row(*cells, key=key)
+        # Plain strings are shown literally: a book or voice name may contain [brackets].
+        table.add_row(*(Text(cell) if isinstance(cell, str) else cell for cell in cells), key=key)
     keys = [key for key, _ in rows]
     if current in keys:
         table.move_cursor(row=keys.index(current))

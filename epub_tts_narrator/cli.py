@@ -405,7 +405,7 @@ def _shell(argv, args):
     target = getattr(args, "input", None) or getattr(args, "directory", None) or (getattr(args, "directories", None) or [""])[0]
     resume = None
     if args.command in _RUN_ID and "--resume" not in argv:
-        def resume(model):
+        def resume(model, books=None):
             found = next((match.group(1) for _, event in reversed(model.logs)
                           if (match := _RUN_ID[args.command].search(event.text))), None)
             return (lambda: main([*argv, "--resume", found], in_shell=True)) if found else None
