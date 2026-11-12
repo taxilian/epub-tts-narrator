@@ -1447,11 +1447,19 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                 plan, requests, completed=completed_chunks(work, plan["chapters"]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
-    # Voice speech traits (accent, pace, timbre) are not sent with each line.
-    # Drama 3 clones identity, accent included, from the reference recording
-    # and the voice's own earlier takes in the chapter history; a per-line
-    # voice description competes with the reference and dilutes the line's
-    # own delivery direction. Traits still shape voice design and casting.
+    # Voice speech traits (pace, timbre, habits) are not sent with each line:
+    # Drama 3 clones identity from the reference recording and the voice's own
+    # earlier takes, and a long per-line description dilutes the line's own
+    # delivery direction. A voice's short accent cue is the exception: Drama 3
+    # does not reliably carry an accent from the reference alone (blind tests
+    # preferred the cued take in 9 of 11 sets), so it opens every line in that
+    # voice, ahead of the line's delivery direction.
+    from .speech_traits import accent_overrides, bind_plan_speech_traits
+    accents = config.get("_accent_snapshot")
+    if accents is None:
+        accents = accent_overrides(bundle, config)
+    if accents:
+        plan = bind_plan_speech_traits(plan, bundle["cast"], overrides=accents, profile_traits=False)
     from .performance_runtime import bind_traits
     plan = bind_traits(plan)
     if (not (multi_speaker or single_speaker_paragraph)
@@ -1508,8 +1516,10 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         config["_tagged_name_snapshot"] = named_pronunciation_snapshot(bundle)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
-    from .speech_traits import speech_trait_overrides
+    from .speech_traits import accent_overrides, speech_trait_overrides
     config["_speech_traits_snapshot"] = speech_trait_overrides(bundle, config)
+    # Accent cues bind into every line of their voice (make_render_plan).
+    config["_accent_snapshot"] = accent_overrides(bundle, config)
     # Learned recognizer variants live beside the analysis (heard_variants.py).
     # Only the path is carried, so copies of this config stay plain data.
     config["_heard_variants_directory"] = (

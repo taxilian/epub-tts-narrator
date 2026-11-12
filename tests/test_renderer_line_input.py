@@ -150,6 +150,8 @@ class CastingLineInputTests(unittest.TestCase):
         self.type(script)
         self.wait_for(b"New vocal traits (Enter keeps current; - clears; B cancels): ")
         self.type(b"\r")
+        self.wait_for(b"- clears; B cancels): ")  # the accent cue prompt
+        self.type(b"\r")
         self.wait_for(b"PLAYBACK_READY")
 
     def stop_playback(self):

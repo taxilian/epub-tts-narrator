@@ -837,7 +837,7 @@ There is one menu, arranged in as many columns as the terminal width allows. Lon
 | `G11` | Use ElevenLabs for the last voice played, or ask for a voice number. |
 | `Q` | Quit. |
 
-All edit and regeneration commands offer three fields: the voice description, the spoken sample script, and vocal traits (accent, articulation, cadence, and other stable speech behavior). Press Enter to keep a value, or enter `-` in the traits field to clear it. `E` saves without generating. Description/script edits take effect when a sample is regenerated; traits condition the next render and do not change the saved sample. Keep the accent in the description and vocal traits consistent when editing both.
+All edit and regeneration commands offer four fields: the voice description, the spoken sample script, vocal traits (accent, articulation, cadence, and other stable speech behavior), and the accent cue (see below). Press Enter to keep a value, or enter `-` in the traits or accent field to clear it. `E` saves without generating. Description/script edits take effect when a sample is regenerated; traits condition the next render and do not change the saved sample. Keep the accent in the description and vocal traits consistent when editing both.
 
 Regeneration verifies, saves, selects, and plays the new voice immediately. If generation fails, the previous voice stays selected. Inputs are case-insensitive. `G` chooses the local speech engine, `GG` chooses Gemini, and `G11` chooses ElevenLabs for that action; none changes the session's startup setting or global configuration. Use `G 11` with a space to regenerate voice 11 locally, since `G11` is the ElevenLabs command.
 
@@ -861,7 +861,7 @@ The optional voice-profile `speechTraits` field records a voice's stable speech 
 
 Use `E` in casting to override these traits, or `cast BOOK --action edit --voice-id ID --speech-traits "Light Mexican Spanish-influenced English; relaxed cadence"`. An empty CLI value clears traits. These explicit edits live in the book's `voice-traits.json`, separate from checksum-bound analysis. Lookup uses the current book, then its parent recursively; a local choice (including an explicit clear) overrides an earlier choice. No global config edits or reanalysis are needed. Each render snapshots the choices for recovery and sends them with remote chapter jobs. Pronunciation previews and frozen comparison snapshots use the same choices.
 
-Changing speech traits does not change rendered speech. Existing valid reference voices do not need to be regenerated. Structured analysis `traits[]` and their evidence are not rewritten by the casting editor; changing those records still uses the validated analysis/corrections workflow.
+Changing speech traits does not change rendered speech (an accent cue does; see "Accent cues"). Existing valid reference voices do not need to be regenerated. Structured analysis `traits[]` and their evidence are not rewritten by the casting editor; changing those records still uses the validated analysis/corrections workflow.
 
 The adapters place this prose differently: Gemini receives it as the voice-design input, following its [one- or two-sentence prompting guidance](https://ai.google.dev/gemini-api/docs/generate-content/voice-design#prompting-best-practices-for-voice-design), while Drama 3 receives it as a character description in the [scene prompt's system message](https://arxiv.org/html/2610.18010v1#A2). Neither adapter sends our trait array as separate model controls. This does not establish that a trait list could never help a particular model; the generated voice still needs listening and evaluation.
 
@@ -904,6 +904,22 @@ sample_true_peak_db = -1.5
 ```
 
 Set `normalize_samples = false` to audition the original levels. Loudness targets accept -40 through -10 LUFS; the true-peak ceiling accepts -9 through 0 dB. Changing either setting creates new cached playback copies automatically. Normalization uses the configured `render.ffmpeg` executable and never starts a speech model.
+
+### Accent cues
+
+Drama 3 keeps the basic sound of a voice from its reference recording, but it does not reliably reproduce an accent from the recording alone. In blind listening tests on six accented voices, the take that was told the accent was preferred in 9 of 11 sets, and the plain take in none. A voice can therefore have a short **accent cue**, such as `heavy Brooklyn accent`, that opens every line spoken in that voice, ahead of the line's own delivery direction:
+
+```text
+[heavy Brooklyn accent; raspy, threatening] Mr. Derrins,
+```
+
+Lines with inline performance controls get the cue as their own leading direction, and a styled span returns to it afterwards. Set it in casting with `E`: the fourth field shows the current cue and, when the voice description names an accent, a suggestion taken from it (`=` uses the suggestion). Without the menu, use:
+
+```bash
+audiobook-render cast BOOK --action edit --voice-id VOICE_ID --accent "heavy Brooklyn accent"
+```
+
+Keep the cue to a few words naming the accent (at most 80 characters, plain text). An empty cue (`-` in the menu, `--accent ""`) clears it. Cues are saved per logical voice in the book's `voice-accents.json` and inherited by continued books, nearest book first; a later book can clear an inherited cue for itself. No recording is regenerated. Setting, changing or clearing a cue changes the synthesis input of that voice's lines only, so the next render re-renders those lines and reuses every other voice's takes. Voices without a cue render exactly as before. Vocal traits are a separate, longer description and are still not sent with each line.
 
 ### Reference clips
 

@@ -326,6 +326,12 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             script = field("New script (Enter keeps current; B cancels): ")
             say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
             traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
+            say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)"))
+            suggestion = row.get("accent_suggestion") or ""
+            if suggestion and suggestion != row.get("accent"):
+                say("From the description: " + suggestion)
+            accent = field("New accent cue (Enter keeps current; " + ("= uses the suggestion; " if suggestion else "")
+                           + "- clears; B cancels): ")
         except KeyboardInterrupt:
             say("\nEdit cancelled. No changes saved or voice generated.")
             return None
@@ -336,6 +342,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             edits["reference_text"] = script
         if traits:
             edits["speech_traits"] = "" if traits == "-" else traits
+        if accent:
+            edits["accent"] = "" if accent == "-" else suggestion if accent == "=" and suggestion else accent
         if edits:
             session.update_prompt(row["voice_id"], **edits)
         return edits
@@ -443,7 +451,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                     voice = session.regenerate(row["voice_id"], voice_designer=voice_designer)
                     last_voice_id = row["voice_id"]
                     from .reference_clips import clip_summary
-                    say(f"New voice saved and selected: {clip_summary(voice, session.config)}.")
+                    say(f"New voice saved and selected: {clip_summary(voice, getattr(session, 'config', {}))}.")
                     play(row, voice)
                 else:
                     row = choose(rows, action)
@@ -468,6 +476,7 @@ def casting_command(args, bundle, config):
     keep_unselected = getattr(args, "keep_unselected", False)
     include_inherited = getattr(args, "include_inherited", False)
     speech_traits = getattr(args, "speech_traits", None)
+    accent = getattr(args, "accent", None)
     if include_inherited and action != "regenerate-all":
         raise ValueError("--include-inherited is used with --action regenerate-all")
     if action in {"generate", "edit", "play", "accept", "recover"} and not args.voice_id:
@@ -480,8 +489,10 @@ def casting_command(args, bundle, config):
         raise ValueError("--prompt-file and --text-file are used with --action generate or edit")
     if speech_traits is not None and action not in {"generate", "edit"}:
         raise ValueError("--speech-traits is used with --action generate or edit")
-    if action == "edit" and not (args.prompt_file or args.text_file or speech_traits is not None):
-        raise ValueError("Provide --prompt-file, --text-file, or --speech-traits to save casting edits")
+    if accent is not None and action not in {"generate", "edit"}:
+        raise ValueError("--accent is used with --action generate or edit")
+    if action == "edit" and not (args.prompt_file or args.text_file or speech_traits is not None or accent is not None):
+        raise ValueError("Provide --prompt-file, --text-file, --speech-traits, or --accent to save casting edits")
     if args.voice_id and action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "normalize-samples"}:
         raise ValueError("--voice-id is not used with this action")
     if action == "recover" and not attempt_file:
@@ -528,7 +539,7 @@ def casting_command(args, bundle, config):
         row = next((r for r in rows if r["voice_id"] == args.voice_id), None)
         if args.voice_id and row is None:
             raise ValueError("Voice ID is not in the bundle cast")
-        if args.prompt_file or args.text_file or speech_traits is not None:
+        if args.prompt_file or args.text_file or speech_traits is not None or accent is not None:
             edits = {}
             if args.prompt_file:
                 edits["prompt"] = args.prompt_file.read_text(encoding="utf-8")
@@ -536,6 +547,8 @@ def casting_command(args, bundle, config):
                 edits["reference_text"] = args.text_file.read_text(encoding="utf-8")
             if speech_traits is not None:
                 edits["speech_traits"] = speech_traits
+            if accent is not None:
+                edits["accent"] = accent
             session.update_prompt(args.voice_id, **edits)
         if action == "interactive":
             run_casting(session, player)

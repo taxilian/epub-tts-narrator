@@ -373,6 +373,8 @@ class CastingSession:
         cast = self.bundle["cast"]
         character_names = {character["id"]: character["name"] for character in cast["characters"]}
         trait_overrides = speech_trait_overrides(self.bundle, self.config)
+        from .speech_traits import accent_overrides, suggest_accent
+        accents = accent_overrides(self.bundle, self.config)
         rows = []
         for voice_id, profile in self._profiles.items():
             selected = self.store.load(voice_id)
@@ -434,7 +436,9 @@ class CastingSession:
                 "description": profile["description"],
                 "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
                                   else speech_traits(profile)),
+                "accent": accents.get(voice_id, ""),
                 **draft,
+                "accent_suggestion": suggest_accent(draft.get("prompt") or profile["description"]),
                 "selected": selected,
                 "regeneration": self.store.regeneration_status(voice_id),
                 "candidates": self.store.list_candidates(voice_id),
@@ -472,12 +476,23 @@ class CastingSession:
                 "canonical_voice_id": after[voice_id],
                 "affected_voice_ids": [item for item in self._profiles if before[item] != after[item]]}
 
-    def update_prompt(self, voice_id, prompt=None, reference_text=None, speech_traits=None):
+    def update_prompt(self, voice_id, prompt=None, reference_text=None, speech_traits=None, accent=None):
         self._profile(voice_id)
         requested_id = voice_id
         if speech_traits is not None and speech_traits != "":
             from ..speech_traits import validate_speech_traits
             validate_speech_traits(speech_traits)
+        if accent is not None and accent != "":
+            from .speech_traits import validate_accent
+            validate_accent(accent)
+        if accent is not None:
+            # The accent cue is the logical voice's render choice, saved apart
+            # from its draft; nothing is regenerated.
+            with self._locked():
+                from .speech_traits import save_accent
+                save_accent(self.bundle, self.config, requested_id, accent)
+            if prompt is None and reference_text is None and speech_traits is None:
+                return {"accent": accent}
         if prompt is not None:
             _validate_text(prompt, "Voice prompt", MAX_PROMPT_CHARACTERS)
         if reference_text is not None:
@@ -512,7 +527,8 @@ class CastingSession:
                         from .common import write_private
                         write_private(path, previous.decode("utf-8"))
                 raise
-        return {**deepcopy(draft), **({"speech_traits": speech_traits} if speech_traits is not None else {})}
+        return {**deepcopy(draft), **({"speech_traits": speech_traits} if speech_traits is not None else {}),
+                **({"accent": accent} if accent is not None else {})}
 
     def prepare_models(self, *, generation=False):
         """CLI-only setup happens before changing selections or calling a designer."""

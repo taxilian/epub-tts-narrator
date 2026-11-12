@@ -303,7 +303,7 @@ class CastingTerminalTests(unittest.TestCase):
             row["sample_source"] = {"kind": "book_excerpt", "chapter_title": "Chapter 4"}
 
         self.session.prepare_samples = prepare
-        self.run_ui("g1", "", "", "", "q")
+        self.run_ui("g1", "", "", "", "", "q")
         self.assertEqual(self.session.events[0], ("prepare_samples",))
         self.assertEqual(self.session.row("v1")["candidates"][0]["reference_text"], script)
         self.assertEqual(self.session.row("v1")["selected"]["reference_text"], script)
@@ -313,13 +313,13 @@ class CastingTerminalTests(unittest.TestCase):
     def test_fallback_script_is_explained_without_an_extra_menu_step(self):
         self.ready()
         self.session.row("v1")["sample_source"] = {"kind": "fallback"}
-        self.run_ui("g1", "", "", "", "q")
+        self.run_ui("g1", "", "", "", "", "q")
         self.assertTrue(any("Fallback script:" in line for line in self.output))
-        self.assertEqual(len(self.prompts), 5)
+        self.assertEqual(len(self.prompts), 6)
 
     def test_regeneration_edits_vocal_traits_with_description_and_script(self):
         self.ready()
-        self.run_ui("G1", "A warm voice.", "A new script.", "Soft Irish accent; measured pace.", "q")
+        self.run_ui("G1", "A warm voice.", "A new script.", "Soft Irish accent; measured pace.", "", "q")
         self.assertIn(("edit", "v1", {"prompt": "A warm voice.", "reference_text": "A new script.",
                                      "speech_traits": "Soft Irish accent; measured pace."}), self.session.events)
         self.assertIn("Vocal traits: A light accent.", self.output)
@@ -328,7 +328,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_e_edits_only_traits_without_generating_or_replacing_sample(self):
         self.ready()
         selected = deepcopy(self.session.row("v1")["selected"])
-        self.run_ui("E 1", "", "", "Rounded vowels; deliberate cadence.", "q")
+        self.run_ui("E 1", "", "", "Rounded vowels; deliberate cadence.", "", "q")
         self.assertEqual(self.session.events, [
             ("edit", "v1", {"speech_traits": "Rounded vowels; deliberate cadence."})])
         self.assertEqual(self.session.row("v1")["selected"], selected)
@@ -337,14 +337,14 @@ class CastingTerminalTests(unittest.TestCase):
 
     def test_e_without_number_uses_last_voice_and_dash_clears_traits(self):
         self.ready()
-        self.run_ui("2", "E", "", "", "-", "q")
+        self.run_ui("2", "E", "", "", "-", "", "q")
         self.assertIn(("edit", "vn", {"speech_traits": ""}), self.session.events)
         self.assertEqual(self.session.row("vn")["speech_traits"], "")
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav"])
 
     def test_e_can_edit_description_and_script_without_regeneration(self):
         self.ready()
-        self.run_ui("e", "1", "A clear voice.", "My new script.", "", "q")
+        self.run_ui("e", "1", "A clear voice.", "My new script.", "", "", "q")
         self.assertEqual(self.session.events, [
             ("edit", "v1", {"prompt": "A clear voice.", "reference_text": "My new script."})])
         self.assertEqual(self.player.played, [])
@@ -352,7 +352,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_empty_edit_and_cancelled_selection_do_not_write_changes(self):
         self.ready()
         before = deepcopy(self.session.data)
-        self.run_ui("e", "", "E1", "", "", "", "q")
+        self.run_ui("e", "", "E1", "", "", "", "", "q")
         self.assertEqual(self.session.events, [])
         self.assertEqual(self.session.data, before)
 
@@ -397,7 +397,7 @@ class CastingTerminalTests(unittest.TestCase):
 
     def test_e_explains_shared_description_and_character_specific_traits_before_editing(self):
         self.session = SharedSessionDouble()
-        self.run_ui("E 1", "", "", "", "q")
+        self.run_ui("E 1", "", "", "", "", "q")
         notice = next(line for line in self.output if "Description and script edits affect the shared voice" in line)
         self.assertIn("used by Mara", notice)
         self.assertIn("Vocal traits apply only to this character", notice)
@@ -423,7 +423,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertNotIn("needs acceptance", "\n".join(self.output).lower())
 
     def test_generate_edits_both_fields_once_and_automatically_selects_and_plays(self):
-        self.run_ui("G1", "A warm, older voice.", "The river is quiet.", "", "q")
+        self.run_ui("G1", "A warm, older voice.", "The river is quiet.", "", "", "q")
         row = self.session.row("v1")
         self.assertEqual(len(row["candidates"]), 2)
         self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
@@ -437,28 +437,28 @@ class CastingTerminalTests(unittest.TestCase):
         ])
         self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
                          [("regenerate", "v1")])
-        self.assertEqual(len(self.prompts), 5)
+        self.assertEqual(len(self.prompts), 6)
         self.assertFalse(self.player.playing)
 
     def test_plain_g_asks_for_character_and_blank_edits_keep_current_text(self):
-        self.run_ui("g", "2", "", "", "", "q")
+        self.run_ui("g", "2", "", "", "", "", "q")
         row = self.session.row("vn")
         self.assertEqual(row["selected"]["candidate_id"], "vn-take-2")
         self.assertEqual(row["selected"]["reference_text"], "Hello there.")
         self.assertEqual(self.player.played, ["/fixtures/vn-2.wav"])
         self.assertFalse(any(event[0] == "edit" for event in self.session.events))
-        self.assertEqual(len(self.prompts), 6)
+        self.assertEqual(len(self.prompts), 7)
 
     def test_plain_g_defaults_to_last_played_character(self):
-        self.run_ui("2", "G", "", "", "", "q")
+        self.run_ui("2", "G", "", "", "", "", "q")
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/vn-2.wav"])
         self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
                          [("regenerate", "vn")])
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
-        self.assertEqual(len(self.prompts), 6)
+        self.assertEqual(len(self.prompts), 7)
 
     def test_g_with_spaced_number_edits_only_provided_field(self):
-        self.run_ui("G 1", "", "A new sample.", "", "q")
+        self.run_ui("G 1", "", "A new sample.", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "edit"], [
             ("edit", "v1", {"reference_text": "A new sample."}),
         ])
@@ -469,7 +469,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_gg_selects_gemini_inside_menu_and_edits_selects_and_plays(self):
         self.ready()
         original_config = deepcopy(self.session.config)
-        self.run_ui("GG 1", "A bright voice.", "A different sample.", "", "q")
+        self.run_ui("GG 1", "A bright voice.", "A different sample.", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "designer"],
                          [("designer", "gemini")])
         self.assertEqual(self.session.row("v1")["selected"]["reference_text"], "A different sample.")
@@ -477,7 +477,7 @@ class CastingTerminalTests(unittest.TestCase):
                          "A bright voice.")
         self.assertEqual(self.player.played, ["/fixtures/v1-2.wav"])
         self.assertEqual(self.session.config, original_config)
-        self.assertEqual(len(self.prompts), 5)
+        self.assertEqual(len(self.prompts), 6)
         self.assertTrue(any("GG [number]" in line and "Gemini" in line for line in self.output))
 
     def test_cancel_at_each_edit_field_discards_staged_changes_without_regeneration(self):
@@ -503,7 +503,7 @@ class CastingTerminalTests(unittest.TestCase):
 
     def test_compact_gg_then_g_choose_gemini_then_local(self):
         self.ready()
-        self.run_ui("gg1", "", "", "", "G 1", "", "", "", "q")
+        self.run_ui("gg1", "", "", "", "", "G 1", "", "", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "designer"],
                          [("designer", "gemini"), ("designer", "local")])
         self.assertEqual(self.player.played, ["/fixtures/v1-2.wav", "/fixtures/v1-3.wav"])
@@ -535,7 +535,7 @@ class CastingTerminalTests(unittest.TestCase):
 
     def test_compact_g11_and_existing_g_commands_choose_each_provider(self):
         self.ready()
-        self.run_ui("g111", "", "", "", "gg1", "", "", "", "g1", "", "", "", "q")
+        self.run_ui("g111", "", "", "", "", "gg1", "", "", "", "", "g1", "", "", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "designer"],
                          [("designer", "elevenlabs"), ("designer", "gemini"), ("designer", "local")])
 
@@ -554,18 +554,18 @@ class CastingTerminalTests(unittest.TestCase):
     def test_failed_g11_preserves_existing_voice(self):
         self.ready()
         self.session.generation_error = RuntimeError("ElevenLabs API request failed")
-        self.run_ui("G11 1", "", "", "", "1", "q")
+        self.run_ui("G11 1", "", "", "", "", "1", "q")
         self.assertTrue(any("ElevenLabs API request failed" in line for line in self.output))
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
 
     def test_plain_gg_defaults_to_last_played_character(self):
         self.ready()
-        self.run_ui("2", "GG", "", "", "", "q")
+        self.run_ui("2", "GG", "", "", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "designer"],
                          [("designer", "gemini")])
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/vn-2.wav"])
-        self.assertEqual(len(self.prompts), 6)
+        self.assertEqual(len(self.prompts), 7)
 
     def test_invalid_gg_numbers_do_not_edit_or_generate(self):
         self.ready()
@@ -577,7 +577,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_failed_gg_keeps_existing_voice_and_returns_to_menu(self):
         self.ready()
         self.session.generation_error = RuntimeError("Gemini API request failed")
-        self.run_ui("GG 1", "", "", "", "1", "q")
+        self.run_ui("GG 1", "", "", "", "", "1", "q")
         self.assertTrue(any("Gemini API request failed" in line for line in self.output))
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
@@ -585,7 +585,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_shared_role_plays_immediately_and_g_updates_only_its_character(self):
         self.session = SharedSessionDouble()
         unrelated = deepcopy(self.session.row("v2"))
-        self.run_ui("1", "G", "A clear voice.", "", "", "q")
+        self.run_ui("1", "G", "A clear voice.", "", "", "", "q")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav", "/fixtures/v1-2.wav"])
         self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
                          [("regenerate", "vn")])
@@ -597,7 +597,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertIn("shares Mara", "\n".join(self.output))
         self.assertTrue(any("Regeneration updates every linked role" in line
                             for line in self.output))
-        self.assertEqual(len(self.prompts), 6)
+        self.assertEqual(len(self.prompts), 7)
         self.assertFalse(any("accept" in prompt.lower() or "confirm" in prompt.lower()
                              for prompt in self.prompts))
 
@@ -610,7 +610,7 @@ class CastingTerminalTests(unittest.TestCase):
     def test_failed_regeneration_preserves_current_voice_and_menu_remains_available(self):
         self.ready()
         self.session.generation_error = RuntimeError("The transcript did not match.")
-        self.run_ui("G1", "", "", "", "1", "q")
+        self.run_ui("G1", "", "", "", "", "1", "q")
         self.assertTrue(any("The transcript did not match." in line for line in self.output))
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
