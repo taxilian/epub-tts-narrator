@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import threading
 import time
 
-from .run_events import FAILURE, FINISHED, LOG, OUTCOME, SEVERITIES, STATUS, STATUS_REMOVED
+from .run_events import FAILURE, FINISHED, LOG, OUTCOME, PROGRESS, SEVERITIES, STATUS, STATUS_REMOVED
 
 
 SEVERITY_LEVELS = ("info", "warning", "error", "debug")  # cycle order; "debug" shows everything
@@ -81,6 +81,7 @@ class RunModel:
         self.filter = RunFilter()
         self.seen = {"book": set(), "chapter": set(), "worker": set()}
         self.stopping = False
+        self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
@@ -119,6 +120,8 @@ class RunModel:
             elif event.kind == FAILURE:
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(event.data or {}), "attempt": self.attempt})
+            elif event.kind == PROGRESS:
+                self.progress = dict(event.data or {})
             elif event.kind == FINISHED:
                 self.finish(event.data.get("exit_code"), event.data.get("error"))
         self.changed.set()
@@ -153,6 +156,7 @@ class RunModel:
             self.completed.clear()
             self.rows.clear()
             self.stopping = False
+            self.progress = None
         self.changed.set()
 
     @property
@@ -218,6 +222,12 @@ class RunModel:
                          if row["snapshot"] and row["snapshot"].get("remaining")]
             if remaining and self.running:
                 parts.append(f"~{_duration(max(remaining))} left in active chapters")
+            progress = self.progress
+            if progress and self.running:
+                parts.append(f"step {progress['step']}/{progress['steps']} {progress['step_name']} "
+                             f"{progress['step_fraction']:.0%}")
+                if progress.get("streams"):
+                    parts.append(f"{progress['streams']} model request(s) active")
             if self.rows:
                 parts.append(f"{len(self.rows)} chapter(s) active")
             done = sum(self.completed.values())

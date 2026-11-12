@@ -22,6 +22,10 @@ from .runpod_api import RunpodAmbiguousOutcome
 # Long-running commands that open the full-screen run shell on an interactive
 # terminal (with the optional tui extra and without --plain).
 SHELL_COMMANDS = frozenset({"render", "assemble", "import-voices", "create-voices"})
+# Bulk casting runs in the shell too; a rerun of regenerate-all would replace
+# every voice again, so only the others offer R to resume.
+CAST_SHELL_ACTIONS = {"generate-missing": True, "prepare-samples": True, "normalize-samples": True,
+                      "regenerate-all": False}
 
 
 def parser():
@@ -322,7 +326,8 @@ def doctor(config):
 
 def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
-    if not in_shell and args.command in SHELL_COMMANDS:
+    cast_bulk = args.command == "cast" and getattr(args, "action", None) in CAST_SHELL_ACTIONS
+    if not in_shell and (args.command in SHELL_COMMANDS or cast_bulk):
         from epub_tts_narrator.tui_support import wants_tui
         if wants_tui(args):
             # The same command, inside the full-screen run shell; errors and
@@ -330,8 +335,11 @@ def main(argv=None, *, in_shell=False):
             from epub_tts_narrator.run_shell import run_in_shell
             books = args.bundle if isinstance(args.bundle, list) else [args.bundle]
             title = f"{args.command} — " + ", ".join(Path(book).name for book in books)
+            if cast_bulk:
+                title = f"cast {args.action} — " + Path(args.bundle).name
             return run_in_shell(lambda: main(argv, in_shell=True), title=title,
-                                graceful_render_stop=args.command == "render")
+                                graceful_render_stop=args.command == "render",
+                                resumable=CAST_SHELL_ACTIONS.get(args.action, True) if cast_bulk else True)
     engine = verifier = None
     config = None
     interrupts = None

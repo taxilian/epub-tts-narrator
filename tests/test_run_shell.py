@@ -260,6 +260,54 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                           "Completed audiobook: /books/fixture/audiobook"])
         self.assertEqual(self.model.logs[-1][1].severity, "info")
 
+    async def test_a_command_s_own_terminal_question_becomes_a_dialog(self):
+        import sys
+        from epub_tts_narrator.tui_widgets import PromptBridge, PromptScreen
+        answers = []
+
+        def command():
+            answers.append(sys.stdout.isatty())
+            print("3 attribution finding(s).")
+            print("[A] accept all / [E] edit-review / [L] leave unchanged (quit): ", end="", flush=True)
+            answers.append(sys.stdin.readline())
+            return 0
+
+        bridge = PromptBridge(None, on_answer=lambda answer: self.bus.log("> " + answer))
+        app = self.make_app(command)
+        app.interactive_input, app.bridge, bridge.app = True, bridge, app
+        previous = sys.stdin
+        sys.stdin = bridge.input
+        self.addCleanup(setattr, sys, "stdin", previous)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            self.assertIn("[A] accept all", app.screen.text)
+            self.assertIn("3 attribution finding(s).", app.screen.text)
+            await pilot.press("e", "enter")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual(answers, [True, "e\n"])
+        self.assertIn("> e", [event.text for _, event in self.model.logs])
+
+    async def test_resume_can_run_a_different_command_and_non_resumable_runs_refuse(self):
+        calls = []
+
+        def command():
+            calls.append("first")
+            print("Fresh verification run: run-42")
+            return 1
+
+        app = self.make_app(command)
+        app.resume_command = lambda model: (lambda: calls.append("resume") or 0)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: not self.model.running)
+            app.resumable = False
+            await pilot.press("R")
+            await pilot.pause()
+            self.assertEqual(calls, ["first"])
+            app.resumable = True
+            await pilot.press("R")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual(calls, ["first", "resume"])
+
     async def test_filters_and_tabs(self):
         release = threading.Event()
 
@@ -292,7 +340,8 @@ class RendererCliShellTests(unittest.TestCase):
         with (patch("epub_tts_narrator.tui_support.wants_tui", return_value=True),
               patch("epub_tts_narrator.run_shell.run_in_shell", return_value=0) as shell):
             self.assertEqual(cli.main(["render", "book-a", "book-b"]), 0)
-            self.assertEqual(shell.call_args.kwargs, {"title": "render — book-a, book-b", "graceful_render_stop": True})
+            self.assertEqual(shell.call_args.kwargs, {"title": "render — book-a, book-b", "graceful_render_stop": True,
+                                                      "resumable": True})
             cli.main(["assemble", "book-a"])
             self.assertFalse(shell.call_args.kwargs["graceful_render_stop"])
             with patch.object(cli, "load_config", side_effect=RuntimeError("stop here")):
@@ -306,6 +355,70 @@ class RendererCliShellTests(unittest.TestCase):
               patch("sys.stderr", new_callable=io.StringIO)):
             self.assertEqual(cli.main(["render", "book-a", "--plain"]), 2)
             shell.assert_not_called()
+
+class AnalyzerShellTests(unittest.TestCase):
+    def test_model_commands_open_the_shell_and_fresh_runs_resume_by_their_printed_id(self):
+        from epub_tts_narrator import cli
+        with (patch("epub_tts_narrator.tui_support.wants_tui", return_value=True),
+              patch("epub_tts_narrator.run_shell.run_in_shell", return_value=0) as shell):
+            self.assertEqual(cli.main(["verify-attribution", "/books/one", "--chapter", "3"]), 0)
+            kwargs = shell.call_args.kwargs
+            self.assertEqual((kwargs["title"], kwargs["interactive_input"]), ("verify-attribution — one", True))
+            model = RunModel("x")
+            bus = EventBus()
+            bus.subscribe(model.on_event)
+            self.assertIsNone(kwargs["resume_command"](model))
+            bus.log("Fresh verification run: 20261112-abc")
+            with patch.object(cli, "main", return_value=0) as rerun:
+                kwargs["resume_command"](model)()
+            rerun.assert_called_once_with(["verify-attribution", "/books/one", "--chapter", "3", "--resume",
+                                           "20261112-abc"], in_shell=True)
+            cli.main(["analyze", "book.epub"])
+            self.assertIsNone(shell.call_args.kwargs["resume_command"])
+        with (patch("epub_tts_narrator.tui_support.wants_tui", return_value=False),
+              patch("epub_tts_narrator.run_shell.run_in_shell") as shell,
+              patch("sys.stderr", new_callable=io.StringIO)):
+            self.assertEqual(cli.main(["analyze", "/missing/book.epub", "--plain"]), 1)
+            shell.assert_not_called()
+
+    def test_bulk_casting_opens_the_shell_and_only_safe_reruns_resume(self):
+        from epub_tts_narrator.renderer import cli
+        with (patch("epub_tts_narrator.tui_support.wants_tui", return_value=True),
+              patch("epub_tts_narrator.run_shell.run_in_shell", return_value=0) as shell):
+            cli.main(["cast", "book-a", "--action", "generate-missing"])
+            self.assertEqual((shell.call_args.kwargs["title"], shell.call_args.kwargs["resumable"]),
+                             ("cast generate-missing — book-a", True))
+            cli.main(["cast", "book-a", "--action", "regenerate-all"])
+            self.assertFalse(shell.call_args.kwargs["resumable"])
+            self.assertEqual(shell.call_count, 2)
+
+    def test_the_bus_stream_console_reports_stage_and_model_streams(self):
+        from epub_tts_narrator.stream_progress import BusStreamConsole
+        bus = EventBus()
+        model = RunModel("analyze")
+        bus.subscribe(model.on_event)
+        console = BusStreamConsole(bus, draw_interval=0)
+        console.progress("Attributing voices 1/4 complete")
+        console.set_progress(0.6, "attribution")
+        self.assertEqual((model.progress["step_name"], model.progress["streams"]), ("Attribution", 0))
+        console.observe({"request_id": "r1", "phase": "started"})
+        console.observe({"request_id": "r1", "phase": "streaming", "received": 2048, "events": 3})
+        self.assertEqual(model.progress["streams"], 1)
+        # The console's once-a-second heartbeat may draw this update a moment later.
+        deadline = time.monotonic() + 3
+        while "2.0 KiB received" not in model.progress["totals"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIn("2.0 KiB received", model.progress["totals"])
+        self.assertIn("step 2/4 Attribution", model.summary())
+        console.observe({"request_id": "r1", "phase": "completed"})
+        console.close()
+        self.assertEqual([event.text for _, event in model.logs], ["Attributing voices 1/4 complete"])
+
+    def test_captured_lines_show_what_a_terminal_would(self):
+        from epub_tts_narrator.tui_widgets import _visible
+        self.assertEqual(_visible("\r\x1b[2Kspeech 3/9\rspeech 4/9"), "speech 4/9")
+        self.assertEqual(_visible("\x1b[1;33mtarget\x1b[0m line\r"), "target line")
+
 
 if __name__ == "__main__":
     unittest.main()

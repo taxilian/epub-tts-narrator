@@ -55,6 +55,7 @@ class RunApp(CapturePrintMixin, App):
     CSS = BASE_CSS + """
     #rows, #workers, #errors { height: 1fr; }
     #sched { height: auto; color: $text-muted; padding: 0 1; }
+    #progress { height: auto; padding: 0 1; }
     #filters { height: auto; color: $text-muted; padding: 0 1; }
     #search { display: none; }
     #search.visible { display: block; }
@@ -78,8 +79,13 @@ class RunApp(CapturePrintMixin, App):
                 tooltip="Stop at safe boundaries (press again to stop immediately)"),
     ]
 
-    def __init__(self, model, bus, command, *, interrupt_scope=raise_interrupts, title="Run"):
+    def __init__(self, model, bus, command, *, interrupt_scope=raise_interrupts, title="Run",
+                 interactive_input=False, resumable=True, bridge=None, resume_command=None):
         super().__init__()
+        self.resume_command = resume_command
+        self.interactive_input = interactive_input
+        self.resumable = resumable
+        self.bridge = bridge
         self.model = model
         self.bus = bus
         self.command = command
@@ -96,6 +102,7 @@ class RunApp(CapturePrintMixin, App):
         yield Header()
         with TabbedContent(initial="status", id="tabs"):
             with TabPane("Status", id="status"):
+                yield Static("", id="progress")
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="sched")
             with TabPane("Workers", id="workers-tab"):
@@ -110,7 +117,11 @@ class RunApp(CapturePrintMixin, App):
 
     def on_mount(self):
         self.title = self.run_title
-        self.capture_prints()
+        if self.interactive_input and self.bridge is not None:
+            # Commands that ask only on a terminal keep asking, through dialogs.
+            self.capture_prints(stdout_tty=True, tee=self.bridge.output)
+        else:
+            self.capture_prints()
         self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
         self.query_one("#workers", DataTable).add_columns("Worker", "Book", "Chapter", "Block", "Doing", "For")
         self.query_one("#errors", DataTable).add_columns("Run", "Book", "Chapter", "Kind", "Error")
@@ -181,6 +192,12 @@ class RunApp(CapturePrintMixin, App):
             rows.append((str(key), cells))
         sync_table(self.query_one("#rows", DataTable), rows)
         self.query_one("#sched", Static).update(self._sched_line())
+        progress = model.progress if model.running else None
+        self.query_one("#progress", Static).update(
+            "" if not progress else "\n".join(line for line in (
+                f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
+                f"{progress['step_fraction']:.0%} · {progress['stage']}",
+                progress.get("activity", ""), progress.get("totals", "")) if line))
         workers = []
         for worker, tasks in sorted(model.workers().items()):
             for book, chapter, block, phase, elapsed in tasks:
@@ -314,9 +331,18 @@ class RunApp(CapturePrintMixin, App):
         if self.model.running:
             self.notify("Still running; resume is for a run that ended with problems", severity="warning")
             return
+        if not self.resumable:
+            self.notify("Running this command again would redo finished work; rerun it yourself if you mean to.",
+                        severity="warning", timeout=8)
+            return
+        command = self.resume_command(self.model) if self.resume_command is not None else None
         self.model.restart()
         self.bus.log(f"Resuming: attempt {self.model.attempt}", severity="warning")
         self.action_tab("status")
+        if command is not None:
+            # Commands that start fresh on rerun resume the run they printed.
+            self.command = command
+            self.resume_command = None
         self.start_command()
 
 
@@ -339,25 +365,40 @@ def _render_interrupts(app):
     return scope
 
 
-def run_in_shell(command, *, title, graceful_render_stop=False, closing_output=None):
+def run_in_shell(command, *, title, graceful_render_stop=False, interactive_input=False, resumable=True,
+                 resume_command=None, closing_output=None):
     """Run ``command()`` inside the run shell; return its result (or re-raise its error).
 
     Render boards, prints and terminal prompts go to the screen while it is
     open. With ``graceful_render_stop`` Ctrl-C stops a render at safe
     boundaries (a second press exits at once); otherwise it raises
-    ``KeyboardInterrupt`` in the command. When the screen closes, the final
-    messages and every error are printed so the terminal keeps a record.
+    ``KeyboardInterrupt`` in the command. With ``interactive_input`` the
+    command's own terminal questions (``sys.stdin.readline`` after a printed
+    question) are asked in dialogs. ``resumable`` allows ``R`` to run the
+    command again; ``resume_command(model)`` may return a different command
+    for that (one that resumes the printed run ID). When the screen closes, the final messages and every error
+    are printed so the terminal keeps a record.
     """
     from .renderer.progress import shell_board
     bus = EventBus()
     model = RunModel(title)
     bus.subscribe(model.on_event)
-    app = RunApp(model, bus, command, title=title)
+    from .run_events import set_active_bus
+    bridge = PromptBridge(None, on_answer=lambda answer: bus.log("> " + (answer or "(no answer)")))
+    app = RunApp(model, bus, command, title=title, interactive_input=interactive_input,
+                 resumable=resumable, bridge=bridge, resume_command=resume_command)
+    bridge.app = app
     if graceful_render_stop:
         app.interrupt_scope = _render_interrupts(app)
-    bridge = PromptBridge(app)
-    with shell_board(bus), prompt_streams(bridge.input, bridge.output):
-        app.run()
+    previous_bus, previous_stdin = set_active_bus(bus), sys.stdin
+    try:
+        if interactive_input:
+            sys.stdin = bridge.input
+        with shell_board(bus), prompt_streams(bridge.input, bridge.output):
+            app.run()
+    finally:
+        sys.stdin = previous_stdin
+        set_active_bus(previous_bus)
     output = closing_output or (lambda line: print(line, file=sys.stderr))
     for line in model.closing_lines():
         output(line)

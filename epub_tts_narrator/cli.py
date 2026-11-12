@@ -382,17 +382,54 @@ def parser():
     export.add_argument("input", type=Path)
     export.add_argument("-o", "--output", type=Path, required=True)
     export.add_argument("--allow-review", action="store_true", help="Compatibility option; analysis notes do not block export")
+    from .tui_support import add_plain_option
+    for name in SHELL_COMMANDS:
+        add_plain_option(commands.choices[name])
     return root
 
 
-def main(argv=None):
+# Long-running model commands that open the full-screen run shell on an
+# interactive terminal (with Textual installed and without --plain).
+SHELL_COMMANDS = ("analyze", "review-attribution", "verify-attribution", "refresh-directions",
+                  "resolve-speakers", "refresh-voice-profiles")
+# Commands whose ordinary rerun starts fresh; the shell resumes them with the
+# run ID they printed (--resume RUN_ID).
+_RUN_ID = {"verify-attribution": re.compile(r"(?:Fresh|Resuming) verification run: (\S+)"),
+           "refresh-directions": re.compile(r"(?:Fresh|Resuming) direction run: (\S+)")}
+
+
+def _shell(argv, args):
+    """Run this same command inside the run shell; its questions become dialogs."""
+    from .run_shell import run_in_shell
+    argv = list(sys.argv[1:] if argv is None else argv)
+    target = getattr(args, "input", None) or getattr(args, "directory", None) or (getattr(args, "directories", None) or [""])[0]
+    resume = None
+    if args.command in _RUN_ID and "--resume" not in argv:
+        def resume(model):
+            found = next((match.group(1) for _, event in reversed(model.logs)
+                          if (match := _RUN_ID[args.command].search(event.text))), None)
+            return (lambda: main([*argv, "--resume", found], in_shell=True)) if found else None
+    return run_in_shell(lambda: main(argv, in_shell=True), title=f"{args.command} — {Path(target).name}",
+                        interactive_input=True, resume_command=resume)
+
+
+def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
+    if not in_shell and args.command in SHELL_COMMANDS:
+        from .tui_support import wants_tui
+        if wants_tui(args):
+            return _shell(argv, args)
     model_cache = None
     title_only_resume = False
     original_stderr = sys.stderr
-    stream_console = StreamConsole(original_stderr)
+    from .run_events import active_bus
+    from .stream_progress import BusStreamConsole
+    bus = active_bus()
+    # Inside the full-screen run shell, the same live status goes to its screen.
+    stream_console = BusStreamConsole(bus) if bus is not None else StreamConsole(original_stderr)
     previous_observer = set_default_stream_observer(stream_console.observe)
-    if stream_console.enabled:
+    if stream_console.enabled and bus is None:
+        # (The run shell already captures stderr, including speaker questions.)
         sys.stderr = stream_console
 
     def progress(message):

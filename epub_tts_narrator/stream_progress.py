@@ -179,10 +179,24 @@ class StreamConsole:
             return self.width
 
     def _draw_locked(self, now):
-        states = list(self._active.values())
-        if not states:
+        lines = self._status_lines(now)
+        if lines is None:
             self._clear_locked()
             return
+        first, second = lines
+        width = max(40, self._terminal_width())
+        self._clear_locked()
+        self.stream.write(first[:max(1, width - 1)] + "\n")
+        self.stream.write(second[:max(1, width - 1)] + "\n")
+        self.stream.flush()
+        self._drawn = True
+        self._last_draw = now
+
+    def _status_lines(self, now):
+        """The two live lines (model activity, then totals), or None with no active stream."""
+        states = list(self._active.values())
+        if not states:
+            return None
         oldest = min(state["started"] for state in states)
         received = sum(state["received"] for state in states)
         events = sum(state["events"] for state in states)
@@ -204,13 +218,7 @@ class StreamConsole:
                   f"{step_fraction:.0%} · {self._stage} | elapsed {_seconds(now - oldest)} | "
                   f"{events} events | thought {reasoning:,} chars | "
                   f"answer {content:,} chars | {_size(received)} received")
-        width = max(40, self._terminal_width())
-        self._clear_locked()
-        self.stream.write(first[:max(1, width - 1)] + "\n")
-        self.stream.write(second[:max(1, width - 1)] + "\n")
-        self.stream.flush()
-        self._drawn = True
-        self._last_draw = now
+        return first, second
 
     def _clear_locked(self):
         if not self._drawn:
@@ -218,3 +226,64 @@ class StreamConsole:
         self.stream.write("\x1b[2A\x1b[J")
         self.stream.flush()
         self._drawn = False
+
+
+class BusStreamConsole(StreamConsole):
+    """``StreamConsole`` for a full-screen run shell: the same status, as run events.
+
+    Messages become log events; the two live lines (and the overall stage
+    fraction) become a ``progress`` event the shell shows in its status view.
+    Nothing is drawn on a terminal.
+    """
+
+    def __init__(self, bus, *, draw_interval=0.5):
+        self.bus = bus
+        super().__init__(_NoStream(), draw_interval=draw_interval)
+        self.enabled = True
+
+    def write(self, text):
+        with self._lock:
+            self._pending += text
+            while "\n" in self._pending:
+                line, self._pending = self._pending.split("\n", 1)
+                self.bus.log(line)
+        return len(text)
+
+    def flush(self):
+        with self._lock:
+            if self._pending:
+                self.bus.log(self._pending)
+                self._pending = ""
+
+    def _message_locked(self, message):
+        self.bus.log(message)
+
+    def set_progress(self, fraction, stage):
+        super().set_progress(fraction, stage)
+        with self._lock:
+            if not self._active:
+                # The stage fraction moves between model requests too.
+                self._draw_locked(monotonic())
+
+    def _draw_locked(self, now):
+        lines = self._status_lines(now)
+        step, step_count, step_name, step_fraction = self._step_status()
+        self.bus.publish("progress", data={
+            "overall": self._overall, "stage": self._stage, "step": step, "steps": step_count,
+            "step_name": step_name, "step_fraction": step_fraction, "streams": len(self._active),
+            "activity": lines[0] if lines else "", "totals": lines[1] if lines else ""})
+        self._last_draw = now
+
+    def _clear_locked(self):
+        pass
+
+
+class _NoStream:
+    def isatty(self):
+        return False
+
+    def write(self, text):
+        return len(text)
+
+    def flush(self):
+        pass

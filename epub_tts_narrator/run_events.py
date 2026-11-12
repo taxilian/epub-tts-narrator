@@ -19,8 +19,8 @@ import time
 from typing import Any
 
 
-LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED = (
-    "log", "status", "status_removed", "outcome", "failure", "finished")
+LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED, PROGRESS = (
+    "log", "status", "status_removed", "outcome", "failure", "finished", "progress")
 SEVERITIES = ("debug", "info", "warning", "error")
 
 
@@ -91,7 +91,7 @@ class EventBus:
     def publish(self, kind, text="", *, severity=None, scope=None, data=None):
         event = Event(kind, self._clock(), str(text), severity or "info", dict(scope or {}), data)
         with self._lock:
-            if kind not in (STATUS, STATUS_REMOVED):
+            if kind not in (STATUS, STATUS_REMOVED, PROGRESS):
                 # Live rows refresh every second; only lasting events are replayed.
                 self.history.append(event)
             subscribers = list(self._subscribers)
@@ -113,3 +113,17 @@ class EventBus:
             parsed, body = parse_scope(line, scope)
             events.append(self.publish(LOG, body, severity=severity or classify(body), scope=parsed))
         return events
+
+
+_ACTIVE_BUS = None
+
+
+def set_active_bus(bus):
+    """The run shell's bus while it is open (process-wide; commands run on a worker thread)."""
+    global _ACTIVE_BUS
+    previous, _ACTIVE_BUS = _ACTIVE_BUS, bus
+    return previous
+
+
+def active_bus():
+    return _ACTIVE_BUS

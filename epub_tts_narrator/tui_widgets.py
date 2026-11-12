@@ -18,6 +18,7 @@ optional extra, and nothing else in the package imports it at module level.
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -60,13 +61,17 @@ JOB_STYLES = {QUEUED: "dim", RUNNING: "bold cyan", DONE: "green", FAILED: "bold 
 class _LineWriter:
     """A text stream that hands each complete line to ``deliver(line)`` in the writing thread."""
 
-    def __init__(self, deliver):
+    def __init__(self, deliver, *, tty=False, tee=None):
         self._deliver = deliver
         self._partial = {}
         self._lock = threading.Lock()
+        self._tty = tty
+        self._tee = tee
         self.encoding = "utf-8"
 
     def write(self, text):
+        if self._tee is not None:
+            self._tee.write(text)
         key = threading.get_ident()
         with self._lock:
             pending = self._partial.pop(key, "") + str(text)
@@ -74,15 +79,24 @@ class _LineWriter:
             if rest:
                 self._partial[key] = rest
         for line in lines:
+            line = _visible(line)
             if line.strip():
-                self._deliver(line.rstrip("\r"))
+                self._deliver(line)
         return len(text)
 
     def flush(self):
         pass
 
     def isatty(self):
-        return False
+        return self._tty
+
+
+_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+
+def _visible(line):
+    """What a terminal would show: the text after the last carriage return, without escapes."""
+    return _ESCAPE.sub("", line.rstrip("\r").rsplit("\r", 1)[-1])
 
 
 class CapturePrintMixin:
@@ -95,9 +109,12 @@ class CapturePrintMixin:
     restores the original streams when the app exits.
     """
 
-    def capture_prints(self):
-        sys.stdout = _LineWriter(lambda line: self.on_captured_line(line, False))
-        sys.stderr = _LineWriter(lambda line: self.on_captured_line(line, True))
+    def capture_prints(self, *, stdout_tty=False, tee=None):
+        """``stdout_tty``: report stdout as a terminal, for commands that only
+        ask questions when it is one (their questions then go through ``tee``,
+        a ``PromptBridge`` output, and the bridge's input)."""
+        sys.stdout = _LineWriter(lambda line: self.on_captured_line(line, False), tty=stdout_tty, tee=tee)
+        sys.stderr = _LineWriter(lambda line: self.on_captured_line(line, True), tee=tee)
 
     def on_captured_line(self, text, stderr):  # pragma: no cover - overridden
         pass
@@ -347,7 +364,8 @@ class _BridgeOutput:
 
     def write(self, text):
         with self._bridge.lock:
-            self._bridge.pending += str(text)
+            # Bounded: long runs print far more than any one question needs.
+            self._bridge.pending = (self._bridge.pending + str(text))[-20000:]
         return len(text)
 
     def flush(self):
@@ -376,16 +394,23 @@ class PromptBridge:
     Must never be used from the UI thread itself (that would deadlock).
     """
 
-    def __init__(self, app):
+    CONTEXT_LINES = 30
+
+    def __init__(self, app, *, on_answer=None):
         self.app = app
         self.lock = threading.Lock()
         self.pending = ""
+        self.on_answer = on_answer
         self.output = _BridgeOutput(self)
         self.input = _BridgeInput(self)
 
     def ask(self):
         with self.lock:
-            text, self.pending = self.pending.strip(), ""
+            # Only the latest lines are the question's context; the full text is in the log.
+            lines = [_visible(line) for line in self.pending.split("\n")]
+            text = "\n".join(line for line in lines if line.strip())
+            text = "\n".join(text.split("\n")[-self.CONTEXT_LINES:])
+            self.pending = ""
         answered = threading.Event()
         result = {"value": ""}
 
@@ -395,6 +420,8 @@ class PromptBridge:
 
         self.app.call_from_thread(self.app.push_screen, PromptScreen(text), done)
         answered.wait()
+        if self.on_answer is not None:
+            self.on_answer(result["value"])
         return result["value"]
 
 
