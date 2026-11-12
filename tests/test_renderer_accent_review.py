@@ -121,8 +121,31 @@ class SavedPlanTests(PlannerCase):
         planner = self.planner(split(("the harbor", "Scottish"), ("inland", "Welsh")))
         planner.propose()
         planner.set_why(0, "Fishers")
+        planner.set_accent(1, "soft Irish")
         planner.save()
         return planner
+
+    def test_hand_edits_are_what_reopens(self):
+        self.save_plan()
+        reopened = self.planner()
+        reopened.load_saved()
+        self.assertEqual([(g["accent"], g["why"]) for g in reopened.groups],
+                         [("Scottish accent", "Fishers"), ("soft Irish accent", "From the story")])
+
+    def test_a_plan_saved_with_received_pronunciation_reads_as_plain_words(self):
+        planner = self.planner(split(("the court", "Scottish"), ("inland", "Welsh")))
+        planner.propose()
+        planner.save()
+        first = planner.pending[0]
+        path = self.directory / accent_assignment.GROUPS_FILENAME
+        path.write_text(path.read_text().replace("Scottish accent", "plummy Received Pronunciation accent"))
+        accent_assignment.save_assignments(self.bundle, self.config, {first: "plummy Received Pronunciation accent"})
+        from epub_tts_narrator.renderer.speech_traits import accent_cues
+        self.assertEqual(accent_cues(self.bundle, self.config)[first], "plummy upper-class English accent")
+        reopened = self.planner()
+        reopened.load_saved()
+        self.assertEqual(reopened.groups[0]["accent"], "plummy upper-class English accent")
+        self.assertEqual(reopened.groups[0]["voice_ids"], [first])
 
     def test_the_saved_plan_reopens_without_a_request(self):
         saved = self.save_plan()

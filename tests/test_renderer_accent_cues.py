@@ -159,6 +159,18 @@ class SuggestionTests(unittest.TestCase):
         self.assertEqual(suggest_accent("strong Murgo accent"), "strong Murgo accent")
 
 
+class PlainWordsTests(unittest.TestCase):
+    def test_phonetics_jargon_becomes_the_words_a_voice_actor_would_use(self):
+        from epub_tts_narrator.renderer.speech_traits import plain_accent
+        for text, expected in (("plummy Received Pronunciation accent", "plummy upper-class English accent"),
+                               ("RP accent", "upper-class English accent"),
+                               ("Grip accent", "Grip accent"), ("thick Welsh accent", "thick Welsh accent")):
+            with self.subTest(text=text):
+                self.assertEqual(plain_accent(text), expected)
+        self.assertEqual(suggest_accent("Resonant baritone, plummy Received Pronunciation accent, theatrical"),
+                         "plummy upper-class English accent")
+
+
 class DesignTests(unittest.TestCase):
     def test_a_voice_is_designed_naming_exactly_its_cued_accent(self):
         from epub_tts_narrator.renderer.speech_traits import with_accent

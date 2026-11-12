@@ -72,10 +72,14 @@ def assigned_accents(bundle, config, *, own=False):
     """Each voice's assigned accent cue ("" = the model gave none), nearest book first, or this book's own."""
     from .book_voice_settings import nearest_book_settings, read_book_setting
     from .book_context import resolve_book_config
+    from .speech_traits import plain_accent
     if own:
         config = resolve_book_config(bundle, config)
-        return read_book_setting(_setting(), bundle, config["voices"]["series_id"])
-    return nearest_book_settings(_setting(), bundle, config)
+        values = read_book_setting(_setting(), bundle, config["voices"]["series_id"])
+    else:
+        values = nearest_book_settings(_setting(), bundle, config)
+    # Accents saved before plain wording was required read plainly ("Received Pronunciation").
+    return {voice_id: plain_accent(value) for voice_id, value in values.items()}
 
 
 def save_assignments(bundle, config, accents, *, replace=False):
@@ -129,7 +133,8 @@ def read_groups(directory, book_id):
                                for key in ("voice_ids", "names"))
                        for group in groups)):
         raise ValueError(f"Invalid accent groups file: {path}")
-    return groups
+    from .speech_traits import plain_accent
+    return [dict(group, accent=plain_accent(group["accent"])) for group in groups]
 
 
 def save_groups(bundle, groups, *, replace=False):
@@ -183,6 +188,11 @@ def accent_cue(accent, terms=frozenset()):
     text = " ".join(re.sub(r"[\[\]<>{}\"]", " ", accent).split()) if isinstance(accent, str) else ""
     if not text:
         raise ValueError("every group needs an accent name")
+    from .speech_traits import accent_jargon
+    jargon = accent_jargon(text)
+    if jargon:
+        raise ValueError(f"accent {text!r}: say it in the plain words a voice actor would use (e.g. "
+                         f"\"upper-class English\"), never the phonetics term {jargon!r}")
     cue = text if text.casefold().endswith("accent") else f"{text} accent"
     if len(cue.split()) > 6 or len(cue) > MAX_ACCENT_CHARACTERS:
         raise ValueError(f"accent {text!r} is too long: give a real-world accent name of at most 5 words")

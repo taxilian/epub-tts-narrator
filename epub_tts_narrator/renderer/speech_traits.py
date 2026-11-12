@@ -1,4 +1,5 @@
 from copy import deepcopy
+import re
 
 from ..spoken_text import MAX_DELIVERY_CHARACTERS, effective_delivery
 from .bundle import chunk_speakers
@@ -90,6 +91,27 @@ _NEGATING = frozenset({"no", "not", "without", "never", "lacking", "free", "none
 _NOT_PLACES = frozenset({"general", "standard", "neutral", "east", "west", "north", "south", "central"})
 
 
+# Phonetics terms a voice actor (and the speech model) would not say, in the plain words they would.
+_JARGON = (("received pronunciation", "upper-class English"), ("rp", "upper-class English"))
+
+
+def plain_accent(text):
+    """An accent name in a voice actor's words ("plummy Received Pronunciation" -> "plummy upper-class English")."""
+    if not isinstance(text, str):
+        return text
+    for term, plain in _JARGON:
+        text = re.sub(rf"(?<![\w-]){re.escape(term)}(?![\w-])", plain, text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
+def accent_jargon(text):
+    """The phonetics term ``text`` uses for an accent, or None."""
+    if not isinstance(text, str):
+        return None
+    return next((term for term, _ in _JARGON
+                 if re.search(rf"(?<![\w-]){re.escape(term)}(?![\w-])", text, re.IGNORECASE)), None)
+
+
 def _sentence_start(text, position):
     before = text[:position].rstrip()
     return not before or before[-1] in ".!?:;"
@@ -130,7 +152,7 @@ def suggest_accent(description, terms=frozenset()):
                 return ""
             named = named or (part[:1].isupper() and not _sentence_start(text, word.start())
                               or part.casefold() in places or part.casefold().endswith(("ian", "ese")))
-    phrase = " ".join([*(word.group() for word in words), "accent"])
+    phrase = plain_accent(" ".join([*(word.group() for word in words), "accent"]))
     return phrase if named and len(phrase) <= MAX_ACCENT_CHARACTERS else ""
 
 
@@ -242,7 +264,8 @@ def accent_cues(bundle, config, *, store=None):
     for voice_id, base in derived.items():
         if cues.get(base):
             cues[voice_id] = cues[base]
-    return cues
+    # Saved before plain wording was required (e.g. "Received Pronunciation"): said plainly.
+    return {voice_id: plain_accent(cue) for voice_id, cue in cues.items()}
 
 
 def performance_direction(chunk, voice_id, *, scene_direction=None):

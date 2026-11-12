@@ -205,7 +205,7 @@ class AccentApp(CapturePrintMixin, App):
         self.push_screen(TextEditScreen(
             "What should change?", "",
             help_text="e.g. \"Tolnedrans should sound Italian\", \"Silk is from Drasnia, keep him with Rhodar\", "
-                      "\"no Received Pronunciation\". The model revises the whole plan. Ctrl+S sends · Escape cancels"),
+                      "\"no upper-class English\". The model revises the whole plan. Ctrl+S sends · Escape cancels"),
             submitted)
 
     def action_propose(self):

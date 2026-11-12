@@ -140,11 +140,11 @@ class AssignmentTests(BookTestCase):
                          [self.entries[voice_id]["names"] for voice_id in self.voices])
 
     def test_an_accent_named_after_the_book_or_without_a_place_is_refused_so_the_model_repairs_it(self):
-        for accent in ("Mara", "heavy", "", "no"):
+        for accent in ("Mara", "heavy", "", "no", "Received Pronunciation", "crisp RP"):
             with self.subTest(accent=accent), self.assertRaises(ValueError):
                 request_assignment(self.bundle, FakeRequests(everyone(accent)), self.voices, {},
                                    terms=frozenset({"mara"}))
-        for accent, cue in (("Received Pronunciation", "Received Pronunciation accent"),
+        for accent, cue in (("upper-class English", "upper-class English accent"),
                             ("Hungarian", "Hungarian accent"), ("thick Geordie accent", "thick Geordie accent")):
             self.assertEqual(accent_cue(accent), cue)
 
