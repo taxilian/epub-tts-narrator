@@ -139,6 +139,11 @@ def _snapshot(document):
 
 PROFILE_FIELDS = {"description", "traits", "speechTraits"}
 _REFRESH_PROVENANCE = {"voice_samples", "voice_profile_refresh"}
+_REVISION_SIDECARS = {
+    "voice-profiles": frozenset({"audition-scripts.json"}),
+    "source-edit": frozenset({"audition-scripts.json", "pronunciations.json", "scoped-pronunciations.json",
+                              "performance-plan.json"}),
+}
 
 
 def _outside_profile_fields(voice):
@@ -264,8 +269,10 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     ``"speaker-decisions"`` reconstructs manual choices from trusted pre-UI
     documents and their receipts, including exact append-only voice creation.
     ``sidecars`` optionally maps a directory to already validated JSON records
-    (keyed by plain existing filenames, e.g. audition-scripts.json) that are
-    backed up, replaced, and rolled back atomically with the revision.
+    keyed by plain existing filenames. Voice profiles accept only their audition
+    binding; source edits accept that plus pronunciations.json,
+    scoped-pronunciations.json, and performance-plan.json. Every file is backed
+    up, replaced, and rolled back atomically with the revision.
     ``reserved_update_locks`` optionally maps exactly the update chain's
     directories to locks already owned through ``reserve_revision_scope``;
     publication reuses them instead of acquiring the locks again, and the
@@ -278,8 +285,8 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     sidecars = {} if sidecars is None else {
         Path(path).resolve(): {name: deepcopy(record) for name, record in files.items()}
         for path, files in sidecars.items()}
-    if sidecars and scope != "voice-profiles":
-        raise ValueError("Revision sidecars are supported only for voice-profile audition bindings")
+    if sidecars and scope not in _REVISION_SIDECARS:
+        raise ValueError("Revision sidecars are supported only for voice-profile or source-edit bindings")
     revisions = {Path(path).resolve(): deepcopy(document) for path, document in revisions.items()}
     speaker_decision_inputs = {Path(path).resolve(): deepcopy(document)
                                for path, document in (speaker_decision_inputs or {}).items()}
@@ -303,7 +310,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         manifests[path] = _read(path / "manifest.json")
         names[path] = ["analysis.json", "series-cast.json", *bundle_names, "manifest.json"]
         for name in sidecars.get(path, {}):
-            if name != "audition-scripts.json" or name in names[path]:
+            if name not in _REVISION_SIDECARS.get(scope, frozenset()) or name in names[path]:
                 raise ValueError(f"Invalid revision sidecar name: {name}")
             target = path / name
             if target.is_symlink() or not target.is_file():

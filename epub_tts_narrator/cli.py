@@ -388,6 +388,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     model_cache = None
+    title_only_resume = False
     original_stderr = sys.stderr
     stream_console = StreamConsole(original_stderr)
     previous_observer = set_default_stream_observer(stream_console.observe)
@@ -418,6 +419,16 @@ def main(argv=None):
 
     def with_name_tags(directory, config, status):
         """Tag every untagged use of names whose pronunciation this book defines or inherits."""
+        if title_only_resume:
+            from .name_pronunciations import pending_tagging
+            pending = pending_tagging(directory, read_json(directory / "source.json"))
+            if pending:
+                names = ", ".join(definition["name"] for definition, _ in pending)
+                print(f"Chapter titles are current. Pronunciation uses still need decisions for {names}; "
+                      f"run audiobook-render pronounce {directory} before rendering. Exiting with status 2.",
+                      file=sys.stderr)
+                return 2
+            return status
         from .name_pronunciation_model import tag_defined_names
         unresolved = tag_defined_names(directory, config, client_factory=provider_client, progress=print)
         if unresolved:
@@ -428,7 +439,7 @@ def main(argv=None):
 
     def resume_book(directory, config):
         """Reuse the saved cast; repair narration boundaries and remaining speakers."""
-        nonlocal model_cache
+        nonlocal model_cache, title_only_resume
         from .analysis_directory import _completed_directory
         from .analysis_revision import related_directories, revise_directories
         from .audition_scripts import prepare_document_samples, audition_preparation_pending
@@ -467,6 +478,28 @@ def main(argv=None):
         if not args.input.is_dir():
             from .book_update import (accepted_epub_digests, epub_digest, latest_epub_sha256,
                                       merged_source, update_book)
+            from .chapter_title_update import source_for_title_refresh
+            title_source = source_for_title_refresh(
+                original, source,
+                epub_sha256=epub_digest(args.input) if args.input.suffix.lower() == ".epub" else None)
+            updates = original["provenance"].get("book_updates") or []
+            last_update = updates[-1] if updates else {}
+            previous_title_repair = (last_update.get("retitled_chapters")
+                                     and not last_update.get("added_chapters")
+                                     and not last_update.get("edited_chapters")
+                                     and last_update.get("delta_source_fingerprint") is None)
+            if (title_source is not None and not args.edits
+                    and (previous_title_repair
+                         or fingerprint(title_source) != fingerprint(original["source"]))):
+                title_only_resume = True
+                if fingerprint(title_source) == fingerprint(original["source"]):
+                    print("Saved analysis is complete; no source text or chapter-title changes. "
+                          "The saved analysis is unchanged.")
+                    return _speaker_completion_status(original)
+                updated = update_book(
+                    directory, title_source, config=config, input_path=args.input, strategy=args.strategy,
+                    client_factory=provider_client, announce_cache=announce_cache, progress=progress)
+                return _speaker_completion_status(updated if updated is not None else original)
             same_chapters = (fingerprint(source) == fingerprint(original["source"])
                              or fingerprint(merged_source(original["source"], source)) == fingerprint(original["source"]))
             if not same_chapters:

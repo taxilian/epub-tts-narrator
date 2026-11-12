@@ -267,6 +267,26 @@ Every unchanged paragraph keeps its ID and its saved segments, including your sp
 
 An update is refused, with the book unchanged, when a saved chapter was removed, a chapter was inserted before saved ones, or chapters were reordered (a saved chapter that shares no paragraph with its position), when an edit would divide the book into different chapter files, when extraction settings changed, or while the book is rendering. If a later book continues from this one, an edit-only update that preserves cast and chapter-file layout is allowed: the parent and every descendant continuation link are rebased atomically. Appending chapters to a book with descendants still requires a separate output directory. The update is resumable: rerun the same command after an interruption; checkpoints live in `BOOK/.analysis-update/` and originals in `.analysis-revisions/`. In `expressive` performance mode, prepare the performance plan again for the new and edited text.
 
+## Repairing saved chapter names
+
+After an extractor update, refresh an existing book from its authoritative EPUB:
+
+```sh
+just analyze "path/to/original.epub" -o runs/book-01
+```
+
+When only chapter titles changed, this takes a metadata-only path: it preserves the text, source blocks, segments, cast, auditions, pronunciation decisions, and speech-cache identities, with no analysis-model requests or speaker prompts. Original analysis files are backed up under `.analysis-revisions/`, and descendant series links are rebound in the same transaction. A book with actual text changes follows the ordinary update workflow instead. Stop rendering before updating a book or its descendants.
+
+For an already completed local render, update the chapter tags and final audiobook from its saved lossless chapter PCM:
+
+```sh
+just assemble runs/book-01 --epub "path/to/original.epub"
+```
+
+Assembly retags and re-encodes the saved chapter audio and republishes the M4B; it makes no speech-generation or recognition calls for a title-only change. Keep the same render work directory and audio settings. Missing, corrupted, or incompatible checkpoints stop assembly rather than generate speech. For an incomplete book, resume its ordinary render after updating the analysis; its verified matching takes remain reusable. This repair applies to local chapter PCM, not a client holding only downloaded remote chapters. A book-local `performance-plan.json` is rebound with the title revision; an external performance plan remains bound to its original inputs and must be explicitly updated before use.
+
+For a series, refresh each affected book's own analysis in series order, then assemble the completed books. Updating a parent's continuation links does not refresh its descendants' own chapter names.
+
 ## Reusing a series cast
 
 Directory analysis saves a cumulative series cast. Continue a series with `--continue-from`; the prior directory stays unchanged and the new output receives its history and a relative continuation link.

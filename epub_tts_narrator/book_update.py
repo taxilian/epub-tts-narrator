@@ -108,7 +108,7 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
     new_keys = [keys(chapter, new_blocks) for chapter in new_chapters]
     next_block = max((_number(identifier, "b") for identifier in old_blocks), default=0)
     next_chapter = max((_number(chapter["id"], "ch") for chapter in old_chapters), default=0)
-    chapters, blocks, edited, block_map, changed = [], [], [], {}, set()
+    chapters, blocks, edited, retitled, block_map, changed = [], [], [], [], {}, set()
     cited_blocks, pending, replaced = set(), [preserve_citations_from], set()
     while pending:
         item = pending.pop()
@@ -171,6 +171,9 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
             blocks.append(block)
         record["block_ids"] = identifiers
         chapters.append(record)
+        if old is not None and old["title"] != record["title"]:
+            retitled.append({"id": record["id"], "number": index + 1,
+                             "previous_title": old["title"], "title": record["title"]})
         if old is not None and any(summary.values()):
             edited.append({"id": record["id"], "title": record["title"], "number": index + 1, **summary})
     kept = {block["id"] for block in blocks}
@@ -179,15 +182,17 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
         # Shared chapter headings alone must not make another book an edit.
         raise ValueError(f"The new EPUB keeps only {shared} of the saved book's {len(old_blocks)} paragraphs; "
                          "it looks like a different book or a wholesale rewrite. " + _REFUSAL)
-    return {"unchanged_chapters": len(old_chapters) - len(edited),
+    changed_chapters = {chapter["id"] for chapter in [*edited, *retitled]}
+    return {"unchanged_chapters": len(old_chapters) - len(changed_chapters),
             "appended_chapters": deepcopy(chapters[len(old_chapters):]), "edited_chapters": edited,
-            "changed_blocks": sorted(changed),
+            "retitled_chapters": retitled, "changed_blocks": sorted(changed),
             "removed_blocks": [identifier for identifier in old_blocks if identifier not in kept or identifier in replaced],
             "block_map": block_map, "source": _source_like(saved, current, chapters, blocks)}
 
 
 def has_changes(comparison):
-    return bool(comparison["appended_chapters"] or comparison["edited_chapters"])
+    return bool(comparison["appended_chapters"] or comparison["edited_chapters"]
+                or comparison["retitled_chapters"])
 
 
 def _source_like(saved, current, chapters, blocks):
@@ -455,6 +460,7 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         "added_chapters": [{"id": chapter["id"], "title": chapter["title"]}
                            for chapter in comparison["appended_chapters"]],
         "edited_chapters": deepcopy(comparison["edited_chapters"]),
+        "retitled_chapters": deepcopy(comparison["retitled_chapters"]),
         "new_characters": [character["id"] for character in appended_characters if status(character) != "reused"],
         "returning_series_characters": [character["id"] for character in appended_characters
                                         if status(character) == "reused"],
@@ -699,6 +705,8 @@ def describe_update(document):
     names = {character["id"]: character["name"] for character in document["cast"]["characters"]}
     chapters = update["added_chapters"]
     lines = []
+    for chapter in update.get("retitled_chapters", []):
+        lines.append(f"Retitled chapter {chapter['number']} ({chapter['previous_title']}): {chapter['title']}")
     if chapters:
         lines.append(f"Added {len(chapters)} chapter{'s' if len(chapters) != 1 else ''}: "
                      + ", ".join(chapter["title"] for chapter in chapters))
@@ -763,21 +771,43 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     ``config["provider"]`` only after every local check has passed, and only
     when some paragraph needs the model (removing paragraphs needs none).
     """
-    from .analysis_progress import (STAGES, analysis_cache_directory, analysis_options_fingerprint,
-                                    create_pending, pending_identity, resume_document)
-    from .audition_scripts import prepare_document_samples
-    from .pipeline import CachedRequests, analyze
-    from .speaker_decisions import prompt_speaker_decisions
     directory = Path(directory).resolve()
     original, registry, _ = _completed_directory(directory)
     if strategy not in (None, "consensus", "narrator"):
         raise ValueError("strategy must be consensus or narrator")
     strategy = strategy or saved_strategy(original)
     comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
+    epub = Path(input_path) if input_path is not None and Path(input_path).suffix.lower() == ".epub" else None
+    digest = epub_digest(epub) if epub is not None else None
+    if comparison["retitled_chapters"] and not comparison["appended_chapters"] and not comparison["edited_chapters"]:
+        from .chapter_title_update import retitled_document, title_update_sidecars
+        related = ensure_updatable(directory, comparison)
+        expected = {str(path): _hash(path / "manifest.json") for path in related}
+        document = retitled_document(original, comparison, epub_sha256=digest)
+        if document is None:
+            raise ValueError("A title-only update requires identical source text, markup, chapter and block "
+                             "layout, and extraction metadata; the saved book was not changed")
+        sidecars = title_update_sidecars(directory, original, document)
+        from .analysis_revision import revise_directories
+        result = revise_directories(
+            {directory: document}, directories=related, expected_manifest_hashes=expected,
+            scope="source-edit", sidecars={directory: sidecars}, progress=log)
+        log(f"Original analysis files and revision journal: {result['backup_directory']}")
+        if epub is not None:
+            from .source_epub import remember_source_epub
+            remember_source_epub(directory, epub, document["source"]["book"]["id"], epub_sha256=digest)
+        for line in describe_update(document):
+            log(line)
+        return document
     if not has_changes(comparison):
         log("No new or edited chapters: the EPUB's chapters match the saved book. "
             "The saved analysis is unchanged.")
         return None
+    from .analysis_progress import (STAGES, analysis_cache_directory, analysis_options_fingerprint,
+                                    create_pending, pending_identity, resume_document)
+    from .audition_scripts import prepare_document_samples
+    from .pipeline import CachedRequests, analyze
+    from .speaker_decisions import prompt_speaker_decisions
     related = ensure_updatable(directory, comparison)
     manifest_hash = _hash(directory / "manifest.json")
     settings = config["analysis"]
@@ -789,8 +819,6 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     if (directory / "name-script.json").exists():
         log("Note: this book has a legacy name-script.json. It covers only the earlier chapters; "
             "name-scoped pronunciation choices that depend on it are blocked until it is prepared again.")
-    epub = Path(input_path) if input_path is not None and Path(input_path).suffix.lower() == ".epub" else None
-    digest = epub_digest(epub) if epub is not None else None
     changes = (f"{len(comparison['appended_chapters'])} new and "
                f"{len(comparison['edited_chapters'])} edited chapter(s)")
     client = client_factory(**config["provider"]) if delta is not None else None
@@ -905,10 +933,12 @@ def plan_update(directory, source, config):
     update = {"unchanged_chapters": comparison["unchanged_chapters"],
               "added_chapters": [{"id": chapter["id"], "title": chapter["title"]}
                                  for chapter in comparison["appended_chapters"]],
-              "edited_chapters": deepcopy(comparison["edited_chapters"])}
+              "edited_chapters": deepcopy(comparison["edited_chapters"]),
+              "retitled_chapters": deepcopy(comparison["retitled_chapters"])}
     delta = delta_source(comparison)
     if delta is None:
-        note = ("No new or edited chapters" if not has_changes(comparison)
+        note = ("No new, edited, or retitled chapters" if not has_changes(comparison)
+                else "Only chapter titles changed" if comparison["retitled_chapters"] and not comparison["edited_chapters"]
                 else "Only paragraphs were removed") + "; analyze would make no model requests."
         return {"output_directory": str(directory), "book_update": update, "note": note}
     planned = plan_analysis(delta, config["analysis"], config["performance_policy"], registry)

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+from xml.sax.saxutils import escape
 
 from epub_tts_narrator.book_update import compare_sources
 from epub_tts_narrator.cli import main, read_json, source_from
@@ -57,6 +58,45 @@ def with_auxiliary_chapter(epub):
             '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Notes</title></head>'
             "<body><h1>Notes</h1><p>The keeper's log recorded the night.</p></body></html>")
     return epub
+
+
+def with_navigation_titles(epub, titles):
+    """Add NCX labels without changing any XHTML heading or paragraph."""
+    with zipfile.ZipFile(epub) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    points = "".join(
+        f'<navPoint id="n{number}"><navLabel><text>{escape(title)}</text></navLabel>'
+        f'<content src="chapter-{number:03d}.xhtml"/></navPoint>'
+        for number, title in enumerate(titles, 1))
+    with zipfile.ZipFile(epub, "w") as archive:
+        for name, data in entries:
+            if name == "content.opf":
+                text = data.decode("utf-8").replace(
+                    "</manifest>", '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>')
+                data = text.replace("<spine>", '<spine toc="ncx">').encode("utf-8")
+            archive.writestr(name, data)
+        archive.writestr("toc.ncx", '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>'
+                         + points + "</navMap></ncx>")
+    return epub
+
+
+def rename_chapter_resource(epub, old_name, new_name):
+    """Move one XHTML resource while preserving its extracted text and markup."""
+    with zipfile.ZipFile(epub) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(epub, "w") as archive:
+        for name, data in entries:
+            if name in {"content.opf", "toc.ncx"}:
+                data = data.replace(old_name.encode("utf-8"), new_name.encode("utf-8"))
+            archive.writestr(new_name if name == old_name else name, data)
+    return epub
+
+
+def publication_snapshot(directory):
+    """Book payload, excluding revision journals and retained lock ownership."""
+    return {name: data for name, data in snapshot(directory).items()
+            if not name.startswith((".analysis-revisions", ".analysis-update.lock"))
+            and not name.endswith(".lease")}
 
 
 class SerialClient(FakeClient):
@@ -191,6 +231,63 @@ class BookUpdateTests(unittest.TestCase):
         status, stdout, stderr = self.analyze(first, fresh=True)
         self.assertEqual(status, 0, stderr)
         return first
+
+    def seed_series(self):
+        earlier = (self.root / "book-one").resolve()
+        status, _, stderr = self.run_cli(
+            "analyze", "--strategy", "consensus",
+            self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"), "-o", earlier)
+        self.assertEqual(status, 0, stderr)
+        morning = ("Four", ["Mara, the lighthouse keeper, said, “Morning.”"])
+        status, _, stderr = self.run_cli(
+            "analyze", self.epub("serial-v1", [morning], "serial-1"), "-o", self.book,
+            "--continue-from", earlier, "--strategy", "consensus")
+        self.assertEqual(status, 0, stderr)
+        return earlier
+
+    def prepare_title_sidecars(self, book):
+        from epub_tts_narrator import audition_scripts, name_pronunciations, pronunciations, scoped_pronunciations
+        from epub_tts_narrator.config import DEFAULTS
+        from epub_tts_narrator.performance_planning import prepare_performance
+        from epub_tts_narrator.pipeline import write_json
+        from test_performance_planning import FakeClient as PerformanceClient
+
+        document = read_json(book / "analysis.json")
+        source_fingerprint = fingerprint(document["source"])
+        block = next(block for block in document["source"]["blocks"] if "Mara" in block["text"])
+        registry = pronunciations._empty(document["source"])
+        registry["entries"].append({
+            "id": pronunciations.word_id("Mara"), "word": "Mara", "status": "confirmed", "kind": "name",
+            "reason": "Chosen by the listener.", "evidence": [{"block_id": block["id"], "quote": "Mara"}],
+            "pronunciation": {"alphabet": "respelling", "value": "MAH-rah"}})
+        write_json(book / pronunciations.FILENAME, registry)
+        write_json(book / scoped_pronunciations.FILENAME,
+                   scoped_pronunciations.local(book, source=document["source"]))
+        write_json(book / audition_scripts.FILENAME, {
+            "version": audition_scripts.VERSION, "source_fingerprint": source_fingerprint,
+            "cast_fingerprint": fingerprint(document["cast"]), "scripts": {},
+            "samples": {"fixture": "keep samples"}, "pending": {"fixture": {"error": "keep pending"}}})
+        config = deepcopy(DEFAULTS)
+        config["analysis"].update(attribution_workers=1, repair_attempts=0)
+        plan = prepare_performance(load_bundle(book), config, book / "performance-plan.json",
+                                   client=PerformanceClient(), notify=lambda _: None)
+        write_json(book / name_pronunciations.FILENAME, name_pronunciations.load_local(book))
+        for name in ("heard-variants.json", "voice-aliases.json", "voice-traits.json"):
+            (book / name).write_text(json.dumps({"fixture": f"keep {name}"}) + "\n", encoding="utf-8")
+        (book / "voices").mkdir(exist_ok=True)
+        (book / "voices" / "mara-reference.wav").write_bytes(b"fixture reference remains")
+        (book / "render-work").mkdir(exist_ok=True)
+        (book / "render-work" / "history.json").write_text('{"fixture": "keep history"}\n', encoding="utf-8")
+        bound_names = ["audition-scripts.json", "pronunciations.json", "scoped-pronunciations.json",
+                       "performance-plan.json"]
+        preserved_names = ["name-pronunciations.json", "heard-variants.json", "voice-aliases.json",
+                           "voice-traits.json", "voices/mara-reference.wav", "render-work/history.json"]
+        preserved = {name: (book / name).read_bytes() for name in preserved_names}
+        preserved.update({str(path.relative_to(book)): path.read_bytes() for path in book.rglob("*")
+                          if path.is_file() and ({".analysis-cache", "performance-plan.json.work"} & set(path.parts))})
+        return {"plan": plan,
+                "bound_bytes": {name: (book / name).read_bytes() for name in bound_names},
+                "preserved_bytes": preserved}
 
     def model_payloads(self):
         return [json.dumps(payload) for client in self.clients for _, payload in client.calls]
@@ -376,6 +473,189 @@ class BookUpdateTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         self.assertIn("No new or edited chapters", stdout)
         self.assertEqual(snapshot(self.book), before)
+
+    def test_title_only_download_republishes_metadata_without_model_work_and_rerun_is_a_no_op(self):
+        from epub_tts_narrator.source_epub import source_epub_hint
+        self.seed()
+        original = read_json(self.book / "analysis.json")
+        before_chunks = self.plan_chunk_ids()
+        before_scripts = {path.name: path.read_bytes() for path in (self.book / "scripts").glob("*.jsonl")}
+        titled = with_navigation_titles(
+            self.epub("serial-titles", [CHAPTER_ONE, CHAPTER_TWO], "download-2"),
+            ["Chapter One", "Chapter Two"])
+
+        with (patch.object(self, "client", side_effect=AssertionError("title update created a model client")),
+              patch("epub_tts_narrator.audition_scripts.prepare_document_samples",
+                    side_effect=AssertionError("title update prepared auditions")),
+              patch("epub_tts_narrator.speaker_decisions.prompt_speaker_decisions",
+                    side_effect=AssertionError("title update prompted for speakers"))):
+            status, stdout, stderr = self.analyze(titled)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        document = read_json(self.book / "analysis.json")
+        expected_source = deepcopy(original["source"])
+        for chapter, title in zip(expected_source["chapters"], ["Chapter One", "Chapter Two"]):
+            chapter["title"] = title
+        self.assertEqual(document["source"], expected_source)
+        for key in ("cast", "segments", "issues"):
+            self.assertEqual(document[key], original[key])
+        self.assertEqual(document["provenance"]["series"], original["provenance"]["series"])
+        expected_samples = deepcopy(original["provenance"]["voice_samples"])
+        expected_samples["source_fingerprint"] = fingerprint(expected_source)
+        self.assertEqual(document["provenance"]["voice_samples"], expected_samples)
+        expected_chunk_source = original["provenance"].get(
+            "chunk_identity_source_fingerprint", fingerprint(original["source"]))
+        self.assertEqual(document["provenance"]["chunk_identity_source_fingerprint"], expected_chunk_source)
+        self.assertEqual(chunk_identity_fingerprint(load_bundle(self.book)["manifest"]), expected_chunk_source)
+        self.assertEqual(self.plan_chunk_ids(), before_chunks)
+        self.assertEqual({path.name: path.read_bytes() for path in (self.book / "scripts").glob("*.jsonl")},
+                         before_scripts)
+        update = document["provenance"]["book_updates"][-1]
+        self.assertEqual(update["retitled_chapters"], [
+            {"id": "ch0001", "number": 1, "previous_title": "One", "title": "Chapter One"},
+            {"id": "ch0002", "number": 2, "previous_title": "Two", "title": "Chapter Two"}])
+        self.assertEqual((update["added_chapters"], update["edited_chapters"]), ([], []))
+        self.assertIsNone(update["delta_source_fingerprint"])
+        self.assertIsNone(update["analysis"])
+        self.assertEqual(update["epub_sha256"], hashlib.sha256(titled.read_bytes()).hexdigest())
+        self.assertEqual(source_epub_hint(self.book, document["source"]["book"]["id"]), titled.resolve())
+        self.assertFalse((self.book / ".analysis-pending").exists())
+        self.assertFalse((self.book / ".analysis-update").exists())
+        after_first = snapshot(self.book)
+
+        with (patch.object(self, "client", side_effect=AssertionError("no-op created a model client")),
+              patch("epub_tts_narrator.audition_scripts.prepare_document_samples",
+                    side_effect=AssertionError("no-op prepared auditions")),
+              patch("epub_tts_narrator.speaker_decisions.prompt_speaker_decisions",
+                    side_effect=AssertionError("no-op prompted for speakers"))):
+            status, stdout, stderr = self.analyze(titled)
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("Saved analysis is complete", stdout)
+        self.assertEqual(snapshot(self.book), after_first)
+
+    def test_title_and_text_changes_still_use_the_ordinary_analysis_pipeline(self):
+        self.seed()
+        calls = len(self.model_payloads())
+        changed_two = ("Two", ["Mara said, “The lamp is lit tonight.”"])
+        titled = with_navigation_titles(
+            self.epub("serial-title-and-text", [CHAPTER_ONE, changed_two], "download-2"),
+            ["Chapter One", "Two"])
+
+        status, _, stderr = self.analyze(titled)
+
+        self.assertEqual(status, 0, stderr)
+        self.assertGreater(len(self.model_payloads()), calls)
+        document = read_json(self.book / "analysis.json")
+        update = document["provenance"]["book_updates"][-1]
+        self.assertEqual([row["id"] for row in update["edited_chapters"]], ["ch0002"])
+        self.assertEqual(update["retitled_chapters"], [
+            {"id": "ch0001", "number": 1, "previous_title": "One", "title": "Chapter One"}])
+        self.assertEqual([chapter["title"] for chapter in document["source"]["chapters"]],
+                         ["Chapter One", "Two"])
+        self.assertTrue(any("lit tonight" in payload for payload in self.model_payloads()[calls:]))
+
+    def test_title_update_refuses_changed_resource_layout_or_an_invalid_sidecar_without_changes(self):
+        for sidecar_case in (False, True):
+            with self.subTest(sidecar_case=sidecar_case):
+                self.book = self.root / f"serial-unsafe-book-{sidecar_case}"
+                self.seed()
+                if sidecar_case:
+                    (self.book / "performance-plan.json").write_text('{"format": "unrecognized"}\n',
+                                                                      encoding="utf-8")
+                before = snapshot(self.book)
+                titled = with_navigation_titles(
+                    self.epub(f"serial-unsafe-{sidecar_case}", [CHAPTER_ONE, CHAPTER_TWO], "download-2"),
+                    ["Chapter One", "Chapter Two"])
+                if not sidecar_case:
+                    titled = rename_chapter_resource(titled, "chapter-001.xhtml", "renamed/chapter-001.xhtml")
+                with patch.object(self, "client", side_effect=AssertionError("unsafe update created a client")):
+                    status, _, stderr = self.analyze(titled)
+                self.assertEqual(status, 1)
+                self.assertIn("Performance plan" if sidecar_case else "title-only", stderr)
+                self.assertEqual(snapshot(self.book), before)
+
+    def test_title_update_rebinds_sidecars_and_descendant_links_without_touching_descendant_content(self):
+        from epub_tts_narrator import audition_scripts, pronunciations, scoped_pronunciations
+        from epub_tts_narrator.analysis_directory import _completed_directory
+        from epub_tts_narrator.performance_planning import load_prepared_performance
+        earlier = self.seed_series()
+        fixtures = self.prepare_title_sidecars(earlier)
+        child_before = {name: (self.book / name).read_bytes() for name in
+                        ["analysis.json", "source.json", "cast.json", "review.json", "scripts/chapter-0001.jsonl"]}
+        original = read_json(earlier / "analysis.json")
+        titled = with_navigation_titles(
+            self.epub("book-one-titles", [CHAPTER_ONE, CHAPTER_THREE], "book-one-2"),
+            ["Chapter One", "Chapter Three"])
+
+        with patch.object(self, "client", side_effect=AssertionError("title update created a model client")):
+            status, stdout, stderr = self.run_cli("analyze", titled, "-o", earlier)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("Original analysis files and revision journal", stdout)
+        document = read_json(earlier / "analysis.json")
+        new_source = fingerprint(document["source"])
+        self.assertEqual([chapter["title"] for chapter in document["source"]["chapters"]],
+                         ["Chapter One", "Chapter Three"])
+        for name, data in child_before.items():
+            self.assertEqual((self.book / name).read_bytes(), data, name)
+        _completed_directory(earlier)
+        _completed_directory(self.book)
+        for name, data in fixtures["preserved_bytes"].items():
+            self.assertEqual((earlier / name).read_bytes(), data, name)
+        for name, module in (("pronunciations.json", pronunciations),
+                             ("scoped-pronunciations.json", scoped_pronunciations),
+                             ("audition-scripts.json", audition_scripts)):
+            expected = json.loads(fixtures["bound_bytes"][name])
+            expected["source_fingerprint"] = new_source
+            self.assertEqual(read_json(earlier / name), expected)
+        self.assertEqual(pronunciations._load_local(earlier)["source_fingerprint"], new_source)
+        self.assertEqual(scoped_pronunciations.local(earlier)["source_fingerprint"], new_source)
+        expected_plan = deepcopy(fixtures["plan"])
+        expected_plan["source_fingerprint"] = new_source
+        provenance_without_inputs = {key: deepcopy(value) for key, value in
+                                     expected_plan["provenance"].items() if key != "inputs_sha256"}
+        expected_plan["provenance"]["inputs_sha256"] = fingerprint({
+            "source": new_source, "chapters": expected_plan["chapters"], **provenance_without_inputs})
+        self.assertEqual(read_json(earlier / "performance-plan.json"), expected_plan)
+        self.assertEqual(load_prepared_performance(load_bundle(earlier), earlier / "performance-plan.json"),
+                         expected_plan)
+        transactions = list((earlier / ".analysis-revisions").glob("*/revision.json"))
+        self.assertEqual(len(transactions), 1)
+        backup = transactions[0].parent / "book-0001" / "before"
+        for name, data in fixtures["bound_bytes"].items():
+            self.assertEqual((backup / name).read_bytes(), data, name)
+
+    def test_title_update_rolls_back_selected_book_descendant_and_sidecars_together(self):
+        from epub_tts_narrator.analysis_directory import _completed_directory
+        from epub_tts_narrator.analysis_revision import _install
+        earlier = self.seed_series()
+        self.prepare_title_sidecars(earlier)
+        before_parent, before_child = publication_snapshot(earlier), publication_snapshot(self.book)
+        titled = with_navigation_titles(
+            self.epub("book-one-rollback", [CHAPTER_ONE, CHAPTER_THREE], "book-one-2"),
+            ["Chapter One", "Chapter Three"])
+        failed = False
+
+        def fail_once_at_descendant_registry(source, destination):
+            nonlocal failed
+            if not failed and Path(destination) == (self.book / "series-cast.json").resolve():
+                failed = True
+                raise OSError("fixture interrupted title publication")
+            return _install(source, destination)
+
+        with (patch("epub_tts_narrator.analysis_revision._install", side_effect=fail_once_at_descendant_registry),
+              patch.object(self, "client", side_effect=AssertionError("rollback created a model client"))):
+            status, _, stderr = self.run_cli("analyze", titled, "-o", earlier)
+
+        self.assertEqual(status, 1)
+        self.assertIn("fixture interrupted title publication", stderr)
+        self.assertTrue(failed)
+        self.assertEqual(publication_snapshot(earlier), before_parent)
+        self.assertEqual(publication_snapshot(self.book), before_child)
+        _completed_directory(earlier)
+        _completed_directory(self.book)
+        journal = json.loads(next((earlier / ".analysis-revisions").glob("*/revision.json")).read_text())
+        self.assertEqual(journal["status"], "rolled_back")
 
     def test_interrupted_publication_resumes_without_repeating_model_work(self):
         self.seed()
@@ -698,6 +978,18 @@ class SourceComparisonTests(unittest.TestCase):
         comparison = compare_sources(saved, current)
         self.assertEqual([chapter["title"] for chapter in comparison["appended_chapters"]], ["Three"])
         self.assertEqual(comparison["unchanged_chapters"], 2)
+
+    def test_title_changes_are_reported_separately_from_paragraph_edits(self):
+        saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
+        epub = with_navigation_titles(
+            make_serial_epub(self.root / "two.epub", "The Serial", "two", [CHAPTER_ONE, CHAPTER_TWO]),
+            ["Chapter One", "Two"])
+        current = source_from(epub)
+        comparison = compare_sources(saved, current)
+        self.assertEqual(comparison["retitled_chapters"], [
+            {"id": "ch0001", "number": 1, "previous_title": "One", "title": "Chapter One"}])
+        self.assertEqual((comparison["appended_chapters"], comparison["edited_chapters"]), ([], []))
+        self.assertEqual(comparison["changed_blocks"], [])
 
     def test_removed_inserted_or_reordered_chapters_are_refused(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])

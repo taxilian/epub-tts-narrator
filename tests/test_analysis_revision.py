@@ -322,6 +322,16 @@ class AnalysisRevisionTests(unittest.TestCase):
         revised, _, _ = _completed_directory(self.paths[0])
         self.assertEqual(revised["segments"][0]["attribution"]["basis"], "unresolved")
 
+    def test_source_edit_rejects_an_unrecognized_sidecar_name_before_publication(self):
+        before = self.managed()
+        revision = deepcopy(self.documents[0])
+        revision["source"]["chapters"][0]["title"] = "Repaired chapter title"
+        with self.assertRaisesRegex(ValueError, "sidecar"):
+            revise_directories({self.paths[0]: revision}, directories=self.paths, scope="source-edit",
+                               sidecars={self.paths[0]: {"unrecognized.json": {"fixture": True}}},
+                               progress=lambda _: None)
+        self.assertEqual(self.managed(), before)
+
     def test_partial_publication_failure_restores_all_originals(self):
         before = self.managed()
         calls = 0
