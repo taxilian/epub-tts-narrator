@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from epub_tts_narrator.cli import export_bundle, script_partitions
+from epub_tts_narrator.renderer.bundle import load_bundle
 from test_contracts import valid_document
 
 
@@ -31,6 +32,47 @@ def chapter_document(items):
 
 
 class ChapterExportTests(unittest.TestCase):
+    def test_legacy_heading_title_remains_readable_but_arbitrary_title_does_not(self):
+        document = chapter_document([
+            ("CHAPTER VIII", "heading", "p"), ("The first scene ends here.", "narration", "p")])
+        document["source"]["chapters"][0]["title"] = "Chapter Eight: The Valley"
+        for title in ("CHAPTER VIII", "Invented chapter"):
+            with self.subTest(title=title), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary) / "bundle"
+                export_bundle(document, target)
+                manifest_path = target / "manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                manifest["files"]["scripts"][0].update(title=title, heading_block_id="b1")
+                manifest_path.write_text(json.dumps(manifest))
+                if title == "CHAPTER VIII":
+                    self.assertEqual(load_bundle(target)["chapters"][0]["entry"]["title"], title)
+                else:
+                    with self.assertRaisesRegex(ValueError, "title or heading differs"):
+                        load_bundle(target)
+
+    def test_source_title_survives_numbered_headings_on_the_first_partition(self):
+        for later_chapter in (False, True):
+            with self.subTest(later_chapter=later_chapter):
+                items = [("CHAPTER VIII", "heading", "p"),
+                         ("The first scene ends here.", "narration", "p")]
+                if later_chapter:
+                    items.extend([("CHAPTER IX", "heading", "p"),
+                                  ("The next scene begins.", "narration", "p")])
+                document = chapter_document(items)
+                document["source"]["chapters"][0]["title"] = "Chapter Eight: The Valley"
+                with tempfile.TemporaryDirectory() as temporary:
+                    target = Path(temporary) / "bundle"
+                    export_bundle(document, target)
+                    manifest = json.loads((target / "manifest.json").read_text())
+                    entries = manifest["files"]["scripts"]
+                    self.assertEqual([entry["title"] for entry in entries],
+                                     ["Chapter Eight: The Valley"] + (["CHAPTER IX"] if later_chapter else []))
+                    self.assertEqual([entry["heading_block_id"] for entry in entries],
+                                     [None] + (["b3"] if later_chapter else []))
+                    rows = [json.loads(line) for entry in entries
+                            for line in (target / entry["path"]).read_text().splitlines()]
+                    self.assertEqual([row["text"] for row in rows], [item[0] for item in items])
+
     def test_two_story_chapters_inside_one_resource_get_distinct_files(self):
         document = chapter_document([
             ("CHAPTER FIVE", "heading", "p"),

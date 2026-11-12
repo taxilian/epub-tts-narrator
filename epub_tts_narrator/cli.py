@@ -111,7 +111,7 @@ _CHAPTER_NUMBER = (
 _CHAPTER_LABEL = re.compile(rf"CHAPTER\s+{_CHAPTER_NUMBER}\s*[:.]?", re.IGNORECASE)
 
 
-def script_partitions(document):
+def script_partitions(document, *, prefer_source_titles=True):
     """Find conservative display chapters without changing source coordinates.
 
     Source chapters are EPUB resources, which can contain several story chapters.
@@ -162,6 +162,8 @@ def script_partitions(document):
             title = chapter["title"]
             if list_like:
                 title = "Contents"
+            elif prefer_source_titles and part == 0 and title.strip().casefold() not in {"", "unknown", "untitled"}:
+                heading = None
             elif heading is not None:
                 title = heading["text"]
             elif title.strip().casefold() in {"", "unknown", "untitled"}:

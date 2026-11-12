@@ -105,10 +105,15 @@ def load_bundle(directory):
     partitions = script_partitions(document)
     if len(partitions) != len(chapters):
         raise ValueError("Script partitions differ from source chapter headings")
-    for expected, chapter in zip(partitions, chapters):
+    legacy_partitions = None
+    for index, (expected, chapter) in enumerate(zip(partitions, chapters)):
         entry = chapter["entry"]
         if any(entry.get(key) != expected[key] for key in ("chapter_id", "title", "heading_block_id")):
-            raise ValueError("Script chapter title or heading differs from source")
+            if legacy_partitions is None:
+                legacy_partitions = script_partitions(document, prefer_source_titles=False)
+            if any(entry.get(key) != legacy_partitions[index][key]
+                   for key in ("chapter_id", "title", "heading_block_id")):
+                raise ValueError("Script chapter title or heading differs from source")
         block_ids = list(dict.fromkeys(row["block_id"] for row in chapter["rows"]))
         if block_ids != expected["block_ids"]:
             raise ValueError("Script partition does not match source chapter boundaries")
