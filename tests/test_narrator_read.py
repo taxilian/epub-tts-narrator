@@ -798,6 +798,33 @@ class NarratedAnalyzeTests(unittest.TestCase):
         stats = document["provenance"]["narrator_read"]["segments"]
         self.assertEqual((stats["cue_sounds"], stats["cue_scoped"], stats["cue_tones"]), (1, 1, 1))
 
+    def test_soft_cues_compile_softly_while_explicit_whispering_stays_scoped(self):
+        self.source = make_source([[('"Amazing," Mara breathed.', "p"), ('"Stay," Mara said softly.', "p"),
+                                    ('"Hush," Mara whispered.', "p")]])
+
+        def rewrite(qids, result):
+            result["q"] = [[qids["Amazing,"], "1", "", "awed, admiring"],
+                           [qids["Stay,"], "1", "", "whispering, reassuring"], [qids["Hush,"], "1"]]
+            result.pop("p", None)
+
+        document = self.markup_with(rewrite, review_answer="remove")
+        self.assertEqual(readiness(document)["errors"], [])
+        rows = self.by_text(document)
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        for text, direction in (('"Amazing,"', "soft and quiet, awed, admiring"),
+                                ('"Stay,"', "soft and quiet, reassuring")):
+            with self.subTest(text=text):
+                row = rows[text]
+                self.assertEqual(row["delivery"]["direction"], direction)
+                _, compiled, _ = prepare_synthesis(row["text"], row["delivery"]["direction"],
+                                                   performance=row.get("performance_controls"))
+                self.assertTrue(compiled.startswith("[soft and quiet, "))
+                self.assertNotIn("whisper", compiled.casefold())
+        whispered = rows['"Hush,"']
+        _, compiled, _ = prepare_synthesis(whispered["text"], whispered["delivery"]["direction"],
+                                           performance=whispered["performance_controls"])
+        self.assertEqual(compiled, "<whisper>Hush,</whisper>")
+
     def test_truncated_markup_is_split_at_paragraph_boundaries_and_retried(self):
         from epub_tts_narrator.provider import OutputTruncatedError
 

@@ -46,12 +46,15 @@ def _spoken(adverbs):
 
 
 # Tone words: scoped tags where Drama 3 documents one, else a direction word.
+# A speech-tag "breathed" (line-final or with a recipient) is cautiously soft;
+# breathing actions such as "breathed deeply" or "breathed in" give no tone.
 _TONES = (
-    ("whisper", r"whisper\w*|breathed|under (?:his|her|their|my) breath"),
+    ("whisper", r"whisper\w*"),
     ("screaming", r"scream\w*|shriek\w*|screech\w*|wail(?:s|ed|ing)?|howl(?:s|ed|ing)?"),
     ("shouting", r"shout\w*|yell\w*|roar(?:s|ed|ing)?|bellow\w*|bawl(?:s|ed|ing)?|holler\w*|"
                  r"thunder(?:s|ed|ing)|called out|cried out|bark(?:s|ed|ing)?|" + _spoken("loudly")),
-    ("soft", r"murmur\w*|" + _spoken("softly|quietly|gently")),
+    ("soft", r"murmur\w*|breathed(?=\s*(?:$|[,.;:!?])|\s+(?:at|to|towards?)\b)|"
+             r"under (?:his|her|their|my) breath|" + _spoken("softly|quietly|gently")),
     ("hurried", r"blurt\w*|gabbl\w*|babbl\w*|" + _spoken("hurriedly|rapidly|quickly|breathlessly")),
     ("slow", r"drawl\w*|" + _spoken("slowly")),
 )
@@ -211,6 +214,9 @@ def tone_direction(direction, tone):
     """The line's direction with a tone word the narration gives, unless it already says so."""
     if tone not in TONE_WORDS:
         return direction
+    if tone == "soft":
+        direction = ", ".join(part for part in (piece.strip() for piece in direction.split(","))
+                              if part and not re.search(r"\bwhisper\w*\b", part, re.IGNORECASE))
     word, present = TONE_WORDS[tone]
     if re.search(present, direction, re.IGNORECASE):
         return direction

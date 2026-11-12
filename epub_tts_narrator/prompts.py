@@ -28,6 +28,13 @@ is a reasonable basis. Unknown traits may remain unspecified.
 Keep persistent vocal identity separate from a passage's local delivery.
 """
 
+WHISPER_DELIVERY_POLICY = """
+Use whisper only for explicit whispering. Gentle, quiet, low, soft, or breathy
+speech (including 'she breathed') calls for a soft tone, not an inferred whisper;
+when delivery is uncertain, choose soft. Ordinary breathing actions and deep
+breaths are not speech-tone controls.
+"""
+
 VOICE_PROFILE_GUIDANCE = """
 VOICE PROFILE CONTRACT v9
 Write voice.description as a complete voice-creation prompt in one or two
@@ -308,7 +315,7 @@ in issues rather than asserting unsupported facts. The summary and cast must be
 concise. Do not quote unnecessary passages in summaries.
 """
 
-ATTRIBUTE = COMMON + PERFORMANCE_POLICY_GUIDANCE + """
+ATTRIBUTE = COMMON + PERFORMANCE_POLICY_GUIDANCE + WHISPER_DELIVERY_POLICY + """
 Assign each target unit's exact text to speaking roles in the final cast. Context
 units and prior_segments are context only: do not emit them as target text.
 Return {"units":[{"unit_id":"existing target ID", "segments":[{

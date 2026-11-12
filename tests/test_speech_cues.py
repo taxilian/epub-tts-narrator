@@ -69,6 +69,14 @@ class SpeechCueTests(unittest.TestCase):
         self.assertEqual(tone_direction("loud and furious", "shouting"), "loud and furious")
         self.assertEqual(tone_direction("", "soft"), "soft and quiet")
 
+    def test_breathed_speech_is_soft_but_ordinary_breathing_has_no_tone(self):
+        for narration in (" she breathed.", " she breathed at him.", " she said under her breath."):
+            with self.subTest(narration=narration):
+                self.assertEqual(cues(('"Amazing,"', "pol"), (narration, None))[0]["tone"], "soft")
+        for narration in (" she breathed deeply.", " she breathed in.", " she took a deep breath."):
+            with self.subTest(narration=narration):
+                self.assertIsNone(cues(('"Wait,"', "pol"), (narration, None))[0]["tone"])
+
     def test_a_bare_tag_is_no_cue_and_thoughts_make_no_sounds(self):
         self.assertEqual(cues(('"Yes,"', "faldor"), (" Faldor said.", None)), [None])
         text, rows = block(('"How odd,"', "silk"), (" Silk thought, laughing.", None))
