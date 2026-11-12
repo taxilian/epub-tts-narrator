@@ -25,15 +25,17 @@ class RunFilter:
     book: str | None = None
     chapter: int | None = None
     worker: str | None = None
+    voice: str | None = None
     severity: str = "info"
     text: str = ""
 
     def active(self):
-        return any((self.book, self.chapter, self.worker, self.text)) or self.severity != "info"
+        return any((self.book, self.chapter, self.worker, self.voice, self.text)) or self.severity != "info"
 
     def describe(self):
         parts = [f"{name}={value}" for name, value in (("book", self.book), ("chapter", self.chapter),
-                                                       ("worker", self.worker)) if value is not None]
+                                                       ("worker", self.worker), ("voice", self.voice))
+                 if value is not None]
         if self.severity != "info":
             parts.append("all messages" if self.severity == "debug" else f"{self.severity} and worse")
         if self.text:
@@ -47,6 +49,8 @@ class RunFilter:
         if self.chapter is not None and scope.get("chapter") != self.chapter:
             return False
         if self.worker is not None and scope.get("worker") != self.worker:
+            return False
+        if self.voice is not None and scope.get("voice") not in (None, self.voice):
             return False
         if severity is not None and SEVERITIES.index(severity) < SEVERITIES.index(self.severity):
             return False
@@ -79,7 +83,7 @@ class RunModel:
         self.error = None
         self.finished_at = None
         self.filter = RunFilter()
-        self.seen = {"book": set(), "chapter": set(), "worker": set()}
+        self.seen = {"book": set(), "chapter": set(), "worker": set(), "voice": set()}
         self.stopping = False
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
@@ -102,6 +106,7 @@ class RunModel:
                     for task in row["snapshot"].get("active", []):
                         if task.get("worker"):
                             self.seen["worker"].add(task["worker"])
+                        self.seen["voice"].update(task.get("voices") or ())
                 if event.text:
                     row["text"] = event.text
                 row["updated"] = event.time
@@ -136,7 +141,7 @@ class RunModel:
         self.changed.set()
 
     def _remember(self, scope):
-        for key in ("book", "chapter", "worker"):
+        for key in ("book", "chapter", "worker", "voice"):
             if scope.get(key) is not None:
                 self.seen[key].add(scope[key])
 
@@ -227,7 +232,9 @@ class RunModel:
                  if (flt.book is None or item[1].get("book") == flt.book)
                  and (flt.chapter is None or item[1].get("chapter") == flt.chapter)
                  and (flt.worker is None or any(task.get("worker") == flt.worker
-                                                for task in (item[2] or {}).get("active", [])))]
+                                                for task in (item[2] or {}).get("active", [])))
+                 and (flt.voice is None or any(flt.voice in (task.get("voices") or ())
+                                               for task in (item[2] or {}).get("active", [])))]
         return sorted(items, key=lambda item: (str(item[1].get("book") or ""), item[1].get("chapter") or 0))
 
     def workers(self):

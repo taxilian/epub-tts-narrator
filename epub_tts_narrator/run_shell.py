@@ -71,6 +71,8 @@ class RunApp(CapturePrintMixin, App):
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
         Binding("c", "pick('chapter')", "Chapter", tooltip="Filter by chapter"),
         Binding("w", "pick('worker')", "Worker", tooltip="Filter by worker"),
+        Binding("V", "pick('voice')", "Voice", show=False,
+                tooltip="Show chapters with a block spoken by this voice"),
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
@@ -220,7 +222,7 @@ class RunApp(CapturePrintMixin, App):
         tabs.get_tab("errors-tab").label = f"Errors ({len(model.current_failures())})" if model.current_failures() else "Errors"
         self._draw_log()
         self.query_one("#filters", Static).update(
-            "Filters: " + (model.filter.describe() or "none") + "   (b book · c chapter · w worker · v level · / text · x clear)")
+            "Filters: " + (model.filter.describe() or "none") + "   (b book · c chapter · w worker · V voice · v level · / text · x clear)")
 
     def _draw_log(self):
         log = self.query_one("#log", RichLog)

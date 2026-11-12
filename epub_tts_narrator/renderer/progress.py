@@ -530,6 +530,15 @@ def report_worker_activity(notify, event, worker=None, elapsed=None):
         pass
 
 
+def _block_voices(chunk):
+    """Voice IDs speaking one block (IDs only), for the run shell's voice filter."""
+    from .bundle import chunk_speakers
+    try:
+        return [speaker["voice_id"] for speaker in chunk_speakers(chunk) if speaker.get("voice_id")]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return []
+
+
 class ChapterProgress:
     """Count successful blocks and show real elapsed time during blocking TTS.
 
@@ -552,6 +561,7 @@ class ChapterProgress:
         self.total_chapters = total_chapters
         self._weights = [0 if chunk.get("silent_control") else len(chunk.get("spoken_text", ""))
                          for chunk in chunks]
+        self._chunks = chunks
         self._notify = notify
         # On an interactive terminal the run's board gives this chapter one
         # persistent row; its messages scroll above all chapters' rows.
@@ -753,7 +763,8 @@ class ChapterProgress:
             else:
                 phase = _short_phase(task.phase)
             active.append({"block": index + 1, "phase": phase, "worker": task.worker,
-                           "worker_stage": task.worker_stage, "elapsed": now - task.phase_started})
+                           "worker_stage": task.worker_stage, "elapsed": now - task.phase_started,
+                           "voices": _block_voices(self._chunks[index])})
         return {"chapter": self.number, "total_chapters": self.total_chapters,
                 "done": len(self._done), "blocks": len(self._weights),
                 "elapsed": now - self._started, "remaining": remaining,

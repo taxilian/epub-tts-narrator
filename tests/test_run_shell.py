@@ -155,14 +155,21 @@ class RunModelTests(unittest.TestCase):
 
     def test_rows_failures_and_outcomes_build_the_screen_state(self):
         board = BusBoard(self.bus)
-        with ChapterProgress(4, 9, chunks(2), notify=PrefixedBoardNotify(board, "[b1] "), clock=self.clock,
+        spoken = [{"spoken_text": "word " * 10, "segment": {"role_id": "r", "voice_id": "v-mara"}}] * 2
+        with ChapterProgress(4, 9, spoken, notify=PrefixedBoardNotify(board, "[b1] "), clock=self.clock,
                              heartbeat=False) as chapter:
             with chapter.task(0) as task:
                 task.worker_activity("started", "gpu-a")
                 chapter.refresh()
                 self.assertEqual(self.model.workers()["gpu-a"][0][:3], ("b1", 4, 1))
                 self.assertEqual(len(self.model.visible_rows()), 1)
+                self.model.filter.voice = "v-other"
+                self.assertEqual(self.model.visible_rows(), [])
+                self.model.filter.voice = "v-mara"
+                self.assertEqual(len(self.model.visible_rows()), 1)
+                self.model.filter.voice = None
         self.assertEqual(self.model.completed, {"b1": 1})
+        self.assertEqual(self.model.choices("voice"), ["v-mara"])
         self.bus.log("[b2] Renderer stopped: provider quota")
         board.book_outcome("/x/b2", False)
         board.chapter_failure({"number": 3, "error_type": "RenderBlocked", "error": "bad clip"}, book="b1")
