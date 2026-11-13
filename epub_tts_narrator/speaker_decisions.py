@@ -119,7 +119,7 @@ def passage_view(document, item, *, number, total, labels, suggestions, roles, p
         else:
             runs = _view_runs(neighbor, rows.get(neighbor["id"], []), 0, len(neighbor["text"]))
         shown.append({"block_id": neighbor["id"], "runs": runs})
-    return {"number": number, "total": total, "book": _display(document["source"]["book"]["title"]),
+    return {"segment_id": item["id"], "number": number, "total": total, "book": _display(document["source"]["book"]["title"]),
             "chapter": _display(chapter["title"]), "paragraphs": shown, "target": target,
             "characters": item["end"] - item["start"],
             "suggestions": [{"role_id": row["role_id"], "label": _display(labels[row["role_id"]]),

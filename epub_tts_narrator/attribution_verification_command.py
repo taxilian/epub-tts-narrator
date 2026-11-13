@@ -79,8 +79,12 @@ def run_attribution_verification(args, config, client_factory, progress):
     write_capable = bool(args.interactive or args.apply
                          or (sys.stdin.isatty() and sys.stdout.isatty()))
     with ExitStack() as stack:
+        # Its own stack: a save that adds characters releases it first, because a
+        # speaker-decisions publication takes its own locks.
+        reservation = ExitStack()
+        stack.callback(reservation.close)
         if write_capable:
-            reserved = stack.enter_context(reserve_revision_scope([directory]))
+            reserved = reservation.enter_context(reserve_revision_scope([directory]))
             print(f"Publication ownership reserved before verification: {len(reserved)} book(s) in the "
                   f"update chain are locked against concurrent analysis revisions.", file=sys.stderr)
         else:
@@ -114,16 +118,23 @@ def run_attribution_verification(args, config, client_factory, progress):
                                     target_block_ids=selected, progress=print)
         found = findings(document, audited)
 
-        def publish(candidate):
+        def publish(candidate, speaker_input=None):
             try:
                 directories = related_directories([directory])
                 hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
                           for path in directories}
                 if hashes[str(directory)] != original_manifest_hash:
                     raise ValueError(f"Analysis changed while attribution was being reviewed: {directory}")
-                result = revise_directories({directory: candidate}, directories=directories,
-                                            expected_manifest_hashes=hashes, scope="attribution", progress=print,
-                                            reserved_update_locks=reserved or None)
+                if speaker_input is not None:
+                    # New characters: an append-only cast revision checked against its decision receipt.
+                    reservation.close()
+                    result = revise_directories({directory: candidate}, directories=directories,
+                                                expected_manifest_hashes=hashes, scope="speaker-decisions",
+                                                progress=print, speaker_decision_inputs={directory: speaker_input})
+                else:
+                    result = revise_directories({directory: candidate}, directories=directories,
+                                                expected_manifest_hashes=hashes, scope="attribution",
+                                                progress=print, reserved_update_locks=reserved or None)
             except (OSError, ValueError) as exc:
                 raise ValueError(
                     f"Attribution publication did not succeed: {exc} The completed audit remains cached; "
@@ -143,6 +154,27 @@ def run_attribution_verification(args, config, client_factory, progress):
         print(f"{len(found)} attribution finding(s).")
         if not found:
             print("No attribution corrections or new review flags. No changes applied.")
+            return 0
+
+        from .tui_support import active_screen_host
+        show = active_screen_host() if not args.apply else None
+        if show is not None:
+            # On screen: decide every finding beside its story, then save once.
+            from .attribution_manual_review import FindingReview
+            review = FindingReview(document, audited, found)
+
+            def screen():
+                from .attribution_review_tui import FindingsScreen
+                return FindingsScreen(review, book=directory.name)
+            if show(screen) != "save":
+                outcome("Leave unchanged", 0)
+                return 0
+            candidate, speaker_input, proposals, manual = review.finish()
+            if proposals + manual:
+                publish(candidate, speaker_input)
+            outcome("Review", proposals + manual)
+            print(f"  {proposals} accepted proposal(s); {manual} manual edit(s)"
+                  + (f", {len(review.new_names())} new character(s)." if speaker_input is not None else "."))
             return 0
 
         action: VerificationAction

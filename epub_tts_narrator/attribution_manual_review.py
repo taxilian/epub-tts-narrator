@@ -173,3 +173,144 @@ def edit_findings(document, audited, found):
     if manual:
         revised = apply_edits(revised, manual)
     return revised, len(applied), len(manual)
+
+
+class FindingReview:
+    """Decisions for each finding, for the full-screen review (no terminal I/O).
+
+    A finding starts undecided. Accepting takes the verifier's proposal;
+    leaving keeps the saved segment; speaker, direction and review-flag edits
+    start from the proposal, exactly like the line review's manual edit. A
+    new character (``new_character``) is staged as an unassigned passage and
+    assigned through ``speaker_decisions`` when the review is finished, so its
+    cast addition is a receipt-bound speaker decision (``finish``).
+    """
+
+    def __init__(self, document, audited, found):
+        self.document, self.audited, self.found = document, audited, list(found)
+        self.originals = {segment["id"]: segment for segment in document["segments"]}
+        self.proposals = {segment["id"]: segment for segment in audited["segments"]}
+        self.roles = list(document["cast"]["roles"])
+        self.roles_by_id = {role["id"]: role for role in self.roles}
+        self.characters = {row["id"]: row for row in document["cast"]["characters"]}
+        self.labels = _role_labels(self.roles, self.characters, document["source"]["book"])
+        from .speaker_decisions import _role_label
+        self.names = {role["id"]: _role_label(role, self.characters, document["source"]["book"]) for role in self.roles}
+        self.decisions = {}
+
+    def segment_id(self, index):
+        return self.found[index]["segment_id"]
+
+    def status(self, index):
+        """"undecided", "accept", "leave", "edit" or "new"."""
+        return self.decisions.get(self.segment_id(index), {}).get("status", "undecided")
+
+    def staged(self, index):
+        """The segment as it would be published for this finding's current decision."""
+        segment_id = self.segment_id(index)
+        decision = self.decisions.get(segment_id)
+        if decision is None or decision["status"] == "accept":
+            return self.proposals[segment_id]
+        if decision["status"] == "leave":
+            return self.originals[segment_id]
+        return decision["segment"]
+
+    def _editable(self, index):
+        decision = self.decisions.get(self.segment_id(index))
+        return deepcopy(decision["segment"] if decision and decision["status"] in {"edit", "new"}
+                        else self.proposals[self.segment_id(index)])
+
+    def _stage(self, index, segment, **extra):
+        segment_id = self.segment_id(index)
+        if extra.get("status") == "new":
+            self.decisions[segment_id] = {"segment": segment, **extra}
+        elif segment == self.originals[segment_id]:
+            self.decisions[segment_id] = {"status": "leave"}
+        elif segment == self.proposals[segment_id]:
+            self.decisions[segment_id] = {"status": "accept"}
+        else:
+            self.decisions[segment_id] = {"status": "edit", "segment": segment}
+
+    def accept(self, index):
+        self.decisions[self.segment_id(index)] = {"status": "accept"}
+
+    def leave(self, index):
+        self.decisions[self.segment_id(index)] = {"status": "leave"}
+
+    def undo(self, index):
+        self.decisions.pop(self.segment_id(index), None)
+
+    def accept_undecided(self):
+        for index in range(len(self.found)):
+            if self.status(index) == "undecided":
+                self.accept(index)
+
+    def set_speaker(self, index, role_ids):
+        """An existing-cast speaker (several: together; none: unresolved); ValueError if refused."""
+        self._stage(index, edit_speaker(self._editable(index), list(role_ids), self.roles_by_id, self.labels))
+
+    def set_direction(self, index, text):
+        decision = self.decisions.get(self.segment_id(index), {})
+        segment = edit_direction(self._editable(index), text)
+        if decision.get("status") == "new":
+            self._stage(index, segment, status="new", name=decision["name"], description=decision["description"])
+        else:
+            self._stage(index, segment)
+
+    def set_review(self, index, required):
+        segment = edit_review(self._editable(index), bool(required))
+        self._stage(index, segment)
+
+    def new_names(self):
+        """Names of new characters staged so far, in first-use order."""
+        return list(dict.fromkeys(decision["name"] for decision in self.decisions.values()
+                                  if decision["status"] == "new"))
+
+    def new_character(self, index, name, description):
+        """Give this finding a character the cast lacks; another finding may reuse the same new name."""
+        name, description = name.strip(), description.strip()
+        if not name or not description:
+            raise ValueError("A new character needs a name and a voice description")
+        if any(row["name"].casefold() == name.casefold() for row in self.characters.values()):
+            raise ValueError(f"{name} is already in the cast; choose them from the list instead")
+        earlier = next((decision for decision in self.decisions.values()
+                        if decision["status"] == "new" and decision["name"].casefold() == name.casefold()), None)
+        if earlier is not None:
+            name, description = earlier["name"], earlier["description"]
+        segment = edit_speaker(self._editable(index), [], self.roles_by_id, self.labels)
+        self._stage(index, segment, status="new", name=name, description=description)
+
+    def counts(self):
+        statuses = [self.status(index) for index in range(len(self.found))]
+        return {status: statuses.count(status) for status in ("undecided", "accept", "edit", "new", "leave")}
+
+    def finish(self):
+        """``(candidate, speaker_input, proposals, manual)`` for publication.
+
+        ``speaker_input`` is None without new characters (an ordinary
+        attribution revision); otherwise it is the trusted pre-decision
+        document and ``candidate`` adds the new characters through
+        ``speaker_decisions.prompt_speaker_decisions``.
+        """
+        accepted = [segment_id for segment_id, decision in self.decisions.items() if decision["status"] == "accept"]
+        edited = {segment_id: decision["segment"] for segment_id, decision in self.decisions.items()
+                  if decision["status"] in {"edit", "new"}}
+        revised, applied = restrict_findings(self.document, self.audited, accepted)
+        if edited:
+            revised = apply_edits(revised, edited)
+        new = {segment_id: decision for segment_id, decision in self.decisions.items() if decision["status"] == "new"}
+        if not new:
+            return revised, None, len(applied), len(edited)
+        from .speaker_decisions import prompt_speaker_decisions
+
+        def chooser(view):
+            decision = new.get(view["segment_id"])
+            if decision is None:
+                return {"action": "skip"}
+            known = next((role["role_id"] for role in view["roles"]
+                          if view["names"].get(role["role_id"], "").casefold() == decision["name"].casefold()), None)
+            if known is not None:
+                return {"action": "assign", "roles": [known]}
+            return {"action": "new", "name": decision["name"], "description": decision["description"]}
+        candidate = prompt_speaker_decisions(revised, chooser=chooser)
+        return candidate, revised, len(applied), len(edited)

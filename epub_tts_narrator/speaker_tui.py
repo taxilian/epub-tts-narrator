@@ -135,8 +135,19 @@ class TogetherScreen(ModalScreen):
         self.dismiss(None)
 
 
+ACTIONS = {"together": "Several speak these words together…", "new": "New character…",
+           "unresolved": "Leave the speaker unresolved", "skip": "Skip this passage for now",
+           "stop": "Save and stop"}
+
+
 class SpeakerScreen(ModalScreen):
-    """Choose who speaks one passage."""
+    """Choose who speaks one passage.
+
+    ``actions`` lists the other choices offered (default: together, new,
+    skip, stop). With ``back=True`` (choosing a speaker inside another
+    review) Escape returns ``None`` instead of stopping, and ``unresolved``
+    dismisses with ``{"action": "unresolved"}``.
+    """
 
     DEFAULT_CSS = BASE_CSS + """
     SpeakerScreen { align: center middle; }
@@ -158,20 +169,21 @@ class SpeakerScreen(ModalScreen):
         Binding("pagedown", "scroll_story(1)", "Scroll story down", show=False),
         Binding("c", "center", "Back to the passage", show=False),
         Binding("t", "together", "Together"), Binding("n", "new", "New character"),
-        Binding("s", "skip", "Skip"), Binding("q", "stop", "Save and stop"),
+        Binding("s", "skip", "Skip"), Binding("q", "stop", "Save and stop"), Binding("u", "unresolved", "Unresolved"),
         *[Binding(str(number), f"suggestion({number})", show=False) for number in range(1, 10)],
     ]
 
-    def __init__(self, view):
+    def __init__(self, view, *, actions=("together", "new", "skip", "stop"), back=False, title=None):
         super().__init__()
         self.view = view
         self.voice_styles = speaker_styles(view)
+        self.actions, self.back, self.title_text = tuple(actions), back, title
 
     def compose(self) -> ComposeResult:
         view = self.view
         with Vertical(id="speaker-frame"):
-            yield Static(Text(f"Passage {view['number']} of {view['total']} · {view['book']} · {view['chapter']}"
-                              f" · {view['characters']} characters"), id="speaker-heading")
+            yield Static(Text(self.title_text or f"Passage {view['number']} of {view['total']} · {view['book']} · "
+                              f"{view['chapter']} · {view['characters']} characters"), id="speaker-heading")
             with Horizontal(id="speaker-body"):
                 with VerticalScroll(id="speaker-story"):
                     for index, paragraph in enumerate(view["paragraphs"]):
@@ -181,9 +193,12 @@ class SpeakerScreen(ModalScreen):
                     yield Input(placeholder="/ to filter voices", id="speaker-filter")
                     yield OptionList(*self._options(""), id="speaker-menu")
                     yield Static(Text(view.get("error") or ""), id="speaker-error")
-            yield Static(Text("↑↓ choose · Enter assigns · 1–9 a likely speaker · / filter · T together · "
-                              "N new character · S skip · Q or Escape save and stop · PgUp/PgDn scroll · "
-                              "C back to the passage"), id="speaker-help")
+            keys = {"together": "T together", "new": "N new character", "skip": "S skip",
+                    "stop": "Q or Escape save and stop", "unresolved": "U unresolved"}
+            yield Static(Text(" · ".join(["↑↓ choose", "Enter assigns", "1–9 a likely speaker", "/ filter",
+                                          *(keys[action] for action in self.actions),
+                                          *(["Escape goes back"] if self.back else []),
+                                          "PgUp/PgDn scroll", "C back to the passage"])), id="speaker-help")
 
     def _options(self, text):
         """Menu entries: likely speakers (numbered), every voice, then the other choices."""
@@ -214,10 +229,8 @@ class SpeakerScreen(ModalScreen):
             options.append(Option(self._voice_label(role["role_id"], role["label"]), id=f"role:{role['role_id']}"))
         if not words:
             options.append(Option(Text("Other choices", style="bold"), disabled=True))
-            for key, label in (("together", "Several speak these words together…"),
-                               ("new", "New character…"), ("skip", "Skip this passage for now"),
-                               ("stop", "Save and stop")):
-                options.append(Option(Text(label), id=f"action:{key}"))
+            for key in self.actions:
+                options.append(Option(Text(ACTIONS[key]), id=f"action:{key}"))
         return options
 
     def _voice_label(self, role_id, label):
@@ -278,7 +291,9 @@ class SpeakerScreen(ModalScreen):
     def check_action(self, action, parameters):
         # Letters and digits are shortcuts only while the menu, not the filter box, has focus.
         if isinstance(self.focused, Input) and action in {"together", "new", "skip", "stop", "suggestion", "filter",
-                                                           "center"}:
+                                                           "center", "unresolved"}:
+            return False
+        if action in ACTIONS and action not in self.actions:
             return False
         return True
 
@@ -315,9 +330,14 @@ class SpeakerScreen(ModalScreen):
     def action_stop(self):
         self.dismiss({"action": "stop"})
 
+    def action_unresolved(self):
+        self.dismiss({"action": "unresolved"})
+
     def action_leave(self):
-        """Escape: out of the filter box first, else save and stop."""
+        """Escape: out of the filter box first, else back (inside a review) or save and stop."""
         if isinstance(self.focused, Input):
             self.query_one("#speaker-menu", OptionList).focus()
+        elif self.back:
+            self.dismiss(None)
         else:
             self.action_stop()
