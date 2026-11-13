@@ -306,8 +306,11 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
             groups = self.app.query_one("#groups", DataTable)
             self.assertEqual(groups.row_count, 2)
             self.assertIn("From the story", str(self.app.query_one("#detail").render()))
-            # Edit the accent by hand; an invented accent stays in the dialog with its reason.
-            await pilot.press("a")
+            # Edit the accent by hand: past the list, typing your own; an invented accent stays in the dialog.
+            await pilot.press("a", *"soft irish")  # matches nothing listed, so only "type your own" remains
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
             self.assertIsInstance(self.app.screen, TextEditScreen)
             editor = self.app.screen.query_one("#editor", Input)
             editor.value = "Mara"

@@ -15,14 +15,18 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, OptionList, Static
+from textual.widgets.option_list import Option
 
 from epub_tts_narrator.tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, JobsTable, KeysScreen, MessageLog, TextEditScreen,
     highlighted_key, sync_table,
 )
 
+from . import accent_catalog as catalog
+
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+TYPE_OWN = "type-own"
 UNASSIGNED = "unassigned"
 
 
@@ -34,6 +38,118 @@ def shown(accent):
 NEW_GROUP = "new"
 NO_ACCENT = "none"
 KEPT = "kept:"
+
+
+def _close_accents(name, used, unused_style=""):
+    """Text for an accent's close neighbours, the ones some group already uses marked with its origin."""
+    text = Text()
+    for position, other in enumerate(catalog.near(name)):
+        if position:
+            text.append(", ", style=unused_style)
+        origins = used.get(other.casefold())
+        text.append(other + ("*" if catalog.ACCENTS[other]["rare"] else ""), style="yellow" if origins else unused_style)
+        if origins:
+            text.append(f" ({', '.join(origins)})", style="yellow")
+    return text
+
+
+class AccentPickerScreen(ChoiceScreen):
+    """Choose an accent from ``accent_catalog``: each row shows its family, its close accents, and the groups using it.
+
+    Filtering matches names, families and close accents, so typing "Scottish"
+    lists every accent that sounds near it. The last row types an accent of
+    your own (a strength word, or one not on the list).
+    """
+
+    def __init__(self, title, current, used, *, own_origin=None):
+        self.current = catalog.listed(current)
+        self.typed_default = shown(current) or ""
+        self.typed = ""
+        self.used = used
+        self.own_origin = own_origin
+        options = [(name, self._plain(name)) for name in catalog.ACCENTS]
+        options.append((TYPE_OWN, "Type an accent of your own…"))
+        super().__init__(title, options, help_text=(
+            "Type to filter by accent, family or close accent · Enter chooses · Escape cancels\n"
+            "Accents of one family sound related; yellow ones are already used (by the origin shown). "
+            "* seldom heard in recordings: Drama 3 may blur it into its family."))
+
+    def _origins(self, name):
+        return [origin for origin in self.used.get(name.casefold(), []) if origin != self.own_origin]
+
+    def _plain(self, name):
+        return " ".join([name, catalog.ACCENTS[name]["family"], *catalog.near(name), *self._origins(name)])
+
+    def _label(self, name, *, grouped=False):
+        """One accent's row. Under its family heading (``grouped``) only links to other families are listed."""
+        entry = catalog.ACCENTS[name]
+        origins = self._origins(name)
+        text = Text("  " if grouped else "")
+        text.append(name + ("*" if entry["rare"] else ""), style="bold yellow" if origins else "bold")
+        if name == self.current:
+            text.append("  (current)", style="green")
+        if origins:
+            text.append(f"  used: {', '.join(origins)}", style="yellow")
+        used = {key: [o for o in value if o != self.own_origin] for key, value in self.used.items()}
+        if grouped:
+            links = [other for other in catalog.near(name) if catalog.ACCENTS[other]["family"] != entry["family"]]
+            for position, other in enumerate(links):
+                text.append("  ≈ " if not position else ", ", style="dim")
+                text.append(other, style="yellow" if used.get(other.casefold()) else "dim")
+            return text
+        text.append(f"  {entry['family']}", style="dim")
+        close = _close_accents(name, used, "dim")
+        if close:
+            text.append("  ≈ ", style="dim")
+            text.append_text(close)
+        return text
+
+    def _options(self, text):
+        words = text.casefold().split()
+        own = Option(Text(self.options[-1][1], style="italic"), id=str(len(self.options) - 1))
+        if not words:
+            # The whole list under family headings: a family's accents sound related.
+            found, family = [], None
+            for index, (value, _) in enumerate(self.options[:-1]):
+                if catalog.ACCENTS[value]["family"] != family:
+                    family = catalog.ACCENTS[value]["family"]
+                    found.append(Option(Text(family, style="bold underline"), id=f"family:{family}", disabled=True))
+                found.append(Option(self._label(value, grouped=True), id=str(index)))
+            return [*found, own]
+        matches = [(index, value) for index, (value, label) in enumerate(self.options)
+                   if value != TYPE_OWN and all(word in label.casefold() for word in words)]
+        # Accents whose own name matches come first, then those that only sound close to it.
+        matches.sort(key=lambda item: not all(word in item[1].casefold() for word in words))
+        return [*(Option(self._label(value), id=str(index)) for index, value in matches), own]
+
+    def _first_choice(self, start=0, step=1):
+        choices = self.query_one("#choices", OptionList)
+        index = start
+        while 0 <= index < choices.option_count:
+            if not choices.get_option_at_index(index).disabled:
+                return index
+            index += step
+        return None
+
+    def on_mount(self):
+        super().on_mount()
+        choices = self.query_one("#choices", OptionList)
+        if self.current is not None:
+            choices.highlighted = choices.get_option_index(str(list(catalog.ACCENTS).index(self.current)))
+        else:
+            choices.highlighted = self._first_choice()
+
+    def on_input_changed(self, event):
+        self.typed = event.value.strip()  # offered when typing an accent of your own
+        super().on_input_changed(event)
+        self.query_one("#choices", OptionList).highlighted = self._first_choice()
+
+    def action_move(self, delta):
+        choices = self.query_one("#choices", OptionList)
+        current = choices.highlighted if choices.highlighted is not None else -1
+        target = self._first_choice(current + delta, 1 if delta > 0 else -1)
+        if target is not None:
+            choices.highlighted = target
 
 
 class AccentApp(CapturePrintMixin, App):
@@ -48,7 +164,7 @@ class AccentApp(CapturePrintMixin, App):
     #left { width: 50%; min-width: 40; }
     #right { width: 1fr; }
     #groups { height: 1fr; }
-    #detail-scroll { height: 9; border: round $primary-background; padding: 0 1; }
+    #detail-scroll { height: 12; border: round $primary-background; padding: 0 1; }
     #members { height: 1fr; border: round $primary-background; }
     #bottom { height: 9; }
     #log { width: 1fr; height: 1fr; border: round $primary-background; }
@@ -169,7 +285,7 @@ class AccentApp(CapturePrintMixin, App):
             origin = Text(group["origin"])
             if planner.continues_series(group):
                 origin.append("  (series)", style="dim")
-            rows.append((str(index), (shown(group["accent"]), origin, str(len(group["voice_ids"])))))
+            rows.append((str(index), (self._accent_cell(str(index), group), origin, str(len(group["voice_ids"])))))
         missing = planner.unassigned()
         if missing:
             rows.append((UNASSIGNED, (Text("no accent", style="yellow"), "left out of the plan", str(len(missing)))))
@@ -183,6 +299,34 @@ class AccentApp(CapturePrintMixin, App):
         self.query_one("#log", MessageLog).sync(self.controller.messages, started=self._started)
         self.query_one("#jobs", JobsTable).show(self.controller.jobs.jobs())
         self.render_busy()
+
+    def _accent_cell(self, key, group):
+        """The accent, yellow when another origin has the same one, with "≈" when another's is close."""
+        relations = {relation for relation, _ in self.controller.planner.neighbours(key)}
+        text = Text(shown(group["accent"]), style="yellow" if "same" in relations else "")
+        if "near" in relations:
+            text.append(" ≈", style="dim")
+        return text
+
+    def _likeness(self, key, group, text):
+        """Which other groups sound the same or close, and the accents near this one to tell them apart."""
+        planner = self.controller.planner
+        neighbours = planner.neighbours(key)
+        same = [other["origin"] for relation, other in neighbours if relation == "same"]
+        near = [f"{shown(other['accent'])} ({other['origin']})" for relation, other in neighbours if relation == "near"]
+        if same:
+            text.append("\nSame accent as: ", style="bold yellow")
+            text.append(", ".join(same), style="yellow")
+        if near:
+            text.append("\nClose to: ", style="bold")
+            text.append(", ".join(near))
+        name = catalog.listed(group["accent"])
+        if name is not None:
+            text.append("\nSimilar accents (a chooses): ", style="bold")
+            used = {k: [o for o in v if o != group["origin"]] for k, v in planner.used_by().items()}
+            text.append_text(_close_accents(name, used))
+        else:
+            text.append("\nNot on the accent list (a chooses one)", style="dim")
 
     def render_detail(self):
         planner = self.controller.planner
@@ -202,6 +346,8 @@ class AccentApp(CapturePrintMixin, App):
             text.append(f" — {group['origin']}\n")
             text.append("Decided elsewhere, so the model keeps it. Tab to a character and press m to give them "
                         "another accent in this book (or none); saving makes it this book's choice.", style="dim")
+            if group["accent"]:
+                self._likeness(key, group, text)
             members = group["voice_ids"]
         else:
             group = planner.groups[int(key)]
@@ -211,6 +357,7 @@ class AccentApp(CapturePrintMixin, App):
                 text.append("Continues this origin from an earlier book in the series.\n", style="dim")
             text.append("Why (w): ", style="bold")
             text.append(group.get("why") or "(no reason given)")
+            self._likeness(key, group, text)
             members = group["voice_ids"]
         detail.update(text)
         sync_table(self.query_one("#members", DataTable),
@@ -285,7 +432,7 @@ class AccentApp(CapturePrintMixin, App):
         def check(text):
             if field == "accent":
                 from .accent_assignment import accent_cue
-                accent_cue(text, planner.terms)
+                accent_cue(catalog.canonical(text), planner.terms)
 
         def saved(text):
             if text is not None:
@@ -293,7 +440,27 @@ class AccentApp(CapturePrintMixin, App):
                 if error:
                     self.notify(error, severity="error")
         value = shown(group[field]) if field == "accent" else group[field]
+        if field == "accent":
+            self._pick_accent(f"Accent for {group['origin']}", group["accent"], saved, check, own_origin=group["origin"])
+            return
         self.push_screen(TextEditScreen(title, value or "", single_line=field != "why", validate=check), saved)
+
+    def _pick_accent(self, title, current, then, check, *, own_origin=None):
+        """The accent list first; its last row (or a filter matching nothing listed) types one instead."""
+        picker = AccentPickerScreen(title, current, self.controller.planner.used_by(), own_origin=own_origin)
+
+        def picked(name):
+            if name is None:
+                return
+            if name != TYPE_OWN:
+                then(name)
+                return
+            typed = picker.typed or picker.typed_default
+            self.push_screen(TextEditScreen(
+                title, typed, single_line=True, validate=check,
+                help_text="An accent in one or two words, optionally after a strength word (light, broad, heavy). "
+                          "Enter saves · Escape cancels"), then)
+        self.push_screen(picker, picked)
 
     def action_move(self):
         if not self._idle():
@@ -334,14 +501,14 @@ class AccentApp(CapturePrintMixin, App):
 
         def check(text):
             from .accent_assignment import accent_cue
-            accent_cue(text, planner.terms)
+            accent_cue(catalog.canonical(text), planner.terms)
 
         def chosen(accent):
             if accent:
                 error = self.controller.edit(planner.move, voice_id, (origin, accent))
                 if error:
                     self.notify(error, severity="error")
-        self.push_screen(TextEditScreen(f"Accent for {origin}", "", single_line=True, validate=check), chosen)
+        self._pick_accent(f"Accent for {origin}", "", chosen, check, own_origin=origin)
 
     def action_save(self):
         if not self._idle():

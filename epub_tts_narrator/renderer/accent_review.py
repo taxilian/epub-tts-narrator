@@ -29,6 +29,7 @@ import uuid
 from epub_tts_narrator.tui_jobs import FAILED, RUNNING, JobQueue
 
 from . import accent_assignment as assignment
+from . import accent_catalog as catalog
 
 
 class AccentPlanner:
@@ -212,6 +213,32 @@ class AccentPlanner:
     def continues_series(self, group):
         return assignment._origin_key(group["origin"]) in self.series
 
+    def _all_groups(self):
+        """(key, group) for every group shown: this plan's by index, kept ones as "kept:N"."""
+        return [*((str(index), group) for index, group in enumerate(self.groups)),
+                *((f"kept:{index}", group) for index, group in enumerate(self.kept_groups()) if group["accent"])]
+
+    def neighbours(self, key):
+        """Other groups whose accent is the same as, or close to, group ``key``'s: [(relation, group)], "same" first.
+
+        Two origins with one accent sound alike; close accents (one family of
+        ``accent_catalog``, or linked there) sound related but still distinct.
+        """
+        shown = dict(self._all_groups())
+        accent = shown[key]["accent"] if key in shown else ""
+        found = [(catalog.relation(accent, group["accent"]), group) for other, group in shown.items()
+                 if other != key and accent]
+        return sorted(((relation, group) for relation, group in found if relation),
+                      key=lambda item: item[0] != "same")
+
+    def used_by(self):
+        """{catalog accent name or bare accent (case-folded): [origin, ...]} for every group shown."""
+        used = {}
+        for _, group in self._all_groups():
+            name = catalog.listed(group["accent"]) or catalog.split(group["accent"])[1]
+            used.setdefault(name.casefold(), []).append(group["origin"])
+        return used
+
     # Editing ----------------------------------------------------------------
 
     def _group(self, index):
@@ -227,7 +254,7 @@ class AccentPlanner:
 
     def set_accent(self, index, accent):
         group = self._group(index)
-        cue = assignment.accent_cue(accent, self.terms)
+        cue = assignment.accent_cue(catalog.canonical(accent), self.terms)
         self._check_series(group["origin"], cue)
         group["accent"] = cue
         self.dirty = True
@@ -260,7 +287,7 @@ class AccentPlanner:
             origin = " ".join(str(origin).split())[:assignment.MAX_ORIGIN]
             if not origin:
                 raise ValueError("A new group needs an origin")
-            cue = assignment.accent_cue(accent, self.terms)
+            cue = assignment.accent_cue(catalog.canonical(accent), self.terms)
             self._check_series(origin, cue)
             destination = {"origin": origin, "accent": cue, "why": "", "voice_ids": [], "names": []}
         else:

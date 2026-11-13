@@ -29,6 +29,7 @@ import re
 import sys
 import uuid
 
+from .accent_catalog import canonical, listed, split as split_accent
 from .accent_prompts import MORE, ASSIGN, NOTES, REVISE
 
 
@@ -426,6 +427,16 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
                              [ids[voice_id] for voice_id in group["voice_ids"] if voice_id in ids]]
                             for group in plan]}
 
+    # Accents allowed off the list: ones already decided, and ones the person's own words name.
+    decided_accents = [*fixed.values(), *(item["accent"] for item in origins), *keep.values()]
+    person = " ".join([notes or "", revise[1] if revise is not None else ""])
+
+    def allowed(cue):
+        if listed(cue) is not None or any(_same_accent(cue, other) for other in decided_accents):
+            return True
+        name = split_accent(cue)[1]
+        return bool(name) and re.search(rf"(?i)(?<!\w){re.escape(name)}(?!\w)", person) is not None
+
     def validate(response):
         groups = response.get("g") if isinstance(response, dict) else None
         if not isinstance(groups, list):
@@ -437,9 +448,13 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
                 continue
             why = group[2] if len(group) >= 4 and isinstance(group[2], str) else ""
             try:
-                cue = terse_accent(accent_cue(group[1], terms))
+                cue = canonical(terse_accent(accent_cue(canonical(group[1]) if isinstance(group[1], str) else group[1],
+                                                           terms)))
             except ValueError as exc:
                 problems.append(str(exc))
+                continue
+            if not allowed(cue):
+                problems.append(f"accent {group[1]!r} is not on the ACCENTS list: choose the closest listed accent")
                 continue
             origin = " ".join(group[0].split())[:MAX_ORIGIN]
             series_accent = decided.get(_origin_key(origin))
