@@ -67,6 +67,84 @@ def _context_runs(block, segments, labels, start, end, *, tail=False, limit=1000
     return visible
 
 
+VIEW_PARAGRAPHS = 8
+
+
+def _view_runs(block, segments, start, end, *, target=False):
+    """``[{"speakers", "text", "target"}]`` for text[start:end]: contiguous runs of one voice, exact text."""
+    text = block["text"]
+    runs = []
+    for segment in segments:
+        left, right = max(start, segment["start"]), min(end, segment["end"])
+        if right <= left:
+            continue
+        role_ids = ([speaker["role_id"] for speaker in segment["simultaneous_speakers"]]
+                    if segment.get("simultaneous_speakers") else
+                    [segment["role_id"]] if has_assigned_speakers(segment) else [])
+        if runs and runs[-1]["speakers"] == role_ids:
+            runs[-1]["text"] += text[left:right]
+        else:
+            runs.append({"speakers": role_ids, "text": text[left:right], "target": target})
+    return [dict(run, text=_display(run["text"])) for run in runs if run["text"].strip()]
+
+
+def passage_view(document, item, *, number, total, labels, suggestions, roles, paragraphs=VIEW_PARAGRAPHS):
+    """What a full-screen chooser shows for one passage, as plain data.
+
+    ``paragraphs`` are the passage's own paragraph with up to ``paragraphs``
+    on each side in the same chapter, each as voice runs (the passage itself
+    is the run marked ``target``); ``target`` is the index of the passage's
+    paragraph. ``suggestions`` are the likely speakers with the reason for
+    each, best first; ``roles`` every voice in cast order. ``labels`` tell
+    voices apart in the menu; ``names`` are the short names for the story.
+    """
+    blocks = document["source"]["blocks"]
+    characters = {row["id"]: row for row in document["cast"]["characters"]}
+    position = next(index for index, block in enumerate(blocks) if block["id"] == item["block_id"])
+    block = blocks[position]
+    chapter = next(row for row in document["source"]["chapters"] if row["id"] == block["chapter_id"])
+    rows = {}
+    for segment in document["segments"]:
+        rows.setdefault(segment["block_id"], []).append(segment)
+    nearby = [index for index in range(max(0, position - paragraphs), min(len(blocks), position + paragraphs + 1))
+              if blocks[index]["chapter_id"] == block["chapter_id"]]
+    shown, target = [], 0
+    for index in nearby:
+        neighbor = blocks[index]
+        if index == position:
+            target = len(shown)
+            runs = (_view_runs(neighbor, rows[neighbor["id"]], 0, item["start"])
+                    + [{"speakers": [], "text": _display(item["text"]), "target": True}]
+                    + _view_runs(neighbor, rows[neighbor["id"]], item["end"], len(neighbor["text"])))
+        else:
+            runs = _view_runs(neighbor, rows.get(neighbor["id"], []), 0, len(neighbor["text"]))
+        shown.append({"block_id": neighbor["id"], "runs": runs})
+    return {"number": number, "total": total, "book": _display(document["source"]["book"]["title"]),
+            "chapter": _display(chapter["title"]), "paragraphs": shown, "target": target,
+            "characters": item["end"] - item["start"],
+            "suggestions": [{"role_id": row["role_id"], "label": _display(labels[row["role_id"]]),
+                             "reason": _display(row.get("reason") or "")} for row in suggestions],
+            "roles": [{"role_id": role["id"], "label": _display(labels[role["id"]]), "kind": role["kind"],
+                       "voice_id": role["voice_id"]} for role in roles],
+            "labels": {role_id: _display(label) for role_id, label in labels.items()},
+            "names": {role["id"]: _display(_role_label(role, characters, document["source"]["book"]))
+                      for role in roles if role["id"] in labels},
+            "error": None}
+
+
+def _screen_chooser():
+    """A chooser on the open full-screen UI, or None for the line prompt."""
+    from .tui_support import active_screen_host
+    show = active_screen_host()
+    if show is None:
+        return None
+
+    def choose(view):
+        from .speaker_tui import SpeakerScreen
+        return show(lambda: SpeakerScreen(view))
+    return choose
+
+
 def _role_label(role, characters, book):
     character = characters.get(role.get("character_id"))
     author = author_narrator_name(role, book)
@@ -194,12 +272,19 @@ def _save_decision_checkpoint(cache_dir, document, decisions, status):
 
 
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,
-                             jev_client=None, decisions_cache=None):
+                             jev_client=None, decisions_cache=None, chooser=None):
     """Ask for every remaining speaker, preserving progress if input ends.
 
     This function is deliberately called only by the CLI after automatic review.
     Redirected standard input does not prevent use of the controlling terminal.
     Explicit input streams never fall back to a different input source.
+
+    Inside the full-screen run shell each passage is chosen on its own screen
+    (``speaker_tui.SpeakerScreen``); ``chooser(view)`` stands in for it, taking
+    a ``passage_view`` and returning ``{"action": "assign", "roles": [...]}``,
+    ``{"action": "new", "name", "description"}``, ``{"action": "skip"}`` or
+    ``{"action": "stop"}`` (also ``None``). A refused answer is asked again
+    with ``view["error"]`` set.
     """
     errors = validate_document(document)
     if errors:
@@ -208,7 +293,9 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     pending = unassigned_segments(result)
     if not pending:
         return result
-    if input_stream is None and not getattr(sys.stdin, "isatty", lambda: False)():
+    if chooser is None and input_stream is None:
+        chooser = _screen_chooser()
+    if chooser is None and input_stream is None and not getattr(sys.stdin, "isatty", lambda: False)():
         # Shell loops and pipelines can redirect stdin even when a person is
         # using a terminal. Ask on that terminal instead of consuming the pipe
         # or silently skipping the required speaker choices.
@@ -222,7 +309,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             else:
                 return prompt_speaker_decisions(
                     document, book_path=book_path, input_stream=terminal_input,
-                    output_stream=terminal_output, jev_client=jev_client)
+                    output_stream=terminal_output, jev_client=jev_client, decisions_cache=decisions_cache)
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stderr if output_stream is None else output_stream
     color = (getattr(output_stream, "isatty", lambda: False)()
@@ -298,8 +385,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         if not name:
             say("No name given; passage left unchanged.")
             return None
-        character_id, _, _ = _mint_series_ids(result, name)
-        if character_id in characters:
+        if name_taken(name):
             say(f"{name} is already defined; choose it from the list instead.")
             return None
         print("Voice description — how it should sound: ", end="", file=output_stream, flush=True)
@@ -370,6 +456,69 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 decisions[-1]["defined_voice"] = deepcopy(defined)
         return True
 
+    def name_taken(name):
+        """A character this book already has, by name or by a prompt-made ID."""
+        return (_mint_series_ids(result, name)[0] in characters
+                or any(_display(row["name"]).casefold() == name.casefold() for row in characters.values()))
+
+    def refused(choices):
+        if len({role["id"] for role in choices}) != len(choices):
+            return "Choose each speaker only once."
+        if len(choices) > 1 and (any(role["kind"] != "dialogue" for role in choices)
+                                or len({role["voice_id"] for role in choices}) != len(choices)):
+            return ("Simultaneous speech requires distinct dialogue roles with distinct voices; "
+                    "narration cannot be a group member.")
+        return None
+
+    def choose_on_screen(item, number, total, suggestions):
+        """One passage on the full-screen chooser: "done", "skip" or "stop"."""
+        error = None
+        while True:
+            view = passage_view(result, item, number=number, total=total, labels=labels,
+                                suggestions=suggestions, roles=list(roles_by_id.values()))
+            view["error"] = error
+            answer = chooser(view)
+            action = answer.get("action") if isinstance(answer, dict) else "stop"
+            if action == "skip":
+                say(f"Passage {number}/{total} skipped; it stays unassigned.")
+                return "skip"
+            if action == "new":
+                name = _display(answer.get("name") or "").strip()
+                description = _display(answer.get("description") or "").strip()
+                if not name or not description:
+                    error = "A new character needs a name and a voice description."
+                    continue
+                if name_taken(name):
+                    error = f"{name} is already defined; choose it from the list instead."
+                    continue
+                character, voice, role = _create_voice_records(result, name, description)
+                characters[character["id"]] = character
+                roles_by_id[role["id"]] = role
+                labels[role["id"]] = name
+                say(f"Defined new voice: {name}.")
+                assign(item, [role])
+                decisions[-1]["defined_voice"] = {"character_id": role["character_id"], "voice_id": role["voice_id"],
+                                                  "name": name, "created": {"character": deepcopy(character),
+                                                                            "voice": deepcopy(voice),
+                                                                            "role": deepcopy(role)}}
+                save_journal("running")
+                return "done"
+            if action == "assign":
+                selected = answer.get("roles")
+                if (not isinstance(selected, list) or not selected
+                        or any(role_id not in roles_by_id for role_id in selected)):
+                    error = "Choose a voice from the list."
+                    continue
+                choices = [roles_by_id[role_id] for role_id in selected]
+                error = refused(choices)
+                if error:
+                    continue
+                assign(item, choices)
+                save_journal("running")
+                return "done"
+            say("Speaker selection stopped; progress is saved.")
+            return "stop"
+
     if decisions_cache is not None:
         journal = _load_decision_checkpoint(decisions_cache, decision_checkpoint_key(document))
         if journal is not None:
@@ -383,17 +532,33 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 labels = _role_labels(roles, characters, result["source"]["book"])
                 decisions = []
             pending = unassigned_segments(result)
-    if pending and not getattr(input_stream, "isatty", lambda: False)():
+    if pending and chooser is None and not getattr(input_stream, "isatty", lambda: False)():
         say(f"Speaker selection incomplete: {len(pending)} spoken passage(s) need a voice, but no interactive terminal is available. Progress will be saved.")
         say("Finish speaker selection from a terminal with: " + _resume_command(book_path))
         return result
-    if pending:
+    if pending and chooser is not None:
+        say(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice; "
+            "choosing them on screen.")
+    elif pending:
         prose(f"Automatic speaker assignment is finished. {len(pending)} passage(s) still need a voice.")
         prose("Enter accepts the best guess. O shows all voices. N defines a new voice. Q saves progress and stops.")
         prose("Comma-separated numbers mean those characters speak these SAME words together.")
     for number, item in enumerate(pending, 1):
         position = positions[item["block_id"]]
         block = blocks[position]
+        if chooser is not None:
+            ranked = rank_speakers(result, item, jev_client=jev_client)
+            suggestions = []
+            for suggestion in ranked:
+                if suggestion["role_id"] in roles_by_id and suggestion["role_id"] not in {
+                        existing["role_id"] for existing in suggestions}:
+                    suggestions.append(suggestion)
+                if len(suggestions) == 3:
+                    break
+            outcome = choose_on_screen(item, number, len(pending), suggestions)
+            if outcome == "stop":
+                break
+            continue
         say()
         say("─" * width)
         prose(f"Passage {number}/{len(pending)} — {result['source']['book']['title']}")

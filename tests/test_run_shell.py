@@ -463,6 +463,35 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await self.wait_for(pilot, lambda: not app.is_running)
         self.assertEqual(answers, ["12\n"])
 
+    async def test_unsettled_speakers_are_chosen_on_their_own_screen_inside_the_shell(self):
+        import sys
+        from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+        from epub_tts_narrator.speaker_tui import SpeakerScreen
+        from epub_tts_narrator.tui_support import screen_host
+        from epub_tts_narrator.tui_widgets import PromptBridge
+        from test_speaker_decisions import add_lena, missing
+        document = missing()
+        add_lena(document)
+        results = []
+
+        def command():
+            results.append(prompt_speaker_decisions(document))
+            return 0
+
+        bridge = PromptBridge(None)
+        app = self.make_app(command)
+        app.interactive_input, app.bridge, bridge.app = True, bridge, app
+        previous = sys.stdin
+        sys.stdin = bridge.input
+        self.addCleanup(setattr, sys, "stdin", previous)
+        with screen_host(bridge.show):
+            async with app.run_test(size=(140, 40)) as pilot:
+                await self.wait_for(pilot, lambda: isinstance(app.screen, SpeakerScreen))
+                await pilot.pause()
+                await pilot.press("slash", *"lena", "enter")
+                await self.wait_for(pilot, lambda: not self.model.running)
+        self.assertEqual(results[0]["segments"][1]["role_id"], "lena")
+
     async def test_escape_in_a_question_ends_input_like_end_of_file(self):
         import sys
         from epub_tts_narrator.tui_widgets import PromptBridge, PromptScreen

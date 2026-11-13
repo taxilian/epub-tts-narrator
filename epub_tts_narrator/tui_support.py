@@ -83,3 +83,27 @@ def prompt_streams(input_stream, output_stream):
 def active_prompt_streams():
     """``(input, output)`` of the open full-screen UI, or ``None``."""
     return _PROMPT_STREAMS
+
+
+_SCREEN_HOST = None
+
+
+@contextmanager
+def screen_host(show):
+    """While a full-screen UI is open, ``show(make_screen)`` opens a screen and waits for its result.
+
+    Code on the command's worker thread that has a screen of its own for a
+    question (the speaker chooser) asks through ``active_screen_host()``
+    instead of a line prompt. ``make_screen`` runs on the UI thread.
+    """
+    global _SCREEN_HOST
+    previous, _SCREEN_HOST = _SCREEN_HOST, show
+    try:
+        yield
+    finally:
+        _SCREEN_HOST = previous
+
+
+def active_screen_host():
+    """The open full-screen UI's ``show(make_screen)``, or ``None``."""
+    return _SCREEN_HOST

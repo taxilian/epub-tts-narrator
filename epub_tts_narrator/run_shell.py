@@ -27,7 +27,7 @@ from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, T
 
 from .run_events import EventBus
 from .run_shell_model import RunModel, next_severity, repair_hint
-from .tui_support import prompt_streams
+from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
     SEVERITY_STYLES, format_seconds, highlighted_key, sync_table,
@@ -901,7 +901,7 @@ def run_in_shell(command, *, title, graceful_render_stop=False, interactive_inpu
     try:
         if interactive_input:
             sys.stdin = bridge.input
-        with shell_board(bus), prompt_streams(bridge.input, bridge.output):
+        with shell_board(bus), prompt_streams(bridge.input, bridge.output), screen_host(bridge.show):
             app.run()
     finally:
         sys.stdin = previous_stdin

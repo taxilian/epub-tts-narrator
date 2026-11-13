@@ -488,6 +488,19 @@ class PromptBridge:
             self.on_answer(result["value"] if result["value"] is not None else "(input ended)")
         return result["value"]
 
+    def show(self, make_screen):
+        """Open ``make_screen()`` (built on the UI thread) and wait for its dismissal value."""
+        answered = threading.Event()
+        result = {"value": None}
+
+        def done(value):
+            result["value"] = value
+            answered.set()
+
+        self.app.call_from_thread(lambda: self.app.push_screen(make_screen(), done))
+        answered.wait()
+        return result["value"]
+
 
 def sync_table(table: DataTable, rows):
     """Replace a table's rows (``[(key, cells)]``) and keep the cursor on the same key."""

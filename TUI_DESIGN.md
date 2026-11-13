@@ -20,7 +20,7 @@ Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); 
 | Analyzer progress | `progress(message)` strings + `stream_progress.StreamConsole` (live provider-stream lines, stage fraction via `meter`) | `observe(event)` dict events and `set_progress(fraction, stage)` |
 | Curses | `review_tui.py`: curses-free `ReviewApp` state machine, `CursesScreen` adapter (`size/write/refresh/read_key`), `_drive` loop; offline tests drive the app with a fake screen | Same split (UI-free model, thin screen) reused with Textual; `review-ui` itself stays curses for now |
 | Casting | `renderer/audition.py:run_casting`: numbered line menu over `CastingSession` (`rows`, `regenerate`, `accept`, `update_prompt`, `share_voice`, `ensure_ready_many`, `refresh_prompts`, `recover_attempt`) | Session API covers everything; only the front end changes |
-| Interactive prompts inside commands | `speaker_decisions` (readline), `verify-attribution` accept prompt, `pronounce` listening loop, `terminal.play_sample`/`wait_key`, casting menu | Must suspend the full-screen UI around them |
+| Interactive prompts inside commands | `speaker_decisions` (own full-screen chooser `speaker_tui.SpeakerScreen` via `tui_support.screen_host`; readline with `--plain`), `verify-attribution` accept prompt, `pronounce` listening loop, `terminal.play_sample`/`wait_key`, casting menu | Must suspend the full-screen UI around them |
 
 ## Principles
 
