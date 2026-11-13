@@ -1548,9 +1548,13 @@ class CastingSession:
             return self._accept_locked(voice_id, candidate_id)
 
     def generate_missing(self):
-        """Make each unselected voice ready, reusing saved candidates first."""
+        """Make each unselected voice that speaks in this book ready, reusing saved candidates first.
+
+        A cast voice without a line here (a character the book only names) is
+        skipped: nothing renders it, and a later book where it speaks makes it.
+        """
         results = self.ensure_ready_many([
-            row["voice_id"] for row in self.rows() if row["selected"] is None])
+            row["voice_id"] for row in self.rows() if row["selected"] is None and row.get("speaks", True)])
         for result in results:
             error = result["error"]
             if error is not None:

@@ -879,6 +879,29 @@ class CastingCLITests(unittest.TestCase):
         self.assertNotIn("awaiting acceptance", output)
         session.close.assert_called_once_with()
 
+    def test_bulk_casting_skips_a_voice_with_no_lines_in_this_book(self):
+        session = SharedSessionDouble()
+        session.row("v2")["speaks"] = False  # a character the book only names
+        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
+                patch("epub_tts_narrator.renderer.audition.AudioPlayer"):
+            code, output, error = self.run_cli("--action", "regenerate-all")
+        self.assertEqual(code, 0, error)
+        self.assertEqual([event for event in session.events if event[0] == "regenerate"], [("regenerate", "vn")])
+        self.assertIn("Skipped 1 voice(s) with no lines in this book.", output)
+
+    def test_generate_missing_prepares_only_voices_that_speak(self):
+        from types import SimpleNamespace
+        from epub_tts_narrator.renderer.casting import CastingSession
+        asked = []
+        double = SimpleNamespace(
+            rows=lambda: [{"voice_id": "talks", "selected": None, "speaks": True},
+                          {"voice_id": "named", "selected": None, "speaks": False},
+                          {"voice_id": "done", "selected": {"candidate_id": "c"}, "speaks": True}],
+            ensure_ready_many=lambda ids: asked.append(ids) or [{"voice_id": i, "selected": {}, "error": None}
+                                                                  for i in ids])
+        CastingSession.generate_missing(double)
+        self.assertEqual(asked, [["talks"]])
+
     def test_regenerate_all_replaces_each_canonical_voice_once_and_selects_it(self):
         session = SharedSessionDouble()
         originals = {voice_id: deepcopy(session.row(voice_id)["selected"])

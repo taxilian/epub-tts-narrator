@@ -357,7 +357,9 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
         if callable(prepare):
             prepare()
         rows = session.rows()
-        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")]
+        # A voice without lines in this book is never rendered, so it is not prepared here.
+        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")
+                   and row.get("speaks", True)]
         missing = sum(not row["candidates"] for row in pending)
         if pending:
             say(f"Preparing voices: {len(pending) - missing} saved, {missing} to generate.")
@@ -572,6 +574,9 @@ def casting_command(args, bundle, config):
                   f"{candidate['reference_audio']}")
         elif action == "generate-missing":
             print(f"Prepared {len(session.generate_missing())} voices for use.")
+            silent = sum(1 for row in rows if row["selected"] is None and not row.get("speaks", True))
+            if silent:
+                print(f"Skipped {silent} voice(s) with no lines in this book (generate one with --action generate).")
         elif action == "prepare-samples":
             print(json.dumps(session.prepare_samples(), ensure_ascii=False, indent=2))
         elif action == "refresh-prompts":
@@ -588,6 +593,10 @@ def casting_command(args, bundle, config):
                 raise ValueError(f"Could not normalize {failed} sample(s); {prepared} playback copies are ready.")
             print(f"Normalized playback copies are ready for {prepared} sample(s).")
         elif action == "regenerate-all":
+            silent = [row for row in rows if not row.get("speaks", True)]
+            if silent:
+                rows = [row for row in rows if row.get("speaks", True)]
+                print(f"Skipped {len(silent)} voice(s) with no lines in this book.")
             if not include_inherited:
                 skipped = {row.get("canonical_voice_id", row["voice_id"]) for row in rows
                            if (row["selected"] or row.get("regeneration") or {}).get("inherited", False)}

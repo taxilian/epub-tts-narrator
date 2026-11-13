@@ -47,6 +47,16 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("A calm voice for Ava.", detail)
             self.assertEqual(self.app.query_one("#takes", DataTable).row_count, 2)
 
+    async def test_voices_without_lines_are_hidden_until_l_shows_them(self):
+        self.session._rows[1]["speaks"] = False  # v-ben: a character the book only names
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.settle(pilot)
+            self.assertNotIn("v-ben", self.voice_keys())
+            self.assertIn("1 without lines hidden (L shows)", self.app.sub_title)
+            await pilot.press("L")
+            await pilot.pause()
+            self.assertIn("v-ben", self.voice_keys())
+
     async def test_filter_and_status_keys_narrow_the_list(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await pilot.press("f")

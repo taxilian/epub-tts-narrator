@@ -129,6 +129,18 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("Done: Generate Ava with Gemini")
                             for _, _, text in self.controller.messages))
 
+    def test_voices_without_lines_are_hidden_counted_apart_and_never_prepared(self):
+        self.row("v-ben")["speaks"] = False  # both v-ben and v-cole have no accepted take
+        self.assertNotIn("v-ben", self.visible_ids())
+        self.assertEqual(self.controller.silent(), 1)
+        self.assertEqual(sum(self.controller.counts().values()), len(self.controller.rows) - 1)
+        self.controller.filter.silent = True
+        self.assertIn("v-ben", self.visible_ids())
+        self.controller.prepare_pending()
+        self.settle()
+        prepared = [call[1][0] for call in self.session.calls if call[0] == "ensure_ready_many"]
+        self.assertEqual(prepared, [["v-cole"]])
+
     def test_a_voice_without_lines_in_this_book_says_it_needs_no_accent(self):
         ben = self.row("v-ben")
         ben.update(accent="", accent_suggestion="", speaks=False)
