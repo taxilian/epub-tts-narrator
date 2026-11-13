@@ -337,10 +337,18 @@ class ChoiceScreen(ModalScreen):
 
 
 _CHOICE = re.compile(r"\[([A-Za-z0-9])\]\s*([^/\[]*?)\s*(?=/|\[|$)")
+_YES_NO = re.compile(r"\[(y/N|Y/n|y/n)\]\s*:?\s*$")
 
 
 def prompt_choices(question):
-    """``[(key, label)]`` from a question like ``[A] apply the new directions / [L] leave it``."""
+    """``[(key, label)]`` from a question like ``[A] apply the new directions / [L] leave it``.
+
+    A yes/no question (``… now? [y/N]``) gets Yes and No, the default first.
+    """
+    yes_no = _YES_NO.search(question.rstrip())
+    if yes_no:
+        choices = [("y", "Yes"), ("n", "No")]
+        return choices[::-1] if yes_no.group(1) == "y/N" else choices
     text = question.rstrip().rstrip(":").rstrip()
     choices = [(key, label.strip(" :")) for key, label in _CHOICE.findall(text)]
     return choices if len(choices) >= 2 else []

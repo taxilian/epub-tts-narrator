@@ -37,6 +37,9 @@ class PromptChoiceTests(unittest.TestCase):
             "[A] accept all / [E] edit-review individual corrections / [L] leave unchanged (quit): ")], ["A", "E", "L"])
         self.assertEqual(prompt_choices("Speaker number, U for unresolved, Enter to keep: "), [])
         self.assertEqual(prompt_choices("Press [Enter] to continue"), [])
+        # A yes/no question gets both answers, its default first.
+        self.assertEqual(prompt_choices("Download this model now? [y/N] "), [("n", "No"), ("y", "Yes")])
+        self.assertEqual(prompt_choices("Continue? [Y/n]"), [("y", "Yes"), ("n", "No")])
 
 
 class EventParsingTests(unittest.TestCase):
