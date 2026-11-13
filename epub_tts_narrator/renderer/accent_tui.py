@@ -22,7 +22,15 @@ from epub_tts_narrator.tui_widgets import (
     highlighted_key, sync_table,
 )
 
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 UNASSIGNED = "unassigned"
+
+
+def shown(accent):
+    """An accent as the screen shows it: "broad Scottish", not "broad Scottish accent" on every row."""
+    if accent and accent.casefold().endswith(" accent"):
+        return accent[:-len(" accent")]
+    return accent
 NEW_GROUP = "new"
 NO_ACCENT = "none"
 KEPT = "kept:"
@@ -33,6 +41,9 @@ class AccentApp(CapturePrintMixin, App):
 
     TITLE = "Accents"
     CSS = BASE_CSS + """
+    #busy { display: none; height: auto; padding: 0 1; background: $warning 25%; color: $text; text-style: bold;
+            border: heavy $warning; }
+    #busy.running { display: block; }
     #main { height: 1fr; }
     #left { width: 50%; min-width: 40; }
     #right { width: 1fr; }
@@ -68,6 +79,7 @@ class AccentApp(CapturePrintMixin, App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static("", id="busy")
         with Horizontal(id="main"):
             with Vertical(id="left"):
                 yield DataTable(id="groups", cursor_type="row", zebra_stripes=True)
@@ -97,7 +109,7 @@ class AccentApp(CapturePrintMixin, App):
             self.controller.log("This is the saved plan; nothing is asked of the model until you press i or n.")
         self.render_all()
         self.query_one("#groups", DataTable).focus()
-        self.set_interval(0.5, self._tick)
+        self.set_interval(0.25, self._tick)
 
     # Updates ------------------------------------------------------------------
 
@@ -116,6 +128,31 @@ class AccentApp(CapturePrintMixin, App):
     def _tick(self):
         if self.controller.busy():
             self.query_one("#jobs", JobsTable).show(self.controller.jobs.jobs())
+        self.render_busy()
+
+    def render_busy(self):
+        """A banner across the screen while a model request runs, so it cannot be missed."""
+        from textual.css.query import NoMatches
+        try:
+            banner = self.query_one("#busy", Static)
+            groups = self.query_one("#groups", DataTable)
+        except NoMatches:
+            return  # The screen is closing; a last timer tick has nothing to draw.
+        jobs = [job for job in self.controller.jobs.jobs() if job.active]
+        busy = bool(jobs)
+        banner.set_class(busy, "running")
+        # No plan to show yet: the groups table itself says it is waiting.
+        groups.loading = busy and not self.controller.planner.groups
+        if not busy:
+            return
+        job = next((job for job in jobs if job.started is not None), jobs[0])
+        now = time.monotonic()
+        seconds = int(job.elapsed(now)) if job.started is not None else 0
+        frame = SPINNER[int(now * 8) % len(SPINNER)]
+        text = Text(f"{frame} Asking the model: {job.label} — {seconds} s", style="bold")
+        text.append("\nThe plan appears here when the reply arrives (often a minute or two); editing waits until "
+                    "then. Q quits without saving.", style="")
+        banner.update(text)
 
     def render_all(self):
         planner = self.controller.planner
@@ -132,19 +169,20 @@ class AccentApp(CapturePrintMixin, App):
             origin = Text(group["origin"])
             if planner.continues_series(group):
                 origin.append("  (series)", style="dim")
-            rows.append((str(index), (group["accent"], origin, str(len(group["voice_ids"])))))
+            rows.append((str(index), (shown(group["accent"]), origin, str(len(group["voice_ids"])))))
         missing = planner.unassigned()
         if missing:
             rows.append((UNASSIGNED, (Text("no accent", style="yellow"), "left out of the plan", str(len(missing)))))
         for index, group in enumerate(planner.kept_groups()):
             # Decided elsewhere; shown so every character can be found and moved.
-            rows.append((f"{KEPT}{index}", (Text(group["accent"] or "no accent", style="dim"),
+            rows.append((f"{KEPT}{index}", (Text(shown(group["accent"]) or "no accent", style="dim"),
                                            Text(f"{group['origin']} (kept)", style="dim"),
                                            str(len(group["voice_ids"])))))
         sync_table(self.query_one("#groups", DataTable), rows)
         self.render_detail()
         self.query_one("#log", MessageLog).sync(self.controller.messages, started=self._started)
         self.query_one("#jobs", JobsTable).show(self.controller.jobs.jobs())
+        self.render_busy()
 
     def render_detail(self):
         planner = self.controller.planner
@@ -160,14 +198,14 @@ class AccentApp(CapturePrintMixin, App):
             members = planner.unassigned()
         elif key.startswith(KEPT):
             group = planner.kept_groups()[int(key[len(KEPT):])]
-            text.append(group["accent"] or "no accent", style="bold")
+            text.append(shown(group["accent"]) or "no accent", style="bold")
             text.append(f" — {group['origin']}\n")
             text.append("Decided elsewhere, so the model keeps it. Tab to a character and press m to give them "
                         "another accent in this book (or none); saving makes it this book's choice.", style="dim")
             members = group["voice_ids"]
         else:
             group = planner.groups[int(key)]
-            text.append(f"{group['accent']}", style="bold")
+            text.append(f"{shown(group['accent'])}", style="bold")
             text.append(f" — {group['origin']}\n")
             if planner.continues_series(group):
                 text.append("Continues this origin from an earlier book in the series.\n", style="dim")
@@ -241,7 +279,7 @@ class AccentApp(CapturePrintMixin, App):
         planner = self.controller.planner
         group = planner.groups[index]
         action = {"accent": planner.set_accent, "origin": planner.set_origin, "why": planner.set_why}[field]
-        title = {"accent": "Accent (a real-world accent, e.g. broad Yorkshire)", "origin": "Origin",
+        title = {"accent": "Accent (one or two words, e.g. Scottish, Cockney, upper-class English)", "origin": "Origin",
                  "why": "Why this accent fits"}[field]
 
         def check(text):
@@ -254,7 +292,8 @@ class AccentApp(CapturePrintMixin, App):
                 error = self.controller.edit(action, index, text)
                 if error:
                     self.notify(error, severity="error")
-        self.push_screen(TextEditScreen(title, group[field] or "", single_line=field != "why", validate=check), saved)
+        value = shown(group[field]) if field == "accent" else group[field]
+        self.push_screen(TextEditScreen(title, value or "", single_line=field != "why", validate=check), saved)
 
     def action_move(self):
         if not self._idle():
@@ -272,7 +311,7 @@ class AccentApp(CapturePrintMixin, App):
         if voice_id is None:
             return
         planner = self.controller.planner
-        options = [(index, f"{group['accent']} — {group['origin']}") for index, group in enumerate(planner.groups)]
+        options = [(index, f"{shown(group['accent'])} — {group['origin']}") for index, group in enumerate(planner.groups)]
         options.append((NEW_GROUP, "A new group…"))
         options.append((NO_ACCENT, "No accent"))
 

@@ -203,6 +203,27 @@ def accent_cue(accent, terms=frozenset()):
     return cue
 
 
+_STRENGTH = {"light", "soft", "broad", "thick", "heavy", "strong", "mild", "slight", "faint", "plummy", "gentle"}
+
+
+def terse_accent(cue):
+    """A model's accent cue in the short house style: "Heavy Russian accent" -> "heavy Russian accent",
+    "German-accented English accent" -> "German accent", "Utah Accent" -> "Utah accent".
+
+    Applied to new model replies only; an accent decided earlier keeps its exact words.
+    """
+    words = re.sub(r"(?i)\b([A-Za-z]+)-accented English\b", r"\1", cue).split()
+    if words and words[-1].casefold() == "accent":
+        words = words[:-1]
+    if words and words[0].casefold() in _STRENGTH:
+        words[0] = words[0].casefold()
+    return " ".join([*words, "accent"]) if words else cue
+
+
+def _same_accent(first, second):
+    return terse_accent(first).casefold() == terse_accent(second).casefold()
+
+
 def _clip(text):
     text = " ".join(str(text).split())
     return text if len(text) <= MAX_QUOTE else text[:MAX_QUOTE - 1].rsplit(" ", 1)[0] + "…"
@@ -399,18 +420,24 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
                 continue
             why = group[2] if len(group) >= 4 and isinstance(group[2], str) else ""
             try:
-                cue = accent_cue(group[1], terms)
+                cue = terse_accent(accent_cue(group[1], terms))
             except ValueError as exc:
                 problems.append(str(exc))
                 continue
             origin = " ".join(group[0].split())[:MAX_ORIGIN]
             series_accent = decided.get(_origin_key(origin))
+            if series_accent and _same_accent(series_accent, cue):
+                cue = series_accent  # The series' own words, exactly.
             if series_accent and series_accent.casefold() != cue.casefold():
                 problems.append(f"origin {origin!r} already has the accent {series_accent!r} in this series; "
                                 "keep it, or name a different origin")
                 continue
             members = [short[item] for item in group[-1] if isinstance(item, str) and item in short
                        and short[item] not in accents]
+            kept = next((keep[voice_id] for voice_id in members if voice_id in keep
+                         and _same_accent(keep[voice_id], cue)), None)
+            if kept is not None:
+                cue = kept  # A kept accent keeps its exact words.
             for voice_id in members:
                 if voice_id in keep and keep[voice_id].casefold() != cue.casefold():
                     problems.append(f"voice {ids[voice_id]} must keep the accent {keep[voice_id]!r}")
