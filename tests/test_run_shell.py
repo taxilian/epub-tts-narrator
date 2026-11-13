@@ -69,6 +69,57 @@ class DialogClosesOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answers, ["gemini"])  # the callback ran once, so the voice is generated once
 
 
+class SyncTableTests(unittest.IsolatedAsyncioTestCase):
+    """Refreshing a table must not move the highlighted row or the scroll position."""
+
+    async def test_updates_keep_the_cursor_and_scroll_and_a_reorder_keeps_the_row_on_its_line(self):
+        import asyncio
+        from rich.text import Text
+        from textual.app import App
+        from textual.widgets import DataTable
+        from epub_tts_narrator.tui_widgets import highlighted_key, sync_table
+        asyncio.get_running_loop().slow_callback_duration = 10
+        keys = [f"v{n:02d}" for n in range(60)]
+
+        class Host(App):
+            CSS = "DataTable { height: 1fr; }"
+
+            def compose(self):
+                yield DataTable(cursor_type="row")
+
+            def on_mount(self):
+                table = self.query_one(DataTable)
+                table.add_columns("Voice", "Status")
+                sync_table(table, [(key, (key, "pending")) for key in keys])
+        app = Host()
+        async with app.run_test(size=(60, 12)) as pilot:
+            table = app.query_one(DataTable)
+            table.focus()
+            await pilot.pause()
+            table.move_cursor(row=30)
+            await pilot.pause()
+            table.scroll_to(y=27, animate=False)  # the highlighted row mid-view, not at an edge
+            await pilot.pause()
+            await pilot.pause()
+            line = table.cursor_row - round(table.scroll_y)
+            scroll = table.scroll_y
+            self.assertGreater(scroll, 0)
+            # A status changes in place: nothing moves, and the new style shows.
+            sync_table(table, [(key, (key, Text("generating", style="cyan") if key == "v30" else "pending"))
+                               for key in keys])
+            await pilot.pause()
+            self.assertEqual((table.scroll_y, highlighted_key(table)), (scroll, "v30"))
+            self.assertEqual(str(table.get_row("v30")[1].style), "cyan")
+            # Rows reorder (sorting by status): the voice stays highlighted on the same screen line.
+            reordered = [key for key in keys if key != "v30"]
+            reordered.insert(40, "v30")
+            sync_table(table, [(key, (key, "pending")) for key in reordered])
+            await pilot.pause()
+            await pilot.pause()
+            self.assertEqual(highlighted_key(table), "v30")
+            self.assertEqual(table.cursor_row - round(table.scroll_y), line)
+
+
 class EventParsingTests(unittest.TestCase):
     def test_existing_prefixes_become_scope(self):
         scope, text = parse_scope("[book-2] Ch 3: === Failed chapter 3 / 9: verification; continuing ===")

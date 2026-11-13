@@ -528,21 +528,56 @@ class PromptBridge:
         return result["value"]
 
 
+def _cell(value):
+    # Plain strings are shown literally: a book or voice name may contain [brackets].
+    return Text(value) if isinstance(value, str) else value
+
+
+def _same(before, after):
+    """Whether a cell would look the same (rich's ``Text ==`` ignores the text's own style)."""
+    if isinstance(before, Text) and isinstance(after, Text):
+        return before == after and str(before.style) == str(after.style) and before.justify == after.justify
+    return type(before) is type(after) and before == after
+
+
 def sync_table(table: DataTable, rows):
-    """Replace a table's rows (``[(key, cells)]``) and keep the cursor on the same key."""
-    current = None
+    """Show ``rows`` (``[(key, cells)]``) in ``table`` without moving what the person is looking at.
+
+    The same keys in the same order (most updates: a status changes) only
+    update the cells that changed, so the cursor and scroll position stay
+    exactly where they are. Added, removed or reordered rows rebuild the
+    table, then keep the highlighted row on the same line of the screen
+    (``clear`` alone would scroll back to the top).
+    """
+    keys = [key for key, _ in rows]
+    current = [row_key.value for row_key in table.rows]
+    if current == keys:
+        columns = [column.key for column in table.ordered_columns]
+        for key, cells in rows:
+            shown = table.get_row(key)
+            for column, before, value in zip(columns, shown, map(_cell, cells)):
+                if not _same(before, value):
+                    table.update_cell(key, column, value)
+        return keys
+    cursor, line = None, 0
     if table.row_count:
         try:
-            current = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            cursor = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            line = table.cursor_row - round(table.scroll_y)
         except Exception:
-            current = None
+            cursor = None
+    scroll_y = table.scroll_y
     table.clear()
     for key, cells in rows:
-        # Plain strings are shown literally: a book or voice name may contain [brackets].
-        table.add_row(*(Text(cell) if isinstance(cell, str) else cell for cell in cells), key=key)
-    keys = [key for key, _ in rows]
-    if current in keys:
-        table.move_cursor(row=keys.index(current))
+        table.add_row(*map(_cell, cells), key=key)
+    if cursor in keys:
+        index = keys.index(cursor)
+        table.move_cursor(row=index, scroll=False)
+        target = max(0, index - line)
+    else:
+        target = scroll_y
+    # The new rows' heights are measured on the next refresh; scroll then.
+    table.call_after_refresh(table.scroll_to, y=target, animate=False)
     return keys
 
 
