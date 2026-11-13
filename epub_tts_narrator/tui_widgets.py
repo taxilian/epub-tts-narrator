@@ -127,7 +127,25 @@ def format_seconds(seconds):
     return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
 
-class ConfirmScreen(ModalScreen[bool]):
+class Dialog(ModalScreen):
+    """A modal screen that closes once.
+
+    Two selections can reach a dialog before it closes (a held or bouncing
+    Enter, a double click). Textual would then run the result callback a
+    second time and fail popping a screen that is already gone, so every
+    dismissal after the first is ignored. Nothing awaits ``dismiss`` here.
+    """
+
+    _dismissed_once = False
+
+    def dismiss(self, result=None):
+        if self._dismissed_once:
+            return None
+        self._dismissed_once = True
+        return super().dismiss(result)
+
+
+class ConfirmScreen(Dialog):
     """Ask a yes/no question; ``y``/Enter confirms, ``n``/Escape declines."""
 
     DEFAULT_CSS = BASE_CSS
@@ -160,7 +178,7 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-class KeysScreen(ModalScreen):
+class KeysScreen(Dialog):
     """List every key an app binds, including ones the footer has no room for."""
 
     DEFAULT_CSS = BASE_CSS
@@ -193,7 +211,7 @@ class KeysScreen(ModalScreen):
         self.dismiss(None)
 
 
-class DetailScreen(ModalScreen):
+class DetailScreen(Dialog):
     """Show a long text (an error's saved detail, a record) in a scrollable dialog."""
 
     DEFAULT_CSS = BASE_CSS
@@ -228,7 +246,7 @@ def _key_name(key):
     return key
 
 
-class TextEditScreen(ModalScreen):
+class TextEditScreen(Dialog):
     """Edit multi-line text; Ctrl+S saves, Escape cancels (returns ``None``).
 
     ``validate(text)`` may raise ``ValueError``; its message is shown and the
@@ -281,7 +299,7 @@ class TextEditScreen(ModalScreen):
         self.dismiss(None)
 
 
-class ChoiceScreen(ModalScreen):
+class ChoiceScreen(Dialog):
     """Choose one of ``options`` (``[(value, label)]``); type to filter, Escape cancels."""
 
     DEFAULT_CSS = BASE_CSS
@@ -354,7 +372,7 @@ def prompt_choices(question):
     return choices if len(choices) >= 2 else []
 
 
-class PromptScreen(ModalScreen):
+class PromptScreen(Dialog):
     """A question the command asks on its terminal, answered in a dialog.
 
     The command's recent output scrolls above; the question itself always

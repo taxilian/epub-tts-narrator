@@ -15,11 +15,10 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
-from .tui_widgets import BASE_CSS
+from .tui_widgets import BASE_CSS, Dialog
 
 
 NARRATION_STYLE = "italic"
@@ -67,7 +66,7 @@ def paragraph_text(paragraph, view, styles):
     return text
 
 
-class NewVoiceScreen(ModalScreen):
+class NewVoiceScreen(Dialog):
     """Name and voice description for a character the cast lacks; Escape goes back."""
 
     DEFAULT_CSS = BASE_CSS + """
@@ -100,7 +99,7 @@ class NewVoiceScreen(ModalScreen):
         self.dismiss(None)
 
 
-class TogetherScreen(ModalScreen):
+class TogetherScreen(Dialog):
     """Several characters saying the same words at once; Space marks, Enter confirms."""
 
     DEFAULT_CSS = BASE_CSS + """
@@ -140,7 +139,7 @@ ACTIONS = {"together": "Several speak these words together…", "new": "New char
            "stop": "Save and stop"}
 
 
-class SpeakerScreen(ModalScreen):
+class SpeakerScreen(Dialog):
     """Choose who speaks one passage.
 
     ``actions`` lists the other choices offered (default: together, new,

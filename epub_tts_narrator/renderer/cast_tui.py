@@ -14,11 +14,10 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Label, SelectionList, Static
 
 from epub_tts_narrator.tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
 )
 
 from .cast_tui_model import DESIGNERS, FIELDS, STATUS_FILTERS, CastController, candidate_rows, label, next_status_filter
@@ -46,7 +45,7 @@ def word_changes(before, after):
     return text
 
 
-class RevisionScreen(ModalScreen):
+class RevisionScreen(Dialog):
     """Review the model's revised descriptions: every change is marked; Space unmarks one; Enter saves the marked.
 
     Dismisses with ``{voice_id: description}`` to save, or None.

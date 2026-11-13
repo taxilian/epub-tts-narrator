@@ -20,11 +20,10 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
-from ..tui_widgets import BASE_CSS, MessageLog, TextEditScreen
+from ..tui_widgets import BASE_CSS, Dialog, MessageLog, TextEditScreen
 
 
 DEFINE_ACTIONS = [
@@ -43,7 +42,7 @@ TAG_ACTIONS = [("y", "✓  Yes, this use gets the reading"), ("n", "✗  No, kee
 _EOF = object()
 
 
-class PartsScreen(ModalScreen):
+class PartsScreen(Dialog):
     """Which parts of speech get the reading; Space marks, Enter confirms."""
 
     DEFAULT_CSS = BASE_CSS + "PartsScreen .dialog { width: 60; height: auto; } PartsScreen SelectionList { height: 9; }"

@@ -42,6 +42,33 @@ class PromptChoiceTests(unittest.TestCase):
         self.assertEqual(prompt_choices("Continue? [Y/n]"), [("y", "Yes"), ("n", "No")])
 
 
+class DialogClosesOnceTests(unittest.IsolatedAsyncioTestCase):
+    """Two selections in one tick (a held Enter, a double click) once crashed casting with ScreenStackError."""
+
+    async def test_a_second_selection_before_the_dialog_closes_is_ignored(self):
+        import asyncio
+        from textual.app import App
+        from textual.widgets import OptionList
+        from epub_tts_narrator.tui_widgets import ChoiceScreen
+        asyncio.get_running_loop().slow_callback_duration = 10
+        answers = []
+
+        class Host(App):
+            def on_mount(self):
+                self.push_screen(ChoiceScreen("Generate", [("gemini", "Gemini"), ("local", "Local")],
+                                              filterable=False), answers.append)
+        app = Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            choices = app.screen.query_one("#choices", OptionList)
+            choices.highlighted = 0
+            choices.action_select()
+            choices.action_select()
+            await pilot.pause()
+        self.assertIsNone(app._exception)
+        self.assertEqual(answers, ["gemini"])  # the callback ran once, so the voice is generated once
+
+
 class EventParsingTests(unittest.TestCase):
     def test_existing_prefixes_become_scope(self):
         scope, text = parse_scope("[book-2] Ch 3: === Failed chapter 3 / 9: verification; continuing ===")

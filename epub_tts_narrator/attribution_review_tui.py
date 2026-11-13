@@ -17,12 +17,11 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from .speaker_tui import NewVoiceScreen, SpeakerScreen, paragraph_text, speaker_styles
-from .tui_widgets import BASE_CSS, ConfirmScreen, TextEditScreen
+from .tui_widgets import BASE_CSS, ConfirmScreen, Dialog, TextEditScreen
 
 
 MARKS = {"undecided": ("·", "dim"), "accept": ("✓", "green"), "leave": ("✗", "red"),
@@ -39,7 +38,7 @@ def _speaker_names(segment, review):
     return role_ids, " & ".join(review.labels[role_id] for role_id in role_ids) or "unresolved"
 
 
-class FindingsScreen(ModalScreen):
+class FindingsScreen(Dialog):
     """Decide each attribution finding, then save or leave."""
 
     DEFAULT_CSS = BASE_CSS + """

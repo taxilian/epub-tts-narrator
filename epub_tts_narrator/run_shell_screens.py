@@ -17,11 +17,10 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import DataTable, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .tui_widgets import BASE_CSS, ChoiceScreen, highlighted_key, sync_table
+from .tui_widgets import BASE_CSS, ChoiceScreen, Dialog, highlighted_key, sync_table
 
 
 ACTIONS = {
@@ -49,7 +48,7 @@ def failure_text(item, hint):
     return title, "\n".join(lines)
 
 
-class FailureScreen(ModalScreen):
+class FailureScreen(Dialog):
     """A failure's detail and the repairs that apply to it."""
 
     DEFAULT_CSS = BASE_CSS + """
@@ -85,7 +84,7 @@ def _seconds(value):
     return "" if value is None else f"{value:.1f}s"
 
 
-class TakesScreen(ModalScreen):
+class TakesScreen(Dialog):
     """Every take of one passage, to compare by ear, choose the one used, and judge verification.
 
     Dismisses with ``{"attempt", "learn"}`` when a person chooses a take to
