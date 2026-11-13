@@ -247,5 +247,42 @@ class ModelPromptBridgeTests(unittest.TestCase):
         self.assertIsNone(active_prompt_streams())
 
 
+class CastListStaysStillTests(unittest.IsolatedAsyncioTestCase):
+    """A voice's status changing must not scroll the cast list or move its highlight."""
+
+    async def asyncSetUp(self):
+        asyncio.get_running_loop().slow_callback_duration = 10
+
+    async def test_a_generation_starting_and_finishing_leaves_the_list_where_it_was(self):
+        import threading
+        from cast_tui_fixtures import voice_row
+        from epub_tts_narrator.tui_widgets import highlighted_key
+        session = FakeSession([voice_row(f"v{n:02d}", f"Voice {n:02d}") for n in range(60)])
+        gate = threading.Event()
+        session.regenerate = lambda voice_id, voice_designer=None: gate.wait(5)
+        controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(controller.close)
+        self.addCleanup(gate.set)
+        app = CastApp(controller, title="Fixture Book", startup=False)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#voices", DataTable)
+            table.focus()
+            table.move_cursor(row=30)
+            await pilot.pause()
+            table.scroll_to(y=24, animate=False)
+            await pilot.pause()
+            await pilot.pause()
+            where = (table.scroll_y, highlighted_key(table))
+            self.assertEqual(where, (24, "v30"))
+            controller.regenerate(controller.row("v30"), "local")
+            await pilot.pause(0.3)
+            self.assertEqual((table.scroll_y, highlighted_key(table)), where)  # now "generating"
+            gate.set()
+            controller.jobs.wait_idle(5)
+            await pilot.pause(0.3)
+            self.assertEqual((table.scroll_y, highlighted_key(table)), where)
+
+
 if __name__ == "__main__":
     unittest.main()
