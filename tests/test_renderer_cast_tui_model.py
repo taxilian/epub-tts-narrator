@@ -129,6 +129,15 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("Done: Generate Ava with Gemini")
                             for _, _, text in self.controller.messages))
 
+    def test_a_voice_without_lines_in_this_book_says_it_needs_no_accent(self):
+        ben = self.row("v-ben")
+        ben.update(accent="", accent_suggestion="", speaks=False)
+        sections = {title: value for title, value, _ in self.controller.details(ben)}
+        self.assertIn("no lines in this book", sections["Accent cue (said before every line)"])
+        ben["speaks"] = True
+        sections = {title: value for title, value, _ in self.controller.details(ben)}
+        self.assertEqual(sections["Accent cue (said before every line)"], "(none)")
+
     def test_the_accent_cue_is_shown_offered_from_the_description_and_saved(self):
         ava = self.row("v-ava")
         ava["accent_suggestion"] = "light Irish accent"

@@ -406,6 +406,9 @@ class CastingSession:
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
         several_clips = designer_records_several_clips(self.config)
+        # Series characters can be in the cast without a line in this book; they need no accent here.
+        speaking = {row.get("voice_id") for chapter in self.bundle.get("chapters", [])
+                    for row in chapter.get("rows", [])}
         rows = []
         for voice_id, profile in self._profiles.items():
             selected = self.store.load(voice_id)
@@ -467,6 +470,7 @@ class CastingSession:
                 "description": profile["description"],
                 "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
                                   else speech_traits(profile)),
+                "speaks": voice_id in speaking,
                 "accent": accents.get(voice_id, ""),
                 "accent_automatic": voice_id not in chosen_accents and bool(accents.get(voice_id)),
                 "accent_source": ("chosen" if voice_id in chosen_accents else "" if not accents.get(voice_id)

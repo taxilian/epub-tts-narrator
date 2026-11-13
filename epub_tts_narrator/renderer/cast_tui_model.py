@@ -48,6 +48,13 @@ def label(row):
     return display(_label(row))
 
 
+def no_accent(row):
+    """How a voice without an accent cue is described: a voice with no lines in this book needs none."""
+    if row.get("speaks") is False:
+        return "(none: no lines in this book, so none is needed until a book where this character speaks)"
+    return "(none)"
+
+
 def canonical(row):
     return row.get("canonical_voice_id", row["voice_id"])
 
@@ -172,7 +179,7 @@ def detail_sections(row, rows, status, note):
         (FIELDS["reference_text"], row.get("reference_text", ""), "s"),
         ("Script source", script_source, ""),
         (FIELDS["speech_traits"], row.get("speech_traits") or "(none)", "t"),
-        (FIELDS["accent"] + " (said before every line)", (row.get("accent") or "(none)")
+        (FIELDS["accent"] + " (said before every line)", (row.get("accent") or no_accent(row))
          + {"assigned": " (the book's accent for this character's origin)",
                   "description": " (from the voice description)"}.get(row.get("accent_source"), "")
          + (f"; suggested: {row['accent_suggestion']}" if row.get("accent_suggestion")

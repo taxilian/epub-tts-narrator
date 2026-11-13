@@ -326,7 +326,8 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             script = field("New script (Enter keeps current; B cancels): ")
             say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
             traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
-            say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)")
+            from .cast_tui_model import no_accent
+            say("Accent cue (said before every line in this voice): " + (row.get("accent") or no_accent(row))
                 + {"assigned": " (the book's accent for this character's origin)",
                   "description": " (from the voice description)"}.get(row.get("accent_source"), ""))
             suggestion = row.get("accent_suggestion") or ""
