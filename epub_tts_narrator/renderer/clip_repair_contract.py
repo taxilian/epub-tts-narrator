@@ -116,14 +116,20 @@ def approved(request, audit):
 
 
 def confirm_part(request, part, metadata, *, performance=None):
+    """Check a part's recorded inputs against its approved plan.
+
+    Returns whether it was recorded in the earlier one-bracket form
+    (``earlier_direction_text``): still valid proof, but not the current input.
+    """
     if performance is None:
         text = trim_speech_text(part['text'])
         directed, control = _directed_text(text, part_direction(part))
-        if (metadata.get('synthesis_text') not in (text, directed, earlier_direction_text(directed, part_direction(part)))
+        earlier = earlier_direction_text(directed, part_direction(part))
+        if (metadata.get('synthesis_text') not in (text, directed, earlier)
                 or any(metadata.get(key) != control[key]
                        for key in ('direction', 'direction_applied', 'applied_control'))):
             raise ValueError('Actual clip repair inputs differ from the approved plan')
-        return
+        return metadata.get('synthesis_text') == earlier != directed
     from .clip_repair_performance import repair_traits
     from .engines import prepare_synthesis
 
@@ -141,6 +147,15 @@ def confirm_part(request, part, metadata, *, performance=None):
                    for key in ('direction', 'direction_applied', 'applied_control'))
             or metadata.get('expressive_performance') != audit):
         raise ValueError('Actual controlled clip repair inputs differ from the approved plan')
+    return metadata.get('synthesis_text') == earlier != directed
+
+
+def recorded_earlier_form(metadata):
+    """Whether any part of an already confirmed repair was recorded in the one-bracket form."""
+    marker = metadata['clip_repair']
+    original = marker['audit']['payload']['request']
+    return any([confirm_part(original, evidence['part'], evidence['metadata'],
+                             performance=evidence.get('performance')) for evidence in marker['parts']])
 
 
 def confirm_plan(request, marker):

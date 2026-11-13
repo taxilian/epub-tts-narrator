@@ -454,8 +454,80 @@ def _plain_delivery_generation_identity(request, voices_by_asset, metadata):
     return generation_identity(request, voices_by_asset)
 
 
+_PROVED = ("exhaustion_selection", "clip_repair", "direction_repair", "recovery", "fragment_recovery")
+
+
+def _embedded_records(value):
+    """Take records nested in a recovery's metadata (its parts' acceptances), outermost first."""
+    if isinstance(value, Mapping):
+        if isinstance(value.get("request"), Mapping) and isinstance(value.get("engine_metadata"), Mapping):
+            yield value
+            return
+        value = list(value.values())
+    if isinstance(value, list):
+        for item in value:
+            yield from _embedded_records(item)
+
+
+def _earlier_turn_text(request, recorded):
+    """Whether recorded speech holds a turn in the earlier one-bracket form."""
+    from .clip_repair_contract import synthesis_request
+    from .performance_compiler import earlier_direction_text
+    request = synthesis_request(request)
+    chunk = request.get("chunk")
+    if not isinstance(chunk, Mapping) or not isinstance(recorded, str):
+        return False
+    if request.get("kind") == "speech":
+        performer = request.get("performer")
+        turns = [(chunk, performer.get("voice_id") if isinstance(performer, Mapping)
+                  else chunk.get("segment", {}).get("voice_id"))]
+    elif request.get("kind") == "paragraph_speech":
+        turns = [(turn, turn.get("segment", {}).get("voice_id")) for turn in chunk.get("paragraph_turns", [])]
+    else:
+        return False
+    for turn, voice_id in turns:
+        direction = _direction(turn, voice_id)
+        expressive = performance_kwargs(turn, voice_id)
+        _, directed, _ = prepare_synthesis(turn.get("spoken_text"), direction, **expressive)
+        directions = (expressive["traits"], direction.strip()) if expressive else (direction,)
+        earlier = earlier_direction_text(directed, *directions)
+        if earlier != directed and (recorded == earlier or (request["kind"] == "paragraph_speech" and earlier in recorded)):
+            return True
+    return False
+
+
+def recorded_in_earlier_form(request, metadata):
+    """Whether a repaired, chosen or recovered take was recorded in the one-bracket form.
+
+    Takes recorded before each direction part became its own tag (``[accent;
+    dry, reproachful]`` rather than ``[accent][dry][reproachful]``) remain valid
+    records, but they were not asked in the current form, so their identity
+    says so and the line renders again. This looks through every take a proof
+    or recovery is made of. An ordinary take already fails its own
+    recorded-text check. A person's manual choice is theirs and is kept.
+    """
+    if not isinstance(metadata, Mapping) or "manual_selection" in metadata:
+        return False
+    if "exhaustion_selection" in metadata:
+        selected = metadata["exhaustion_selection"]["selected_record"]
+        return recorded_in_earlier_form(selected["request"], selected.get("engine_metadata", {}))
+    if "clip_repair" in metadata:
+        from .clip_repair_contract import recorded_earlier_form
+        return recorded_earlier_form(metadata)
+    if "direction_repair" in metadata:
+        from .direction_repair import confirm_metadata
+        return bool(confirm_metadata(request, metadata))
+    nested = list(_embedded_records({key: value for key, value in metadata.items() if key in _PROVED}))
+    if nested:
+        return any([recorded_in_earlier_form(record["request"], record["engine_metadata"]) for record in nested])
+    return _earlier_turn_text(request, metadata.get("synthesis_text"))
+
+
 def generation_identity(request, voices_by_asset=None, *, engine_metadata=None):
     result = _generation_identity(request, voices_by_asset, engine_metadata=engine_metadata)
+    if (isinstance(engine_metadata, Mapping) and any(key in engine_metadata for key in _PROVED)
+            and recorded_in_earlier_form(request, engine_metadata)):
+        result = dict(result, recorded_tag_form="one_bracket")
     if "continuity" in request:
         result = dict(result, continuity=deepcopy(request["continuity"]))
     return result

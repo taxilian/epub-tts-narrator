@@ -114,7 +114,10 @@ def confirm_metadata(request, metadata):
     direction = repaired_direction(request, replacement)
     directed, expected = _directed_text(text, direction)
     from .performance_compiler import earlier_direction_text
-    if (metadata.get("synthesis_text") not in (text, directed, earlier_direction_text(directed, direction))
+    earlier = earlier_direction_text(directed, direction)
+    if (metadata.get("synthesis_text") not in (text, directed, earlier)
             or any(metadata.get(key) != expected[key] for key in
                    ("direction", "direction_applied", "applied_control"))):
         raise ValueError("Recorded synthesis does not prove the reviewed direction repair")
+    # Recorded in the earlier one-bracket form: valid proof, not the current input.
+    return metadata.get("synthesis_text") == earlier != directed

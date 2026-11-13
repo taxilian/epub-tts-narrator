@@ -413,3 +413,40 @@ class EarlierTagFormatTests(unittest.TestCase):
             confirm_part(request, part, dict(fields, synthesis_text=earlier,
                                              expressive_performance=control['expressive_performance']),
                          performance=performance)
+
+    def test_a_chosen_or_recovered_take_recorded_in_the_earlier_form_renders_again(self):
+        # Valid records, but not asked in the current form: the line renders again in separate tags.
+        from epub_tts_narrator.renderer.speech_identity import recorded_in_earlier_form
+        voice = reference()
+        request = speech_request(voice, 'Wear a skirt.')
+        request['chunk']['speech_traits'] = {voice['voice_id']: 'thick New York accent'}
+        request['chunk']['segment']['delivery'] = {'direction': 'dry, mildly reproachful'}
+        earlier = '[thick New York accent; dry, mildly reproachful] Wear a skirt.'
+        current = '[thick New York accent][dry][mildly reproachful] Wear a skirt.'
+
+        def chosen(text):
+            return {'exhaustion_selection': {'selected_record': {
+                'request': request, 'engine_metadata': {'synthesis_text': text}}}}
+
+        def recovered(text):
+            return {'synthesis_text': 'Wear a skirt.', 'recovery': {'parts': [{'acceptance': {
+                'request': request, 'engine_metadata': {'synthesis_text': text}}}]}}
+
+        for wrap in (chosen, recovered):
+            with self.subTest(wrap=wrap.__name__):
+                self.assertTrue(recorded_in_earlier_form(request, wrap(earlier)))
+                self.assertFalse(recorded_in_earlier_form(request, wrap(current)))
+        # A person's own pick is kept.
+        self.assertFalse(recorded_in_earlier_form(request, {'manual_selection': {}, 'synthesis_text': earlier}))
+        # A line whose direction has one part reads the same in both forms.
+        request['chunk']['segment']['delivery'] = {}
+        self.assertFalse(recorded_in_earlier_form(request, chosen('[thick New York accent] Wear a skirt.')))
+
+    def test_a_repair_part_reports_which_form_it_was_recorded_in(self):
+        from epub_tts_narrator.renderer.clip_repair_contract import confirm_part, part_direction
+        from epub_tts_narrator.renderer.engines import _directed_text
+        part = {'text': 'Hush.', 'speech_traits': 'raspy', 'delivery': 'dry, low'}
+        directed, control = _directed_text('Hush.', part_direction(part))
+        fields = {key: control[key] for key in ('direction', 'direction_applied', 'applied_control')}
+        self.assertFalse(confirm_part({}, part, dict(fields, synthesis_text=directed)))
+        self.assertTrue(confirm_part({}, part, dict(fields, synthesis_text='[raspy; dry, low] Hush.')))
