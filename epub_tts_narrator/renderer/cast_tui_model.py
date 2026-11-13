@@ -48,13 +48,6 @@ def label(row):
     return display(_label(row))
 
 
-def no_accent(row):
-    """How a voice without an accent cue is described: a voice with no lines in this book needs none."""
-    if row.get("speaks") is False:
-        return "(none: no lines in this book, so none is needed until a book where this character speaks)"
-    return "(none)"
-
-
 def canonical(row):
     return row.get("canonical_voice_id", row["voice_id"])
 
@@ -96,11 +89,8 @@ class CastFilter:
     text: str = ""
     status: str | None = None
     by_status: bool = False
-    silent: bool = False  # also list voices with no lines in this book (characters it only names)
 
     def matches(self, row, status):
-        if not self.silent and row.get("speaks") is False:
-            return False
         if self.status is not None and status != self.status:
             return False
         words = self.text.casefold().split()
@@ -182,7 +172,7 @@ def detail_sections(row, rows, status, note):
         (FIELDS["reference_text"], row.get("reference_text", ""), "s"),
         ("Script source", script_source, ""),
         (FIELDS["speech_traits"], row.get("speech_traits") or "(none)", "t"),
-        (FIELDS["accent"] + " (said before every line)", (row.get("accent") or no_accent(row))
+        (FIELDS["accent"] + " (said before every line)", (row.get("accent") or "(none)")
          + {"assigned": " (the book's accent for this character's origin)",
                   "description": " (from the voice description)"}.get(row.get("accent_source"), "")
          + (f"; suggested: {row['accent_suggestion']}" if row.get("accent_suggestion")
@@ -252,23 +242,16 @@ class CastController:
             result.sort(key=lambda item: (STATUSES.index(item[1]), label(item[0]).casefold()))
         return result
 
-    def speaking(self):
-        """The rows of voices with lines in this book: what a render needs."""
-        return [row for row in self._rows if row.get("speaks", True)]
-
-    def silent(self):
-        return len(self._rows) - len(self.speaking())
-
     def counts(self):
         active = self.jobs.active_scopes("voice")
         counts = {}
-        for row in self.speaking():
+        for row in self._rows:
             status = voice_status(row, active)[0]
             counts[status] = counts.get(status, 0) + 1
         return counts
 
     def ready(self):
-        return sum(row.get("selected") is not None for row in self.speaking())
+        return sum(row.get("selected") is not None for row in self._rows)
 
     def details(self, row):
         return detail_sections(row, self._rows, *self.status(row))
@@ -487,8 +470,7 @@ class CastController:
 
     def prepare_pending(self):
         """Prepare every voice without an accepted take, reusing saved takes first."""
-        pending = [row for row in self._rows if row.get("selected") is None and not row.get("regeneration")
-                   and row.get("speaks", True)]  # a voice without lines in this book is never rendered
+        pending = [row for row in self._rows if row.get("selected") is None and not row.get("regeneration")]
         if not pending:
             return None
         voices = [canonical(row) for row in pending]

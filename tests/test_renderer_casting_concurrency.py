@@ -211,6 +211,19 @@ class CastingConcurrencyTests(unittest.TestCase):
         # The lease is released: an ordinary locked action works again.
         session.update_prompt(extra, "An extra voice, edited afterwards.")
 
+    def test_a_voice_without_lines_in_the_book_is_never_offered_or_prepared(self):
+        from epub_tts_narrator.renderer.casting import speaking_voices
+        bundle = self.narration_bundle()
+        named_only = self.add_voice(bundle, "voice_named_only")  # in the cast, never in a chapter
+        self.assertNotIn(named_only, speaking_voices(bundle))
+        remote = GeminiOverlapTransport(self, blocked=())
+        session = self.session(remote, bundle=bundle)
+        self.assertNotIn(named_only, [row["voice_id"] for row in session.rows()])
+        self.assertNotIn(named_only, [item["voice_id"] for item in session.prepare_samples()])
+        session.generate_missing()
+        self.assertTrue(session.rows())  # the speaking voices were prepared
+        self.assertIsNone(session.store.load(named_only))
+
     def test_bounded_admission_dedupes_aliases_in_input_order(self):
         bundle = self.narration_bundle()
         extra = self.add_voice(bundle)

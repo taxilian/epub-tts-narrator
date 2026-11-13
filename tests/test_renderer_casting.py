@@ -19,7 +19,7 @@ from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voice_prompts import AUDIOBOOK_VOICE_CONTEXT, audiobook_voice_prompt
 from epub_tts_narrator.renderer.workflow import RenderBlocked, ensure_voice, render
 from epub_tts_narrator.cli import export_bundle
-from audition_fixtures import prepare_bundle
+from audition_fixtures import give_lines, prepare_bundle
 from shared_fixtures import HISTORY_CAPABILITY, fixture_codes, pcm_hash
 
 
@@ -264,6 +264,9 @@ class CastingTests(unittest.TestCase):
             {"id": "afterword_role", "kind": "narration", "voice_id": "afterword_voice", "character_id": None},
             {"id": "other_narration", "kind": "narration", "voice_id": "other_narrator", "character_id": None},
         ])
+        give_lines(bundle, "narration_voice", role_id=bundle["cast"]["roles"][0]["id"])
+        give_lines(bundle, "afterword_voice")
+        give_lines(bundle, "other_narrator")
         session = self.new_session(bundle=bundle)
         self.addCleanup(session.close)
         labels = {row["voice_id"]: row["label"] for row in session.rows()}
@@ -290,6 +293,7 @@ class CastingTests(unittest.TestCase):
                     "A warm, friendly authorial voice with a natural mid register and relaxed resonance.", "traits": []})
                 bundle["cast"]["roles"].append({"id": "afterword", "kind": "narration", "voice_id": "author_voice",
                                                  "character_id": None, "description": description})
+                give_lines(bundle, "author_voice")
                 if number == 5:
                     bundle["cast"]["roles"].append({"id": "editor_notes", "kind": "narration", "voice_id": "author_voice",
                         "character_id": None, "description": "Editorial margin-note commentary ([1]-[23]) accompanying the text; nonstory author/editor asides distinct from the narrative frame and from the formal afterword."})
@@ -307,6 +311,7 @@ class CastingTests(unittest.TestCase):
         bundle["cast"]["voices"].append({"id": "author_voice", "description": "Author voice: Warm and friendly.", "traits": []})
         bundle["cast"]["roles"].append({"id": "afterword", "kind": "narration", "voice_id": "author_voice",
                                          "character_id": None, "description": "Author afterword and acknowledgments."})
+        give_lines(bundle, "author_voice")
         session = self.new_session(bundle=bundle)
         self.addCleanup(session.close)
         with patch.object(session.store, "canonical_id", side_effect=lambda voice_id: self.voice_id if voice_id == "author_voice" else voice_id):

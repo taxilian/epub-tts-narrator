@@ -326,8 +326,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             script = field("New script (Enter keeps current; B cancels): ")
             say("Vocal traits: " + (row.get("speech_traits") or "(none)"))
             traits = field("New vocal traits (Enter keeps current; - clears; B cancels): ")
-            from .cast_tui_model import no_accent
-            say("Accent cue (said before every line in this voice): " + (row.get("accent") or no_accent(row))
+            say("Accent cue (said before every line in this voice): " + (row.get("accent") or "(none)")
                 + {"assigned": " (the book's accent for this character's origin)",
                   "description": " (from the voice description)"}.get(row.get("accent_source"), ""))
             suggestion = row.get("accent_suggestion") or ""
@@ -357,9 +356,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
         if callable(prepare):
             prepare()
         rows = session.rows()
-        # A voice without lines in this book is never rendered, so it is not prepared here.
-        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")
-                   and row.get("speaks", True)]
+        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")]
         missing = sum(not row["candidates"] for row in pending)
         if pending:
             say(f"Preparing voices: {len(pending) - missing} saved, {missing} to generate.")
@@ -512,16 +509,25 @@ def casting_command(args, bundle, config):
         raise ValueError("Sample normalization is disabled; set casting.normalize_samples = true")
     if args.voice_id and args.voice_id not in {voice["id"] for voice in bundle["cast"]["voices"]}:
         raise ValueError("Voice ID is not in the bundle cast")
+    from .casting import speaking_voices
+    speaking = speaking_voices(bundle)
+    if args.voice_id and speaking is not None and args.voice_id not in speaking:
+        raise ValueError("That voice has no lines in this book, so casting does not offer it; it is cast in a "
+                         "book where the character speaks")
     if action in {"interactive", "generate-missing", "regenerate-all", "prepare-samples", "generate"} and not args.text_file:
         from epub_tts_narrator.audition_scripts import ensure_bundle_scripts
         from .book_context import voice_store
         store = voice_store(bundle, config)
-        voice_ids = [args.voice_id] if args.voice_id else None
+        # Voices without lines here are never cast, so they need no audition script either.
+        voice_ids = ([args.voice_id] if args.voice_id else
+                     None if speaking is None else [voice["id"] for voice in bundle["cast"]["voices"]
+                                                   if voice["id"] in speaking])
         if action == "regenerate-all" and not include_inherited:
             # Ignored references do not need new scripts or any analyzer calls.
             voice_ids = [voice["id"] for voice in bundle["cast"]["voices"]
-                         if not (store.load(voice["id"]) or store.regeneration_status(voice["id"])
-                                 or {}).get("inherited", False)]
+                         if (speaking is None or voice["id"] in speaking)
+                         and not (store.load(voice["id"]) or store.regeneration_status(voice["id"])
+                                  or {}).get("inherited", False)]
         if voice_ids is None or voice_ids:
             from .voice_clip_counts import extra_clip_plan
             bundle = ensure_bundle_scripts(bundle, getattr(args, "config", None), canonical_id=store.canonical_id,
@@ -574,9 +580,6 @@ def casting_command(args, bundle, config):
                   f"{candidate['reference_audio']}")
         elif action == "generate-missing":
             print(f"Prepared {len(session.generate_missing())} voices for use.")
-            silent = sum(1 for row in rows if row["selected"] is None and not row.get("speaks", True))
-            if silent:
-                print(f"Skipped {silent} voice(s) with no lines in this book (generate one with --action generate).")
         elif action == "prepare-samples":
             print(json.dumps(session.prepare_samples(), ensure_ascii=False, indent=2))
         elif action == "refresh-prompts":
@@ -593,10 +596,6 @@ def casting_command(args, bundle, config):
                 raise ValueError(f"Could not normalize {failed} sample(s); {prepared} playback copies are ready.")
             print(f"Normalized playback copies are ready for {prepared} sample(s).")
         elif action == "regenerate-all":
-            silent = [row for row in rows if not row.get("speaks", True)]
-            if silent:
-                rows = [row for row in rows if row.get("speaks", True)]
-                print(f"Skipped {len(silent)} voice(s) with no lines in this book.")
             if not include_inherited:
                 skipped = {row.get("canonical_voice_id", row["voice_id"]) for row in rows
                            if (row["selected"] or row.get("regeneration") or {}).get("inherited", False)}

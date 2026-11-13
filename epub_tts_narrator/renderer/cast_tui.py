@@ -132,8 +132,6 @@ class CastApp(CapturePrintMixin, App):
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
         Binding("slash", "filter", "Filter", tooltip="Filter by name, voice ID or description"),
         Binding("f", "status_filter", "Status", tooltip="Cycle the status filter"),
-        Binding("L", "show_silent", "No lines", show=False,
-                tooltip="Show or hide voices with no lines in this book (characters it only names)"),
         Binding("o", "sort", "Sort", tooltip="Sort by status (what needs attention first) or cast order"),
         Binding("enter,p", "play", "Play", tooltip="Play the highlighted take in Takes, else the accepted take"),
         Binding("space", "stop", "Stop", show=False, tooltip="Stop playback"),
@@ -240,11 +238,7 @@ class CastApp(CapturePrintMixin, App):
         controller = self.controller
         counts = controller.counts()
         flt = controller.filter
-        summary = f"{controller.ready()}/{len(controller.speaking())} ready"
-        silent = controller.silent()
-        if silent:
-            summary += (f" · {silent} without lines shown (L hides)" if flt.silent
-                        else f" · {silent} without lines hidden (L shows)")
+        summary = f"{controller.ready()}/{len(controller.rows)} ready"
         if counts.get("failed"):
             summary += f" · {counts['failed']} failed"
         if flt.status or flt.text:
@@ -358,13 +352,6 @@ class CastApp(CapturePrintMixin, App):
 
     def action_status_filter(self):
         self.controller.filter.status = next_status_filter(self.controller.filter.status)
-        self.render_all()
-
-    def action_show_silent(self):
-        flt = self.controller.filter
-        flt.silent = not flt.silent
-        self.notify(("Showing" if flt.silent else "Hiding") + f" {self.controller.silent()} voice(s) with no lines "
-                    "in this book")
         self.render_all()
 
     def action_sort(self):

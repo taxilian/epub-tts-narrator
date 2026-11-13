@@ -12,6 +12,7 @@ from epub_tts_narrator.renderer.casting import CastingSession
 from epub_tts_narrator.renderer.common import digest, read_json, write_json
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.voice_prompts import default_voice_prompt
+from audition_fixtures import give_lines
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern" / "bundle"
@@ -208,6 +209,7 @@ class SampleDraftTests(unittest.TestCase):
         data["cast"]["voices"].append(
             {"id": alias, "description": "Mara's narration voice.", "traits": []})
         data["cast"]["roles"][0]["voice_id"] = alias
+        give_lines(data, alias, role_id=data["cast"]["roles"][0]["id"])
         session = self.new_session(bundle=data)
         rows = {item["voice_id"]: item for item in session.rows()}
         self.assertEqual(rows[alias]["canonical_voice_id"], self.voice_id)

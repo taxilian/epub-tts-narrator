@@ -802,6 +802,22 @@ class CastingCLITests(unittest.TestCase):
         finally:
             lock.rmdir()
 
+    def test_a_voice_without_lines_in_the_book_is_refused_by_name(self):
+        document = valid_document()
+        cast = document["cast"]
+        cast["characters"].append({"id": "c-named", "name": "Orrin", "aliases": [], "description": "Only named.",
+                                   "evidence": [{"block_id": "b1", "quote": "Mara"}], "voice_id": "v-named"})
+        cast["roles"].append({"id": "r-named", "kind": "dialogue", "character_id": "c-named", "voice_id": "v-named",
+                              "description": "Orrin's lines."})
+        cast["voices"].append({"id": "v-named", "description": "A dry tenor.", "traits": []})
+        self.bundle = self.root / "named-only-bundle"
+        export_bundle(prepare_document(document), self.bundle)
+        with patch("epub_tts_narrator.renderer.casting.CastingSession") as session:
+            code, output, error = self.run_cli("--action", "generate", "--voice-id", "v-named")
+        self.assertEqual(code, 2)  # the renderer CLI reports a ValueError this way
+        self.assertIn("has no lines in this book", error + output)
+        session.assert_not_called()
+
     def test_list_never_initializes_tts_or_verifier_and_creates_no_store(self):
         with patch("epub_tts_narrator.renderer.engines.create_engine") as engine, \
                 patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier:
@@ -878,29 +894,6 @@ class CastingCLITests(unittest.TestCase):
                          [("generate", "vn")])
         self.assertNotIn("awaiting acceptance", output)
         session.close.assert_called_once_with()
-
-    def test_bulk_casting_skips_a_voice_with_no_lines_in_this_book(self):
-        session = SharedSessionDouble()
-        session.row("v2")["speaks"] = False  # a character the book only names
-        with patch("epub_tts_narrator.renderer.casting.CastingSession", return_value=session), \
-                patch("epub_tts_narrator.renderer.audition.AudioPlayer"):
-            code, output, error = self.run_cli("--action", "regenerate-all")
-        self.assertEqual(code, 0, error)
-        self.assertEqual([event for event in session.events if event[0] == "regenerate"], [("regenerate", "vn")])
-        self.assertIn("Skipped 1 voice(s) with no lines in this book.", output)
-
-    def test_generate_missing_prepares_only_voices_that_speak(self):
-        from types import SimpleNamespace
-        from epub_tts_narrator.renderer.casting import CastingSession
-        asked = []
-        double = SimpleNamespace(
-            rows=lambda: [{"voice_id": "talks", "selected": None, "speaks": True},
-                          {"voice_id": "named", "selected": None, "speaks": False},
-                          {"voice_id": "done", "selected": {"candidate_id": "c"}, "speaks": True}],
-            ensure_ready_many=lambda ids: asked.append(ids) or [{"voice_id": i, "selected": {}, "error": None}
-                                                                  for i in ids])
-        CastingSession.generate_missing(double)
-        self.assertEqual(asked, [["talks"]])
 
     def test_regenerate_all_replaces_each_canonical_voice_once_and_selects_it(self):
         session = SharedSessionDouble()

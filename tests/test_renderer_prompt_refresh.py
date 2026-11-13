@@ -13,6 +13,7 @@ from epub_tts_narrator.provider import ProviderError
 import test_renderer_sample_drafts as drafts_fixture
 import test_renderer_audition as cli_fixture
 import test_book_voice_workflow as book_fixture
+from audition_fixtures import give_lines
 
 
 class PromptRefreshTests(unittest.TestCase):
@@ -112,6 +113,7 @@ class PromptRefreshTests(unittest.TestCase):
         alias = "shared-narrator"
         bundle["cast"]["voices"].append({"id": alias, "description": "Mara narrating.", "traits": []})
         bundle["cast"]["roles"][0]["voice_id"] = alias
+        give_lines(bundle, alias, role_id=bundle["cast"]["roles"][0]["id"])
         session = self.new_session(bundle)
         writer, _ = self.helpers(session)
         result = session.refresh_prompts(voice_ids=[alias, self.voice_id])
@@ -175,6 +177,7 @@ class InheritedPromptRefreshTests(book_fixture.BookFixture):
         second = self.publish(2, first)
         third = self.publish(3, second)
         voice_id = first["cast"]["characters"][0]["voice_id"]
+        give_lines(third, voice_id)  # she speaks in the third book too, so casting offers her there
         profile = next(item for item in first["cast"]["voices"] if item["id"] == voice_id)
         reference = self.root / "ancestor-reference.wav"
         reference.write_bytes(b"immutable ancestor recording, never decoded by text refresh")

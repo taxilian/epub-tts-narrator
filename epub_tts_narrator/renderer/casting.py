@@ -42,6 +42,21 @@ def _validate_text(value, label, limit):
     return value
 
 
+def speaking_voices(bundle):
+    """The voice IDs with at least one line in this book, or None when the bundle carries no chapter rows.
+
+    The analysis casts every named character so a series keeps identities,
+    including characters a book only names. Casting leaves those out
+    entirely: nothing of them is rendered, and a book where they speak casts
+    them. Without chapter rows (a bundle loaded without its scripts) nothing
+    can be told apart, so every voice counts.
+    """
+    rows = [row for chapter in bundle.get("chapters", []) for row in chapter.get("rows", [])]
+    if not rows:
+        return None
+    return {row.get("voice_id") for row in rows if row.get("voice_id")}
+
+
 def _require_available_confirmation(report):
     if text_confirmation_unavailable(report):
         raise VerificationUnavailable(
@@ -99,6 +114,9 @@ class CastingSession:
         self._profiles = {voice["id"]: deepcopy(voice) for voice in bundle["cast"]["voices"]}
         if len(self._profiles) != len(bundle["cast"]["voices"]):
             raise ValueError("Duplicate voice ID in cast")
+        speaking = speaking_voices(bundle)
+        # Voices casting offers: those with lines in this book (profiles keep every voice for shared recordings).
+        self._cast_ids = [voice_id for voice_id in self._profiles if speaking is None or voice_id in speaking]
         self._validate_paths()
 
     @property
@@ -301,7 +319,7 @@ class CastingSession:
         prepared, seen = [], set()
         with self._locked():
             self._retry_gemini_cleanup()
-            for voice_id in self._profiles:
+            for voice_id in self._cast_ids:
                 canonical = self.store.canonical_id(voice_id)
                 if canonical in seen:
                     continue
@@ -317,7 +335,7 @@ class CastingSession:
         from epub_tts_narrator.voice_prompt_refresh import refresh_bundle_prompts
         from .samples import MissingSampleScript, select_sample
 
-        selected = list(self._profiles) if voice_ids is None else list(dict.fromkeys(voice_ids))
+        selected = list(self._cast_ids) if voice_ids is None else list(dict.fromkeys(voice_ids))
         # A clone has a direction, not a design description; refreshing would replace it.
         selected = [voice_id for voice_id in selected
                     if not isinstance(self._profiles.get(voice_id, {}).get("derived_from"), dict)]
@@ -406,11 +424,9 @@ class CastingSession:
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
         several_clips = designer_records_several_clips(self.config)
-        # Series characters can be in the cast without a line in this book; they need no accent here.
-        speaking = {row.get("voice_id") for chapter in self.bundle.get("chapters", [])
-                    for row in chapter.get("rows", [])}
         rows = []
-        for voice_id, profile in self._profiles.items():
+        for voice_id in self._cast_ids:
+            profile = self._profiles[voice_id]
             selected = self.store.load(voice_id)
             try:
                 draft = self._draft(voice_id, selected)
@@ -470,7 +486,6 @@ class CastingSession:
                 "description": profile["description"],
                 "speech_traits": (trait_overrides[voice_id] if voice_id in trait_overrides
                                   else speech_traits(profile)),
-                "speaks": voice_id in speaking,
                 "accent": accents.get(voice_id, ""),
                 "accent_automatic": voice_id not in chosen_accents and bool(accents.get(voice_id)),
                 "accent_source": ("chosen" if voice_id in chosen_accents else "" if not accents.get(voice_id)
@@ -1548,13 +1563,9 @@ class CastingSession:
             return self._accept_locked(voice_id, candidate_id)
 
     def generate_missing(self):
-        """Make each unselected voice that speaks in this book ready, reusing saved candidates first.
-
-        A cast voice without a line here (a character the book only names) is
-        skipped: nothing renders it, and a later book where it speaks makes it.
-        """
+        """Make each unselected voice ready, reusing saved candidates first (only voices with lines; see ``rows``)."""
         results = self.ensure_ready_many([
-            row["voice_id"] for row in self.rows() if row["selected"] is None and row.get("speaks", True)])
+            row["voice_id"] for row in self.rows() if row["selected"] is None])
         for result in results:
             error = result["error"]
             if error is not None:

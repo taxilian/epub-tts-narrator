@@ -10,7 +10,7 @@ from epub_tts_narrator.contracts import VOICE_EFFECT_PRESETS
 from epub_tts_narrator.renderer.voice_bindings import canonical_aliases
 from epub_tts_narrator.renderer.voice_effects import CHAINS, recipe
 
-from audition_fixtures import prepare_bundle, prepare_document
+from audition_fixtures import give_lines, prepare_bundle, prepare_document
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.casting import CastingSession
@@ -97,6 +97,7 @@ class DerivedVoiceCastingTests(unittest.TestCase):
                                                               "quote": evidence["text"]}]}})
         cast["roles"].append({"id": "mara_young", "kind": "dialogue", "character_id": mara["character_id"],
                               "voice_id": "voice_mara_young", "description": "Mara, young."})
+        give_lines(self.bundle, "voice_mara_young")  # a changed voice exists for the lines it speaks
         self.config = deepcopy(DEFAULTS)
         self.config["engine"]["checkpoint"] = str(self.root / "drama-model")
         self.config["verification"]["model"] = str(self.root / "asr-model")

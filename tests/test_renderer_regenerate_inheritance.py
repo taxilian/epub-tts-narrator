@@ -1,5 +1,6 @@
 """Bulk recasting preserves inherited voices unless the caller opts in."""
 
+from copy import deepcopy
 import contextlib
 import io
 import json
@@ -37,6 +38,17 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
         directory = self.root / f"book-{number:02}"
         document = fixture(sequel=parent is not None)
         document["source"]["book"].update(id=f"book-{number}", title=f"Journey {number}")
+        if parent is not None:
+            # Mara speaks in every book here: casting offers only voices with lines in the book.
+            block = document["source"]["blocks"][0]
+            narration, line = block["text"] + " ", "“I am back.”"
+            block["text"] = narration + line
+            first = document["segments"][0]
+            first.update(end=len(narration), text=narration)
+            mara = next(role for role in document["cast"]["roles"] if role["kind"] == "dialogue")
+            document["segments"].insert(1, {**deepcopy(first), "id": "b1-line", "start": len(narration),
+                                            "end": len(block["text"]), "text": line, "kind": "dialogue",
+                                            "role_id": mara["id"], "voice_id": mara["voice_id"]})
         document["cast"]["voices"].append({
             "id": "additional-voice", "description": "Additional warm voice.", "traits": [],
         })
@@ -44,6 +56,9 @@ class RegenerateInheritanceTests(book_fixtures.BookFixture):
             "id": "additional-role", "kind": "narration", "character_id": None,
             "voice_id": "additional-voice", "description": "Additional narration.",
         })
+        # The additional narrator reads the last narration line; casting offers only voices with lines.
+        last = [segment for segment in document["segments"] if segment["role_id"] == "narrator_main"][-1]
+        last.update(role_id="additional-role", voice_id="additional-voice")
         if parent is None:
             registry = fresh_registry(directory)
         else:
