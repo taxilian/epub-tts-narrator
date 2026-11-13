@@ -14,7 +14,8 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Input, Label, SelectionList, Static
 
 from epub_tts_narrator.tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
@@ -28,6 +29,84 @@ STATUS_STYLES = {
     "missing": "yellow", "pending": "magenta", "accepted": "green", "shared": "blue",
     "derived": "blue", "inherited": "dim green",
 }
+
+
+def word_changes(before, after):
+    """``after`` with the words it added in green and the words it dropped struck through in red."""
+    import difflib
+    old, new = before.split(), after.split()
+    text = Text()
+    for tag, first, last, start, end in difflib.SequenceMatcher(a=old, b=new, autojunk=False).get_opcodes():
+        if tag in ("delete", "replace"):
+            text.append(" ".join(old[first:last]) + " ", style="red strike")
+        if tag in ("insert", "replace"):
+            text.append(" ".join(new[start:end]) + " ", style="bold green")
+        if tag == "equal":
+            text.append(" ".join(new[start:end]) + " ")
+    return text
+
+
+class RevisionScreen(ModalScreen):
+    """Review the model's revised descriptions: every change is marked; Space unmarks one; Enter saves the marked.
+
+    Dismisses with ``{voice_id: description}`` to save, or None.
+    """
+
+    DEFAULT_CSS = BASE_CSS + """
+    RevisionScreen .dialog { width: 90%; height: 90%; }
+    RevisionScreen #revision-body { height: 1fr; }
+    RevisionScreen #revision-voices { width: 34%; height: 1fr; }
+    RevisionScreen #revision-scroll { width: 1fr; height: 1fr; border: round $primary-background; padding: 0 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Discard", priority=True),
+                Binding("enter", "save", "Save marked", priority=True)]
+
+    def __init__(self, changes, names, instructions):
+        super().__init__()
+        self.changes, self.names, self.instructions = changes, names, instructions
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label(Text(f"{len(self.changes)} revised description(s): {self.instructions}"),
+                        classes="dialog-title")
+            with Horizontal(id="revision-body"):
+                yield SelectionList(*[(self.names.get(voice_id, voice_id), voice_id, True) for voice_id in self.changes],
+                                    id="revision-voices")
+                with VerticalScroll(id="revision-scroll"):
+                    yield Static("", id="revision-detail")
+            yield Static(Text("Green words are added, red struck words removed · Space unmarks a voice · Enter saves "
+                              "the marked descriptions as drafts (recordings are unchanged; regenerate to hear them) · "
+                              "Escape discards"), classes="dialog-help")
+
+    def on_mount(self):
+        voices = self.query_one("#revision-voices", SelectionList)
+        voices.focus()
+        if self.changes:
+            voices.highlighted = 0
+            self.show(next(iter(self.changes)))
+
+    def show(self, voice_id):
+        before, after = self.changes[voice_id]
+        text = Text(self.names.get(voice_id, voice_id) + "\n", style="bold")
+        text.append("Now\n", style="dim")
+        text.append(before + "\n\n")
+        text.append("Revised\n", style="dim")
+        text.append_text(word_changes(before, after))
+        self.query_one("#revision-detail", Static).update(text)
+
+    def on_selection_list_selection_highlighted(self, event):
+        self.show(event.selection.value)
+
+    def action_save(self):
+        marked = set(self.query_one("#revision-voices", SelectionList).selected)
+        self.dismiss({voice_id: after for voice_id, (_, after) in self.changes.items() if voice_id in marked})
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+REVISE_SCOPES = (("this", "This voice"), ("untaken", "Every voice without an accepted take"),
+                 ("all", "Every voice"))
 
 
 class CastApp(CapturePrintMixin, App):
@@ -71,6 +150,8 @@ class CastApp(CapturePrintMixin, App):
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
+        Binding("i", "instruct", "Instruct",
+                tooltip="Type how descriptions should change; the model revises them for you to review"),
         Binding("r", "refresh_prompt", "Rewrite", show=False,
                 tooltip="Rewrite the description and script with the analysis model"),
         Binding("M", "prepare_missing", "All missing", show=False,
@@ -415,6 +496,45 @@ class CastApp(CapturePrintMixin, App):
                           "Book text about this character is sent to the configured endpoint. "
                           "Recordings are unchanged.",
                           lambda: self._attempt(lambda: self.controller.refresh_prompt(row)))
+
+    def action_instruct(self):
+        row = self.current_row()
+
+        def scoped(scope):
+            if scope is None:
+                return
+            rows = {"this": [row] if row else [], "untaken": [r for r in self.controller.rows if r.get("selected") is None],
+                    "all": list(self.controller.rows)}[scope]
+            rows = self.controller.revisable(rows)
+            if not rows:
+                self.notify("No designed voice to revise there (a cloned voice keeps its clone direction)",
+                            severity="warning")
+                return
+            self.push_screen(TextEditScreen(
+                f"How should {len(rows)} description(s) change?", "",
+                help_text="e.g. \"Remove every mention of accent or regional speech; the accent cue adds it\", "
+                          "\"make the women's voices lower\". Each voice's accent cue is sent too. Names and "
+                          "descriptions go to the analysis model. Ctrl+S sends · Escape cancels"),
+                lambda text: text and text.strip() and self._attempt(
+                    lambda: self.controller.revise_descriptions(rows, text, self._revised(text))))
+        self.push_screen(ChoiceScreen("Revise which descriptions?", REVISE_SCOPES, filterable=False), scoped)
+
+    def _revised(self, instructions):
+        def ready(changes):
+            def review():
+                if not changes:
+                    self.notify("The model changed no description", severity="information")
+                    return
+                names = {voice_id: label(self.controller.row(voice_id) or {"voice_id": voice_id})
+                         for voice_id in changes}
+                self.push_screen(RevisionScreen(changes, names, instructions),
+                                 lambda chosen: chosen and self._attempt(
+                                     lambda: self.controller.save_descriptions(chosen)))
+            try:
+                self.call_from_thread(review)
+            except RuntimeError:
+                pass  # The screen closed before the reply arrived.
+        return ready
 
     def action_prepare_missing(self):
         self._attempt(lambda: self.controller.prepare_pending() or self.notify("Every voice has a take"))

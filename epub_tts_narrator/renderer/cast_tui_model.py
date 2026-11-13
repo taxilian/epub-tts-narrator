@@ -21,7 +21,7 @@ from .audition import _label, display
 
 
 DESIGNERS = {"local": "locally", "gemini": "with Gemini", "elevenlabs": "with ElevenLabs"}
-SAVE_LANE, GENERATE_LANE = "save", "generate"
+SAVE_LANE, GENERATE_LANE, ASK_LANE = "save", "generate", "ask"
 GENERATIONS = 3  # Gemini voices generated at once on the screen (at most casting.gemini_concurrency)
 
 
@@ -203,6 +203,9 @@ class CastController:
         self.jobs = jobs or JobQueue(on_change=self._job_changed, describe_error=describe_error, clock=clock)
         # Saving a field never waits for another voice's generation.
         self.jobs.add_independent_lane(SAVE_LANE)
+        # Asking the text model to revise descriptions changes nothing, so it waits for nothing either.
+        self.jobs.add_independent_lane(ASK_LANE)
+        self.requests_factory = None  # tests supply the model; otherwise the book's analysis provider
         # Gemini generations run up to GENERATIONS at once, sharing one store lease and verifier.
         self._pool = None
         self.generation_limit = generation_limit(getattr(session, "config", {}) or {})
@@ -420,6 +423,50 @@ class CastController:
         return self._submit(f"Refresh description and script for {label(row)}",
                             lambda: self.session.refresh_prompts(voice_ids=[voice_id],
                                                                  config_path=self.config_path), row)
+
+    def revisable(self, rows):
+        """The rows whose descriptions ``i`` can revise: designed voices (a clone keeps its direction)."""
+        return [row for row in rows if not row.get("derived_from")]
+
+    def revise_descriptions(self, rows, instructions, on_ready):
+        """Ask the text model to revise ``rows``' descriptions as ``instructions`` say; nothing is saved.
+
+        ``on_ready({voice_id: (current, proposed)})`` is called from the job's
+        thread with the voices the model changed, for the person to review.
+        """
+        from .description_revision import book_requests, revise
+        rows = self.revisable(rows)
+        if not rows:
+            raise ValueError("A cloned voice keeps its clone direction; choose a designed voice")
+        if not " ".join(str(instructions or "").split()):
+            raise ValueError("Type what should change in the descriptions")
+        voices = [{"voice_id": row["voice_id"], "name": label(row),
+                   "description": row.get("prompt") or row.get("description") or "",
+                   "accent": row.get("accent") or ""} for row in rows]
+
+        def run():
+            factory = self.requests_factory or (lambda: book_requests(
+                self.session.bundle, self.config_path, progress=self.log))
+            requests = factory()
+            if requests is None:
+                raise ValueError("Set provider.model in the TOML configuration to revise descriptions with a model")
+            proposals = revise(requests, voices, instructions, progress=self.log)
+            current = {voice["voice_id"]: voice["description"] for voice in voices}
+            changes = {voice_id: (current[voice_id], text) for voice_id, text in proposals.items()}
+            self.log(f"The model proposes {len(changes)} changed description(s) of {len(voices)}.")
+            on_ready(changes)
+            return len(changes)
+        return self.jobs.submit(f"Revise {len(voices)} description(s): {display(instructions)[:60]}", run,
+                                scope={"revise": [canonical(row) for row in rows]}, lane=ASK_LANE)
+
+    def save_descriptions(self, changes):
+        """Save reviewed descriptions as each voice's draft (``{voice_id: description}``); recordings are unchanged."""
+        jobs = []
+        for voice_id, text in changes.items():
+            row = self.row(voice_id)
+            if row is not None:
+                jobs.append(self.save_field(row, "prompt", text))
+        return jobs
 
     def prepare_pending(self):
         """Prepare every voice without an accepted take, reusing saved takes first."""
