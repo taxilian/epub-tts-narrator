@@ -113,15 +113,18 @@ class ControllerTests(unittest.TestCase):
         self.controller.set_clips(ava, None)
         self.controller.refresh_prompt(ava)
         self.settle()
-        self.assertEqual(self.session.calls, [
+        saves = {"update_prompt", "set_reference_clips"}  # quick saves may run beside the queue
+        self.assertEqual([call for call in self.session.calls if call[0] not in saves], [
             ("regenerate", ("v-ava",), {"voice_designer": "gemini"}),
             ("accept", ("v-ava", "c-ava-1"), {}),
-            ("update_prompt", ("v-ava",), {"speech_traits": ""}),
             ("share_voice", ("v-ben", "v-ava"), {}),
             ("stop_sharing", ("v-fay",), {}),
+            ("refresh_prompts", (), {"voice_ids": ["v-ava"], "config_path": "config.toml"}),
+        ])
+        self.assertEqual([call for call in self.session.calls if call[0] in saves], [
+            ("update_prompt", ("v-ava",), {"speech_traits": ""}),
             ("set_reference_clips", ("v-ava", 2), {}),
             ("set_reference_clips", ("v-ava", None), {}),
-            ("refresh_prompts", (), {"voice_ids": ["v-ava"], "config_path": "config.toml"}),
         ])
         self.assertTrue(any(text.startswith("Done: Generate Ava with Gemini")
                             for _, _, text in self.controller.messages))
@@ -183,3 +186,74 @@ class ControllerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParallelAndImmediateTests(unittest.TestCase):
+    """Gemini voices generate up to three at once; saving never waits for another voice's generation."""
+
+    def controller(self, session):
+        controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(controller.close)
+        controller.refresh()
+        return controller
+
+    def test_three_gemini_generations_run_at_once_through_one_pool(self):
+        import threading
+        from unittest.mock import patch
+        gate, lock, running = threading.Event(), threading.Lock(), {"now": 0, "most": 0}
+        opened = []
+
+        class Pool:
+            def __init__(self, session, limit, designer):
+                opened.append((limit, designer))
+
+            def open(self):
+                pass
+
+            def regenerate(self, voice_id):
+                with lock:
+                    running["now"] += 1
+                    running["most"] = max(running["most"], running["now"])
+                gate.wait(5)
+                with lock:
+                    running["now"] -= 1
+                return voice_id
+
+            def close(self):
+                opened.append("closed")
+        session = FakeSession(config={"casting": {"reference_clips": 3, "gemini_concurrency": 4},
+                                      "voice_design": {"type": "gemini"}})
+        controller = self.controller(session)
+        with patch("epub_tts_narrator.renderer.casting_batch.GenerationPool", Pool):
+            for voice_id in ("v-ava", "v-ben", "v-cole", "v-eli"):
+                controller.regenerate(controller.row(voice_id), "gemini")
+            controller.regenerate(controller.row("v-dee"), "local")  # local design stays in line, alone
+            for _ in range(100):
+                if running["now"] == 3:
+                    break
+                threading.Event().wait(0.02)
+            self.assertEqual(running["now"], 3)
+            gate.set()
+            self.assertTrue(controller.jobs.wait_idle(5))
+        self.assertEqual(running["most"], 3)
+        self.assertEqual(opened, [(3, "gemini"), "closed"])  # one pool for the run of Gemini voices
+        self.assertEqual([call[0] for call in session.calls], ["regenerate"])  # only the local one
+
+    def test_a_save_runs_at_once_unless_its_own_voice_is_busy(self):
+        import threading
+        gate = threading.Event()
+        session = FakeSession()
+        session.regenerate = lambda voice_id, voice_designer=None: gate.wait(5)
+        controller = self.controller(session)
+        controller.regenerate(controller.row("v-ava"), "local")
+        other = controller.save_field(controller.row("v-ben"), "speech_traits", "")
+        own = controller.save_field(controller.row("v-ava"), "speech_traits", "")
+        for _ in range(100):
+            if other.state == "done":
+                break
+            threading.Event().wait(0.02)
+        self.assertEqual(other.state, "done")  # another voice's save did not wait
+        self.assertEqual(own.state, QUEUED)    # this voice's save follows its generation
+        gate.set()
+        self.assertTrue(controller.jobs.wait_idle(5))
+        self.assertEqual(own.state, "done")

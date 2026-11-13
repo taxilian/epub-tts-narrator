@@ -106,5 +106,66 @@ class WantsTuiTests(unittest.TestCase):
         self.assertEqual(self.decide(available=False), (False, [INSTALL_HINT]))
 
 
+class LaneTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        self.queue = JobQueue(describe_error=str)
+        self.addCleanup(self.queue.close)
+        self.queue.add_lane("generate", 3, opening=lambda: self.events.append("open"),
+                            closing=lambda: self.events.append("close"))
+
+    def test_lane_jobs_run_together_up_to_the_limit_and_never_beside_other_jobs(self):
+        gate, started, lock = threading.Event(), [], threading.Lock()
+        running = {"now": 0, "most": 0}
+
+        def work(name):
+            def run():
+                with lock:
+                    running["now"] += 1
+                    running["most"] = max(running["most"], running["now"])
+                    started.append(name)
+                gate.wait(5)
+                with lock:
+                    running["now"] -= 1
+            return run
+        for name in "abcd":
+            self.queue.submit(name, work(name), lane="generate")
+        self.queue.submit("save", lambda: self.events.append(("save", running["now"])))
+        deadline = threading.Event()
+        for _ in range(100):
+            if len(started) == 3:
+                break
+            deadline.wait(0.02)
+        self.assertEqual(sorted(started), ["a", "b", "c"])  # the fourth waits for a free slot
+        gate.set()
+        self.assertTrue(self.queue.wait_idle(5))
+        self.assertEqual(running["most"], 3)
+        self.assertEqual(self.events, ["open", "close", ("save", 0)])  # the lane closes before other work
+
+    def test_a_failed_opening_fails_the_waiting_job_and_the_queue_goes_on(self):
+        def refuse():
+            raise RuntimeError("no designer")
+        self.queue.add_lane("broken", 2, opening=refuse)
+        failed = self.queue.submit("voice", lambda: "never", lane="broken")
+        later = self.queue.submit("later", lambda: "ok")
+        self.assertTrue(self.queue.wait_idle(5))
+        self.assertEqual((failed.state, failed.error), (FAILED, "no designer"))
+        self.assertEqual(later.state, DONE)
+        self.assertEqual(self.queue.retry(failed.job_id).lane, "broken")
+
+    def test_an_independent_lane_does_not_wait_for_long_work(self):
+        self.queue.add_independent_lane("save")
+        gate, started = threading.Event(), threading.Event()
+        long_job = self.queue.submit("generate", lambda: (started.set(), gate.wait(5)))
+        self.assertTrue(started.wait(2))
+        saved = threading.Event()
+        save = self.queue.submit("save", saved.set, lane="save")
+        self.assertTrue(saved.wait(2))
+        self.assertEqual(long_job.state, RUNNING)
+        gate.set()
+        self.assertTrue(self.queue.wait_idle(5))
+        self.assertEqual(save.state, DONE)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,15 @@ from .audition import _label, display
 
 
 DESIGNERS = {"local": "locally", "gemini": "with Gemini", "elevenlabs": "with ElevenLabs"}
+SAVE_LANE, GENERATE_LANE = "save", "generate"
+GENERATIONS = 3  # Gemini voices generated at once on the screen (at most casting.gemini_concurrency)
+
+
+def generation_limit(config):
+    """How many Gemini generations the cast screen runs at once."""
+    casting = config.get("casting") if isinstance(config, dict) else None
+    value = (casting or {}).get("gemini_concurrency", 1) if isinstance(casting, dict) else 1
+    return max(1, min(GENERATIONS, value)) if isinstance(value, int) else 1
 
 # Display order when sorting by status: what needs attention first.
 STATUSES = ("failed", "generating", "queued", "needs regeneration", "missing", "pending",
@@ -192,6 +201,14 @@ class CastController:
             secrets = configured_secrets(getattr(session, "config", {}) or {})
             describe_error = lambda error: display(safe_error_text(error, secrets=secrets))  # noqa: E731
         self.jobs = jobs or JobQueue(on_change=self._job_changed, describe_error=describe_error, clock=clock)
+        # Saving a field never waits for another voice's generation.
+        self.jobs.add_independent_lane(SAVE_LANE)
+        # Gemini generations run up to GENERATIONS at once, sharing one store lease and verifier.
+        self._pool = None
+        self.generation_limit = generation_limit(getattr(session, "config", {}) or {})
+        if self.generation_limit > 1:
+            self.jobs.add_lane(GENERATE_LANE, self.generation_limit, opening=self._open_pool,
+                               closing=self._close_pool)
         self.filter = CastFilter()
         self._rows = []
         self.playing = None
@@ -311,12 +328,34 @@ class CastController:
             scope["voice_id"] = row["voice_id"]
         return self.jobs.submit(title, run, scope=scope)
 
+    def _submit_save(self, title, run, row):
+        """A quick save: at once, unless this voice has work queued or running, which it must follow."""
+        if canonical(row) in self.jobs.active_scopes("voice"):
+            return self._submit(title, run, row)
+        return self.jobs.submit(title, run, scope={"voice": [canonical(row)], "voice_id": row["voice_id"]},
+                                lane=SAVE_LANE)
+
     def regenerate(self, row, designer="local"):
         if designer not in DESIGNERS:
             raise ValueError("Unknown voice designer")
         voice_id = row["voice_id"]
-        return self._submit(f"Generate {label(row)} {DESIGNERS[designer]}",
-                            lambda: self.session.regenerate(voice_id, voice_designer=designer), row)
+        title = f"Generate {label(row)} {DESIGNERS[designer]}"
+        if designer == "gemini" and self.generation_limit > 1 and not row.get("derived_from"):
+            # A changed voice is cloned from its main voice by the local model, so it stays serial.
+            return self.jobs.submit(title, lambda: self._pool.regenerate(voice_id),
+                                    scope={"voice": [canonical(row)], "voice_id": voice_id}, lane=GENERATE_LANE)
+        return self._submit(title, lambda: self.session.regenerate(voice_id, voice_designer=designer), row)
+
+    def _open_pool(self):
+        from .casting_batch import GenerationPool
+        pool = GenerationPool(self.session, self.generation_limit, designer="gemini")
+        pool.open()
+        self._pool = pool
+
+    def _close_pool(self):
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close()
 
     def accept(self, row, candidate_id):
         voice_id = row["voice_id"]
@@ -352,8 +391,8 @@ class CastController:
     def save_field(self, row, field, value):
         self.validate_field(row, field, value)
         voice_id = row["voice_id"]
-        return self._submit(f"Save {FIELDS[field].lower()} for {label(row)}",
-                            lambda: self.session.update_prompt(voice_id, **{field: value}), row)
+        return self._submit_save(f"Save {FIELDS[field].lower()} for {label(row)}",
+                                 lambda: self.session.update_prompt(voice_id, **{field: value}), row)
 
     def share(self, row, target):
         if row["voice_id"] == target["voice_id"]:
@@ -371,8 +410,8 @@ class CastController:
     def set_clips(self, row, count):
         voice_id = row["voice_id"]
         text = "the default" if count is None else str(count)
-        return self._submit(f"Use {text} reference clip(s) for {label(row)}",
-                            lambda: self.session.set_reference_clips(voice_id, count), row)
+        return self._submit_save(f"Use {text} reference clip(s) for {label(row)}",
+                                 lambda: self.session.set_reference_clips(voice_id, count), row)
 
     def refresh_prompt(self, row):
         if row.get("derived_from"):

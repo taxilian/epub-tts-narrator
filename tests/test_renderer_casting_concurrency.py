@@ -184,6 +184,33 @@ class CastingConcurrencyTests(unittest.TestCase):
         self.assertEqual(len({id(designer) for designer in remote.designers}), 2)
         self.assertTrue(overlapped, "Independent Gemini jobs were admitted serially")
 
+    def test_a_generation_pool_overlaps_voices_asked_for_one_at_a_time_and_saves_still_work(self):
+        from epub_tts_narrator.renderer.casting_batch import GenerationPool
+        bundle = self.narration_bundle()
+        extra = self.add_voice(bundle)
+        remote = GeminiOverlapTransport(self, blocked=(1, 2), release_on_overlap=False)
+        session = self.session(remote, bundle=bundle)
+        pool = GenerationPool(session, 2)
+        pool.open()
+        try:
+            # The pool holds the store lease; this session's own saves share it.
+            session.update_prompt(extra, "An extra voice, edited while others generate.")
+            with ThreadPoolExecutor(max_workers=2) as callers:
+                first = callers.submit(pool.regenerate, "voice_mara")
+                second = callers.submit(pool.regenerate, "voice_lena")
+                try:
+                    overlapped = remote.overlap.wait(WAIT_SECONDS)
+                finally:
+                    remote.release.set()
+                selected = [first.result(2 * WAIT_SECONDS), second.result(2 * WAIT_SECONDS)]
+        finally:
+            pool.close()
+        self.assertTrue(overlapped, "Voices asked for one at a time were generated serially")
+        self.assertTrue(all(row is not None for row in selected))
+        self.assertEqual(remote.maximum_active_interactions, 2)
+        # The lease is released: an ordinary locked action works again.
+        session.update_prompt(extra, "An extra voice, edited afterwards.")
+
     def test_bounded_admission_dedupes_aliases_in_input_order(self):
         bundle = self.narration_bundle()
         extra = self.add_voice(bundle)

@@ -3,7 +3,13 @@
 Interactive screens hand slow work (voice generation, verification, saves that
 take a lock) to one worker thread so the screen stays responsive. Jobs run one
 at a time in submission order, which also serializes every write the work
-makes. Each job records its state, timing, and a sanitized error, so a screen
+makes. A job may instead name a *lane* (``add_lane``): consecutive jobs of one
+lane run together, up to the lane's limit, and never beside any other job; the
+lane's ``opening`` runs before its first job and ``closing`` after its last, so
+the lane can hold a shared resource (a lock, a pool of workers) while it runs.
+An *independent* lane instead runs its jobs one at a time on a worker of its
+own, beside everything else (quick saves that need not wait for long work).
+Each job records its state, timing, and a sanitized error, so a screen
 can list failures and retry one while later jobs keep running. A job never
 decides anything on a person's behalf: it only runs what was submitted.
 """
@@ -37,6 +43,7 @@ class Job:
     error: str | None = None
     error_type: str | None = None
     retry_of: int | None = None
+    lane: str | None = None
 
     @property
     def active(self):
@@ -69,17 +76,53 @@ class JobQueue:
         self._history = history
         self._closed = False
         self._thread = None
+        self._lanes = {}
+        self._open_lane = None  # the lane whose ``opening`` ran and whose ``closing`` has not
+        self._lane_running = 0
+        self._side = {}  # independent lane -> its own pending jobs
+        self._side_threads = {}
 
-    def submit(self, label, run, *, scope=None, retry_of=None):
-        job = Job(next(self._ids), label, run, dict(scope or {}), submitted=self._clock(), retry_of=retry_of)
+    def add_independent_lane(self, name):
+        """Let jobs submitted with ``lane=name`` run in order on their own worker, never waiting for other jobs."""
+        with self._lock:
+            self._side.setdefault(name, deque())
+
+    def add_lane(self, name, limit, *, opening=None, closing=None):
+        """Let jobs submitted with ``lane=name`` run up to ``limit`` at once.
+
+        ``opening()`` runs on the queue's worker before the lane's first job of
+        a run of consecutive lane jobs, and ``closing()`` after the last one
+        finishes. A failed ``opening`` fails the job waiting to start, and a
+        failed ``closing`` is recorded as a failed job of its own.
+        """
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError("A lane needs a limit of at least 1")
+        with self._lock:
+            self._lanes[name] = (limit, opening or (lambda: None), closing or (lambda: None))
+
+    def submit(self, label, run, *, scope=None, retry_of=None, lane=None):
+        if lane is not None and lane not in self._lanes and lane not in self._side:
+            raise ValueError(f"Unknown job lane: {lane}")
+        job = Job(next(self._ids), label, run, dict(scope or {}), submitted=self._clock(), retry_of=retry_of,
+                  lane=lane)
         with self._lock:
             if self._closed:
                 raise RuntimeError("The job queue is closed")
             self._jobs[job.job_id] = job
             self._order.append(job.job_id)
             self._trim()
-            self._pending.append(job)
-            if self._thread is None:
+            if lane in self._side:
+                self._side[lane].append(job)
+                if self._side_threads.get(lane) is None:
+                    self._side_threads[lane] = threading.Thread(target=self._side_work, args=(lane,),
+                                                                name=f"tui-jobs-{lane}", daemon=True)
+                    self._side_threads[lane].start()
+                self._lock.notify_all()
+                pending_main = False
+            else:
+                self._pending.append(job)
+                pending_main = True
+            if pending_main and self._thread is None:
                 self._thread = threading.Thread(target=self._work, name="tui-jobs", daemon=True)
                 self._thread.start()
             self._lock.notify_all()
@@ -90,19 +133,20 @@ class JobQueue:
         """Submit a failed or cancelled job's work again as a new job."""
         with self._lock:
             job = self._jobs.get(job_id)
-        if job is None or job.state not in (FAILED, CANCELLED):
+        if job is None or job.state not in (FAILED, CANCELLED) or job.run is None:
             raise ValueError("Only a failed or cancelled job can be retried")
-        return self.submit(job.label, job.run, scope=job.scope, retry_of=job.job_id)
+        return self.submit(job.label, job.run, scope=job.scope, retry_of=job.job_id, lane=job.lane)
 
     def cancel_queued(self, predicate=lambda job: True):
         """Cancel jobs that have not started; a running job always finishes."""
         cancelled = []
         with self._lock:
-            for job in list(self._pending):
-                if predicate(job):
-                    self._pending.remove(job)
-                    job.state, job.finished = CANCELLED, self._clock()
-                    cancelled.append(job)
+            for pending in (self._pending, *self._side.values()):
+                for job in list(pending):
+                    if predicate(job):
+                        pending.remove(job)
+                        job.state, job.finished = CANCELLED, self._clock()
+                        cancelled.append(job)
         for job in cancelled:
             self._changed(job)
         return cancelled
@@ -139,7 +183,8 @@ class JobQueue:
         """Block until nothing is queued or running (for tests and orderly exit)."""
         deadline = None if timeout is None else self._clock() + timeout
         with self._lock:
-            while self._pending or any(self._jobs[job_id].state == RUNNING for job_id in self._order):
+            while (self._pending or self._open_lane is not None or any(self._side.values())
+                   or any(self._jobs[job_id].state == RUNNING for job_id in self._order)):
                 remaining = None if deadline is None else deadline - self._clock()
                 if remaining is not None and remaining <= 0:
                     return False
@@ -171,32 +216,129 @@ class JobQueue:
     def _work(self):
         while True:
             with self._lock:
-                while not self._pending and not self._closed:
-                    self._lock.wait()
-                if not self._pending:
+                action, job = self._next()
+                if action == "stop":
                     return
-                job = self._pending.popleft()
-                job.state, job.started = RUNNING, self._clock()
-            self._changed(job)
-            try:
-                result = job.run()
-            except BaseException as error:  # noqa: BLE001 - every outcome is recorded
-                with self._lock:
-                    job.state, job.finished = FAILED, self._clock()
-                    job.error, job.error_type = self._describe(error), type(error).__name__
-                    self._lock.notify_all()
+                if action in ("run", "lane"):
+                    self._pending.popleft()
+                    job.state, job.started = RUNNING, self._clock()
+                    if action == "lane":
+                        self._lane_running += 1
+            if action == "open":
+                self._open(job)
+            elif action == "close":
+                self._close_lane()
+            elif action == "lane":
                 self._changed(job)
-                if not isinstance(error, Exception):
+                threading.Thread(target=self._run_lane_job, args=(job,), name=f"tui-jobs-{job.lane}",
+                                 daemon=True).start()
+            else:
+                self._changed(job)
+                if not self._execute(job):
                     # Interruption and exit still stop the worker after recording;
                     # a later submission starts a fresh worker.
                     with self._lock:
                         self._thread = None
                     return
+
+    def _next(self):
+        """What the worker does next (called holding the lock): wait until there is something."""
+        while True:
+            head = self._pending[0] if self._pending else None
+            if self._open_lane is not None and (head is None or head.lane != self._open_lane):
+                if self._lane_running:
+                    self._lock.wait()
+                    continue
+                return "close", None
+            if head is None:
+                if self._closed:
+                    return "stop", None
+                self._lock.wait()
                 continue
+            if head.lane is None:
+                return "run", head
+            if self._open_lane is None:
+                return "open", head
+            if self._lane_running < self._lanes[head.lane][0]:
+                return "lane", head
+            self._lock.wait()
+
+    def _open(self, job):
+        opening = self._lanes[job.lane][1]
+        try:
+            opening()
+        except BaseException as error:  # noqa: BLE001 - the waiting job carries the failure
             with self._lock:
-                job.state, job.finished, job.result = DONE, self._clock(), result
+                if self._pending and self._pending[0] is job:
+                    self._pending.popleft()
+                job.started = job.started or self._clock()
+                job.state, job.finished = FAILED, self._clock()
+                job.error, job.error_type = self._describe(error), type(error).__name__
                 self._lock.notify_all()
             self._changed(job)
+            return
+        with self._lock:
+            self._open_lane = job.lane
+            self._lock.notify_all()
+
+    def _close_lane(self):
+        with self._lock:
+            name = self._open_lane
+        try:
+            self._lanes[name][2]()
+        except BaseException as error:  # noqa: BLE001 - recorded as its own failed job
+            now = self._clock()
+            failed = Job(next(self._ids), f"Finish {name}", None, submitted=now, state=FAILED, started=now,
+                         finished=now, error=self._describe(error), error_type=type(error).__name__)
+            with self._lock:
+                self._jobs[failed.job_id] = failed
+                self._order.append(failed.job_id)
+                self._trim()
+            self._changed(failed)
+        with self._lock:
+            self._open_lane = None
+            self._lock.notify_all()
+
+    def _side_work(self, lane):
+        while True:
+            with self._lock:
+                while not self._side[lane] and not self._closed:
+                    self._lock.wait()
+                if not self._side[lane]:
+                    self._side_threads[lane] = None
+                    return
+                job = self._side[lane].popleft()
+                job.state, job.started = RUNNING, self._clock()
+            self._changed(job)
+            if not self._execute(job):
+                with self._lock:
+                    self._side_threads[lane] = None
+                return
+
+    def _run_lane_job(self, job):
+        try:
+            self._execute(job)
+        finally:
+            with self._lock:
+                self._lane_running -= 1
+                self._lock.notify_all()
+
+    def _execute(self, job):
+        """Run one job and record its outcome; False when it was interrupted."""
+        try:
+            result = job.run()
+        except BaseException as error:  # noqa: BLE001 - every outcome is recorded
+            with self._lock:
+                job.state, job.finished = FAILED, self._clock()
+                job.error, job.error_type = self._describe(error), type(error).__name__
+                self._lock.notify_all()
+            self._changed(job)
+            return isinstance(error, Exception)
+        with self._lock:
+            job.state, job.finished, job.result = DONE, self._clock(), result
+            self._lock.notify_all()
+        self._changed(job)
+        return True
 
 
 def _scope_values(value):

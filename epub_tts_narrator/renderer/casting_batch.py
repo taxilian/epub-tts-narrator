@@ -247,3 +247,63 @@ def run_gemini_batch(session, representatives, *, regenerate, worker_factory):
     if fatal.error is not None:
         raise fatal.error
     return results
+
+
+class GenerationPool:
+    """Gemini generations for a screen that asks for one voice at a time, up to ``limit`` at once.
+
+    ``open`` takes the session's store lease and prepares the workers once, as
+    ``run_gemini_batch`` does for a whole list; each ``regenerate`` then
+    borrows a free worker, so a screen can start up to ``limit`` voices
+    together and start the next as one finishes. ``close`` releases
+    everything. A batch-fatal error (setup, verification outage,
+    interruption) fails every later generation until the pool is reopened.
+    """
+
+    def __init__(self, session, limit, *, designer="gemini"):
+        self.session, self.limit, self.designer = session, limit, designer
+        self._stack = None
+        self._free = None
+
+    def open(self):
+        from contextlib import ExitStack
+        from queue import Queue
+        session = self.session
+        stack = ExitStack()
+        try:
+            stack.enter_context(session._using_voice_designer(self.designer))
+            stack.enter_context(session._locked())
+            self._lease, self._fatal = BatchLease(), _Fatal()
+            self._resources = _Resources(session, self._fatal)
+            stack.callback(self._lease.revoke)
+            stack.callback(self._resources.close)
+            session.prepare_models(generation=True)
+            session._retry_gemini_cleanup()
+            self._resources.start()
+            self._free = Queue()
+            for _ in range(self.limit):
+                worker = session._batch_worker(self._lease, self._resources)
+                stack.callback(worker.close)
+                worker._cleanup_attempted = set(session._cleanup_attempted)
+                worker._get_designer()
+                self._free.put(worker)
+        except BaseException:
+            stack.close()
+            raise
+        self._stack = stack
+
+    def regenerate(self, voice_id):
+        if self._stack is None:
+            raise RuntimeError("The generation pool is not open")
+        if self._fatal.error is not None:
+            raise self._fatal.error
+        worker = self._free.get()
+        try:
+            return _invoke(worker, voice_id, True, self._fatal)
+        finally:
+            self._free.put(worker)
+
+    def close(self):
+        stack, self._stack = self._stack, None
+        if stack is not None:
+            stack.close()

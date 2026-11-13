@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sys
+import threading
 import uuid
 
 from .audio_naming import validate_audio_filename
@@ -89,6 +90,9 @@ class CastingSession:
         self._samples = {}
         self._cleanup_attempted = set()
         self._batch_lease = batch_lease
+        self._lock_guard = threading.Lock()
+        self._lock_holders = 0
+        self._held_lock = None
         # Temporary local/G11 choices must retain the session's verifier owner.
         self._use_verifier_runtime = self.config.get("voice_design", {}).get("type") == "gemini"
         self._closed = False
@@ -142,19 +146,38 @@ class CastingSession:
 
     @contextmanager
     def _locked(self):
+        """Hold the voice store's lease. Threads of this one session share it.
+
+        The lease keeps other processes out; inside this session a screen
+        saves one voice's draft or sidecars while another voice generates, and
+        those writes touch different files (the screen keeps a voice's own
+        saves behind its generation).
+        """
         if self._batch_lease is not None:
             self._batch_lease.require_active()
             yield
             return
-        self._validate_paths()
-        lock = self.store.lock()
+        with self._lock_guard:
+            if self._lock_holders == 0:
+                self._validate_paths()
+                lock = self.store.lock()
+                try:
+                    from ..voice_profile_guard import require_valid_profiles
+                    require_valid_profiles(self.bundle["directory"])
+                    self.store.persist_aliases()
+                except BaseException:
+                    lock.rmdir()
+                    raise
+                self._held_lock = lock
+            self._lock_holders += 1
         try:
-            from ..voice_profile_guard import require_valid_profiles
-            require_valid_profiles(self.bundle["directory"])
-            self.store.persist_aliases()
             yield
         finally:
-            lock.rmdir()
+            with self._lock_guard:
+                self._lock_holders -= 1
+                if self._lock_holders == 0:
+                    lock, self._held_lock = self._held_lock, None
+                    lock.rmdir()
 
     def _draft_path(self, voice_id):
         voice_id = self.store.canonical_id(voice_id)
