@@ -172,7 +172,7 @@ def _excerpt(source, item, width=160):
 class NameTool:
     def __init__(self, bundle, config, *, analysis_config, input_fn, output, engine_factory=None, store=None,
                  player=None, playback_fn=None, requests=None, interactive=True, voice_id=None,
-                 verifier_factory=None):
+                 verifier_factory=None, observer=None):
         from .pronunciation_review import PronunciationReviewSession
         self.bundle, self.config = bundle, config
         self.directory = Path(bundle["directory"])
@@ -190,6 +190,12 @@ class NameTool:
         self._verifier_factory, self._verifier = verifier_factory, None
         self._previews = {}
         self._samples = {}
+        # A full-screen UI (pronounce_tui) sees what each question is about.
+        self.observer = observer
+
+    def report(self, state):
+        if self.observer is not None:
+            self.observer(state)
 
     def say(self, value):
         self.output(display(value))
@@ -339,7 +345,17 @@ class NameTool:
                     from .diagnostics import configured_secrets, safe_error_text
                     self.say("Playback stopped: " + safe_error_text(exc, secrets=configured_secrets(self.config))
                              + ". Use P to try again.")
-            self.say(MENU)
+            sentence, spans = self._sample(name, parts)
+            self.report({"kind": "define", "name": name, "reading": dict(current), "described": describe_reading(current),
+                         "respelling": respelling if "phonemes" in current else None, "parts": list(parts),
+                         "applies": describe_parts(parts), "possessive": (possessive, prefix + possessive_reading),
+                         "plural": (plural, prefix + plural_reading), "sentence": sentence,
+                         "spans": [list(span) for span in (spans if spans is not None else [
+                             (item["start"], item["end"], item["word"]) for item in occurrences(sentence, name)])],
+                         "uses": len(found), "forms": dict(sorted(counts.items())),
+                         "phonemes": current.get("phonemes"), "say_as": current.get("say_as")})
+            if self.observer is None:  # A full-screen UI shows its own choices.
+                self.say(MENU)
             command = self.input_fn("> ").strip()
             verb, _, rest = command.partition(" ")
             verb, rest = verb.casefold(), rest.strip()
@@ -492,6 +508,11 @@ class NameTool:
                      else f"labelled {PART_LABELS.get(item['label'], item['label'])}, "
                           + ("gets the reading" if item["use"] else "keeps the default reading"))
             self.say(f"[{index}/{len(asked)}] {label}: {_excerpt(self.source, item)}")
+            excerpt = _excerpt(self.source, item)
+            before, _, rest = excerpt.partition("»")
+            word, _, after = rest.partition("«")
+            self.report({"kind": "tag", "name": name, "index": index, "total": len(asked), "label": label,
+                         "before": before, "word": word, "after": after, "parts": describe_parts(parts)})
             answer = self.input_fn(f"Should »{item['word']}« here get the reading of {name}? y/n "
                                    "(Enter keeps, Q stops): ").strip().casefold()
             if answer == "q":
@@ -605,6 +626,26 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
         if name is None or getattr(args, "tag_only", False) or getattr(args, "list", False):
             raise ValueError("--as needs a word to define and cannot be combined with --tag-only or --list")
         parts = parse_parts(parts)
+    options = dict(name=name, sound=sound, parts=parts, analysis_config=analysis_config, engine_factory=engine_factory,
+                   store=store, player=player, requests=requests, verifier_factory=verifier_factory)
+    if input_fn is None and playback_fn is None and not getattr(args, "list", False):
+        from epub_tts_narrator.tui_support import wants_tui
+        if wants_tui(args):
+            # Full screen: the same listening loop, answered on screen (pronounce_tui).
+            from .pronounce_tui import run_pronounce_app
+            lines = []
+
+            def command(tui_input, tui_output, tui_play, observer):
+                def said(text):
+                    lines.append(text)
+                    tui_output(text)
+                return _run_tool(bundle, config, args, input_fn=tui_input, output=said, playback_fn=tui_play,
+                                 interactive=True, observer=observer, **options)
+            try:
+                return run_pronounce_app(command, title=f"pronounce — {Path(bundle['directory']).name}")
+            finally:
+                for line in lines:
+                    output(line)
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -614,11 +655,17 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
         playback_fn = play_sample
     if interactive is None:
         interactive = sys.stdin.isatty()
+    return _run_tool(bundle, config, args, input_fn=input_fn, output=output, playback_fn=playback_fn,
+                     interactive=interactive, **options)
+
+
+def _run_tool(bundle, config, args, *, name, sound, parts, analysis_config, input_fn, output, playback_fn, interactive,
+              engine_factory=None, store=None, player=None, requests=None, verifier_factory=None, observer=None):
     player = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
     tool = NameTool(bundle, config, analysis_config=analysis_config, input_fn=input_fn, output=output,
                     engine_factory=engine_factory, store=store, player=player, playback_fn=playback_fn,
                     requests=requests, interactive=interactive, voice_id=getattr(args, "voice_id", None),
-                    verifier_factory=verifier_factory)
+                    verifier_factory=verifier_factory, observer=observer)
     review = bool(getattr(args, "review_tags", False))
     try:
         if getattr(args, "list", False):

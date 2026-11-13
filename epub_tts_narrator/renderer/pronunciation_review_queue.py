@@ -27,13 +27,16 @@ _JUMP_BACK = 5
 
 
 def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=print,
-                            interactive=None, redraw=None, gap_seconds=_GAP_SECONDS):
+                            interactive=None, redraw=None, gap_seconds=_GAP_SECONDS, wait_fn=None, observer=None):
     """Run the count-only menu and the interruptible listening queue.
 
     ``interactive`` gates the walk: without an interactive terminal a
     completed play cannot be attributed to a listener, so the queue refuses to
     walk (explicit per-word actions remain available). ``redraw`` receives each
     queue line so a terminal can rewrite the current line instead of scrolling.
+    ``wait_fn(seconds)`` waits for an interrupting key (default: the
+    terminal's); ``observer`` receives the entries before each question, for
+    a full-screen UI (``pronounce_tui.PronunciationQueueApp``).
     """
     from ..pronunciations import set_pronunciation
     from .diagnostics import configured_secrets, safe_error_text
@@ -108,7 +111,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
 
     def walk(start, *, selected_proposal=None):
         nonlocal last
-        from .terminal import wait_key
+        from .terminal import wait_key as terminal_wait
+        wait_key = wait_fn or terminal_wait
         index = start
         previous_notify = session.notify
         try:
@@ -179,7 +183,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
             if row.get("preparation_error"):
                 say("     Audio unavailable: " + row["preparation_error"])
         say(f"Enter resumes the queue at [{first + 1}/{len(rows)}] {rows[first]['word']}; "
-            "E/P/B/C/I/R [N] adjusts a word by its list number (L); Q quits.")
+            "E/P/B/C/I/R [N] adjusts a word by its list number (L); Q quits." if observer is None else
+            f"Listening stopped; S resumes at {rows[first]['word']}, or adjust any of these words first.")
 
     def reopen(spec):
         rows = session.rows()
@@ -245,10 +250,11 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         unavailable = sum(bool(row.get("preparation_error")) for row in rows)
         if unavailable:
             say(f"{unavailable} audio preview(s) unavailable; edits remain available, and numbered playback retries.")
-        say("S [N]: listen and auto-accept, starting at entry N (default: saved position or first queued word)")
-        say("Number: play that entry's excerpt preview   L: compact list   O <all|N|N-M>: mark for re-listening")
-        say("B/E/P/C/I/R [N]: baseline / readable hint / CMU phonemes / confirm / keep default / reset   Q: quit")
-        say("During playback or the gap after it, any key interrupts and returns to the last five words.")
+        if observer is None:  # A full-screen UI shows its own choices.
+            say("S [N]: listen and auto-accept, starting at entry N (default: saved position or first queued word)")
+            say("Number: play that entry's excerpt preview   L: compact list   O <all|N|N-M>: mark for re-listening")
+            say("B/E/P/C/I/R [N]: baseline / readable hint / CMU phonemes / confirm / keep default / reset   Q: quit")
+            say("During playback or the gap after it, any key interrupts and returns to the last five words.")
         return True
 
     def start_walk(rows, parts):
@@ -269,10 +275,21 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
                 return
         walk(start, selected_proposal=selected_proposal)
 
+    def report():
+        if observer is None:
+            return
+        rows = session.rows()
+        observer({"kind": "queue", "queued": queued_count(), "resume": state.resume_word, "last": last,
+                  "rows": [{"number": number, "word": row["word"], "status": row["status"],
+                            "description": session.description(row), "queued": state.queued(row),
+                            "proposal": pending_proposal(row), "error": row.get("preparation_error"),
+                            "conflict": bool(row.get("case_conflict"))} for number, row in enumerate(rows, 1)]})
+
     if not help_text():
         return 0
     while True:
         try:
+            report()
             command = input_fn("> ").strip()
         except EOFError:
             state.save()

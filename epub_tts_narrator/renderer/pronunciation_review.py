@@ -856,6 +856,32 @@ def run_pronunciation_review(bundle, config, args, *, input_fn=None, output=prin
         return 0
     if action not in {"review", "play"}:
         raise ValueError("Unsupported pronunciation review action")
+    if action == "review" and word is None and input_fn is None and playback_fn is None:
+        from epub_tts_narrator.tui_support import wants_tui
+        if wants_tui(args):
+            # Full screen: the same listening queue, its entries listed (pronounce_tui).
+            from .pronounce_tui import run_queue_app
+            from .pronunciation_review_queue import run_pronunciation_queue
+            lines = []
+
+            def command(tui_input, tui_output, tui_play, observer, wait_fn, redraw):
+                def said(text):
+                    lines.append(text)
+                    tui_output(text)
+                session = PronunciationReviewSession(bundle, config, engine_factory=engine_factory, store=store,
+                                                     notify=said, scope=scope)
+                chosen = player or AudioPlayer(config.get("casting", {}).get("player", ["/usr/bin/afplay"]))
+                try:
+                    return run_pronunciation_queue(session, chosen, tui_play, input_fn=tui_input, output=said,
+                                                   interactive=True, redraw=redraw, wait_fn=wait_fn, observer=observer)
+                finally:
+                    chosen.stop()
+                    session.close()
+            try:
+                return run_queue_app(command, title=f"pronunciations — {Path(bundle['directory']).name}")
+            finally:
+                for line in lines:
+                    output(line)
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()

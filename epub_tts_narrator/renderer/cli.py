@@ -104,6 +104,9 @@ def parser():
             correction = command.add_mutually_exclusive_group()
             correction.add_argument("--say-as", help="Literal readable respelling (e.g. Quarm); set saves it and play auditions it")
             correction.add_argument("--phonemes", help="Advanced: CMU Arpabet phonemes, with stress digits if needed")
+        if name in {"pronounce", "pronounce-name", "pronunciations"}:
+            from epub_tts_narrator.tui_support import add_plain_option
+            add_plain_option(command)
         if name in {"pronounce", "pronounce-name"}:
             command.description = ("Choose how a name or invented word is pronounced by listening to test sentences "
                                    "(model guess, then accept, revise with instructions, or edit phonemes), and which "
