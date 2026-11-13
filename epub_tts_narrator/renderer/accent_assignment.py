@@ -29,7 +29,7 @@ import re
 import sys
 import uuid
 
-from .accent_prompts import ASSIGN, NOTES, REVISE
+from .accent_prompts import MORE, ASSIGN, NOTES, REVISE
 
 
 ASSIGNMENTS_FILENAME = "voice-accent-assignments.json"
@@ -42,6 +42,10 @@ MAX_WHY = 200
 MAX_EXAMPLES = 6
 MAX_NOTES = 2000
 MAX_INTRO = 2
+# What the model may ask for, once, about characters it cannot place.
+MAX_MORE = 12
+MORE_PASSAGES = 6
+MORE_LINES = 3
 INTRO_BEFORE = 80
 INTRO_AFTER = 240
 MAX_ALIASES = 8
@@ -264,7 +268,9 @@ def voice_entries(bundle, parents=()):
     from the earliest book they appear in, when it differs), the narration
     where the series first mentions them (where a story usually says who
     they are and where they come from; ``parents`` are earlier books' bundles,
-    nearest first), and one of their own lines as a dialect clue. Derived
+    nearest first), and one of their own lines as a dialect clue; ``more``
+    holds further passages naming them and more of their lines, sent only
+    if the model asks about them. Derived
     voices (a character's later state) are left out; they take their main
     voice's accent.
     """
@@ -277,8 +283,10 @@ def voice_entries(bundle, parents=()):
             if not voice_id:
                 continue
             used.add(voice_id)
-            if voice_id not in spoken and row.get("kind") in SPOKEN_KINDS and len(row.get("text", "").split()) >= 4:
-                spoken[voice_id] = _clip(row["text"])
+            lines = spoken.setdefault(voice_id, [])
+            if (len(lines) <= MORE_LINES and row.get("kind") in SPOKEN_KINDS and len(row.get("text", "").split()) >= 4
+                    and _clip(row["text"]) not in lines):
+                lines.append(_clip(row["text"]))
     earliest_first = [*reversed(list(parents)), bundle]
     entries = {}
     for profile in cast["voices"]:
@@ -315,9 +323,10 @@ def voice_entries(bundle, parents=()):
                 first_about = "; ".join(character.get("description", "") for character in here
                                         if character.get("description"))
             words = [name for character in here for name in [character["name"], *character.get("aliases", [])]]
-            intro += _introductions(book, words, MAX_INTRO - len(intro))
-            if len(intro) >= MAX_INTRO:
+            intro += _introductions(book, words, MAX_INTRO + MORE_PASSAGES - len(intro))
+            if len(intro) >= MAX_INTRO + MORE_PASSAGES:
                 break
+        intro, more = intro[:MAX_INTRO], intro[MAX_INTRO:]
         if first_about and first_about != about:
             about = f"{first_about} (when first met); now: {about}" if about else first_about
         if narrates and characters:
@@ -325,8 +334,11 @@ def voice_entries(bundle, parents=()):
         if not intro:
             intro = [_clip(evidence["quote"]) for character in characters for evidence in character.get("evidence", [])
                      if isinstance(evidence, dict) and isinstance(evidence.get("quote"), str)][:MAX_INTRO]
+        lines = spoken.get(voice_id, [])
         entries[voice_id] = {"label": label[:120], "names": ", ".join(names)[:MAX_NAMES], "about": about[:MAX_ABOUT],
-                             "intro": intro, "line": spoken.get(voice_id, "")}
+                             "intro": intro, "line": lines[0] if lines else "",
+                             # Sent only when the model asks about this character (request_assignment).
+                             "more": {"passages": more, "lines": lines[1:]}}
     return entries
 
 
@@ -375,6 +387,11 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     person's instructions say. Returns
     {"groups": [{"origin", "accent", "why", "voice_ids", "names"}],
     "accents": {voice_id: cue}}. A voice the reply leaves out gets no accent.
+
+    When the clues for some voices are too thin, the model may first reply
+    ``{"more": [id, ...]}`` (at most ``MAX_MORE``); a second request then
+    sends those voices' further passages and lines (``entries[...]["more"]``)
+    and must return the plan. The result's ``asked_more`` names them.
     """
     keep = keep or {}
     entries = entries if entries is not None else voice_entries(bundle)
@@ -450,7 +467,25 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
             raise ValueError("; ".join(dict.fromkeys(problems)))
         return {"groups": found, "accents": accents}
 
-    return requests.run(system, payload, validate)
+    def plan_or_more(response):
+        if not (isinstance(response, dict) and "more" in response and "g" not in response):
+            return validate(response)
+        wanted = response["more"]
+        if not isinstance(wanted, list) or not all(isinstance(item, str) for item in wanted):
+            raise ValueError('"more" must be a list of voice ids from "voices"')
+        chosen = list(dict.fromkeys(short[item] for item in wanted if item in short))[:MAX_MORE]
+        if not chosen:
+            raise ValueError('"more" must name voice ids from "voices"')
+        return {"more": chosen}
+
+    result = requests.run(system, payload, plan_or_more)
+    if "more" not in result:
+        return result
+    asked = result["more"]
+    extra = [[ids[voice_id], entries[voice_id].get("more", {}).get("passages", []),
+              entries[voice_id].get("more", {}).get("lines", [])] for voice_id in asked]
+    result = requests.run(system + MORE, {**payload, "more": extra}, validate)
+    return {**result, "asked_more": [entries[voice_id]["label"] for voice_id in asked]}
 
 
 def _requests(bundle, config_path, cache, *, progress):
@@ -523,7 +558,15 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     return result
 
 
+def asked_more_line(result):
+    """The line saying which characters the model asked to read more about, else None."""
+    asked = result.get("asked_more") if isinstance(result, dict) else None
+    return f"The model read more of the book about: {', '.join(asked)}." if asked else None
+
+
 def _report(result, entries, notify, origins=()):
+    if asked_more_line(result):
+        notify(asked_more_line(result))
     inherited = {_origin_key(item["origin"]) for item in origins}
     for group in result["groups"]:
         names = ", ".join(entries[voice_id]["label"] for voice_id in group["voice_ids"])

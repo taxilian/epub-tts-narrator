@@ -76,3 +76,40 @@ class BusyBannerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskForMoreTests(assignment_tests.BookTestCase):
+    """The model may ask, once, to read more about characters it cannot place."""
+
+    def test_asking_about_a_character_sends_more_of_the_book_then_takes_the_plan(self):
+        from copy import deepcopy
+        from epub_tts_narrator.renderer.accent_prompts import MORE
+        entries = deepcopy(self.entries)
+        first = self.voices[0]
+        entries[first]["more"] = {"passages": ["…she sailed from Leith as a girl…"], "lines": ["Aye, I ken it."]}
+        answers = iter([lambda payload: {"more": ["v1", "v99"]},
+                        lambda payload: {"g": [["Leith", "Scottish", "Born in Leith", ["v1"]],
+                                               ["the town", "Welsh", "", [row[0] for row in payload["voices"][1:]]]]}])
+        requests = assignment_tests.FakeRequests(lambda payload: next(answers)(payload))
+        result = request_assignment(self.bundle, requests, self.voices, {}, entries=entries)
+        self.assertEqual(len(requests.calls), 2)
+        system, payload = requests.calls[1]
+        self.assertTrue(system.endswith(MORE))
+        self.assertEqual(payload["more"], [["v1", ["…she sailed from Leith as a girl…"], ["Aye, I ken it."]]])
+        self.assertNotIn("more", requests.calls[0][1])  # nothing extra unless asked
+        self.assertEqual(result["accents"][first], "Scottish accent")
+        self.assertEqual(result["asked_more"], [entries[first]["label"]])
+
+    def test_asking_again_or_about_nobody_is_refused_so_the_model_repairs_it(self):
+        with self.assertRaisesRegex(ValueError, "voice ids"):
+            request_assignment(self.bundle, assignment_tests.FakeRequests(lambda payload: {"more": ["v99"]}),
+                               self.voices, {})
+        with self.assertRaisesRegex(ValueError, "response must be"):
+            request_assignment(self.bundle, assignment_tests.FakeRequests(lambda payload: {"more": ["v1"]}),
+                               self.voices, {})
+
+    def test_entries_hold_further_passages_and_lines_apart_from_what_is_always_sent(self):
+        for entry in self.entries.values():
+            self.assertLessEqual(len(entry["intro"]), 2)
+            self.assertLessEqual(len(entry["more"]["passages"]), 6)
+            self.assertNotIn(entry["line"], entry["more"]["lines"])

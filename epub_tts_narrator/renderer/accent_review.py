@@ -148,11 +148,14 @@ class AccentPlanner:
     def _ask(self, revise=None):
         if not self.pending:
             raise ValueError("Every character's accent was decided elsewhere; move one (m) to give it an accent here")
-        return assignment.request_assignment(
+        result = assignment.request_assignment(
             self.bundle, self.requests(), self.pending,
             {voice_id: kept["accent"] for voice_id, kept in self.locked.items() if kept["accent"]},
             notes=self.base_notes, terms=self.terms, clues=self.clues, entries=self.entries,
             origins=self.origins, keep=self.keep, revise=revise)
+        if assignment.asked_more_line(result):
+            self.progress(assignment.asked_more_line(result))
+        return result
 
     def propose(self):
         """Ask for a fresh plan (the current one is replaced)."""
