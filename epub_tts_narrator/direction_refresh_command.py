@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import hashlib
+from pathlib import Path
 import re
 import sys
 import uuid
@@ -132,21 +133,71 @@ def run_direction_refresh(args, config, client_factory, progress):
             if not _ask_apply():
                 print("No changes applied.")
                 return 0
-        revised["provenance"].setdefault("direction_refreshes", []).append(
-            {**report, "provider": client.identity, "chapters": chapter_ids})
-        try:
-            directories = related_directories([directory])
-            hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
-                      for path in directories}
-            if hashes[str(directory)] != original_manifest_hash:
-                raise ValueError(f"Analysis changed while directions were being refreshed: {directory}")
-            result = revise_directories({directory: revised}, directories=directories,
-                                        expected_manifest_hashes=hashes, scope="attribution", progress=print,
-                                        reserved_update_locks=reserved or None)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"Direction publication did not succeed: {exc} This run's responses remain; "
-                             f"publish them without new requests by rerunning with --resume {run_id}.") from exc
-        print(f"Original analysis files and revision journal: {result['backup_directory']}")
-        print(f"Applied: {report['changed_segments']} segment(s) changed. Their audio renders again on the next "
-              f"render of this book.")
+        _publish(directory, revised, report, client, chapter_ids, original_manifest_hash, reserved,
+                 f"rerunning with --resume {run_id}")
         return 0
+
+
+def _publish(directory, revised, report, client, chapter_ids, original_manifest_hash, reserved, retry):
+    revised["provenance"].setdefault("direction_refreshes", []).append(
+        {**report, "provider": client.identity, "chapters": chapter_ids})
+    try:
+        directories = related_directories([directory])
+        hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                  for path in directories}
+        if hashes[str(directory)] != original_manifest_hash:
+            raise ValueError(f"Analysis changed while directions were being refreshed: {directory}")
+        result = revise_directories({directory: revised}, directories=directories,
+                                    expected_manifest_hashes=hashes, scope="attribution", progress=print,
+                                    reserved_update_locks=reserved or None)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Direction publication did not succeed: {exc} This run's responses remain; "
+                         f"publish them without new requests by {retry}.") from exc
+    print(f"Original analysis files and revision journal: {result['backup_directory']}")
+    print(f"Applied: {report['changed_segments']} segment(s) changed. Their audio renders again on the next "
+          f"render of this book.")
+
+
+def refresh_outdated_directions(directory, config, client_factory, progress):
+    """``analyze BOOK``: refresh the whole book's directions when an older version of the rules made them.
+
+    Returns True when it published new directions. Directions a person typed
+    are kept. The run ID comes from the saved book and the direction rules,
+    so rerunning ``analyze`` after an interruption replays this run's
+    responses instead of asking again; it is also accepted by
+    ``refresh-directions --resume``.
+    """
+    from .direction_policy import VERSION, consensus_only, outdated
+    directory = Path(directory).resolve()
+    original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+    document, _, _ = _completed_directory(directory)
+    if not outdated(document):
+        if consensus_only(document):
+            print("Line directions come from the consensus analysis; run refresh-directions on this book to "
+                  "direct its lines with the narrator's rules (reading the narration's cues for each line).")
+        return False
+    settings = config["analysis"]
+    if not config["provider"]["model"]:
+        raise ValueError("This book's line directions were made with older rules and are refreshed by analyze; "
+                         "set provider.model in epub-tts-narrator.toml, or select a TOML file with --config")
+    print("This book's line directions were made with older direction rules; directing every line again "
+          "(speakers, cast and voices stay as they are; directions a person typed are kept).")
+    with ExitStack() as stack:
+        reserved = stack.enter_context(reserve_revision_scope([directory]))
+        run_id = hashlib.sha256(f"analyze-directions:{VERSION}:{original_manifest_hash}".encode()).hexdigest()[:32]
+        cache = analysis_cache_directory(directory, settings["cache_dir"]) / "direction-refresh" / run_id
+        cache.mkdir(parents=True, exist_ok=True)
+        print(f"Direction run: {run_id}", file=sys.stderr)
+        client = client_factory(config["provider"])
+        print(f"Directing lines with {client.model} at {client.base_url}; book passages will be sent to "
+              f"this endpoint.", file=sys.stderr)
+        requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
+                                  max_request_chars=settings["max_request_chars"], progress=progress)
+        revised, report = refresh_directions(document, requests, workers=min(5, settings["attribution_workers"]),
+                                             progress=progress)
+        print(f"{report['directed']}/{report['lines']} spoken line(s) directed; {report['changes']} mid-line "
+              f"change(s); {report['narration_reads']} narration direction(s); {report['kept_typed_directions']} "
+              f"typed direction(s) kept.")
+        # Even with nothing changed, the record says these directions now follow the current rules.
+        _publish(directory, revised, report, client, None, original_manifest_hash, reserved, "rerunning analyze")
+    return True

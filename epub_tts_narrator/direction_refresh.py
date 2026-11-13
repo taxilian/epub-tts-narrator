@@ -15,6 +15,9 @@ tags, pauses, sounds) go through the shared remove-only review. Pronunciation
 controls and spelling edits are kept; a row that has pronunciation controls
 keeps its new line direction but takes no new in-line notes.
 
+A direction a person typed (``delivery.basis == "user"``) is kept with its
+row's controls, and the row takes no new notes.
+
 Every response is cached in the book's own analysis cache, so a rerun replays
 completed requests. Publication goes through ``revise_directories`` scope
 ``attribution`` (backups, descendant rebinding), in the command module.
@@ -23,6 +26,7 @@ completed requests. Publication goes through ``revise_directories`` scope
 from copy import deepcopy
 import threading
 
+from .direction_policy import VERSION as POLICY, typed
 from .narrator_prompts import DIRECTIONS, DIRECTIONS_VERSION, HINTS
 from .narrator_read import (MARKER_CLOSE, MARKER_OPEN, MARKUP_CHARS, _attach_notes, _changes, _context, _direction,
                             _item_row, _numbers, _parallel, _parse_note, _render_blocks, _unwrap, chapter_groups,
@@ -227,7 +231,9 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
     revised = deepcopy(document)
     segments = revised["segments"]
     selected = set(block_ids) if block_ids is not None else {block["id"] for block in revised["source"]["blocks"]}
-    targets = lines(revised, selected)
+    # A person's typed directions stay; their lines are not asked about.
+    kept = {id(segment) for segment in segments if segment["block_id"] in selected and typed(segment)}
+    targets = [line for line in lines(revised, selected) if id(segments[line["index"]]) not in kept]
     before = {segment["id"]: (segment["delivery"]["direction"], deepcopy(segment.get("performance_controls")))
               for segment in segments if segment["block_id"] in selected}
     people = speakers(revised["cast"])
@@ -248,7 +254,9 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
     for segment in segments:
         if segment["block_id"] not in selected:
             continue
-        if segment["kind"] in SPOKEN_KINDS or segment["kind"] == "narration":
+        if id(segment) in kept:
+            locked.add(id(segment))
+        elif segment["kind"] in SPOKEN_KINDS or segment["kind"] == "narration":
             segment["delivery"] = {"direction": "", "evidence": []}
             if _strip_controls(segment):
                 locked.add(id(segment))
@@ -288,13 +296,14 @@ def refresh_directions(document, requests, *, block_ids=None, notes="", workers=
                and before[segment["id"]] != (segment["delivery"]["direction"],
                                              segment.get("performance_controls"))]
     directed = sum(1 for line in targets if revised["segments"][line["index"]]["delivery"]["direction"])
-    report = {"version": DIRECTIONS_VERSION, "lines": len(targets), "directed": directed,
+    report = {"version": DIRECTIONS_VERSION, "policy": POLICY, "lines": len(targets), "directed": directed,
               "narration_reads": stats["narration_reads"], "changes": stats["shifts"],
               "italic_emphasis": stats["italic_emphasis"], "notes_attached": stats["attached"],
               "cued_lines": len(line_cue_text), "cue_sounds": stats["cue_sounds"], "cue_scoped": stats["cue_scoped"],
               "cue_tones": stats["cue_tones"],
               "notes_dropped": stats["dropped"] + request_stats["dropped_notes"],
-              "kept_pronunciation_rows": len(locked), "changed_segments": len(changed),
+              "kept_pronunciation_rows": len(locked - kept), "kept_typed_directions": len(kept),
+              "changed_segments": len(changed),
               "groups": request_stats["groups"], "subdivided_groups": request_stats["subdivided_groups"],
               "review": review["counts"] if review else {}, "hints": bool(notes.strip())}
     return revised, report

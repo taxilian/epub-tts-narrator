@@ -15,6 +15,7 @@ from epub_tts_narrator.analysis_directory import _completed_directory, fresh_reg
 from epub_tts_narrator.cli import export_bundle, main
 from epub_tts_narrator.config import DEFAULTS
 from epub_tts_narrator.contracts import readiness
+from epub_tts_narrator.direction_policy import VERSION as DIRECTION_POLICY
 from epub_tts_narrator.direction_refresh import refresh_directions
 from epub_tts_narrator.performance_plan import text_sha256, validate_performance
 from epub_tts_narrator.pipeline import CachedRequests, fingerprint
@@ -196,6 +197,19 @@ class DirectionRefreshTests(unittest.TestCase):
         self.assertEqual(readiness(revised)["errors"], [])
 
 
+    def test_a_typed_direction_is_kept_and_its_line_is_not_asked_about(self):
+        from epub_tts_narrator.attribution_edits import edit_direction
+        document = scene_document()
+        document["segments"][1] = edit_direction(document["segments"][1], "my own reading")
+        revised, report, client = self.refresh(document)
+        self.assertNotIn("‹q1 Mara›", client.calls[0]["text"])
+        mara = {row["id"]: row for row in revised["segments"]}["b1:14:43"]
+        self.assertEqual((mara["delivery"]["direction"], mara["delivery"]["basis"]), ("my own reading", "user"))
+        self.assertNotIn("performance_controls", mara)
+        self.assertEqual(report["kept_typed_directions"], 1)
+        self.assertEqual(report["policy"], DIRECTION_POLICY)
+
+
 class LeftoverSpokenTextTests(DirectionRefreshTests.__base__):
     def test_a_line_that_loses_its_only_control_loses_the_spoken_text_written_for_it(self):
         document = scene_document()
@@ -287,6 +301,76 @@ class DirectionRefreshCLITests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Unknown chapter number(s): 9", errors)
         self.assertEqual(client.calls, [])
+
+
+class AnalyzeRefreshesOutdatedDirectionsTests(unittest.TestCase):
+    """Rerunning analyze on a saved book directs its lines again when older rules made them."""
+
+    def publish(self, *, refreshed):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        book = Path(temporary.name).resolve() / "book"
+        document = scene_document()
+        if refreshed:
+            # A whole-book refresh made before direction rules were versioned.
+            document["provenance"]["direction_refreshes"] = [{"version": 2, "lines": 3, "chapters": None}]
+        registry = fresh_registry(book)
+        publish_directory(link_analysis(document, registry), registry, book, export_bundle)
+        return book
+
+    def analyze(self, book):
+        config = {**deepcopy(DEFAULTS), "analysis": deepcopy(DEFAULTS["analysis"]),
+                  "provider": {**deepcopy(DEFAULTS["provider"]), "model": "test-model",
+                               "base_url": "https://example.invalid"}}
+        client = DirectorClient()
+        output, errors = io.StringIO(), io.StringIO()
+        with (patch("epub_tts_narrator.cli.load_config", return_value=config),
+              patch("epub_tts_narrator.cli.OpenAICompatibleClient", return_value=client),
+              patch("sys.stdin", io.StringIO()),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
+            code = main(["analyze", str(book)])
+        return code, output.getvalue(), errors.getvalue(), client
+
+    def test_outdated_directions_are_refreshed_once(self):
+        book = self.publish(refreshed=True)
+        code, output, errors, client = self.analyze(book)
+        self.assertIn(code, (0, 2), errors + output)
+        self.assertIn("made with older direction rules", output)
+        self.assertTrue(any(call["mode"] == "direction_refresh" for call in client.calls))
+        document, _, _ = _completed_directory(book)
+        self.assertEqual(document["provenance"]["direction_refreshes"][-1]["policy"], DIRECTION_POLICY)
+        rows = {row["id"]: row for row in document["segments"]}
+        self.assertEqual(rows["b1:14:43"]["delivery"]["direction"], "flat, weary")
+        self.assertEqual(rows["b1:14:43"]["role_id"], "mara")
+
+        published = (book / "manifest.json").read_bytes()
+        code, output, errors, again = self.analyze(book)
+        self.assertIn(code, (0, 2), errors + output)
+        self.assertEqual(again.calls, [])
+        self.assertEqual((book / "manifest.json").read_bytes(), published)
+
+    def test_an_interrupted_refresh_replays_its_answers_on_the_next_analyze(self):
+        book = self.publish(refreshed=True)
+        with patch("epub_tts_narrator.direction_refresh_command.revise_directories",
+                   side_effect=OSError("disk interrupted")):
+            code, output, errors, first = self.analyze(book)
+        self.assertEqual(code, 1)
+        self.assertIn("rerunning analyze", errors)
+        self.assertTrue(first.calls)
+        code, output, errors, second = self.analyze(book)
+        self.assertIn(code, (0, 2), errors + output)
+        self.assertEqual(second.calls, [])
+        document, _, _ = _completed_directory(book)
+        self.assertEqual(document["provenance"]["direction_refreshes"][-1]["policy"], DIRECTION_POLICY)
+
+    def test_a_never_refreshed_consensus_book_keeps_its_directions(self):
+        book = self.publish(refreshed=False)
+        before = (book / "manifest.json").read_bytes()
+        code, output, errors, client = self.analyze(book)
+        self.assertIn(code, (0, 2), errors + output)
+        self.assertIn("run refresh-directions on this book", output)
+        self.assertEqual(client.calls, [])
+        self.assertEqual((book / "manifest.json").read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,11 @@ def edit_speaker(segment, role_ids, roles_by_id, labels, candidates=None):
 
 
 def edit_direction(segment, direction):
-    """Return a segment with bounded, whitespace-trimmed delivery direction."""
+    """Return a segment with bounded, whitespace-trimmed delivery direction.
+
+    The direction is marked as typed by a person (``delivery.basis = "user"``),
+    so direction refreshes keep it (``direction_policy.typed``).
+    """
     if not isinstance(direction, str):
         raise ValueError("Delivery direction must be a string")
     value = direction.strip()
@@ -68,6 +72,7 @@ def edit_direction(segment, direction):
         raise ValueError(f"Delivery direction exceeds 240 characters (received {len(value)})")
     result = deepcopy(segment)
     result["delivery"]["direction"] = value
+    result["delivery"]["basis"] = "user"
     return result
 
 

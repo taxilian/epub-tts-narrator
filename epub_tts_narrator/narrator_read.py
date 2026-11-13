@@ -28,6 +28,7 @@ import time
 
 from .narrator_ledger import (EFFECT_PRESETS, IDENTITY_CHANGES, apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
                               name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
+from .direction_policy import VERSION as DIRECTION_POLICY
 from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VERIFY_TIEBREAK, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
@@ -2257,7 +2258,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
             "source_fingerprint": fingerprint(source), "provider": client.identity,
             "performance_policy": policy, "attribution_workers": workers, "strategy": STRATEGY,
             "narrator_read": {
-                "version": VERSION, "prompt_version": PROMPT_VERSION,
+                "version": VERSION, "prompt_version": PROMPT_VERSION, "direction_policy": DIRECTION_POLICY,
                 "prep_windows": windows, "markup_groups": groups, "quote_spans": len(spans),
                 "extra_spans": len(extras), "dropped_extra_spans": dropped_markup["extras"],
                 "dropped_notes": dropped_markup["notes"], "subdivided_markup_groups": dropped_markup["subdivided_groups"],

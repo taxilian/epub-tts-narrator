@@ -13,7 +13,7 @@ misread, and the book update reads it again with its neighbours
 Only paragraphs that contain quotation marks in the book's dialogue style are
 compared; unquoted speech is the model's call. Paragraphs with a person's
 speaker choice, a quoted thought or letter, or a restored source span are
-left alone. A paragraph read again at this ``VERSION`` is recorded in
+left alone, and so are paragraphs with a direction a person typed. A paragraph read again at this ``VERSION`` is recorded in
 ``provenance.split_rereads`` with its text hash and is not flagged again
 for the same text, whatever the second read decided.
 """
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 
+from .direction_policy import typed
 from .quote_spans import dialogue_style, quote_spans, spans_by_block
 
 VERSION = 1
@@ -55,7 +56,7 @@ def misread_blocks(document):
         saved = rows.get(block["id"], [])
         if not spans or not saved or done.get(block["id"]) == text_hash(block["text"]):
             continue
-        if any(row["attribution"]["basis"] == "user" or row["kind"] in {"thought", "letter"}
+        if any(row["attribution"]["basis"] == "user" or typed(row) or row["kind"] in {"thought", "letter"}
                or "source_restoration" in row for row in saved):
             continue
         text = block["text"]
