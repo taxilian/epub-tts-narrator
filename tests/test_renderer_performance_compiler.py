@@ -28,6 +28,28 @@ class PerformanceCompilerTests(unittest.TestCase):
         self.assertEqual(prepare_synthesis("Hush.", "whispering")[1], "<whisper>Hush.</whisper>")
         self.assertEqual(prepare_synthesis("Hush.", "softly")[1], "[softly] Hush.")
 
+    def test_a_direction_written_as_sentences_stays_one_tag(self):
+        from epub_tts_narrator.renderer.performance_compiler import direction_tags
+        self.assertEqual(direction_tags("Western American accent; Flat, matter-of-fact note. Begin on the first word."),
+                         "[Western American accent][Flat, matter-of-fact note. Begin on the first word.]")
+        self.assertEqual(direction_tags("quiet, urgent"), "[quiet][urgent]")
+
+    def test_the_earlier_one_bracket_form_of_the_same_inputs(self):
+        # Takes recorded before each part became its own tag remain valid proof of what was asked.
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        from epub_tts_narrator.renderer.performance_compiler import earlier_direction_text
+        direction = "Western American accent; dry, mildly reproachful"
+        directed = prepare_synthesis("Wear a skirt.", direction)[1]
+        self.assertEqual(earlier_direction_text(directed, direction), f"[{direction}] Wear a skirt.")
+        text, traits = "Wear a skirt.", "thick New York accent"
+        compiled = compile_performance(text, record(text), traits=traits, direction="dry, mildly reproachful")["text"]
+        self.assertEqual(earlier_direction_text(compiled, traits, "dry, mildly reproachful"),
+                         "[thick New York accent] [dry, mildly reproachful] Wear a skirt.")
+        whispered = compile_performance(text, record(text), traits="raspy, low", direction="whispering")["text"]
+        self.assertEqual(earlier_direction_text(whispered, "raspy, low", "whispering"),
+                         "[raspy, low] <whisper>Wear a skirt.</whisper>")
+        self.assertEqual(earlier_direction_text("Wear a skirt.", "dry"), "Wear a skirt.")
+
     def test_paired_direction_changes_only_the_requested_words(self):
         text = "It may explode."
         result = compile_performance(text, record(text, delivery(text, 7, 14, tag="emphasis")))

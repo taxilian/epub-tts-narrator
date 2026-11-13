@@ -369,3 +369,47 @@ class BroadRepairTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.client.repair_calls, [])
         self.assertEqual(len(self.engine.calls), 4)
+
+
+class EarlierTagFormatTests(unittest.TestCase):
+    def test_a_part_recorded_in_the_earlier_one_bracket_form_still_proves_the_approved_plan(self):
+        # A render stopped on these: the take was valid, only its recorded tag format was older.
+        from epub_tts_narrator.renderer.clip_repair_contract import confirm_part, part_direction
+        from epub_tts_narrator.renderer.engines import _directed_text
+        part = {'text': 'Items with an asterisk', 'speech_traits': 'Western American accent',
+                'delivery': 'Flat, matter-of-fact note. Begin on the first word.'}
+        direction = part_direction(part)
+        directed, control = _directed_text(part['text'], direction)
+        self.assertEqual(directed, '[Western American accent][Flat, matter-of-fact note. Begin on the first word.] '
+                                   'Items with an asterisk')
+        fields = {key: control[key] for key in ('direction', 'direction_applied', 'applied_control')}
+        for recorded in (directed, f'[{direction}] Items with an asterisk'):
+            confirm_part({}, part, dict(fields, synthesis_text=recorded))
+        for recorded in ('[Western American accent] Items with an asterisk', f'[{direction}] Items with a star'):
+            with self.subTest(recorded=recorded), self.assertRaises(ValueError):
+                confirm_part({}, part, dict(fields, synthesis_text=recorded))
+
+    def test_a_controlled_part_recorded_in_the_earlier_form_still_proves_the_approved_plan(self):
+        # Its compiler audit carries that earlier engine text too.
+        from epub_tts_narrator.renderer.clip_repair_contract import confirm_part, part_direction
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        from test_performance_plan import pronunciation, record
+        text = 'Jas spoke.'
+        performance = record(text, pronunciation(text, 0, 3))
+        part = {'text': text, 'speech_traits': 'clear articulation, unhurried', 'delivery': 'Say the name slowly.'}
+        direction = part_direction(part)
+        _, directed, control = prepare_synthesis(text, direction, performance=performance)
+        earlier = f'[{direction}] ' + directed.split('] ', 1)[1]
+        self.assertTrue(directed.startswith('[clear articulation][unhurried][Say the name slowly.] '))
+        fields = {key: control[key] for key in ('direction', 'direction_applied', 'applied_control')}
+        request = {'kind': 'paragraph_speech'}
+        confirm_part(request, part, dict(fields, synthesis_text=directed,
+                                         expressive_performance=control['expressive_performance']),
+                     performance=performance)
+        confirm_part(request, part, dict(fields, synthesis_text=earlier,
+                                         expressive_performance=dict(control['expressive_performance'], text=earlier)),
+                     performance=performance)
+        with self.assertRaises(ValueError):  # the earlier text with an audit that does not match it
+            confirm_part(request, part, dict(fields, synthesis_text=earlier,
+                                             expressive_performance=control['expressive_performance']),
+                         performance=performance)

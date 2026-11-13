@@ -45,11 +45,30 @@ def direction_tags(*directions):
     Fish layers cues as separate brackets (``[sad][whispering]``); one bracket
     holding an accent and a feeling lets the feeling crowd out the accent.
     Parts are separated by ``;`` (an accent cue from the line's direction) or
-    ``,`` (the dimensions of one direction).
+    ``,`` (the dimensions of one direction). A clause written as sentences (a
+    clip repair's "Flat, matter-of-fact note. Begin on the first word.") is an
+    instruction, not a list of dimensions, so it stays one tag.
     """
     parts = [part.strip() for direction in directions if direction
-             for clause in direction.split(";") for part in clause.split(",")]
+             for clause in direction.split(";")
+             for part in ((clause,) if re.search(r"[.!?]", clause) else clause.split(","))]
     return "".join(f"[{part}]" for part in parts if part)
+
+
+def earlier_direction_text(engine_text, *directions):
+    """The engine text releases before ``direction_tags`` prepared for the same inputs.
+
+    The plain path sent ``[direction] text`` and the structured compiler
+    ``[traits] [direction] text`` (``[traits] <whisper>…`` for a paired
+    direction). A take recorded that way is still valid proof of what was
+    asked; whether it is current is the speech identity's decision, not this.
+    """
+    for used in (directions, directions[:-1]):
+        parts = [direction for direction in used if direction]
+        prefix = direction_tags(*parts)
+        if parts and engine_text.startswith(prefix + " "):
+            return " ".join(f"[{direction}]" for direction in parts) + engine_text[len(prefix):]
+    return engine_text
 
 
 def performance_kwargs(chunk, voice_id):

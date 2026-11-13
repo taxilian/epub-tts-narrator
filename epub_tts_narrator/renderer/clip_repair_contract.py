@@ -6,6 +6,7 @@ from typing import TypedDict
 from .common import digest
 from .clip_repair_prompts import PLAN, REVIEW
 from .engines import _directed_text
+from .performance_compiler import earlier_direction_text
 from .speech_text import trim_speech_text
 
 
@@ -118,7 +119,7 @@ def confirm_part(request, part, metadata, *, performance=None):
     if performance is None:
         text = trim_speech_text(part['text'])
         directed, control = _directed_text(text, part_direction(part))
-        if (metadata.get('synthesis_text') not in (text, directed)
+        if (metadata.get('synthesis_text') not in (text, directed, earlier_direction_text(directed, part_direction(part)))
                 or any(metadata.get(key) != control[key]
                        for key in ('direction', 'direction_applied', 'applied_control'))):
             raise ValueError('Actual clip repair inputs differ from the approved plan')
@@ -126,13 +127,19 @@ def confirm_part(request, part, metadata, *, performance=None):
     from .clip_repair_performance import repair_traits
     from .engines import prepare_synthesis
 
+    traits = repair_traits(request)
     _, directed, control = prepare_synthesis(
-        part['text'], part_direction(part),
-        performance=performance, traits=repair_traits(request))
-    if (metadata.get('synthesis_text') != directed
+        part['text'], part_direction(part), performance=performance, traits=traits)
+    # A part recorded before each direction part became its own tag carries
+    # that earlier engine text, also inside its compiler audit.
+    earlier = earlier_direction_text(directed, traits.strip(), control['direction'])
+    audit = control['expressive_performance']
+    if metadata.get('synthesis_text') == earlier != directed:
+        audit = dict(audit, text=earlier)
+    if (metadata.get('synthesis_text') not in (directed, earlier)
             or any(metadata.get(key) != control[key]
                    for key in ('direction', 'direction_applied', 'applied_control'))
-            or metadata.get('expressive_performance') != control['expressive_performance']):
+            or metadata.get('expressive_performance') != audit):
         raise ValueError('Actual controlled clip repair inputs differ from the approved plan')
 
 

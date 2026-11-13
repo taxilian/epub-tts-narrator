@@ -113,7 +113,8 @@ def confirm_metadata(request, metadata):
     text = trim_speech_text(speech["chunk"]["spoken_text"])
     direction = repaired_direction(request, replacement)
     directed, expected = _directed_text(text, direction)
-    if (metadata.get("synthesis_text") not in (text, directed)
+    from .performance_compiler import earlier_direction_text
+    if (metadata.get("synthesis_text") not in (text, directed, earlier_direction_text(directed, direction))
             or any(metadata.get(key) != expected[key] for key in
                    ("direction", "direction_applied", "applied_control"))):
         raise ValueError("Recorded synthesis does not prove the reviewed direction repair")
