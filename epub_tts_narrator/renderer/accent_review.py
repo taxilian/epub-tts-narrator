@@ -6,6 +6,11 @@ group's accent, origin or reason, move a character to another group (or a
 new one), ask the model for a fresh plan, or type instructions that the
 model uses to revise the current plan. Nothing is saved until ``save``.
 
+Every character that speaks is listed. Characters whose accent was decided
+elsewhere (a cue chosen in casting, an accent in vocal traits a person set, or
+an earlier book's assignment) are shown as kept groups the model works
+around; moving one by hand makes it this book's own choice (``released``).
+
 ``AccentController`` runs the planner's model calls as background jobs on
 one serial ``JobQueue`` for the full-screen screen (``accent_tui.py``); the
 line command (``accent_assignment.run_accents_command``) calls the planner
@@ -44,6 +49,8 @@ class AccentPlanner:
         self.entries = assignment.voice_entries(bundle, assignment.parent_bundles(self.config))
         _, self.fixed = assignment._fixed(bundle, self.config, self.entries, own_only=True)
         self.pending = [voice_id for voice_id in self.entries if voice_id not in self.fixed]
+        self.locked = self._locked()  # decided elsewhere: {voice_id: {"accent", "source", "origin"}}
+        self.released = {}  # kept characters moved by hand: {voice_id: source}
         self.keep = {}
         if keep:
             own = assignment.assigned_accents(bundle, self.config, own=True)
@@ -61,6 +68,25 @@ class AccentPlanner:
         self._requests = requests
         self.run_id = resume
         self._resume = resume
+
+    def _locked(self):
+        from .speech_traits import accent_overrides, speech_trait_overrides
+        chosen = accent_overrides(self.bundle, self.config, include_cleared=True)
+        traits = speech_trait_overrides(self.bundle, self.config)
+        origins = {}
+        for directory in self.config.get("_voice_parents", []):
+            from .common import read_json, regular_file
+            from pathlib import Path
+            book_id = read_json(regular_file(Path(directory) / "manifest.json"))["book"]["id"]
+            for group in assignment.read_groups(directory, book_id):
+                for voice_id in group["voice_ids"]:
+                    origins.setdefault(voice_id, group["origin"])
+        locked = {}
+        for voice_id, accent in self.fixed.items():
+            source = "chosen" if voice_id in chosen else "traits" if traits.get(voice_id) else "inherited"
+            locked[voice_id] = {"accent": accent or "", "source": source,
+                                "origin": origins.get(voice_id, "") if source == "inherited" else ""}
+        return locked
 
     # The saved plan ---------------------------------------------------------
 
@@ -120,8 +146,11 @@ class AccentPlanner:
         return "\n".join(notes)[-assignment.MAX_NOTES:]
 
     def _ask(self, revise=None):
+        if not self.pending:
+            raise ValueError("Every character's accent was decided elsewhere; move one (m) to give it an accent here")
         return assignment.request_assignment(
-            self.bundle, self.requests(), self.pending, {k: v for k, v in self.fixed.items() if v},
+            self.bundle, self.requests(), self.pending,
+            {voice_id: kept["accent"] for voice_id, kept in self.locked.items() if kept["accent"]},
             notes=self.base_notes, terms=self.terms, clues=self.clues, entries=self.entries,
             origins=self.origins, keep=self.keep, revise=revise)
 
@@ -155,6 +184,19 @@ class AccentPlanner:
 
     def accents(self):
         return {voice_id: group["accent"] for group in self.groups for voice_id in group["voice_ids"]}
+
+    KEPT_SOURCES = {"chosen": "chosen in casting", "traits": "from vocal traits you set",
+                    "inherited": "from an earlier book"}
+
+    def kept_groups(self):
+        """Characters decided elsewhere, grouped by where and what: [{"origin", "accent", "source", "voice_ids"}]."""
+        groups = {}
+        for voice_id, kept in self.locked.items():
+            origin = kept["origin"] or self.KEPT_SOURCES[kept["source"]]
+            key = (kept["source"], kept["accent"].casefold(), origin.casefold())
+            groups.setdefault(key, {"origin": origin, "accent": kept["accent"], "source": kept["source"],
+                                    "voice_ids": []})["voice_ids"].append(voice_id)
+        return list(groups.values())
 
     def unassigned(self):
         placed = self.accents()
@@ -202,10 +244,15 @@ class AccentPlanner:
         self.dirty = True
 
     def move(self, voice_id, target):
-        """Move one character to group ``target`` (an index), or to a new group given as (origin, accent)."""
-        if voice_id not in self.pending:
-            raise ValueError("Only characters this book is assigning can be moved")
-        if isinstance(target, tuple):
+        """Move one character to group ``target`` (an index), a new group given as (origin, accent), or None (no accent).
+
+        A kept character (decided elsewhere) becomes this book's own choice.
+        """
+        if voice_id not in self.pending and voice_id not in self.locked:
+            raise ValueError("That character has no lines in this book")
+        if target is None:
+            destination = None
+        elif isinstance(target, tuple):
             origin, accent = target
             origin = " ".join(str(origin).split())[:assignment.MAX_ORIGIN]
             if not origin:
@@ -215,14 +262,18 @@ class AccentPlanner:
             destination = {"origin": origin, "accent": cue, "why": "", "voice_ids": [], "names": []}
         else:
             destination = self._group(target)
+        if voice_id in self.locked:
+            self.released[voice_id] = self.locked.pop(voice_id)["source"]
+            self.pending.append(voice_id)
         for group in self.groups:
             if voice_id in group["voice_ids"]:
                 position = group["voice_ids"].index(voice_id)
                 del group["voice_ids"][position], group["names"][position]
         if isinstance(target, tuple):
             self.groups.append(destination)
-        destination["voice_ids"].append(voice_id)
-        destination["names"].append(self.label(voice_id))
+        if destination is not None:
+            destination["voice_ids"].append(voice_id)
+            destination["names"].append(self.label(voice_id))
         self.groups = [group for group in self.groups if group["voice_ids"]]
         self.dirty = True
 
@@ -233,6 +284,11 @@ class AccentPlanner:
         assignment.save_assignments(self.bundle, self.config,
                                     {voice_id: accents.get(voice_id, "") for voice_id in self.pending}, replace=True)
         assignment.save_groups(self.bundle, self.groups, replace=True)
+        from .speech_traits import save_accent
+        for voice_id, source in self.released.items():
+            if source != "inherited":
+                # A cue chosen in casting (or traits naming an accent) outranks assignments: the move replaces it.
+                save_accent(self.bundle, self.config, voice_id, accents.get(voice_id, ""))
         if self.explicit_guidance is not None or self.revisions:
             # Instructions given here shape later assignments too (new characters, later books).
             assignment.save_guidance(self.bundle, self._notes())
@@ -319,6 +375,9 @@ def report(planner, write=print):
     missing = planner.unassigned()
     if missing:
         write(f"{len(missing)} voice(s) got no accent: " + ", ".join(planner.label(v) for v in missing[:8]))
+    for group in planner.kept_groups():
+        names = [planner.label(voice_id) for voice_id in group["voice_ids"]]
+        write(f"  kept: {group['accent'] or 'no accent'} ({group['origin']}): {', '.join(names)}")
     write(f"{planner.changed()} voice(s) would change accent; their lines render again on the next render of "
           "this book.")
 

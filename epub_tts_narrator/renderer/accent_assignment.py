@@ -524,7 +524,10 @@ def run_accents_command(bundle, config, args, config_path):
           f"accents a person chose, and accents inherited from earlier books); {len(planner.origins)} origin(s) "
           f"decided earlier in the series; guidance={'yes' if planner.base_notes else 'no'}"
           + (f"; keeping this book's {len(planner.keep)} current accent(s)" if planner.keep else "") + ".")
-    if not planner.pending:
+    from epub_tts_narrator.tui_support import wants_tui
+    screen = not args.apply and wants_tui(args)
+    if not planner.pending and not screen:
+        # The screen still opens, listing every character, so a kept accent can be changed by hand.
         print("Every voice's accent is already decided; nothing to assign.")
         return 0
     # --keep records reasons for accents saved before reasons were, so it asks the model.
@@ -535,8 +538,7 @@ def run_accents_command(bundle, config, args, config_path):
                                                         else ".") +
               (f" {len(planner.unassigned())} character(s) added since have no accent yet."
                if planner.unassigned() else ""))
-    from epub_tts_narrator.tui_support import wants_tui
-    if not args.apply and wants_tui(args):
+    if screen:
         from .accent_tui import AccentApp
         from .accent_review import AccentController
         controller = AccentController(planner)

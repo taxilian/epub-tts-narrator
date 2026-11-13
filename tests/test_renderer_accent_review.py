@@ -114,6 +114,56 @@ class PlannerTests(PlannerCase):
         planner.set_accent(0, "Irish")
 
 
+class KeptCharacterTests(PlannerCase):
+    """Every character is listed, including those whose accent was decided elsewhere, and any can be moved."""
+
+    def setUp(self):
+        super().setUp()
+        self.chosen, self.other = list(AccentPlanner(self.bundle, self.config, None, requests=Replies(),
+                                                     progress=lambda _: None).entries)[:2]
+
+    def choose(self, voice_id, cue):
+        from epub_tts_narrator.renderer.speech_traits import save_accent
+        save_accent(self.bundle, self.config, voice_id, cue)
+
+    def test_kept_characters_are_listed_with_where_their_accent_came_from(self):
+        self.choose(self.chosen, "Welsh accent")
+        self.choose(self.other, "")  # "no accent" chosen in casting is a decision too
+        planner = self.planner()
+        self.assertEqual(planner.pending, [])
+        kept = {group["accent"]: group for group in planner.kept_groups()}
+        self.assertEqual(kept["Welsh accent"]["voice_ids"], [self.chosen])
+        self.assertEqual(kept[""]["voice_ids"], [self.other])
+        self.assertEqual(kept["Welsh accent"]["source"], "chosen")
+        lines = []
+        from epub_tts_narrator.renderer.accent_review import report
+        report(planner, lines.append)
+        self.assertIn(f"  kept: no accent (chosen in casting): {planner.label(self.other)}", lines)
+        with self.assertRaisesRegex(ValueError, "decided elsewhere"):
+            planner.propose()  # nothing to ask the model about
+
+    def test_the_model_keeps_a_kept_accent_and_a_move_makes_it_this_books_choice(self):
+        from epub_tts_narrator.renderer.speech_traits import accent_cues
+        self.choose(self.chosen, "Welsh accent")
+        planner = self.planner(lambda payload: {"g": [["the harbor", "Scottish", "From the story", ["v1"]]]})
+        self.assertEqual(planner.pending, [self.other])
+        planner.propose()
+        self.assertEqual([row[2] for row in self.replies.calls[0][1]["fixed"]], ["Welsh accent"])
+        planner.move(self.chosen, 0)
+        self.assertEqual(planner.kept_groups(), [])
+        planner.move(self.other, None)  # no accent
+        self.assertEqual(planner.unassigned(), [self.other])
+        planner.save()
+        cues = accent_cues(self.bundle, self.config)
+        self.assertEqual(cues[self.chosen], "Scottish accent")  # the casting choice is replaced, so it applies
+        self.assertEqual(cues.get(self.other, ""), "")
+        reopened = self.planner()
+        reopened.load_saved()
+        self.assertEqual([(g["accent"], g["voice_ids"]) for g in reopened.kept_groups()],
+                         [("Scottish accent", [self.chosen])])
+        self.assertEqual(reopened.unassigned(), [self.other])
+
+
 class SavedPlanTests(PlannerCase):
     """A saved plan reopens for editing; the model is asked only when a person asks."""
 
@@ -298,6 +348,32 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.query_one("#groups", DataTable).row_count, 2)
             self.assertEqual(controller.jobs.jobs(), [])
             self.assertIn("saved", app.sub_title)
+
+    async def test_kept_characters_are_shown_and_can_be_given_no_accent(self):
+        from epub_tts_narrator.renderer.speech_traits import save_accent
+        kept = list(self.planner.entries)[-1]
+        save_accent(self.case.bundle, self.case.config, kept, "Welsh accent")
+        planner = self.case.planner(split(("the harbor", "Scottish"), ("inland", "Irish")))
+        controller = AccentController(planner, describe_error=str)
+        self.addCleanup(controller.close)
+        from epub_tts_narrator.renderer.accent_tui import AccentApp, KEPT, NO_ACCENT
+        app = AccentApp(controller, title="Fixture Book")
+        async with app.run_test(size=(160, 45)) as pilot:
+            controller.jobs.wait_idle(5)
+            await pilot.pause()
+            await pilot.pause()
+            groups = app.query_one("#groups", DataTable)
+            keys = [row.value for row in groups.rows]
+            self.assertIn(f"{KEPT}0", keys)
+            await pilot.press("m")
+            self.assertIsInstance(app.screen, ChoiceScreen)
+            app.screen.dismiss(kept)
+            await pilot.pause()
+            app.screen.dismiss(NO_ACCENT)
+            await pilot.pause()
+            self.assertIn(kept, planner.unassigned())
+            self.assertIn("unassigned", [row.value for row in groups.rows])
+            self.assertNotIn(f"{KEPT}0", [row.value for row in groups.rows])
 
     async def test_moving_a_character_and_quitting_unsaved_asks_first(self):
         async with self.app.run_test(size=(160, 45)) as pilot:

@@ -24,6 +24,8 @@ from epub_tts_narrator.tui_widgets import (
 
 UNASSIGNED = "unassigned"
 NEW_GROUP = "new"
+NO_ACCENT = "none"
+KEPT = "kept:"
 
 
 class AccentApp(CapturePrintMixin, App):
@@ -87,7 +89,7 @@ class AccentApp(CapturePrintMixin, App):
         self.query_one("#members", DataTable).border_title = "Characters (m moves one)"
         self.query_one("#log", MessageLog).border_title = "Log"
         self.query_one("#jobs", JobsTable).border_title = "Model requests"
-        if not self.controller.planner.groups:
+        if not self.controller.planner.groups and self.controller.planner.pending:
             self.controller.propose()  # no saved plan yet
         elif self.initial_instructions:
             self.controller.revise(self.initial_instructions)
@@ -132,8 +134,13 @@ class AccentApp(CapturePrintMixin, App):
                 origin.append("  (series)", style="dim")
             rows.append((str(index), (group["accent"], origin, str(len(group["voice_ids"])))))
         missing = planner.unassigned()
-        if missing and planner.groups:
+        if missing:
             rows.append((UNASSIGNED, (Text("no accent", style="yellow"), "left out of the plan", str(len(missing)))))
+        for index, group in enumerate(planner.kept_groups()):
+            # Decided elsewhere; shown so every character can be found and moved.
+            rows.append((f"{KEPT}{index}", (Text(group["accent"] or "no accent", style="dim"),
+                                           Text(f"{group['origin']} (kept)", style="dim"),
+                                           str(len(group["voice_ids"])))))
         sync_table(self.query_one("#groups", DataTable), rows)
         self.render_detail()
         self.query_one("#log", MessageLog).sync(self.controller.messages, started=self._started)
@@ -151,6 +158,13 @@ class AccentApp(CapturePrintMixin, App):
             text.append("Left out of the plan\n", style="bold")
             text.append("These characters get no assigned accent. Press m to place one, or i to ask the model.")
             members = planner.unassigned()
+        elif key.startswith(KEPT):
+            group = planner.kept_groups()[int(key[len(KEPT):])]
+            text.append(group["accent"] or "no accent", style="bold")
+            text.append(f" — {group['origin']}\n")
+            text.append("Decided elsewhere, so the model keeps it. Tab to a character and press m to give them "
+                        "another accent in this book (or none); saving makes it this book's choice.", style="dim")
+            members = group["voice_ids"]
         else:
             group = planner.groups[int(key)]
             text.append(f"{group['accent']}", style="bold")
@@ -175,6 +189,10 @@ class AccentApp(CapturePrintMixin, App):
         key = highlighted_key(self.query_one("#groups", DataTable))
         if key is None or key == UNASSIGNED:
             self.notify("Highlight a group first", severity="warning")
+            return None
+        if key.startswith(KEPT):
+            self.notify("This accent was decided elsewhere; move a character (m) to change theirs",
+                        severity="warning")
             return None
         return int(key)
 
@@ -246,7 +264,7 @@ class AccentApp(CapturePrintMixin, App):
         voice_id = highlighted_key(members) if self.focused is members else None
         if voice_id is None:
             self.push_screen(ChoiceScreen("Move which character?",
-                                          [(v, planner.label(v)) for v in planner.pending]), self._move_to)
+                                          [(v, planner.label(v)) for v in planner.entries]), self._move_to)
         else:
             self._move_to(voice_id)
 
@@ -256,11 +274,14 @@ class AccentApp(CapturePrintMixin, App):
         planner = self.controller.planner
         options = [(index, f"{group['accent']} — {group['origin']}") for index, group in enumerate(planner.groups)]
         options.append((NEW_GROUP, "A new group…"))
+        options.append((NO_ACCENT, "No accent"))
 
         def chosen(target):
             if target is None:
                 return
-            if target == NEW_GROUP:
+            if target == NO_ACCENT:
+                target = None
+            elif target == NEW_GROUP:
                 self.push_screen(TextEditScreen("New group's origin", "", single_line=True),
                                  lambda origin: origin and self._new_group(voice_id, origin))
                 return
