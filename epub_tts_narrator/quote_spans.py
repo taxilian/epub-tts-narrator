@@ -39,41 +39,66 @@ _NOT_NAMES = {"The", "A", "An", "Then", "But", "And", "So", "When", "After", "Be
               "He", "She", "They", "I", "We", "It", "You", "His", "Her", "Their"}
 
 
-def _straight_quote_spans(text):
-    spans, start = [], None
-    for index, char in enumerate(text):
-        if char == '"':
-            if start is None:
-                start = index
-            else:
-                spans.append((start, index + 1, True))
-                start = None
-    if start is not None:
-        spans.append((start, len(text), False))
-    return spans
+_AFTER_CLOSE = ",.;:!?…)]}—–-'’" + CLOSE_CURLY
 
 
-def _curly_quote_spans(text):
-    spans, start = [], None
+def _looks_closing(text, index):
+    """A straight mark that ends a word or phrase: `dignified." He` / `that,"` / `now"` at the end."""
+    before = text[index - 1] if index else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return (bool(before) and not before.isspace() and not before.isdigit() and before not in "([{"
+            and (not after or after.isspace() or after in _AFTER_CLOSE))
+
+
+def double_quote_marks(text):
+    """Return ``(spans, clean)`` for one paragraph's double quotation marks.
+
+    ``spans`` is ``[(start, end, closed)]``. Curly marks say which way they
+    face; a straight mark closes whatever is open and otherwise opens, so one
+    paragraph may mix them (`“What?" she asked`, an EPUB converted by hand).
+    A paragraph whose first mark closes a quotation after words of its own
+    starts inside speech, so the speech runs from the paragraph's start: the
+    source split one paragraph of speech in two (`dignified." He paused.`), or
+    its opening mark was lost or misread (`'Is he all right?" Durnik asked`).
+    ``clean`` is False when the marks do not pair: an opening mark while a
+    quotation is open, a stray closing mark, or a quotation left open.
+    """
+    spans, start, clean, first = [], None, True, True
     for index, char in enumerate(text):
-        if char == OPEN_CURLY:
+        if char not in ('"', OPEN_CURLY, CLOSE_CURLY):
+            continue
+        after = text[index + 1] if index + 1 < len(text) else ""
+        if char == OPEN_CURLY and start is not None and (not after or after.isspace()):
+            # An opening mark typed where a closing one belongs (`I ought to-“ He stopped`).
+            char = CLOSE_CURLY
+        elif char == CLOSE_CURLY and start is None and not _looks_closing(text, index) and after.strip():
+            # A closing mark typed where an opening one belongs (`said. ”Go`).
+            char = OPEN_CURLY
+        continued = (first and start is None and any(other.isalnum() for other in text[:index])
+                     and char != OPEN_CURLY and _looks_closing(text, index))
+        first = False
+        if continued:
+            spans.append((0, index + 1, True))
+        elif char == OPEN_CURLY or char == '"' and start is None:
             if start is not None:
                 # A new opening mark without a close: the earlier speech ran to here.
                 spans.append((start, index, False))
+                clean = False
             start = index
-        elif char == CLOSE_CURLY and start is not None:
+        elif start is not None:
             spans.append((start, index + 1, True))
             start = None
+        else:
+            clean = False
     if start is not None:
         spans.append((start, len(text), False))
-    return spans
+        clean = False
+    return spans, clean
 
 
 def block_quote_spans(text):
     """Return [(start, end, closed)] double-quotation spans in one paragraph."""
-    if OPEN_CURLY in text or CLOSE_CURLY in text:
-        return _curly_quote_spans(text)
-    return _straight_quote_spans(text)
+    return double_quote_marks(text)[0]
 
 
 # Single quotes double as apostrophes ("don't", "James' book", "'em"). An opening

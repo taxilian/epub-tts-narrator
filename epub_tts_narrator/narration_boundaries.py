@@ -12,6 +12,7 @@ import re
 from .contracts import readiness, validate_document
 from .inline_performance import project_segments
 from .performance import apply_bracket_delivery
+from .quote_spans import double_quote_marks
 
 
 VERSION = 1
@@ -27,31 +28,22 @@ _DESCRIPTIVE_SUBJECT = (r"(?:the|a|an|my|his|her|our|their)\s+"
 
 
 def _quote_layout(text):
-    """Return complete outer pairs, or None; also flag an unfinished quotation."""
-    curly = "“" in text or "”" in text
-    straight = '"' in text
-    if curly and straight:
-        return None, text.count("“") > text.count("”")
+    """Return complete outer pairs, or None; also flag an unfinished quotation.
+
+    Pairs come from ``quote_spans.double_quote_marks``: curly and straight
+    marks may mix, and a paragraph whose first mark closes a quotation starts
+    inside speech. Marks that do not pair cleanly give None.
+    """
+    spans, clean = double_quote_marks(text)
+    unfinished = bool(spans) and not spans[-1][2]
     # Single quotation marks can delimit nested dialogue. Apostrophes within
     # words (don't, Mara's) do not. Skip instead of guessing their nesting scope.
     if "‘" in text or re.search(r"(?<!\w)'(?=\w)[^\n]*?'(?!\w)", text):
-        return None, (text.count("“") > text.count("”") if curly else text.count('"') % 2 == 1)
-    pairs, opening, invalid = [], None, False
-    for index, character in enumerate(text):
-        if character not in ('"', "“", "”"):
-            continue
-        if index and text[index - 1] == "\\":
-            invalid = True
-        if character == "“" or character == '"' and opening is None:
-            if opening is not None:
-                invalid = True
-            opening = index
-        elif opening is None:
-            invalid = True
-        else:
-            pairs.append((opening, index + 1))
-            opening = None
-    return (None if invalid or opening is not None else pairs), opening is not None
+        return None, unfinished
+    if not clean or any(text[index - 1] == "\\" for index, character in enumerate(text)
+                        if index and character in ('"', "“", "”")):
+        return None, unfinished
+    return [(start, end) for start, end, _ in spans], unfinished
 
 
 def narration_tag_ranges(text, *, names=()):

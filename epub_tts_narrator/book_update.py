@@ -190,6 +190,26 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
             "block_map": block_map, "source": _source_like(saved, current, chapters, blocks)}
 
 
+def reread_comparison(saved, reasons):
+    """A comparison that reads the saved paragraphs ``reasons`` names again, text unchanged.
+
+    The paragraphs keep their block IDs; ``delta_source`` gives each its
+    neighbours as context and ``merge_update`` replaces only their segments.
+    ``reasons`` maps block IDs to why the saved split is wrong
+    (``split_check.misread_blocks``).
+    """
+    chapters = {block["id"]: block["chapter_id"] for block in saved["blocks"]}
+    counts = {}
+    for block_id in reasons:
+        counts[chapters[block_id]] = counts.get(chapters[block_id], 0) + 1
+    reread = [{"id": chapter["id"], "title": chapter["title"], "number": number, "reread_paragraphs": counts[chapter["id"]]}
+              for number, chapter in enumerate(saved["chapters"], 1) if chapter["id"] in counts]
+    return {"unchanged_chapters": len(saved["chapters"]) - len(reread), "appended_chapters": [],
+            "edited_chapters": [], "retitled_chapters": [], "reread_chapters": reread,
+            "reread_reasons": dict(sorted(reasons.items())), "changed_blocks": sorted(reasons),
+            "removed_blocks": [], "block_map": {}, "source": deepcopy(saved)}
+
+
 def has_changes(comparison):
     return bool(comparison["appended_chapters"] or comparison["edited_chapters"]
                 or comparison["retitled_chapters"])
@@ -339,7 +359,7 @@ def _speakers(rows):
             for row in rows]
 
 
-def merge_update(saved, delta, comparison, *, epub_sha256=None):
+def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False):
     """Merge ``delta`` (the analyzed new chapters and edits) into the ``saved`` analysis.
 
     Unchanged paragraphs keep their saved segments, including speaker choices;
@@ -348,7 +368,10 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
     about them retired. Existing cast records are kept and the delta adds only
     those the book lacks. Where the model now reads an unchanged context
     paragraph's speakers differently, a review issue is added instead of
-    changing it. ``delta`` is ``None`` when nothing needed the model. Returns
+    changing it. With ``keep_cast`` (a re-read in a book another book continues
+    from) the cast stays exactly as saved: a changed paragraph whose new
+    speaker the book lacks keeps its saved segments and gets a review issue.
+    ``delta`` is ``None`` when nothing needed the model. Returns
     the merged document; its update record is ``provenance.book_updates[-1]``.
     """
     source = comparison["source"]
@@ -362,6 +385,8 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
                            if character["id"] not in old_characters]
     appended_roles = [deepcopy(role) for role in new_cast["roles"] if roles[role["id"]] == role["id"]
                       and role["id"] not in {old["id"] for old in old_cast["roles"]}]
+    if keep_cast:
+        appended_characters, appended_roles = [], []
     used_voices = {item["voice_id"] for item in [*appended_characters, *appended_roles]}
     appended_voices = [deepcopy(voice) for voice in new_cast["voices"]
                        if voice["id"] not in old_voices and voice["id"] in used_voices]
@@ -386,8 +411,16 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         saved_rows.setdefault(row["block_id"], []).append(row)
     for row in delta["segments"] if delta is not None else []:
         delta_rows.setdefault(row["block_id"], []).append(_remap_row(row, roles, role_voice, chapter_ids))
-    segments, disagreements = [], []
+    segments, disagreements, kept_for_cast = [], [], []
+    known_roles = {role["id"] for role in cast["roles"]}
     for block in source["blocks"]:
+        if block["id"] in changed and keep_cast and any(
+                role_id not in known_roles for row in delta_rows[block["id"]]
+                for role_id in [row.get("role_id"), *(item["role_id"] for item in row.get("simultaneous_speakers", []))]
+                if role_id is not None):
+            kept_for_cast.append(block["id"])
+            segments.extend(rebind_citations(row, comparison, dropped=dropped) for row in saved_rows[block["id"]])
+            continue
         if block["id"] in changed:
             segments.extend(delta_rows[block["id"]])
             continue
@@ -397,7 +430,10 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
             disagreements.append(block["id"])
 
     removed = set(comparison["removed_blocks"])
-    removed_segments = {row["id"] for row in saved["segments"] if row["block_id"] in removed}
+    kept_segments = {row["id"] for row in segments}
+    # Segments of removed paragraphs, and saved segments of re-read paragraphs that the new split replaced.
+    removed_segments = {row["id"] for row in saved["segments"]
+                        if row["block_id"] in removed or row["block_id"] in changed and row["id"] not in kept_segments}
 
     def head(issue):
         target = issue.get("target")
@@ -426,6 +462,14 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         by_id[mapped.get("id")] = mapped
         issues.append(mapped)
     titles = {chapter["id"]: chapter["title"] for chapter in source["chapters"]}
+    for block_id in kept_for_cast:
+        issues.append({
+            "id": f"book-update-{number}:new-speaker:{block_id}", "kind": "update_context_attribution",
+            "target": next(row["id"] for row in segments if row["block_id"] == block_id),
+            "reason": (f"Read again in {titles[chapter_ids[block_id]]!r}, this paragraph's split names a speaker "
+                       "the book has no voice for, and a later book continues from this one, so its cast cannot "
+                       "change here. Its saved split was kept; check its speakers."),
+            "resolved": False})
     for block_id in disagreements:
         issues.append({
             "id": f"book-update-{number}:context:{block_id}", "kind": "update_context_attribution",
@@ -461,6 +505,8 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
                            for chapter in comparison["appended_chapters"]],
         "edited_chapters": deepcopy(comparison["edited_chapters"]),
         "retitled_chapters": deepcopy(comparison["retitled_chapters"]),
+        **({"reread_chapters": deepcopy(comparison["reread_chapters"]),
+            "reread_paragraphs": deepcopy(comparison["reread_reasons"])} if comparison.get("reread_chapters") else {}),
         "new_characters": [character["id"] for character in appended_characters if status(character) != "reused"],
         "returning_series_characters": [character["id"] for character in appended_characters
                                         if status(character) == "reused"],
@@ -470,12 +516,16 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None):
         "added_voices": [voice["id"] for voice in appended_voices],
         "role_map": {key: value for key, value in roles.items() if key != value},
         "context_reviews": disagreements,
+        **({"reread_kept_for_cast": kept_for_cast} if kept_for_cast else {}),
         "dropped_citations": len(dropped),
         "rebased_traits": rebased_traits,
         "strategy": (saved_strategy(delta) if delta is not None else None),
         "analysis": deepcopy(delta["provenance"]) if delta is not None else None,
     }
     provenance.setdefault("book_updates", []).append(update)
+    if comparison.get("reread_reasons"):
+        from .split_check import record_rereads
+        record_rereads(provenance, {"source": source}, comparison["reread_reasons"])
     document = deepcopy(saved)
     document.update(source=deepcopy(source), cast=cast, segments=segments, issues=issues,
                     provenance=provenance)
@@ -642,7 +692,8 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
         if new_scripts[:len(old_scripts)] != old_scripts:
             raise ValueError("The edited chapters would divide the book into different chapter files; analyze "
                              "the new EPUB into a separate output directory instead")
-        edited = {chapter["id"] for chapter in document["provenance"]["book_updates"][-1].get("edited_chapters", [])}
+        latest = document["provenance"]["book_updates"][-1]
+        edited = {chapter["id"] for chapter in [*latest.get("edited_chapters", []), *latest.get("reread_chapters", [])]}
         before_rows, after_rows = _script_rows(directory, manifest), _script_rows(after, new_manifest)
         if any(after_rows.get(chapter) != rows for chapter, rows in before_rows.items() if chapter not in edited):
             raise ValueError("An update must keep every unchanged chapter's script rows unchanged")
@@ -716,6 +767,9 @@ def describe_update(document):
             ("removed_paragraphs", "removed")) if chapter[key]]
         lines.append(f"Edited chapter {chapter['number']} ({chapter['title']}): "
                      + ", ".join(counts) + " paragraph(s)")
+    for chapter in update.get("reread_chapters", []):
+        lines.append(f"Read again chapter {chapter['number']} ({chapter['title']}): {chapter['reread_paragraphs']} "
+                     "paragraph(s) whose saved split did not match their quotation marks")
     if update.get("context_reviews"):
         lines.append(f"{len(update['context_reviews'])} unchanged paragraph(s) next to an edit now read "
                      "differently; their saved speakers were kept and added to the review list.")
@@ -760,11 +814,18 @@ def saved_strategy(document):
 
 
 def update_book(directory, source, *, config, input_path=None, client_factory, speaker_judge=None,
-                announce_cache=lambda path: Path(path).resolve(), progress=print, log=print, strategy=None):
+                announce_cache=lambda path: Path(path).resolve(), progress=print, log=print, strategy=None,
+                reread=None, base_document=None):
     """Analyze and publish the new and edited chapters of ``directory``'s book.
 
     ``strategy`` ("consensus" or "narrator") selects the analysis for the new
     paragraphs; by default the one the book was analyzed with.
+
+    ``reread`` (``{block_id: reason}``, from ``split_check.misread_blocks``)
+    instead reads those saved paragraphs again with their neighbours, keeping
+    their text and block IDs; ``source`` is then ignored. ``base_document``
+    is the saved analysis to build on (default: the published one), such as
+    the published one after a model-free tag repair.
 
     Returns the published document, or ``None`` when the source has no new or
     edited chapters. ``client_factory`` builds the analysis client from
@@ -773,12 +834,19 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     """
     directory = Path(directory).resolve()
     original, registry, _ = _completed_directory(directory)
+    if base_document is not None:
+        if base_document["source"] != original["source"]:
+            raise ValueError("The analysis to build on does not match the saved book's source")
+        original = base_document
     if strategy not in (None, "consensus", "narrator"):
         raise ValueError("strategy must be consensus or narrator")
     strategy = strategy or saved_strategy(original)
-    comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
+    if reread:
+        comparison = reread_comparison(original["source"], reread)
+    else:
+        comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
     epub = Path(input_path) if input_path is not None and Path(input_path).suffix.lower() == ".epub" else None
-    digest = epub_digest(epub) if epub is not None else None
+    digest = epub_digest(epub) if epub is not None and not reread else None
     if comparison["retitled_chapters"] and not comparison["appended_chapters"] and not comparison["edited_chapters"]:
         from .chapter_title_update import retitled_document, title_update_sidecars
         related = ensure_updatable(directory, comparison)
@@ -799,7 +867,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
         for line in describe_update(document):
             log(line)
         return document
-    if not has_changes(comparison):
+    if not has_changes(comparison) and not reread:
         log("No new or edited chapters: the EPUB's chapters match the saved book. "
             "The saved analysis is unchanged.")
         return None
@@ -819,13 +887,15 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     if (directory / "name-script.json").exists():
         log("Note: this book has a legacy name-script.json. It covers only the earlier chapters; "
             "name-scoped pronunciation choices that depend on it are blocked until it is prepared again.")
-    changes = (f"{len(comparison['appended_chapters'])} new and "
+    changes = (f"{len(reread)} paragraph(s) read again" if reread else
+               f"{len(comparison['appended_chapters'])} new and "
                f"{len(comparison['edited_chapters'])} edited chapter(s)")
     client = client_factory(**config["provider"]) if delta is not None else None
     if client is not None:
         log(f"Updating {directory} with {changes} using {client.model} at {client.base_url}"
-            f"{' (narrator read)' if strategy == 'narrator' else ''}; only the new "
-            "chapters and the edited paragraphs with their neighbours will be sent to this endpoint.")
+            f"{' (narrator read)' if strategy == 'narrator' else ''}; only "
+            + ("those paragraphs" if reread else "the new chapters and the edited paragraphs")
+            + " with their neighbours will be sent to this endpoint.")
     else:
         log(f"Updating {directory} with {changes}; only paragraphs were removed, so no model is needed.")
     model_cache = announce_cache(cache)
@@ -834,7 +904,9 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
         settings, config["performance_policy"],
         # A narrator-read update never resumes a consensus update's checkpoints.
         fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash,
-                     **({"strategy": strategy} if strategy != "consensus" else {})})))
+                     **({"strategy": strategy} if strategy != "consensus" else {}),
+                     **({"reread": comparison["reread_reasons"],
+                         "base": fingerprint(original)} if reread else {})})))
     workspace = update_workspace(directory)
     resumed = resume_document(workspace, identity)
     document, resume_index = None, 0
@@ -876,7 +948,8 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
                     # The book's own history: returning characters keep their voices.
                     series_registry=deepcopy(registry),
                     policy=config["performance_policy"], progress=progress)
-            document = merge_update(original, analyzed, comparison, epub_sha256=digest)
+            document = merge_update(original, analyzed, comparison, epub_sha256=digest,
+                                    keep_cast=bool(reread) and related != [directory])
             pending.complete_stage("analyzed", document)
         if resume_index <= 1:
             pending.begin_stage("speech-normalized-1")
