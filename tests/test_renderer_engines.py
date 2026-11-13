@@ -440,7 +440,9 @@ class RendererEngineTests(unittest.TestCase):
                      "prolong the vowel in the final word without adding other words; "
                      "let the final word rise in volume while preserving the same character's pitch and tone.")
         self.assertGreater(len(direction), 240)
-        expected = f"<|speaker:0|> [{direction}] No!"
+        # Each clause is its own tag ([sad][whispering], as Fish layers cues).
+        tags = "".join(f"[{part.strip()}]" for part in direction.split(";"))
+        expected = f"<|speaker:0|> {tags} No!"
         self.generate(self.segment(text=expected))
         with patch.object(self.engine, "_reference", return_value=FakeReference("Saved.", object())):
             self.engine.synthesize("No!", {}, self.output, seed=9, direction=direction)

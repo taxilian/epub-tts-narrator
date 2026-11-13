@@ -58,7 +58,7 @@ class SpeechResolutionEvaluationTests(unittest.TestCase):
         self.assertNotIn("alignment", case["failures"][0]["metrics"])
         self.assertEqual(case["failures"][0]["secondary_transcript"], "The pain has returned.")
         self.assertEqual(case["failures"][0]["generation"]["direction"], "pained, breaking into a cry")
-        self.assertIn("[pained, breaking into a cry]", case["failures"][0]["generation"]["synthesis_text"])
+        self.assertIn("[pained][breaking into a cry]", case["failures"][0]["generation"]["synthesis_text"])
         self.assertTrue(case["can_plain_delivery"])
         self.assertIsNone(case["expected_actions"], "Unlabelled saved audio is not required to be accepted")
 

@@ -39,6 +39,19 @@ _SOUNDS = {"sigh": "sighs", "laugh": "laughs", "chuckle": "chuckles", "breath": 
 _PAIRED = DELIVERY_TAGS - {"style"}
 
 
+def direction_tags(*directions):
+    """Each part of a line-opening direction as its own Drama 3 tag: ``[accent][dry][mildly reproachful]``.
+
+    Fish layers cues as separate brackets (``[sad][whispering]``); one bracket
+    holding an accent and a feeling lets the feeling crowd out the accent.
+    Parts are separated by ``;`` (an accent cue from the line's direction) or
+    ``,`` (the dimensions of one direction).
+    """
+    parts = [part.strip() for direction in directions if direction
+             for clause in direction.split(";") for part in clause.split(",")]
+    return "".join(f"[{part}]" for part in parts if part)
+
+
 def performance_kwargs(chunk, voice_id):
     """Optional engine arguments, without changing legacy plugin calls."""
     if "expressive_performance" not in chunk:
@@ -233,10 +246,10 @@ The plain backend explicitly reports every unsupported requested control.
     paired_direction = {"whispering": "whisper", "whispered": "whisper"}.get(direction.casefold(), direction.casefold())
     if paired_direction in _PAIRED:
         engine_text = f"<{paired_direction}>{engine_text}</{paired_direction}>"
-    elif direction:
-        engine_text = f"[{direction}] {engine_text}"
-    if traits:
-        engine_text = f"[{traits}] {engine_text}"
+        direction = ""
+    prefix = direction_tags(traits, direction)
+    if prefix:
+        engine_text = f"{prefix} {engine_text}"
     result["text"] = validate_compiled_text(engine_text)
     result["warnings"] = list(dict.fromkeys(result["warnings"]))
     return result

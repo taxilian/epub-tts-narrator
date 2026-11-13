@@ -96,7 +96,9 @@ class RendererSpeechTraitsTests(unittest.TestCase):
         rendered, _, _ = format_dialogue([collapsed])
 
         self.assertNotEqual(conditioned, baseline)
-        self.assertIn("[" + TRAITS + "; softly]", rendered)
+        # The traits and the line's direction open the turn as separate tags, one per part.
+        tags = "".join(f"[{part.strip()}]" for part in (TRAITS + ", softly").replace(";", ",").split(","))
+        self.assertIn(tags + " Hello, again.", rendered)
         self.assertEqual(
             collapsed["direction"],
             performance_direction(request["chunk"]["paragraph_turns"][0], voice["voice_id"]),

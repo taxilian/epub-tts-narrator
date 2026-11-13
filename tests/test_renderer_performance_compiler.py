@@ -13,6 +13,21 @@ class PerformanceCompilerTests(unittest.TestCase):
         self.assertEqual(result["text"], "[Precise consonants] <whisper>Keep this secret.</whisper>")
         self.assertEqual(result["expected_text"], text)
 
+    def test_accent_and_each_part_of_the_direction_open_the_line_as_separate_tags(self):
+        # Fish layers cues as separate brackets ([sad][whispering]); one bracket let the feeling crowd out the accent.
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        accent, direction = "thick old-Hollywood New York accent", "dry, mildly reproachful"
+        tags = "[thick old-Hollywood New York accent][dry][mildly reproachful]"
+        _, plain, metadata = prepare_synthesis("Wear a skirt.", f"{accent}; {direction}")
+        self.assertEqual(plain, f"{tags} Wear a skirt.")
+        self.assertEqual(metadata["direction"], f"{accent}; {direction}")  # the recorded direction is unchanged
+        text = "Wear a skirt."
+        self.assertEqual(compile_performance(text, record(text), traits=accent, direction=direction)["text"],
+                         f"{tags} {text}")
+        # One-word controls keep their exact form.
+        self.assertEqual(prepare_synthesis("Hush.", "whispering")[1], "<whisper>Hush.</whisper>")
+        self.assertEqual(prepare_synthesis("Hush.", "softly")[1], "[softly] Hush.")
+
     def test_paired_direction_changes_only_the_requested_words(self):
         text = "It may explode."
         result = compile_performance(text, record(text, delivery(text, 7, 14, tag="emphasis")))

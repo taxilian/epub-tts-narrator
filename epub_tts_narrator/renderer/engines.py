@@ -124,8 +124,10 @@ def _directed_text(text: str, direction: str) -> tuple[str, dict[str, Any]]:
     elif control:
         engine_text = f"[{control}] {text}"
     elif direction:
+        # An accent cue and each dimension of the delivery are separate tags.
+        from .performance_compiler import direction_tags
         control = "style_prefix"
-        engine_text = f"[{direction}] {text}"
+        engine_text = f"{direction_tags(direction)} {text}"
     else:
         engine_text = text
     return engine_text, {
