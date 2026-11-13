@@ -305,6 +305,31 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
         self.assertIsInstance(app.raised, KeyboardInterrupt)
 
+    async def test_a_second_stop_closes_the_screen_before_the_process_exits(self):
+        # Exiting at once would cut off Textual's terminal restore (kitty keys, alt screen, mouse).
+        from epub_tts_narrator.run_shell import _render_interrupts
+        started, release = threading.Event(), threading.Event()
+        exits = []
+
+        def command():
+            started.set()
+            release.wait(10)  # A blocked render worker that ignores the stop.
+            return 0
+
+        self.addCleanup(release.set)
+        app = self.make_app(command)
+        app.interrupt_scope = _render_interrupts(app, exit_process=exits.append, grace=0.3)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, started.is_set)
+            await pilot.press("q", "y")
+            await self.wait_for(pilot, lambda: self.model.stopping)
+            self.assertTrue(app.is_running)
+            await pilot.press("ctrl+c", "y")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual((app.forced_exit, exits), (130, []))  # run_in_shell exits once the screen is closed.
+        await asyncio.sleep(0.5)
+        self.assertEqual(exits, [130])  # The fallback when a screen never closes.
+
     async def test_printed_lines_keep_their_order_with_board_messages(self):
         def command():
             with live_board(print) as notify:

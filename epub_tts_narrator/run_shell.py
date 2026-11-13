@@ -123,6 +123,7 @@ class RunApp(CapturePrintMixin, App):
         self.run_title = title
         self.request_stop = None
         self.exit_when_done = False
+        self.forced_exit = None  # The exit code of a second stop, once the screen has closed.
         self.result = None
         self.raised = None
         self._log_seen = 0
@@ -832,20 +833,36 @@ def _active_text(snapshot):
         f"{format_seconds(task.get('elapsed', 0))}" for task in snapshot.get("active", [])) or "idle"
 
 
-def _render_interrupts(app):
-    """Renderer commands: Ctrl-C keys drive ``RenderInterrupts`` exactly like SIGINT would."""
+# How long a stopping screen may take to give the terminal back before the process exits anyway.
+FORCED_EXIT_GRACE_SECONDS = 3.0
+
+
+def _render_interrupts(app, *, exit_process=None, grace=FORCED_EXIT_GRACE_SECONDS):
+    """Renderer commands: Ctrl-C keys drive ``RenderInterrupts`` exactly like SIGINT would.
+
+    A second stop closes the screen the ordinary way, so Textual restores the
+    terminal (its restore sequences go through a writer thread that an
+    immediate ``os._exit`` would cut off), and ``run_in_shell`` then exits the
+    process. Should the screen not close within ``grace`` seconds, the process
+    exits anyway.
+    """
     @contextmanager
     def scope():
-        from .renderer.interrupts import keyboard_interrupts
+        from .renderer.interrupts import hard_exit, keyboard_interrupts
+        leave = exit_process or hard_exit
 
         def force_exit(code):
-            # A second Ctrl-C exits at once; give the terminal back first.
+            app.forced_exit = code
+            if not app.is_running:
+                leave(code)
+                return
+            timer = threading.Timer(grace, leave, (code,))
+            timer.daemon = True
+            timer.start()
             try:
-                driver = getattr(app, "_driver", None)
-                if driver is not None:
-                    driver.stop_application_mode()
-            finally:
-                os._exit(code)
+                app.call_from_thread(app.exit)
+            except RuntimeError:  # Already on the screen's own thread.
+                app.exit()
         with keyboard_interrupts(lambda message: print(message, file=sys.stderr), force_exit=force_exit) as controller:
             yield controller.request
     return scope
@@ -892,6 +909,10 @@ def run_in_shell(command, *, title, graceful_render_stop=False, interactive_inpu
     output = closing_output or (lambda line: print(line, file=sys.stderr))
     for line in model.closing_lines():
         output(line)
+    if app.forced_exit is not None:
+        # A second stop: the terminal is restored; blocked workers must not delay the exit.
+        from .renderer.interrupts import hard_exit
+        hard_exit(app.forced_exit)
     if app.raised is not None:
         raise app.raised
     if model.running:

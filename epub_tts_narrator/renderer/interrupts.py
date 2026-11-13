@@ -12,6 +12,7 @@ import contextvars
 import os
 import signal
 import subprocess
+import sys
 import threading
 
 
@@ -28,6 +29,27 @@ class RenderPaused(Exception):
     """
 
 
+def hard_exit(code):
+    """End the process at once (a second stop): flush output and release semaphores first.
+
+    ``os._exit`` skips interpreter shutdown, which would otherwise wait for
+    blocked workers; multiprocessing's own finalizers still run, so its
+    resource tracker has no leaked semaphores (such as tqdm's lock) to warn
+    about after the process ends.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    try:
+        from multiprocessing import util
+        util._run_finalizers(0)
+    except Exception:  # noqa: BLE001 - nothing may delay the exit
+        pass
+    os._exit(code)
+
+
 _active: RenderInterrupts | None = None
 
 # Scoped stop conditions carry owner-loss stops into worker threads. Executor
@@ -39,7 +61,7 @@ _scoped_stop: contextvars.ContextVar = contextvars.ContextVar("renderer_scoped_s
 class RenderInterrupts:
     """Temporarily handle render interruption without interrupting active takes.
 
-    ``force_exit`` is injectable for tests. Production uses ``os._exit`` so a
+    ``force_exit`` is injectable for tests. Production uses ``hard_exit`` so a
     blocked worker, executor shutdown, or model destructor cannot delay the
     second interrupt. Tracked child process groups are killed first.
     """
@@ -48,7 +70,7 @@ class RenderInterrupts:
         self.requested = False
         self.forced = False
         self._notify = notify
-        self._exit = os._exit if force_exit is None else force_exit
+        self._exit = hard_exit if force_exit is None else force_exit
         self._installed = False
         self._exiting = False
         self._previous = None
