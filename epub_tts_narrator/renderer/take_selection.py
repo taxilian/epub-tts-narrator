@@ -9,7 +9,8 @@ import shutil
 import tempfile
 
 from .audio_naming import MANUAL_SELECTION_ROLE, speech_take_filename
-from .common import digest, file_hash, read_json, regular_file, write_json
+from .common import digest, read_json, regular_file, write_json
+from .stored_audio import StoredAudioError, audio_exists, audio_hash, audio_present, copy_audio
 
 
 _HEX = re.compile(r"[0-9a-f]{64}")
@@ -93,12 +94,12 @@ def _take_row(number, record, audio, accepted):
     report = record["report"]
     physical = None
     ineligible_reason = None
-    if not audio.exists() and not audio.is_symlink():
+    if not audio_present(audio):
         ineligible_reason = "audio file missing"
-    elif audio.is_symlink() or not audio.is_file():
+    elif not audio_exists(audio):
         ineligible_reason = "audio file is not a regular nonsymlink file"
     else:
-        if file_hash(audio) != record.get("audio_sha256"):
+        if audio_hash(audio) != record.get("audio_sha256"):
             ineligible_reason = "audio_sha256 does not match audio bytes"
         physical = physical_audio(audio)
         if ineligible_reason is None and physical is None:
@@ -144,7 +145,7 @@ def current_acceptance(directory, request_hash):
         if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
             return None
         audio = directory / name
-        if audio.is_symlink() or not audio.is_file() or file_hash(audio) != record.get("audio_sha256"):
+        if not audio_exists(audio) or audio_hash(audio) != record.get("audio_sha256"):
             return None
         if "manual_selection" in (record.get("engine_metadata") or {}):
             validate_manual_selection(record)
@@ -321,16 +322,15 @@ def _result(directory, previous, record, basis, note):
 
 
 def _publish_audio(directory, source, target, audio_sha256):
-    if target.exists() or target.is_symlink():
-        if file_hash(regular_file(target)) != audio_sha256:
+    if audio_present(target):
+        if audio_hash(target) != audio_sha256:
             raise ValueError("Existing manual-selection audio differs from audio_sha256")
         return
     with tempfile.TemporaryDirectory(prefix=".manual-selection-", dir=directory) as staging:
-        copied = Path(staging) / target.name
-        shutil.copyfile(regular_file(source), copied)
-        if file_hash(copied) != audio_sha256:
-            raise ValueError("Selected attempt audio changed during publication")
-        os.replace(copied, target)
+        try:
+            copy_audio(source, target, expected_sha256=audio_sha256, staging=staging)
+        except StoredAudioError as exc:
+            raise ValueError("Selected attempt audio changed during publication") from exc
 
 
 def _archive_evidence(directory, previous, choice):
@@ -366,8 +366,8 @@ def select_take(clips_directory, request_hash, attempt, *, note="") -> dict:
     record = deepcopy(row["record"]) if ordinary else _manual_record(row, note)
     basis = "ordinary" if ordinary else "manual_take_selection"
     target = row["audio_path"] if ordinary else directory / record["audio_file"]
-    if previous == record and target.is_file() and not target.is_symlink() \
-            and file_hash(target) == record["audio_sha256"]:
+    if previous == record and audio_exists(target) \
+            and audio_hash(target) == record["audio_sha256"]:
         if ordinary:
             from .exhaustion_selection import validate_record
             validate_record(record)
@@ -394,6 +394,6 @@ def select_take(clips_directory, request_hash, attempt, *, note="") -> dict:
         validate_record(saved)
     else:
         validate_manual_selection(saved)
-    if file_hash(regular_file(target)) != saved["audio_sha256"]:
+    if audio_hash(target) != saved["audio_sha256"]:
         raise ValueError("Accepted audio changed during manual take selection")
     return _result(directory, previous, saved, basis, note)

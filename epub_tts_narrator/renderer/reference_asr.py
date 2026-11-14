@@ -86,7 +86,9 @@ class MlxParakeetVerifier:
     def transcribe_reference(self, path) -> dict:
         self._check_model_files()
         # No text, prompt, vocabulary hint, or expected answer enters the model.
-        result = self._load().generate(str(path))
+        from .stored_audio import materialize
+        with materialize(path) as wav:
+            result = self._load().generate(str(wav))
         if not isinstance(getattr(result, "text", None), str):
             raise ValueError("Parakeet result must contain a text string")
         sentences = getattr(result, "sentences", None)

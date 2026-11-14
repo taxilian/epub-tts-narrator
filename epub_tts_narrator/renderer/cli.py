@@ -31,13 +31,15 @@ CAST_SHELL_ACTIONS = {"generate-missing": True, "prepare-samples": True, "normal
 def parser():
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "prune", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name", "take-feedback", "accents"):
+    for name in ("plan", "cache-report", "render", "assemble", "refresh-metadata", "cleanup", "prune", "convert-flac", "history-echoes", "voices", "create-voices", "import-voice", "import-voices", "cast", "voice-aliases", "prepare-performance", "compare-performance", "pronunciations", "pronounce", "pronounce-name", "take-feedback", "accents"):
         command = commands.add_parser(name)
         if name == "render":
             command.add_argument("bundle", type=Path, nargs="+",
                                  help="One book directory, or several books rendered in order through one queue")
         elif name == "prune":
             command.add_argument("bundle", type=Path, nargs="+", help="One or more book directories to clean up")
+        elif name == "convert-flac":
+            command.add_argument("bundle", type=Path, nargs="+", help="One or more book directories to convert")
         else:
             command.add_argument("bundle", type=Path)
         command.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
@@ -92,6 +94,12 @@ def parser():
             command.add_argument("--dry-run", action="store_true", help="Show what would be deleted; delete nothing")
             command.add_argument("--yes", action="store_true", help="Delete without asking for confirmation")
             command.add_argument("--json", action="store_true", help="Print the full report, every file listed, as JSON")
+        if name == "convert-flac":
+            command.add_argument("--only", metavar="GROUPS",
+                                 help="Comma-separated groups to convert: clips, chapters, mixes, previews (default: all)")
+            command.add_argument("--dry-run", action="store_true", help="Count the WAV files; convert nothing")
+            command.add_argument("--yes", action="store_true", help="Convert without asking for confirmation")
+            command.add_argument("--json", action="store_true", help="Print the full report as JSON")
         if name == "history-echoes":
             command.add_argument("--retire", action="store_true",
                                  help="Rename each published history-echo take's files out of the way (never deletes) "
@@ -423,7 +431,7 @@ def main(argv=None, *, in_shell=False):
         if args.command == "merge-characters":
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
-                            "history-echoes", "take-feedback", "accents"}:
+                            "history-echoes", "take-feedback", "accents", "convert-flac"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report", "prune"}:
             config = load_config(config_path, require_verifier=False)
@@ -476,6 +484,9 @@ def main(argv=None, *, in_shell=False):
         if args.command == "prune":
             from .prune import prune_command
             return prune_command(args, config)
+        if args.command == "convert-flac":
+            from .flac_migration import convert_command
+            return convert_command(args, config)
         bundle_paths = args.bundle if args.command == "render" else [args.bundle]
         if args.command == "render" and (len(bundle_paths) > 1 or getattr(args, "remote", False)):
             from .render_queue import render_queue_command

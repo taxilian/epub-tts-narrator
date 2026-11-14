@@ -11,6 +11,7 @@ from epub_tts_narrator.renderer.speech_recovery import recover_speech
 from test_renderer_clip_repair import BroadClient
 import test_renderer_split_delivery_recovery as fixtures
 from test_renderer_workflow import FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, 'FFmpeg and ffprobe required')
@@ -94,7 +95,7 @@ class ExhaustionChildrenTests(unittest.TestCase):
 
         wav, accepted = recover()
 
-        self.assertTrue(wav.is_file())
+        self.assertTrue(stored_audio.audio_exists(wav))
         self.assertTrue(accepted['report']['passed'])
         self.assertEqual(good_child.read_bytes(), good_before)
         self.assertEqual(len(repair_starts), 2)

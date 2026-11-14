@@ -13,16 +13,18 @@ import re
 import stat
 
 from .audio_naming import validate_audio_filename
-from .common import digest, file_hash, read_json
+from .common import digest, read_json
+from .stored_audio import audio_hash, audio_present, locate
 
 
 _HASH = re.compile(r"[0-9a-f]{64}")
 # Per-run retry limits do not limit cumulative take IDs. Keep canonical
 # minimum-three-digit names, including attempts beyond 999, recognizable.
 _ATTEMPT_NUMBER = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})"
-_LEGACY_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
-_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?![0-9]).*-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.wav")
-_ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?:\.json|\.wav|-.+-take\.wav)")
+# Kept audio may be a WAV or its stored FLAC (``stored_audio``); records name the WAV.
+_LEGACY_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.(?:wav|flac)")
+_RAW = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?![0-9]).*-(?:raw|recovery-raw|regenerated-[0-9a-f]{{16}})\.(?:wav|flac)")
+_ATTEMPT = re.compile(rf"attempt-({_ATTEMPT_NUMBER})(?:\.json|\.(?:wav|flac)|-.+-take\.(?:wav|flac))")
 _SPEECH = {"speech", "paragraph_speech", "speech_recovery_part"}
 _STORES = ("clips", "chapters", "mixes", "completed-chapters", "speech-cache")
 
@@ -52,6 +54,16 @@ def _exists(path):
     return path.exists() or path.is_symlink()
 
 
+def _logical_name(name):
+    """The WAV name a record uses for a file kept as its stored FLAC."""
+    return name[:-len(".flac")] + ".wav" if name.endswith(".flac") else name
+
+
+def _kept_names(names):
+    """Each recorded WAV name together with the stored-FLAC name it may be kept under."""
+    return set(names) | {name[:-len(".wav")] + ".flac" for name in names if name.endswith(".wav")}
+
+
 def _hash(value):
     return isinstance(value, str) and _HASH.fullmatch(value) is not None
 
@@ -64,10 +76,12 @@ class _Plan:
         self.checked = {}
 
     def check_file(self, path, checksum=None):
-        info = _file(path)
-        if checksum is not None and (not _hash(checksum) or file_hash(path) != checksum):
+        """Check a file; a recorded WAV kept as its stored FLAC is checked in that form."""
+        located = locate(path)
+        info = _file(located)
+        if checksum is not None and (not _hash(checksum) or audio_hash(path) != checksum):
             raise ValueError(f"Cleanup refused a file with an invalid checksum: {path}")
-        self.checked[path] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        self.checked[located] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
         return info
 
     def remove_file(self, path, category):
@@ -183,7 +197,7 @@ def _take(directory, plan, *, require_directory_identity=False):
             continue
         recorded_raw = owner.get("raw_file")
         if recorded_raw is not None:
-            if raw.name != validate_audio_filename(recorded_raw, suffix=".wav"):
+            if _logical_name(raw.name) != validate_audio_filename(recorded_raw, suffix=".wav"):
                 continue
         elif _LEGACY_RAW.fullmatch(raw.name) is None:
             continue
@@ -254,7 +268,7 @@ def discard_interrupted_raw(directory):
         record = records.get(number)
         recorded_raw = record.get("raw_file") if record is not None else None
         if recorded_raw is not None:
-            if raw.name != validate_audio_filename(recorded_raw, suffix=".wav"):
+            if _logical_name(raw.name) != validate_audio_filename(recorded_raw, suffix=".wav"):
                 continue
         elif _LEGACY_RAW.fullmatch(raw.name) is None:
             continue
@@ -262,9 +276,10 @@ def discard_interrupted_raw(directory):
         if record is not None and record.get("audio_file") is not None:
             normalized_candidates.add(directory / validate_audio_filename(record["audio_file"], suffix=".wav"))
         normalized_candidates.update(directory.glob(f"attempt-{number:03d}-*-take.wav"))
-        if any(_exists(normalized) for normalized in normalized_candidates):
+        normalized_candidates.update(directory.glob(f"attempt-{number:03d}-*-take.flac"))
+        if any(audio_present(normalized) for normalized in normalized_candidates):
             for normalized in normalized_candidates:
-                if _exists(normalized):
+                if audio_present(normalized):
                     plan.check_file(normalized)
             continue
         if number not in protected:
@@ -325,6 +340,12 @@ def _chapter(directory, plan, *, staging=False):
     if ".DS_Store" in children:
         plan.check_file(directory / ".DS_Store")
     optional = {".DS_Store"} | ({"normalized.wav"} if staging else set())
+    stored = (_kept_names({wav}) - {wav}).pop() if wav.endswith(".wav") else None
+    if stored is not None and wav not in children and stored in children:
+        expected = expected - {wav} | {stored}
+    elif stored is not None:
+        # Storing the chapter as FLAC can be interrupted with both forms present.
+        optional.add(stored)
     if children - optional != expected:
         raise ValueError(f"Cleanup found unrecognized files in a complete chapter: {directory}")
     return record
@@ -349,7 +370,7 @@ def _chapter_staging(directory, plan):
             files.append(path)
     stems = set()
     for path in files:
-        match = re.fullmatch(r"chapter-([0-9]{4,})\.wav", path.name)
+        match = re.fullmatch(r"chapter-([0-9]{4,})\.(?:wav|flac)", path.name)
         if match and (path.parent == ready or path.parent.name.startswith(".compose-")):
             number = int(match[1])
             if number < 1 or f"{number:04d}" != match[1]:
@@ -371,7 +392,8 @@ def _chapter_staging(directory, plan):
         if path.name == ".DS_Store":
             pass
         elif path.parent == ready:
-            if path.name not in {stem + ".wav", stem + "-loudness-normalized.wav", "chapter.json"} | encoded:
+            if path.name not in {stem + ".wav", stem + ".flac", stem + "-loudness-normalized.wav",
+                                 "chapter.json"} | encoded:
                 return
         elif path.parent.name.startswith(".compose-"):
             if path.name != stem + ".wav" and re.fullmatch(r"(?:masked|effect)-(?:0|[1-9][0-9]*)\.wav", path.name) is None:
@@ -479,28 +501,28 @@ def _mixes_names(directory, plan):
     """
     record_path = directory / "mix.json"
     if not _exists(record_path):
-        return {"mix.json", "mix.wav"}
+        return _kept_names({"mix.json", "mix.wav"})
     try:
         record = _signed(record_path, "audiobook-renderer-mix", plan)
     except ValueError:
-        return {"mix.json", "mix.wav"}
+        return _kept_names({"mix.json", "mix.wav"})
     name = validate_audio_filename(record.get("audio_file", "mix.wav"), suffix=".wav")
     if not _hash(record.get("audio_sha256")):
         raise ValueError(f"Cleanup needs a mixture audio checksum: {directory}")
     plan.check_file(directory / name, record["audio_sha256"])
-    return {"mix.json", name}
+    return _kept_names({"mix.json", name})
 
 
 def _purge_cache(directory, plan, store, *, staging=False):
     _directory(directory)
     if store == "chapters" and staging and _chapter_staging(directory, plan):
         return
-    names = ({"chapter.json", "chapter.wav", "chapter.m4a", "chapter.mp3", "normalized.wav"}
-             if store == "chapters" else {"mix.json", "mix.wav"}) | {".DS_Store"}
+    names = _kept_names({"chapter.json", "chapter.wav", "chapter.m4a", "chapter.mp3", "normalized.wav"}
+                        if store == "chapters" else {"mix.json", "mix.wav"}) | {".DS_Store"}
     if store == "chapters" and _exists(directory / "chapter.json"):
         record = _chapter(directory, plan, staging=staging)
         wav, encoded = _chapter_audio(record)
-        names = {"chapter.json", wav, ".DS_Store"} | ({"normalized.wav"} if staging else set())
+        names = _kept_names({"chapter.json", wav}) | {".DS_Store"} | ({"normalized.wav"} if staging else set())
         if encoded is not None:
             names.add(encoded)
     if store == "mixes":

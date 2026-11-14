@@ -110,7 +110,8 @@ def disagreement(entry):
 
 def export(work, output=None, *, include_agreements=False):
     """Write every take where a person disagreed with verification; return ``(path, counts)``."""
-    from .common import file_hash, read_json, regular_file, write_json
+    from .common import read_json, regular_file, write_json
+    from .stored_audio import audio_exists, audio_hash
     work = Path(work)
     items, counts = [], {"false_rejection": 0, "false_acceptance": 0, "agreed": 0, "audio_changed": 0}
     for entry in sorted(load(work)["takes"].values(), key=lambda value: (value["request_hash"], value["attempt"])):
@@ -126,7 +127,7 @@ def export(work, output=None, *, include_agreements=False):
         except (OSError, ValueError):
             record = None
         audio = directory / record["audio_file"] if isinstance(record, dict) and record.get("audio_file") else None
-        current = file_hash(audio) if audio is not None and audio.is_file() and not audio.is_symlink() else None
+        current = audio_hash(audio) if audio is not None and audio_exists(audio) else None
         if current != entry.get("audio_sha256"):
             counts["audio_changed"] += 1
         report = (record or {}).get("report") or {}

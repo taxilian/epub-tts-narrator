@@ -9,6 +9,7 @@ import re
 from threading import RLock
 
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_hash, audio_present, regular_audio
 from .speech_identity import generation_compatible, generation_identity, synthesis_engine_identity
 
 
@@ -108,9 +109,9 @@ class SpeechCache:
         if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
             raise ValueError("Invalid cached speech audio path")
         audio = directory / name
-        if not audio.exists() and not audio.is_symlink():
+        if not audio_present(audio):
             return None
-        regular_file(audio)
+        regular_audio(audio)
         if "manual_selection" in (record.get("engine_metadata") or {}):
             from .take_selection import validate_manual_selection
             validate_manual_selection(record)
@@ -208,7 +209,7 @@ class SpeechCache:
         if saved is None or file_hash(saved[0]) != entry["accepted_sha256"]:
             return None
         _, audio, record = saved
-        if verify_audio and (file_hash(audio) != record["audio_sha256"]
+        if verify_audio and (audio_hash(audio) != record["audio_sha256"]
                              or record["audio_sha256"] != entry["audio_sha256"]):
             raise ValueError("Cached speech audio changed on disk")
         return saved
@@ -300,7 +301,7 @@ class SpeechCache:
             if record.get("report", {}).get("passed") is not True:
                 raise ValueError("Only successful speech can enter the cache")
             saved = self._accepted(record["request_hash"])
-            if saved is None or saved[2] != record or file_hash(saved[1]) != record["audio_sha256"]:
+            if saved is None or saved[2] != record or audio_hash(saved[1]) != record["audio_sha256"]:
                 raise ValueError("Speech cache publication requires unchanged verified audio")
             if identity != self.identity(record["request"], engine_metadata=record.get("engine_metadata")):
                 raise ValueError("Speech cache identity does not match the accepted performance")
@@ -326,7 +327,7 @@ class SpeechCache:
                 return False
             path, audio, record = saved
             if (record["audio_sha256"] != accepted.get("audio_sha256")
-                    or file_hash(audio) != record["audio_sha256"]):
+                    or audio_hash(audio) != record["audio_sha256"]):
                 raise ValueError("Cached chapter speech audio changed")
             entry = self._current_entry(digest(identity))
             if (entry is not None and entry["request_hash"] == record["request_hash"]

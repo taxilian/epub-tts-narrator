@@ -16,6 +16,8 @@ from epub_tts_narrator.renderer.workflow import (
     SpeechRetryBudget, SpeechVerificationFailed, _render_chunk,
 )
 from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
+from epub_tts_narrator.renderer import stored_audio
 
 
 TEXT = "Insang Mortuary Services! What does it—"
@@ -24,7 +26,7 @@ LAST = "What does it—"
 
 
 def pcm(path):
-    with wave.open(str(path), "rb") as audio:
+    with open_wave(path) as audio:
         return audio.readframes(audio.getnframes())
 
 
@@ -140,7 +142,7 @@ class SpeechRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual([call["text"] for call in self.engine.calls], [TEXT] * 3 + [FIRST, LAST])
         self.assertEqual(result, {**self.chunk, "wav_path": result["wav_path"]})
         self.assertEqual(acceptance["chunk_id"], self.chunk["chunk_id"])
-        self.assertEqual(acceptance["audio_sha256"], file_hash(Path(result["wav_path"])))
+        self.assertEqual(acceptance["audio_sha256"], audio_hash(Path(result["wav_path"])))
         report = acceptance["report"]
         self.assertTrue(report["passed"], report)
         self.assertEqual(report["expected_text"], TEXT)
@@ -179,7 +181,7 @@ class SpeechRecoveryIntegrationTests(unittest.TestCase):
         self.engine.interrupt_part = None
         result, acceptance = self.render_chunk()
         self.assertTrue(acceptance["report"]["passed"])
-        self.assertTrue(Path(result["wav_path"]).is_file())
+        self.assertTrue(stored_audio.audio_exists(Path(result["wav_path"])))
         self.assertEqual([call["text"] for call in self.engine.calls], [TEXT] * 3 + [FIRST, LAST, LAST])
         for path, contents in saved.items():
             self.assertEqual(path.read_bytes(), contents)
@@ -210,7 +212,7 @@ class SpeechRecoveryIntegrationTests(unittest.TestCase):
         self.engine.fail_part = None
         result, acceptance = self.render_chunk()
         self.assertTrue(acceptance["report"]["passed"])
-        self.assertTrue(Path(result["wav_path"]).is_file())
+        self.assertTrue(stored_audio.audio_exists(Path(result["wav_path"])))
         self.assertEqual([call["text"] for call in self.engine.calls],
                          [TEXT] * 3 + [FIRST] + [LAST] * 7)
         for path, contents in saved.items():

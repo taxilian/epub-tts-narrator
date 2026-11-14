@@ -22,6 +22,8 @@ from epub_tts_narrator.renderer.workflow import (
 import epub_tts_narrator.renderer.workflow as workflow
 from test_renderer_speech_recovery_integration import RecoveryEngine, RecoveryVerifier, pcm
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
+from epub_tts_narrator.renderer import stored_audio
 
 
 TEXT = "Insang waited beside the old gate while everyone watched the river."
@@ -178,12 +180,12 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         pending = read_json(self.work / "takes" / "attempt-003.json")
         self.assertTrue(pending["report"]["resolution_pending"])
         wav = self.work / "takes" / pending["audio_file"]
-        original = wav.read_bytes()
+        original = stored_audio.read_bytes(wav)
         old_asr_calls = len(self.base.calls)
         self.client.unavailable = False
         resumed, accepted = self.take()
         self.assertEqual(resumed, wav)
-        self.assertEqual(wav.read_bytes(), original)
+        self.assertEqual(stored_audio.read_bytes(wav), original)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.engine.calls), 3)
         self.assertGreater(len(self.base.calls), old_asr_calls)
@@ -207,7 +209,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         pending_path = next((self.work / "clips").glob("*/attempt-004.json"))
         pending = read_json(pending_path)
         wav = pending_path.parent / pending["audio_file"]
-        self.assertEqual(pending["audio_sha256"], file_hash(wav))
+        self.assertEqual(pending["audio_sha256"], audio_hash(wav))
         self.assertTrue(pending["report"]["retry_on_resume"])
         self.assertEqual(pending["engine_metadata"]["synthesis_text"], TEXT.replace("Insang", "Insaan"))
         self.assertEqual(pending["engine_metadata"]["speech_resolution"]["original_text"], TEXT)
@@ -254,7 +256,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
 
     def test_saved_accept_is_not_replayed_when_fresh_transcription_changes(self):
         self.interrupt_after_saved_decision("accept")
-        candidate = next((self.work / "clips").glob("*/attempt-003-*-take.wav"))
+        candidate = next((self.work / "clips").glob("*/attempt-003-*-take.flac")).with_suffix(".wav")
         # The waveform is unchanged, but independent recognition now reports a
         # missing complete word. The old decision must not approve that result.
         self.registry[hashlib.sha256(pcm(candidate)).hexdigest()] = HEARD.replace("old ", "")
@@ -283,7 +285,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.client.plans), 2, "Only the child rewrite should need a new model call")
         self.assertEqual(state_path.read_bytes(), saved_state)
         self.assertTrue(any("Resuming saved speech recovery decision: split" in row for row in self.messages))
-        self.assertTrue(Path(result["wav_path"]).is_file())
+        self.assertTrue(stored_audio.audio_exists(Path(result["wav_path"])))
 
     def prepare_persisted_split(self, *, omitted_word=False):
         text = "Everyone watched the river. The halfblade struck the apeman."
@@ -353,7 +355,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(acceptance["report"]["transcript"], text)
         self.assertEqual(acceptance["report"]["metrics"]["duration_seconds"], 2)
         self.assertNotIn("saved_whole_take_recheck", acceptance["report"])
-        self.assertTrue(Path(result["wav_path"]).is_file())
+        self.assertTrue(stored_audio.audio_exists(Path(result["wav_path"])))
 
     def test_persisted_split_with_missing_word_resumes_existing_parts(self):
         self.check_persisted_split_with_omission()
@@ -491,7 +493,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         for part in proof:
             child_file = Path(result["wav_path"]).parent / part["audio_file"]
             accepted_path = child_file.parent / "accepted.json"
-            self.assertEqual(part["accepted_sha256"], file_hash(accepted_path))
+            self.assertEqual(part["accepted_sha256"], audio_hash(accepted_path))
             children.append(read_json(accepted_path))
         self.assertEqual(children[0]["report"]["text_confirmation_method"], "pronunciation_rewrite")
         self.assertEqual(children[0]["report"]["expected_text"], "Insang waited beside the old gate. ")
@@ -522,7 +524,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(accepted["report"]["text_confirmation_method"], "pronunciation_rewrite")
         wav = Path(result["wav_path"])
         self.assertNotEqual(wav, joined / "attempt-001.wav")
-        self.assertNotEqual(file_hash(wav), rejected["audio_sha256"])
+        self.assertNotEqual(audio_hash(wav), rejected["audio_sha256"])
         self.assertNotIn("recovery", read_json(wav.parent / "accepted.json")["request"])
         self.assertTrue(list((self.work / "speech-cache").glob("*.json")))
 
@@ -533,7 +535,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
 
         def tamper_after_assembly(path):
             result = transcribe(path)
-            with wave.open(str(path), "rb") as audio:
+            with open_wave(path) as audio:
                 assembled = audio.getnframes() > 44100
             if assembled and not changed:
                 child = next(Path(path).parent.glob("parts/*/accepted.json"))
@@ -554,7 +556,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertFalse((joined / "accepted.json").exists(), "Changed child evidence cannot authorize the join")
         bound_child = next(row for row in rejected["engine_metadata"]["recovery"]["parts"]
                            if row["request_hash"] == changed[0].parent.name)
-        self.assertNotEqual(file_hash(changed[0]), bound_child["accepted_sha256"])
+        self.assertNotEqual(audio_hash(changed[0]), bound_child["accepted_sha256"])
         self.assertEqual(read_json(changed[0])["diagnostic"], "Altered after assembly evidence was bound")
         self.assertEqual(len(self.engine.calls), 9)
         self.assertEqual(self.engine.calls[-1]["text"], original.replace("Insang", "Insaan"))
@@ -564,7 +566,7 @@ class RecurringResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(accepted["report"]["text_confirmation_method"], "pronunciation_rewrite")
         wav = Path(result["wav_path"])
         self.assertNotEqual(wav, joined / "attempt-001.wav")
-        self.assertNotEqual(file_hash(wav), rejected["audio_sha256"])
+        self.assertNotEqual(audio_hash(wav), rejected["audio_sha256"])
         self.assertNotIn("recovery", read_json(wav.parent / "accepted.json")["request"])
         self.assertTrue(list((self.work / "speech-cache").glob("*.json")))
 

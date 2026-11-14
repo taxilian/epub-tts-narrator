@@ -18,6 +18,7 @@ from test_renderer_phonetic_fallback import PairClient
 import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import IndependentVerifier, PrimaryVerifier
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
+from epub_tts_narrator.renderer import stored_audio
 
 
 REQUESTED = "Insang Mortuary Services! What does it—"
@@ -174,11 +175,11 @@ class AdaptiveVerificationResumeTests(unittest.TestCase):
             self.assertEqual(len(generations), 1)
             pending = read_json(root / "takes" / "attempt-001.json")
             wav = root / "takes" / pending["audio_file"]
-            before = wav.read_bytes()
+            before = stored_audio.read_bytes(wav)
             client.error = None
             reused, accepted = take()
             self.assertEqual(reused, wav)
-            self.assertEqual(wav.read_bytes(), before)
+            self.assertEqual(stored_audio.read_bytes(wav), before)
             self.assertEqual(len(generations), 1)
             self.assertTrue(accepted["report"]["passed"])
             self.assertEqual(accepted["report"]["text_confirmation_method"], "phonetic_primary")

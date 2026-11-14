@@ -17,6 +17,7 @@ from .chapter_records import signed_record
 from .common import digest, file_hash, read_json, regular_file, write_json
 from .config import RENDER_CONTRACT
 from .interrupts import run_subprocess
+from .stored_audio import StoredAudioError, audio_hash, link_audio, regular_audio, store_quietly, tool_path
 
 
 def chapter_settings(render, *, censorship_policy=None):
@@ -53,7 +54,7 @@ def chapter_settings(render, *, censorship_policy=None):
 
 def _loudness_pass(source, audio_filter, destination, settings):
     command = [settings["ffmpeg"], "-hide_banner", "-nostats", "-nostdin", "-n",
-               "-protocol_whitelist", "file,pipe", "-i", str(source),
+               "-protocol_whitelist", "file,pipe", "-i", str(tool_path(source)),
                "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", audio_filter]
     if destination is None:
         command += ["-f", "null", "-"]
@@ -221,6 +222,14 @@ LANE_FIELDS = ("role_id", "voice_id", "audio_sha256", "request_hash", "validatio
                "start_frame", "end_frame")
 
 
+def _audio_hash_or_none(path):
+    """A damaged stored FLAC fails the same integrity check as a changed WAV."""
+    try:
+        return audio_hash(path)
+    except StoredAudioError:
+        return None
+
+
 def mixture_identity(lanes, sample_rate):
     """Bind the fixed mixing recipe to each independently verified performer."""
     return {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
@@ -248,9 +257,9 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
         if (not isinstance(lane, dict) or not isinstance(lane.get("report"), dict)
                 or lane["report"].get("passed") is not True):
             raise ValueError("Every simultaneous speaker must pass verification before mixing")
-        path = regular_file(lane["wav_path"])
+        path = regular_audio(lane["wav_path"])
         info = _wave_info(path, sample_rate)
-        if not info["frames"] or file_hash(path) != lane["audio_sha256"]:
+        if not info["frames"] or audio_hash(path) != lane["audio_sha256"]:
             raise ValueError("Verified simultaneous speaker audio changed or is empty")
         prepared.append(dict(lane, start_frame=0, end_frame=info["frames"]))
     if (len({lane["role_id"] for lane in prepared}) != len(prepared)
@@ -272,10 +281,10 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
             raise ValueError("Simultaneous mixture metadata must be an object")
         checksum = record.pop("record_sha256", None)
         filename = validate_audio_filename(record.get("audio_file", "mix.wav"), suffix=".wav")
-        wav = regular_file(folder / filename)
+        wav = regular_audio(folder / filename)
         if (checksum != signed_record(record) or record.get("identity") != identity
                 or record.get("format") != "audiobook-renderer-mix" or record.get("version") != 1
-                or record.get("audio_sha256") != file_hash(wav)
+                or record.get("audio_sha256") != _audio_hash_or_none(wav)
                 or _wave_info(wav, sample_rate)["frames"] != frames
                 or record.get("frames") != frames):
             raise ValueError("Simultaneous mixture cache failed integrity checks")
@@ -305,6 +314,7 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
                   "frames": frames, "audio_sha256": mixed["audio_sha256"],
                   "peak_amplitude": mixed["peak_amplitude"], "audio_file": filename}
         write_json(stage / "mix.json", dict(record, record_sha256=digest(record)))
+        store_quietly(stage / filename, expected_sha256=mixed["audio_sha256"])
         try:
             os.rename(stage, folder)
         except OSError:
@@ -343,8 +353,8 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
         filename = record.get("wav_file")
         if filename is not None and (not isinstance(filename, str) or filename != Path(filename).name):
             raise ValueError("Chapter PCM filename must be a plain file")
-        wav = regular_file(folder / (filename or "chapter.wav"))
-        if (file_hash(wav) != record["pcm_sha256"]
+        wav = regular_audio(folder / (filename or "chapter.wav"))
+        if (_audio_hash_or_none(wav) != record["pcm_sha256"]
                 or _wave_info(wav, chapter["sample_rate"]) != {
                     "sample_rate": chapter["sample_rate"], "channels": chapter["channels"],
                     "frames": chapter["frames"]}):
@@ -377,7 +387,7 @@ def load_chapter(directory, *, ffprobe="ffprobe"):
 
 def _legacy_audio_paths(folder, chapter, kind):
     """Return legacy generic paths only when they are valid, ordinary files."""
-    wav = regular_file(folder / "chapter.wav")
+    wav = regular_audio(folder / "chapter.wav")
     encoded = regular_file(folder / f"chapter.{kind}")
     return wav, encoded
 
@@ -420,7 +430,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                 item["censorship_lanes"] = [
                     {key: deepcopy(value) for key, value in lane.items() if key != "wav_path"}
                     for lane in clip["censorship_lanes"]]
-        item["audio_sha256"] = (file_hash(regular_file(clip["wav_path"]))
+        item["audio_sha256"] = (audio_hash(clip["wav_path"])
                                 if clip.get("wav_path") is not None else None)
         if clip.get("chunk_id") in take_timings:
             item["take_pause_timing_sha256"] = digest(take_timings[clip["chunk_id"]])
@@ -468,7 +478,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                 ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
         for clip, expected in zip(clips, clip_identity):
             if (clip.get("wav_path") is not None
-                    and file_hash(regular_file(clip["wav_path"])) != expected["audio_sha256"]):
+                    and audio_hash(clip["wav_path"]) != expected["audio_sha256"]):
                 raise ValueError("Verified clip changed during chapter preparation")
         record = {"format": "audiobook-renderer-chapter", "version": 1, "identity": identity,
                   "chapter": {key: value for key, value in composed.items() if key != "wav_path"},
@@ -477,6 +487,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
                   "normalization": normalization, "pcm_sha256": file_hash(composed["wav_path"]),
                   "encoded_sha256": encoded["sha256"] if encoded else None}
         write_json(stage / "chapter.json", dict(record, record_sha256=digest(record)))
+        store_quietly(composed["wav_path"], expected_sha256=record["pcm_sha256"])
         try:
             os.rename(stage, folder)
         except OSError:
@@ -527,7 +538,7 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
         stage = Path(temporary) / "ready"
         stage.mkdir()
         wav = stage / f"chapter-{identity['chapter']['number']:04d}.wav"
-        wav.hardlink_to(regular_file(source["wav_path"]))
+        link_audio(source["wav_path"], wav)
         encoded = None
         if source["frames"]:
             notify(f"Re-encoding chapter {source['number']} / {identity['total_chapters']}: {identity['chapter']['title']}")
@@ -537,7 +548,7 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
                 book=book, ordinal=identity["ordinal"], total_chapters=identity["total_chapters"],
                 chapter_format=settings["chapter_format"], aac_bitrate=settings["aac_bitrate"],
                 mp3_bitrate=settings["mp3_bitrate"], ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
-        if file_hash(wav) != original["pcm_sha256"]:
+        if audio_hash(wav) != original["pcm_sha256"]:
             raise ValueError("Chapter PCM changed during re-encoding")
         record = {key: deepcopy(value) for key, value in original.items() if key != "record_sha256"}
         record.update(identity=identity, wav_file=wav.name,
@@ -545,6 +556,7 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
                       encoded_sha256=encoded["sha256"] if encoded else None)
         record["chapter"]["title"] = identity["chapter"]["title"]
         write_json(stage / "chapter.json", dict(record, record_sha256=digest(record)))
+        store_quietly(wav, expected_sha256=record["pcm_sha256"])
         try:
             os.rename(stage, folder)
         except OSError:

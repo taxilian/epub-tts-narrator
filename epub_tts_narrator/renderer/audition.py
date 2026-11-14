@@ -29,7 +29,10 @@ class AudioPlayer:
     def prepare(self, path):
         """Prepare a playback copy without changing the saved clone reference."""
         source = Path(path).resolve()
-        return self.normalizer.prepare(source) if self.normalizer is not None else source
+        from .stored_audio import tool_path
+        if self.normalizer is not None:
+            return tool_path(self.normalizer.prepare(source))
+        return tool_path(source)
 
     def start(self, path):
         self.stop()

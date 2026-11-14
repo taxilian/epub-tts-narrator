@@ -15,6 +15,8 @@ from shared_fixtures import renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -128,7 +130,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertIn("Blocks 1 / 1 complete", self.messages[-1])
         self.assertIn("elapsed 00:06", self.messages[-1])
         self.assertIn("speech complete", self.messages[-1])
-        original = wav.read_bytes(), (self.root / "take" / "accepted.json").read_bytes()
+        original = stored_audio.read_bytes(wav), stored_audio.read_bytes((self.root / "take" / "accepted.json"))
 
         self.messages.clear()
         with ChapterProgress(1, 1, [{"spoken_text": text}], notify=self.messages.append,
@@ -141,7 +143,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
                 progress.refresh()
                 self.assertIn("checking saved audio", self.messages[-1])
         self.assertEqual(resumed, (wav, accepted))
-        self.assertEqual(original, (wav.read_bytes(), (self.root / "take" / "accepted.json").read_bytes()))
+        self.assertEqual(original, (stored_audio.read_bytes(wav), stored_audio.read_bytes((self.root / "take" / "accepted.json"))))
         self.assertFalse(any("generating" in item or "verifying" in item for item in self.messages))
         self.assertIn("Blocks 1 / 1 complete", self.messages[-1])
 
@@ -269,7 +271,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         grouped_path = next(path for path in accepted
                             if read_json(path)["request"]["kind"] == "paragraph_speech")
         wav = grouped_path.parent / read_json(grouped_path)["audio_file"]
-        checksum = file_hash(wav)
+        checksum = audio_hash(wav)
         verified_before = len(self.verifier.calls)
 
         self.messages.clear()
@@ -281,7 +283,7 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.engine.dialogue_calls), 3)  # two accepted, one interrupted
         self.assertEqual(len(self.engine.speech_calls), 4)
         self.assertTrue(all(path.read_bytes() == content for path, content in accepted.items()))
-        self.assertEqual(file_hash(wav), checksum)
+        self.assertEqual(audio_hash(wav), checksum)
         self.assertTrue(any("Blocks 6 / 6 complete" in item and "speech complete" in item
                             for item in self.messages))
         self.assertTrue(any("Completed chapter 1 / 1" in item for item in self.messages))

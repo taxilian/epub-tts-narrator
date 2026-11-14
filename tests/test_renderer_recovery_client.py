@@ -17,6 +17,7 @@ from legacy_recovery_fixtures import LegacySpeechResolver as SpeechResolver
 from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import VerificationUnavailable
 import test_renderer_recurring_resolution as recurring_fixture
+from epub_tts_narrator.renderer import stored_audio
 
 
 def settings(**overrides):
@@ -215,7 +216,7 @@ class RecoveryModelRetryIntegrationTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         candidate = read_json(records[0])
         candidates = [records[0].parent / candidate["audio_file"]]
-        original = candidates[0].read_bytes()
+        original = stored_audio.read_bytes(candidates[0])
 
         def request(_client, encoded, _headers):
             payload = json.loads(json.loads(encoded)["messages"][1]["content"])
@@ -229,7 +230,7 @@ class RecoveryModelRetryIntegrationTests(unittest.TestCase):
             result, accepted = self.render_chunk()
         self.assertEqual(len(self.engine.calls), 3)
         self.assertEqual(Path(result["wav_path"]), candidates[0])
-        self.assertEqual(candidates[0].read_bytes(), original)
+        self.assertEqual(stored_audio.read_bytes(candidates[0]), original)
         self.assertTrue(accepted["report"]["passed"])
 
 

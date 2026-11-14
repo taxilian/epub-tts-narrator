@@ -22,6 +22,7 @@ from epub_tts_narrator.renderer.workflow import make_render_plan, render
 from audition_fixtures import prepare_bundle
 from test_renderer_pool import pool_config, worker
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -68,8 +69,8 @@ class GracefulRenderTests(unittest.TestCase):
         self.assertEqual(len(indices), count)
         for path, record in records.items():
             self.assertIs(record["report"]["passed"], True)
-            self.assertEqual(file_hash(path.parent / record["audio_file"]), record["audio_sha256"])
-            self.assertTrue(any(read_json(index)["accepted_sha256"] == file_hash(path) for index in indices))
+            self.assertEqual(audio_hash(path.parent / record["audio_file"]), record["audio_sha256"])
+            self.assertTrue(any(read_json(index)["accepted_sha256"] == audio_hash(path) for index in indices))
         self.assertFalse((self.root / "work" / ".render.lock").exists())
         self.assertFalse((Path(self.bundle["directory"]) / ".audio-render.lock").exists())
         return records
@@ -272,7 +273,7 @@ class GracefulRenderTests(unittest.TestCase):
         else:
             self.assertEqual(len(self.verifier.calls), 1)
             self.assertEqual(record["report"]["text_judge"]["decision"], "unavailable")
-            self.assertEqual(file_hash(attempts[0].parent / record["audio_file"]), record["audio_sha256"])
+            self.assertEqual(audio_hash(attempts[0].parent / record["audio_file"]), record["audio_sha256"])
 
     def test_stop_during_resumed_asr_does_not_start_another_recovery_model_request(self):
         from epub_tts_narrator.renderer.speech_resolver import SpeechResolver
@@ -316,7 +317,7 @@ class GracefulRenderTests(unittest.TestCase):
         self.assertFalse((directory / "accepted.json").exists())
         pending = read_json(directory / "attempt-003.json")
         self.assertTrue(pending["report"]["resolution_pending"])
-        self.assertEqual(file_hash(directory / pending["audio_file"]), pending["audio_sha256"])
+        self.assertEqual(audio_hash(directory / pending["audio_file"]), pending["audio_sha256"])
 
 
 if __name__ == "__main__":

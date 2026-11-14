@@ -22,6 +22,7 @@ from test_renderer_recurring_resolution import PlanClient
 from test_renderer_speech_identity import reference
 from test_renderer_speech_recovery_integration import RecoveryEngine, RecoveryVerifier, TEXT, FIRST, LAST
 from test_renderer_workflow import FFMPEG, FFPROBE, timed_transcript, write_tone
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 
 class UniformEngine(RecoveryEngine):
@@ -51,7 +52,7 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         self.voice = reference("voice")
         reference_path = self.work / "reference.wav"
         write_tone(reference_path)
-        self.voice.update(reference_audio=str(reference_path), reference_sha256=file_hash(reference_path))
+        self.voice.update(reference_audio=str(reference_path), reference_sha256=audio_hash(reference_path))
         turns = []
         boundary = TEXT.index(" What") + 1
         for index, (start, end) in enumerate(((0, boundary), (boundary, len(TEXT)))):
@@ -107,8 +108,8 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         for part in audit["parts"]:
             child = part["acceptance"]
             path = Path(clip["wav_path"]).parent / part["audio_file"]
-            self.assertEqual(file_hash(path), child["audio_sha256"])
-            self.assertEqual(file_hash(path.parent / "accepted.json"), part["accepted_sha256"])
+            self.assertEqual(audio_hash(path), child["audio_sha256"])
+            self.assertEqual(audio_hash(path.parent / "accepted.json"), part["accepted_sha256"])
             self.assertEqual(child["request"]["synthesis_request"]["voice_asset_hash"], self.voice["asset_hash"])
         artifacts = self.executor.assemble(self.spec, prepared, self.work, self.messages.append)
         metadata = read_json(artifacts["chapter.json"])
@@ -140,7 +141,7 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         self.engine.interrupt_part = LAST
         with self.assertRaises(KeyboardInterrupt):
             self.render()
-        saved = {path: file_hash(path) for path in (self.work / "clips").glob("*/parts/*/accepted.json")}
+        saved = {path: audio_hash(path) for path in (self.work / "clips").glob("*/parts/*/accepted.json")}
         self.assertEqual(len(saved), 1)
         self.assertEqual(len(self.engine.dialogue_calls), 3)
         self.engine.interrupt_part = None
@@ -149,7 +150,7 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.engine.dialogue_calls), 3)
         self.assertEqual([call["text"] for call in self.engine.calls], [FIRST, LAST, LAST])
         self.assertNotEqual(self.engine.calls[1]["seed"], self.engine.calls[2]["seed"])
-        self.assertTrue(all(file_hash(path) == checksum for path, checksum in saved.items()))
+        self.assertTrue(all(audio_hash(path) == checksum for path, checksum in saved.items()))
 
     def test_ordinary_accepted_paragraph_keeps_identity_and_never_splits(self):
         with patch.object(self.verifier, "transcribe", return_value=timed_transcript(TEXT)):
@@ -219,13 +220,13 @@ class UniformParagraphRecoveryTests(unittest.TestCase):
         self.assertNotIn("split", client.plans[0]["permitted_actions"])
         self.assertIn("rewrite", client.plans[0]["permitted_actions"])
         whole_calls = len(self.engine.dialogue_calls)
-        saved = {path: file_hash(path) for path in (self.work / "clips").glob("*/attempt-*.wav")}
+        saved = {path: audio_hash(path) for path in (self.work / "clips").glob("*/attempt-*.wav")}
         prepared = self.render()
         self.assertIn("split", client.plans[-1]["permitted_actions"])
         self.assertEqual(len(self.engine.dialogue_calls), whole_calls)
         self.assertTrue(prepared["acceptance"][0]["report"]["passed"])
         self.assertTrue(list((self.work / "clips").glob("*/speech-resolution-*.json")))
-        self.assertTrue(all(file_hash(path) == checksum for path, checksum in saved.items()))
+        self.assertTrue(all(audio_hash(path) == checksum for path, checksum in saved.items()))
 
     def test_small_shared_budget_reserves_real_starts_for_split_parts(self):
         self.config["verification"]["max_resolution_attempts"] = 3

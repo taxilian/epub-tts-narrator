@@ -42,7 +42,8 @@ def bind_legacy_recovery_metadata(clips, request, metadata):
             acceptance = regular_file(audio.parent / "accepted.json")
             if file_hash(acceptance) != row.get("accepted_sha256"):
                 raise ValueError("Legacy sentence recovery child acceptance changed")
-            if file_hash(regular_file(audio)) != row.get("audio_sha256"):
+            from .stored_audio import audio_hash
+            if audio_hash(audio) != row.get("audio_sha256"):
                 raise ValueError("Legacy sentence recovery child audio changed")
             row["acceptance"] = read_json(acceptance)
         except OSError as exc:

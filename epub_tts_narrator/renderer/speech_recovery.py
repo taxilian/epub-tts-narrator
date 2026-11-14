@@ -10,6 +10,7 @@ import wave
 
 from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_hash, audio_present, open_wave, regular_audio
 from .speech_text import trim_speech_text
 
 
@@ -128,17 +129,17 @@ def recovery_available(directory, request, text, verifier, config, *, voices_by_
 def _concatenate(parts, target, sample_rate):
     """Publish an exact ordered PCM concatenation only after every input checks."""
     target = Path(target)
-    if target.exists() or target.is_symlink():
+    if audio_present(target):
         raise ValueError("Speech recovery output already exists")
     with tempfile.TemporaryDirectory(prefix=".recovery-join-", dir=target.parent) as temporary:
         staged = Path(temporary) / target.name
         with wave.open(str(staged), "wb") as output:
             output.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
             for path, record in parts:
-                path = regular_file(path)
-                if file_hash(path) != record["audio_sha256"]:
+                path = regular_audio(path)
+                if audio_hash(path) != record["audio_sha256"]:
                     raise ValueError("Verified recovery part changed before assembly")
-                with wave.open(str(path), "rb") as source:
+                with open_wave(path) as source:
                     if (source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype()) != (1, 2, sample_rate, "NONE"):
                         raise ValueError("Recovery parts must share the normalized mono PCM16 format")
                     remaining = source.getnframes()
@@ -151,7 +152,7 @@ def _concatenate(parts, target, sample_rate):
                             raise ValueError("Recovery part has truncated PCM audio")
                         output.writeframesraw(data)
                         remaining -= count
-        if any(file_hash(regular_file(path)) != record["audio_sha256"] for path, record in parts):
+        if any(audio_hash(path) != record["audio_sha256"] for path, record in parts):
             raise ValueError("Verified recovery part changed during assembly")
         target.hardlink_to(staged)
 
@@ -179,9 +180,9 @@ def _legacy_accepted_part(directory, request):
     if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
         raise ValueError("Invalid existing recovery part audio path")
     wav = directory / name
-    if not wav.exists() and not wav.is_symlink():
+    if not audio_present(wav):
         return False
-    if file_hash(regular_file(wav)) != accepted.get("audio_sha256"):
+    if audio_hash(wav) != accepted.get("audio_sha256"):
         raise ValueError("Existing recovery part audio changed")
     return True
 
@@ -217,7 +218,7 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
             saved_attempt = read_json(regular_file(attempt_path))
             if saved_attempt.get("audio_file") is not None:
                 joined_name = validate_audio_filename(saved_attempt["audio_file"], suffix=".wav")
-        if not (directory / joined_name).exists():
+        if not audio_present(directory / joined_name):
             # An interrupted join or normalization has no accepted full waveform.
             # Recreate that cheap assembly from verified children, without keeping
             # successive orphan raw names or disturbing pending normalized audio.

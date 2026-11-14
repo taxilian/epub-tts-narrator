@@ -199,11 +199,12 @@ def _recognized_words(path, verifier, cache_dir):
     in the take cannot move a pause.
     """
     from .censorship_alignment import _model_identity, _primary_verifier, _serialized_verifier
-    from .common import digest, file_hash, read_json, regular_file, write_json
+    from .common import digest, read_json, regular_file, write_json
+    from .stored_audio import audio_hash, regular_audio
     from pathlib import Path
-    path = regular_file(path)
+    path = regular_audio(path)
     primary = _primary_verifier(verifier)
-    binding = {"audio_sha256": file_hash(path), "model": _model_identity(primary),
+    binding = {"audio_sha256": audio_hash(path), "model": _model_identity(primary),
                "version": TAKE_PAUSE_VERSION}
     directory = Path(cache_dir)
     if directory.is_symlink():
@@ -221,7 +222,9 @@ def _recognized_words(path, verifier, cache_dir):
     def recognize():
         if facade is not None:
             facade._runtime.initialize_mlx()
-        return primary.transcribe(path)
+        from .stored_audio import materialize
+        with materialize(path) as wav:
+            return primary.transcribe(wav)
 
     raw = facade._call("take_pause_words", recognize, (), {}) if facade is not None else recognize()
     try:
@@ -234,7 +237,7 @@ def _recognized_words(path, verifier, cache_dir):
         raise ValueError("Recognized word timings are malformed") from exc
     if _timed_tokens(words) is None:
         raise ValueError("Recognized word timings are malformed")
-    if file_hash(path) != binding["audio_sha256"]:
+    if audio_hash(path) != binding["audio_sha256"]:
         raise ValueError("Saved take changed during word timing")
     write_json(target, {"format": _WORDS_FORMAT, "binding": binding, "words": words,
                         "words_sha256": digest(words)})

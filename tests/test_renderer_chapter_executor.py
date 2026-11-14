@@ -18,6 +18,8 @@ from epub_tts_narrator.renderer.workflow import RenderBlocked, make_render_plan
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureVerifier, write_tone
 from shared_fixtures import HISTORY_CAPABILITY
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -78,7 +80,7 @@ class ChapterExecutorTests(unittest.TestCase):
         self.assertEqual(chapter["voice_bindings"], spec["voice_bindings"])
         self.assertEqual(chapter["audio_file"], "chapter-0042.m4a")
         self.assertEqual(chapter["lossless_file"], "chapter-0042.flac")
-        self.assertEqual(chapter["encoded_sha256"], file_hash(artifacts[chapter["audio_file"]]))
+        self.assertEqual(chapter["encoded_sha256"], audio_hash(artifacts[chapter["audio_file"]]))
         decoded = self.root / "decoded.wav"
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
                         "-i", str(artifacts[chapter["lossless_file"]]), "-c:a", "pcm_s16le", str(decoded)],
@@ -148,7 +150,7 @@ class ChapterExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.assemble(prepared, changed)
         wav = Path(next(clip["wav_path"] for clip in prepared["clips"] if clip["wav_path"]))
-        wav.write_bytes(wav.read_bytes() + b"changed")
+        wav.write_bytes(stored_audio.read_bytes(wav) + b"changed")
         with self.assertRaisesRegex(ValueError, "changed before assembly"):
             self.assemble(prepared)
 
@@ -174,10 +176,10 @@ class ChapterExecutorTests(unittest.TestCase):
         manifest = read_json(folder / "manifest.json")
         manifest.pop("record_sha256")
         names = {"chapter.json", "sync.json", "verification.json", "chapter.m4a", "chapter.flac"}
-        manifest["artifacts"] = {name: {"sha256": file_hash(folder / name), "bytes": (folder / name).stat().st_size}
+        manifest["artifacts"] = {name: {"sha256": audio_hash(folder / name), "bytes": (folder / name).stat().st_size}
                                  for name in names}
         write_json(folder / "manifest.json", dict(manifest, record_sha256=digest(manifest)))
-        before = {name: file_hash(folder / name) for name in names}
+        before = {name: audio_hash(folder / name) for name in names}
         with patch("epub_tts_narrator.renderer.chapter_executor.prepare_chapter",
                    side_effect=AssertionError("regenerated chapter")), \
              patch("epub_tts_narrator.renderer.chapter_executor._flac_master",
@@ -185,7 +187,7 @@ class ChapterExecutorTests(unittest.TestCase):
              patch.object(self.executor, "_components", side_effect=AssertionError("model access during resume")):
             resumed = self.assemble(prepared)
         self.assertEqual(set(resumed), names | {"manifest.json"})
-        self.assertEqual(before, {name: file_hash(folder / name) for name in names})
+        self.assertEqual(before, {name: audio_hash(folder / name) for name in names})
 
     def test_empty_chapter_is_explicit_and_does_not_invent_audio(self):
         empty = deepcopy(self.spec)
@@ -234,12 +236,12 @@ class ChapterExecutorTests(unittest.TestCase):
 
     def test_export_failure_removes_only_its_temporary_chapter_pcm(self):
         prepared = self.synthesize()
-        before = {path: file_hash(path) for path in (self.work / "clips").rglob("*.wav")}
+        before = {path: audio_hash(path) for path in (self.work / "clips").rglob("*.wav")}
         with patch("epub_tts_narrator.renderer.chapter_executor._flac_master", side_effect=ValueError("compress failed")):
             with self.assertRaisesRegex(ValueError, "compress failed"):
                 self.assemble(prepared)
         self.assertEqual(list((self.work / "chapter-exports").iterdir()), [])
-        self.assertEqual(before, {path: file_hash(path) for path in (self.work / "clips").rglob("*.wav")})
+        self.assertEqual(before, {path: audio_hash(path) for path in (self.work / "clips").rglob("*.wav")})
         with patch.object(self.engine, "synthesize", side_effect=AssertionError("regenerated speech")), \
              patch.object(self.engine, "synthesize_dialogue", side_effect=AssertionError("regenerated paragraph")), \
              patch.object(self.verifier, "transcribe", side_effect=AssertionError("reverified accepted speech")):
@@ -250,13 +252,13 @@ class ChapterExecutorTests(unittest.TestCase):
         changed = deepcopy(self.spec)
         changed["render"]["paragraph_pause_ms"] = 750
         first, second = self.synthesize(), self.synthesize(changed)
-        before = {path: file_hash(path) for path in (self.work / "clips").rglob("*.wav")}
+        before = {path: audio_hash(path) for path in (self.work / "clips").rglob("*.wav")}
         with ThreadPoolExecutor(max_workers=2) as pool:
             a = pool.submit(self.assemble, first)
             b = pool.submit(self.assemble, second, changed)
             exports = a.result(), b.result()
         self.assertNotEqual(exports[0]["chapter-0001.m4a"].parent, exports[1]["chapter-0001.m4a"].parent)
-        self.assertEqual(before, {path: file_hash(path) for path in (self.work / "clips").rglob("*.wav")})
+        self.assertEqual(before, {path: audio_hash(path) for path in (self.work / "clips").rglob("*.wav")})
         self.assertEqual(list((self.work / "chapter-exports").rglob("*.wav")), [])
 
 

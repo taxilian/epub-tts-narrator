@@ -7,6 +7,8 @@ from epub_tts_narrator.renderer.speech_cache import SpeechCache
 from epub_tts_narrator.renderer.speech_identity import generation_identity
 from epub_tts_narrator.spoken_text import effective_delivery
 import test_renderer_split_delivery_recovery as fixtures
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(fixtures.FFMPEG and fixtures.FFPROBE, "FFmpeg and ffprobe required")
@@ -69,7 +71,7 @@ class RecoveryProvenanceTests(unittest.TestCase):
         row = accepted["engine_metadata"]["recovery"]["parts"][0]
         audio = wav.parent / row["audio_file"]
         child = audio.parent / "accepted.json"
-        saved_audio, saved_child = audio.read_bytes(), child.read_bytes()
+        saved_audio, saved_child = stored_audio.read_bytes(audio), stored_audio.read_bytes(child)
         for change in ("acceptance", "audio", "path", "symlink", "delivery"):
             with self.subTest(change=change):
                 altered = deepcopy(original)
@@ -89,7 +91,7 @@ class RecoveryProvenanceTests(unittest.TestCase):
                     value["engine_metadata"].update(synthesis_text=row["text"].strip(),
                                                      direction="A different performance")
                     write_json(child, value)
-                    altered["engine_metadata"]["recovery"]["parts"][0]["accepted_sha256"] = file_hash(child)
+                    altered["engine_metadata"]["recovery"]["parts"][0]["accepted_sha256"] = audio_hash(child)
                 write_json(wav.parent / "accepted.json", altered)
                 try:
                     with self.assertRaises((ValueError, OSError)):
@@ -117,7 +119,7 @@ class RecoveryProvenanceTests(unittest.TestCase):
         del row["acceptance"]["engine_metadata"]["synthesis_text"]
         child = (wav.parent / row["audio_file"]).parent / "accepted.json"
         write_json(child, row["acceptance"])
-        row["accepted_sha256"] = file_hash(child)
+        row["accepted_sha256"] = audio_hash(child)
 
         with self.assertRaises(ValueError):
             generation_identity(accepted["request"], self.fixture.voices, engine_metadata=metadata)

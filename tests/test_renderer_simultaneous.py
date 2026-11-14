@@ -21,6 +21,8 @@ from epub_tts_narrator.renderer.workflow import RenderBlocked, assemble, render
 from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.pipeline import segment
 from test_renderer_workflow import EXAMPLE, FixtureEngine, FixtureVerifier, pcm_key, timed_transcript
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
+from epub_tts_narrator.renderer import stored_audio
 
 
 def pcm(path, samples):
@@ -31,7 +33,7 @@ def pcm(path, samples):
 
 
 def samples(path):
-    with wave.open(str(path), "rb") as audio:
+    with open_wave(path) as audio:
         raw = audio.readframes(audio.getnframes())
     return list(struct.unpack("<" + "h" * (len(raw) // 2), raw))
 
@@ -46,20 +48,20 @@ class SimultaneousMixerTests(unittest.TestCase):
         paths = [pcm(self.root / "a.wav", [30000, 30000, 10000, 10000]),
                  pcm(self.root / "b.wav", [30000, 10000])]
         return [{"role_id": f"role{index}", "voice_id": f"voice{index}", "wav_path": str(path),
-                 "audio_sha256": file_hash(path), "request_hash": digest({"request": index}),
+                 "audio_sha256": audio_hash(path), "request_hash": digest({"request": index}),
                  "validation_key": digest({"validation": index}), "report": {"passed": True}}
                 for index, path in enumerate(paths)]
 
     def test_fixed_average_aligns_starts_pads_ends_and_prevents_clipping(self):
         lanes = self.lanes()
-        before = [file_hash(lane["wav_path"]) for lane in lanes]
+        before = [audio_hash(lane["wav_path"]) for lane in lanes]
         output = self.root / "mixed.wav"
         result = mix_speakers(lanes, output)
         self.assertEqual(samples(output), [30000, 20000, 5000, 5000])
         self.assertEqual(result["frames"], 4)
         self.assertEqual(result["weight"], .5)
         self.assertEqual(result["peak_amplitude"], 30000)
-        self.assertEqual(before, [file_hash(lane["wav_path"]) for lane in lanes])
+        self.assertEqual(before, [audio_hash(lane["wav_path"]) for lane in lanes])
 
     def test_only_verified_lanes_can_enter_mix_cache_and_cached_bytes_are_checked(self):
         lanes = self.lanes()
@@ -73,7 +75,7 @@ class SimultaneousMixerTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
             self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
         path = Path(mixed["wav_path"])
-        data = bytearray(path.read_bytes())
+        data = bytearray(stored_audio.read_bytes(path))
         data[-1] ^= 1
         path.write_bytes(data)
         with self.assertRaisesRegex(ValueError, "integrity"):
@@ -89,8 +91,9 @@ class SimultaneousMixerTests(unittest.TestCase):
         self.assertIn(f"key-{folder.name[:16]}", name)
         self.assertTrue(all(f"voice{index}" in name for index in range(2)))
         self.assertEqual(Path(mixed["wav_path"]).name, name)
-        self.assertEqual(file_hash(folder / name), record["audio_sha256"])
-        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", name})
+        self.assertEqual(audio_hash(folder / name), record["audio_sha256"])
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", stored_audio.locate(folder / name).name})
+        self.assertTrue(stored_audio.is_stored(folder / name), "the mix is kept as FLAC")
         with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
             self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
 
@@ -99,7 +102,7 @@ class SimultaneousMixerTests(unittest.TestCase):
         prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         folder = next((self.root / "mixes").iterdir())
         record = read_json(folder / "mix.json")
-        (folder / record.pop("audio_file")).rename(folder / "mix.wav")
+        stored_audio.rename_audio(folder / record.pop("audio_file"), folder / "mix.wav")
         record.pop("record_sha256")
         write_json(folder / "mix.json", dict(record, record_sha256=digest(record)))
         with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
@@ -118,20 +121,20 @@ class SimultaneousMixerTests(unittest.TestCase):
             write_json(folder / "mix.json", dict(tampered, record_sha256=digest(tampered)))
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "Recorded audio filename"):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
-        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", original})
+        self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", stored_audio.locate(folder / original).name})
 
     def test_truncated_lane_and_cancelling_audio_never_publish(self):
         lanes = self.lanes()
         short = Path(lanes[1]["wav_path"])
         short.write_bytes(short.read_bytes()[:-2])
-        lanes[1]["audio_sha256"] = file_hash(short)
+        lanes[1]["audio_sha256"] = audio_hash(short)
         with self.assertRaisesRegex(ValueError, "Truncated"):
             mix_speakers(lanes, self.root / "bad.wav")
         self.assertFalse((self.root / "bad.wav").exists())
         pcm(Path(lanes[0]["wav_path"]), [10000] * 4)
         pcm(short, [-10000] * 4)
         for lane in lanes:
-            lane["audio_sha256"] = file_hash(lane["wav_path"])
+            lane["audio_sha256"] = audio_hash(lane["wav_path"])
         with self.assertRaisesRegex(ValueError, "silent"):
             mix_speakers(lanes, self.root / "silent.wav")
         self.assertFalse((self.root / "silent.wav").exists())
@@ -150,12 +153,12 @@ class SimultaneousMixerTests(unittest.TestCase):
 
     def test_mixture_interruption_keeps_inputs_and_publishes_nothing(self):
         lanes = self.lanes()
-        original = [file_hash(lane["wav_path"]) for lane in lanes]
+        original = [audio_hash(lane["wav_path"]) for lane in lanes]
         with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(list((self.root / "mixes").iterdir()), [])
-        self.assertEqual(original, [file_hash(lane["wav_path"]) for lane in lanes])
+        self.assertEqual(original, [audio_hash(lane["wav_path"]) for lane in lanes])
 
 
 class LaneEngine(FixtureEngine):
@@ -189,7 +192,7 @@ class LaneVerifier(FixtureVerifier):
         if self.engine.performers.get(key) == self.failed_voice and self.failed_voice is not None:
             text = "A completely wrong phrase was spoken."
         transcript = timed_transcript(text)
-        with wave.open(str(path), "rb") as audio:
+        with open_wave(path) as audio:
             duration = audio.getnframes() / audio.getframerate()
         for segment in transcript["segments"]:
             segment["end"] *= duration

@@ -8,7 +8,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.renderer import assembly, chapter_cache
+from epub_tts_narrator.renderer import assembly, chapter_cache, stored_audio
 from epub_tts_narrator.renderer.chapter_cache import load_chapter, prepare_chapter
 from epub_tts_narrator.renderer.common import digest, file_hash, read_json, write_json
 from test_renderer_assembly import clip, make_wav
@@ -136,7 +136,9 @@ class ChapterCheckpointTests(unittest.TestCase):
         record = read_json(metadata)
         record.pop("wav_file")
         record.pop("encoded_file")
-        (metadata.parent / "chapter-0007.wav").rename(metadata.parent / "chapter.wav")
+        # Older versions kept the chapter as a WAV under the generic name.
+        (metadata.parent / "chapter.wav").write_bytes(stored_audio.read_bytes(metadata.parent / "chapter-0007.wav"))
+        stored_audio.remove_audio(metadata.parent / "chapter-0007.wav")
         (metadata.parent / "chapter-0007.m4a").rename(metadata.parent / "chapter.m4a")
         signature = record.pop("record_sha256", None)
         record["record_sha256"] = digest(record)
@@ -188,7 +190,7 @@ class ChapterCheckpointTests(unittest.TestCase):
             self.assertEqual(self.prepare(), first)
 
     def test_audio_and_metadata_corruption_are_rejected(self):
-        for filename in ("chapter-0007.wav", "chapter-0007.m4a", "chapter.json"):
+        for filename in ("chapter-0007.flac", "chapter-0007.m4a", "chapter.json"):
             with self.subTest(filename=filename):
                 self.context["test"] = filename
                 ready = self.prepare()
@@ -268,7 +270,7 @@ class ChapterCheckpointTests(unittest.TestCase):
         original = assembly.compose_chapter(self.clips, self.root / "original.wav", **{
             key: defaults[key] for key in ("paragraph_pause_ms", "blank_pause_ms", "bracket_pause_ms",
                                            "sentence_pause_ms", "clause_pause_ms")})
-        self.assertEqual(file_hash(ready["wav_path"]), file_hash(original["wav_path"]))
+        self.assertEqual(stored_audio.audio_hash(ready["wav_path"]), file_hash(original["wav_path"]))
         self.assertEqual(ready["normalization"]["status"], "disabled")
 
     def test_normalization_cannot_change_timing(self):
@@ -301,7 +303,7 @@ class ChapterCheckpointTests(unittest.TestCase):
              patch.object(assembly, "_run", side_effect=record_command):
             manifest = assembly.package_audio([ready], output, book=self.book)
         self.assertEqual(len(calls), 1)
-        self.assertIn("chapter-0007.wav", calls[0])
+        self.assertIn("chapter-0007.flac", calls[0])
         self.assertNotIn("chapter.m4a", calls[0])
         self.assertEqual(file_hash(output / "chapters/chapter-0007.m4a"), ready["encoded_sha256"])
         self.assertEqual(manifest["chapters"][0]["ordinal"], 1)

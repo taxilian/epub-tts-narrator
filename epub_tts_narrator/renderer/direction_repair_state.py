@@ -6,6 +6,7 @@ from pathlib import Path
 from ..provider import ProviderError
 from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_hash
 from .direction_repair import (make_payload, policy, proposal_valid, review_payload,
                                review_valid, validate_marker)
 from .direction_repair_prompts import PROPOSE, REVIEW
@@ -116,7 +117,7 @@ class DirectionRepair:
         filename = validate_audio_filename(record.get('audio_file'), suffix='.wav')
         if (record.get('request_hash') != self.binding['request_sha256']
                 or record.get('engine_metadata', {}).get('direction_repair') != self.state['audit']
-                or file_hash(regular_file(self.path.parent / filename)) != record.get('audio_sha256')):
+                or audio_hash(self.path.parent / filename) != record.get('audio_sha256')):
             raise ValueError('Interrupted direction trial lacks bound audio; refusing another synthesis trial')
 
     def abandoned(self, attempt):

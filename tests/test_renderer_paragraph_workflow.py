@@ -17,6 +17,7 @@ from epub_tts_narrator.renderer.workflow import (
 from epub_tts_narrator.cli import export_bundle
 from shared_fixtures import fixture_codes, renderer_config
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 
 class ParagraphFixtureEngine(FixtureEngine):
@@ -276,7 +277,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.paragraphs.group_paragraphs", side_effect=legacy_groups):
             self.chapters()
         before = self.accepted_clips()
-        hashes = {path: file_hash(path.parent / record["audio_file"])
+        hashes = {path: audio_hash(path.parent / record["audio_file"])
                   for path, record in before.items()}
         old_mixed = next(record for record in before.values()
                          if record["request"]["kind"] == "paragraph_speech"
@@ -301,7 +302,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
                          old_mixed["request"]["chunk"]["paragraph_turns"])
         for path, record in before.items():
             self.assertEqual(read_json(path), record)
-            self.assertEqual(file_hash(path.parent / record["audio_file"]), hashes[path])
+            self.assertEqual(audio_hash(path.parent / record["audio_file"]), hashes[path])
         checkpoint = read_json(checkpoint_path)
         self.assertNotEqual(checkpoint["context"]["chapter_hash"], old_checkpoint["context"]["chapter_hash"])
         self.assertNotIn(old_mixed["request"]["chunk"]["chunk_id"],
@@ -331,7 +332,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         path, accepted = next(iter(grouped.items()))
         self.assertEqual(len(accepted["request"]["chunk"]["paragraph_turns"]), 3)
         wav = path.parent / accepted["audio_file"]
-        old_hash = file_hash(wav)
+        old_hash = audio_hash(wav)
         calls = len(self.verifier.calls)
         self.assertFalse((self.root / "work" / ".render.lock").exists())
         self.engine.interrupt_speech_number = None
@@ -341,7 +342,7 @@ class ParagraphWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.engine.speech_calls), 7)  # six successes plus interruption
         self.assertEqual(len(self.verifier.calls) - calls, 3)  # interrupted and final two passages
         self.assertEqual(read_json(path), accepted)
-        self.assertEqual(file_hash(wav), old_hash)
+        self.assertEqual(audio_hash(wav), old_hash)
         self.assertEqual(len(self.grouped_clips()), 1)
 
     def test_partially_rendered_legacy_paragraph_keeps_its_boundaries(self):

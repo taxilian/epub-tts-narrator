@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from .common import digest, read_json, regular_file
+from .stored_audio import audio_exists
 from .clip_repair_contract import approved, logical_text, synthesis_request
 from .continuity import history_recovery
 from .history_echo import candidate_echo
@@ -24,7 +25,7 @@ def _repair_resumable(directory, state):
             continue
         for file_key in ('raw_file', 'audio_file'):
             name = part.get(file_key)
-            if isinstance(name, str) and (folder / name).is_file():
+            if isinstance(name, str) and audio_exists(folder / name):
                 return True
     return False
 

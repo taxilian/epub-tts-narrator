@@ -115,14 +115,14 @@ class TakeReview:
         return row
 
     def _learn(self, row):
-        from .common import file_hash, regular_file
+        from .stored_audio import audio_hash
         report = row["record"].get("report") or {}
         blocks = self._learnable(report)
         if not blocks:
             return []
         from .heard_variants import record_sightings, recognizer_key
         record_sightings(self.config["_heard_variants_directory"], recognizer_key(self.verifier), blocks,
-                         source="listened", audio_sha256=file_hash(regular_file(row["audio_path"])),
+                         source="listened", audio_sha256=audio_hash(row["audio_path"]),
                          request_hash=self.request_hash, transcript=report["transcript"])
         return [(" ".join(block["expected"]), " ".join(block["heard"])) for block in blocks]
 

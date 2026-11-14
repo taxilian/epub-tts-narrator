@@ -11,6 +11,7 @@ import test_renderer_reference_consensus as consensus
 from test_renderer_jev_verification import Judge
 import test_renderer_speech_retry as retry
 from test_renderer_workflow import FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 class WordSpacingComparisonTests(unittest.TestCase):
@@ -200,14 +201,14 @@ class WordSpacingResumeTests(unittest.TestCase):
         first_report_path = self.root / "takes" / "attempt-001.json"
         first_record = read_json(first_report_path)
         first = self.root / "takes" / first_record["audio_file"]
-        saved_audio = first.read_bytes()
+        saved_audio = stored_audio.read_bytes(first)
         first_report = first_report_path.read_bytes()
         # Rejected attempts remain diagnostics even after a verification change.
         # Only a successful new take becomes reusable speech.
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(accepted["attempt"], 3)
         self.assertEqual(wav, self.root / "takes" / accepted["audio_file"])
-        self.assertEqual(first.read_bytes(), saved_audio)
+        self.assertEqual(stored_audio.read_bytes(first), saved_audio)
         self.assertEqual(first_report_path.read_bytes(), first_report)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "word_spacing")

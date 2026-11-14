@@ -3,7 +3,6 @@
 from array import array
 import re
 import sys
-import wave
 
 
 def activity(path):
@@ -14,7 +13,8 @@ def activity(path):
     A window is audible above -60 dBFS (or -40 dB below a very quiet clip's
     loudest peak), which keeps breaths and soft consonants.
     """
-    with wave.open(str(path), "rb") as source:
+    from .stored_audio import open_wave
+    with open_wave(path) as source:
         rate, frames = source.getframerate(), source.getnframes()
         window = max(1, round(rate / 100))
         peaks, read = [], 0

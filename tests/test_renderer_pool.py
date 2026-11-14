@@ -30,6 +30,8 @@ from audition_fixtures import prepare_bundle
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 from test_renderer_paragraph_workflow import ParagraphFixtureEngine
 from shared_fixtures import HISTORY_CAPABILITY
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 def worker(name, *, local=False, concurrency=1, multi_speaker=True):
@@ -736,7 +738,7 @@ class PoolWorkflowTests(unittest.TestCase):
         wav, accepted = verified_take("Hello there.",
             lambda path, seed: self.engines[0]._write("Hello there.", path, seed),
             folder, request, self.verifier, self.config, notify=lambda _: None)
-        self.assertTrue(wav.is_file())
+        self.assertTrue(stored_audio.audio_exists(wav))
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["attempt"], 1)
 

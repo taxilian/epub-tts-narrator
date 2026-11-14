@@ -10,6 +10,7 @@ from epub_tts_narrator.renderer.verification import ReferenceTextJudgingVerifier
 from epub_tts_narrator.renderer.workflow import VerificationUnavailable, verified_take
 from epub_tts_narrator.jev import JevTranscriptJudge
 import test_renderer_reference_consensus as consensus
+from epub_tts_narrator.renderer import stored_audio
 
 
 SCRIPT = (
@@ -144,12 +145,12 @@ class RelaxedJevTests(unittest.TestCase):
                     verified_take(expected, generate, directory, {"fixture": True}, verifier, config, purpose="speech")
                 self.assertEqual(len(generated), 1)
                 pending = read_json(Path(directory, "attempt-001.json"))
-                saved = Path(directory, pending["audio_file"]).read_bytes()
+                saved = stored_audio.read_bytes(Path(directory, pending["audio_file"]))
                 path, record = verified_take(expected, generate, directory, {"fixture": True},
                                              verifier, config, purpose="speech")
             self.assertEqual(len(generated), 1)
             self.assertEqual(evaluate.call_count, 2)
-            self.assertEqual(path.read_bytes(), saved)
+            self.assertEqual(stored_audio.read_bytes(path), saved)
             self.assertTrue(record["report"]["passed"])
 
 

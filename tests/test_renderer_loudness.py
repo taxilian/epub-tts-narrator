@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
+from epub_tts_narrator.renderer import stored_audio
 from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
 from epub_tts_narrator.renderer.loudness import SampleNormalizer
 
@@ -45,7 +46,7 @@ class SampleLoudnessTests(unittest.TestCase):
         loudnorm = (f"loudnorm=I={settings['target_lufs']}:TP={settings['true_peak_db']}"
                     f":LRA={settings['loudness_range']}:print_format=json")
         result = subprocess.run([
-            "ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-i", str(path),
+            "ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-i", str(stored_audio.tool_path(path)),
             "-af", loudnorm, "-f", "null", "-",
         ], capture_output=True, check=True)
         report = result.stderr.decode()
@@ -62,7 +63,7 @@ class SampleLoudnessTests(unittest.TestCase):
             measured.append(float(stats["input_i"]))
             self.assertAlmostEqual(measured[-1], -20, delta=.3)
             self.assertLessEqual(float(stats["input_tp"]), -1.4)
-            with wave.open(str(source)) as before, wave.open(str(preview)) as after:
+            with wave.open(str(source)) as before, stored_audio.open_wave(preview) as after:
                 self.assertEqual(before.getparams(), after.getparams())
             self.assertEqual(file_hash(source), original[source])
             self.assertNotEqual(preview, source)
@@ -99,14 +100,16 @@ class SampleLoudnessTests(unittest.TestCase):
         self.assertEqual(preview.name, "hero-audition-loudness-sample.wav")
         record = read_json(preview.parent / "normalization.json")
         self.assertEqual(record["audio_file"], preview.name)
-        self.assertEqual(record["audio_sha256"], file_hash(preview))
+        self.assertEqual(record["audio_sha256"], stored_audio.audio_hash(preview))
+        self.assertEqual(stored_audio.locate(preview).name, "hero-audition-loudness-sample.flac")
 
     def test_legacy_sample_cache_resumes_without_rename_or_ffmpeg(self):
         # Given a valid old preview directory using sample.wav and no audio_file field.
         source = signal(self.root / "legacy-hero.wav")
         current = self.normalizer.prepare(source)
         legacy = current.parent / "sample.wav"
-        current.rename(legacy)
+        legacy.write_bytes(stored_audio.read_bytes(current))  # Older versions kept the WAV.
+        stored_audio.remove_audio(current)
         receipt = current.parent / "normalization.json"
         saved = read_json(receipt)
         saved.pop("audio_file")
@@ -124,7 +127,8 @@ class SampleLoudnessTests(unittest.TestCase):
 
     def test_corrupted_cache_is_not_played(self):
         source = signal(self.root / "source.wav")
-        preview = self.normalizer.prepare(source)
+        preview = stored_audio.locate(self.normalizer.prepare(source))
+        self.assertEqual(preview.suffix, ".flac", "the preview is kept as FLAC")
         data = bytearray(preview.read_bytes())
         data[-20] ^= 1
         preview.write_bytes(data)
@@ -160,7 +164,7 @@ class SampleLoudnessTests(unittest.TestCase):
                     self.normalizer.prepare(source)
             self.assertEqual(list(self.normalizer.cache_dir.iterdir()), [])
             self.assertEqual(file_hash(source), original)
-        self.assertTrue(self.normalizer.prepare(source).is_file())
+        self.assertTrue(stored_audio.audio_exists(self.normalizer.prepare(source)))
 
     def test_external_process_failure_reports_error_and_leaves_no_partial_output(self):
         source = signal(self.root / "source.wav")

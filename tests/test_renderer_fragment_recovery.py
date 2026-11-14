@@ -25,6 +25,8 @@ from test_renderer_speech_identity import reference, speech_request
 from test_renderer_speech_recovery import AudioVerifier
 from test_renderer_speech_resolver import Client
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 TEXT = "Insang Mortuary Services! This is—ack!"
@@ -171,7 +173,7 @@ class FragmentRecoveryTests(unittest.TestCase):
         self.assertEqual(self.calls.count(PART), 2)
         self.assertEqual(self.calls.count("This is—"), 1)
         self.assertEqual(self.calls.count("ack!"), 1)
-        self.assertTrue(wav.is_file())
+        self.assertTrue(stored_audio.audio_exists(wav))
 
     def test_exhausted_fragment_join_is_terminal_and_never_rebuilt(self):
         self.asr.final_transcript = "Insang Mortuary Services! This is—what"
@@ -185,10 +187,10 @@ class FragmentRecoveryTests(unittest.TestCase):
         self.assertFalse((part_dir / "accepted.json").exists())
         join = read_json(part_dir / "attempt-003.json")
         self.assertEqual(join["report"]["reasons"], ["text_mismatch"])
-        piece_hashes = {file_hash(path) for path in part_dir.glob("fragments/*/accepted.json")}
+        piece_hashes = {audio_hash(path) for path in part_dir.glob("fragments/*/accepted.json")}
         with self.assertRaisesRegex(SpeechVerificationFailed, "Cutoff-tail recovery is exhausted"):
             self.recover()
-        self.assertEqual({file_hash(path) for path in part_dir.glob("fragments/*/accepted.json")},
+        self.assertEqual({audio_hash(path) for path in part_dir.glob("fragments/*/accepted.json")},
                          piece_hashes)
 
     def test_fragment_audit_tampering_cannot_change_identity(self):

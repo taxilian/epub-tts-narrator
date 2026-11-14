@@ -7,6 +7,7 @@ import uuid
 from .assembly import normalize_clip
 from .audio_naming import speech_take_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_files, audio_hash, audio_present, locate, regular_audio, store_quietly
 from .generation_failures import drama3_truncation
 from .clip_repair_contract import approved, confirm_part, logical_text
 from .clip_repair_performance import project_plan_performance, repair_traits
@@ -55,7 +56,7 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
             if (previous.get('request_hash') != digest(request)
                     or previous.get('engine_metadata', {}).get('clip_repair', {}).get('audit') != state['audit']
                     or previous.get('audio_sha256') != state.get('joined_sha256')
-                    or file_hash(regular_file(target)) != previous['audio_sha256']):
+                    or audio_hash(target) != previous['audio_sha256']):
                 raise ValueError('Completed clip repair candidate changed')
             state['phase'] = 'evaluated'
             session.save()
@@ -82,7 +83,7 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
             if saved['part'] != part:
                 raise ValueError('Pending clip repair part changed')
             if 'audio_sha256' in saved:
-                if file_hash(regular_file(folder / saved['audio_file'])) != saved['audio_sha256']:
+                if audio_hash(folder / saved['audio_file']) != saved['audio_sha256']:
                     raise ValueError('Completed clip repair part changed')
                 confirm_part(request, part, saved['metadata'], performance=performance)
                 continue
@@ -129,21 +130,23 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                                f'({type(exc).__name__}) after {part_start + 1} start(s) in this invocation; '
                                'approved plan and completed parts are retained.')
                         return None
-                    saved.update(metadata=metadata, raw_sha256=file_hash(regular_file(folder / saved['raw_file'])))
+                    saved.update(metadata=metadata, raw_sha256=audio_hash(folder / saved['raw_file']))
                     session.save()
                     break
-            raw = regular_file(folder / saved['raw_file'])
-            if file_hash(raw) != saved['raw_sha256']:
+            raw = regular_audio(folder / saved['raw_file'])
+            if audio_hash(raw) != saved['raw_sha256']:
                 raise ValueError('Pending clip repair raw audio changed')
             if attempt_ticket is not None:
-                charged += raw.stat().st_size
+                charged += locate(raw).stat().st_size
                 attempt_ticket.update_bytes(charged)
             wav = folder / speech_take_filename(request, attempt, role=f'part-{number:03d}-take')
             with tempfile.TemporaryDirectory(prefix='.normalize-part-', dir=folder) as staging:
                 normalized = Path(staging) / wav.name
                 normalize_clip(raw, normalized, sample_rate=config['render']['sample_rate'], ffmpeg=config['render']['ffmpeg'])
-                if wav.exists() or wav.is_symlink():
-                    regular_file(wav).rename(folder / f'{wav.stem}-orphan-{uuid.uuid4().hex}.wav')
+                if audio_present(wav):
+                    orphan = f'{wav.stem}-orphan-{uuid.uuid4().hex}'
+                    for item in audio_files(wav):
+                        regular_file(item).rename(folder / (orphan + item.suffix))
                 os.replace(normalized, wav)
             saved.update(audio_file=wav.name, audio_sha256=file_hash(regular_file(wav)))
             session.save()
@@ -153,15 +156,15 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                 _concatenate([(folder / part['audio_file'], part) for part in state['parts']],
                              joined, config['render']['sample_rate'])
                 checksum = file_hash(joined)
-                if target.exists() and file_hash(regular_file(target)) != checksum:
+                if audio_present(target) and audio_hash(target) != checksum:
                     raise ValueError('Interrupted clip repair join changed')
                 os.replace(joined, target)
             state['joined_sha256'] = checksum
             session.save()
-        if file_hash(regular_file(target)) != state['joined_sha256']:
+        if audio_hash(target) != state['joined_sha256']:
             raise ValueError('Clip repair joined audio changed')
         if attempt_ticket is not None:
-            attempt_ticket.update_bytes(regular_file(target).stat().st_size)
+            attempt_ticket.update_bytes(locate(regular_audio(target)).stat().st_size)
         evidence = []
         for number, part in enumerate(state['parts'], 1):
             item = {key: deepcopy(part[key]) for key in ('part', 'metadata', 'audio_sha256')}
@@ -180,6 +183,9 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
             raise ClipRecoveryUnavailable('Clip repair verification unavailable; completed synthesis retained')
         record = {**pending, 'report': report}
         write_json(candidate_path, record)
+        store_quietly(target, expected_sha256=record['audio_sha256'])
+        for part in state['parts']:
+            store_quietly(folder / part['audio_file'], expected_sha256=part['audio_sha256'])
         state['phase'] = 'evaluated'
         session.save()
         if report.get('passed') is True:

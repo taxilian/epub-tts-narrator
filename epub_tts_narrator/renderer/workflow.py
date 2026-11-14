@@ -20,6 +20,7 @@ from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare
 from .chapter_records import signed_record
 from .bundle import chunk_identity_fingerprint, chunk_speakers, make_plan
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_exists, audio_hash, audio_present, store_quietly
 from .continuity import POLICY as CONTINUITY_POLICY
 from .config import resolve_voice_design
 from .diagnostics import configured_secrets, safe_error_text
@@ -256,7 +257,7 @@ def _load_elevenlabs_generation(path, request, attempt, seed):
             raise ValueError("generation identity")
         raw_name = validate_audio_filename(payload["raw_file"], suffix=".wav")
         raw = path.parent / raw_name
-        if file_hash(regular_file(raw)) != payload["raw_sha256"]:
+        if audio_hash(raw) != payload["raw_sha256"]:
             raise ValueError("generation audio checksum")
         metadata = payload["engine_metadata"]
         if (not isinstance(metadata, dict) or metadata.get("description_applied") is not True
@@ -286,7 +287,7 @@ def _heard_variant_check(report, config, verifier, request_hash, wav, purpose, n
         return report
     from .heard_variants import POLICY, apply
     try:
-        audio = file_hash(regular_file(wav))
+        audio = audio_hash(wav)
         report, outcome = apply(report, directory=directory, verifier=verifier,
                                 request_hash=request_hash, audio_sha256=audio)
     except (ValueError, OSError) as exc:
@@ -315,7 +316,7 @@ def _skipped_word_check(report, verifier, request_hash, wav, directory, purpose,
         return report
     from .skipped_word import POLICY, apply
     try:
-        audio = file_hash(regular_file(wav))
+        audio = audio_hash(wav)
         report, outcome = apply(report, directory=directory, verifier=verifier,
                                 request_hash=request_hash, audio_sha256=audio, engine_metadata=metadata)
     except (ValueError, OSError):
@@ -426,7 +427,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 or not pending_confirmation(pending.get("report", {}))):
             raise RenderBlocked("Saved reference is not awaiting text confirmation")
         pending_wav = directory / validate_audio_filename(pending.get("audio_file"), suffix=".wav")
-        if pending_wav.is_symlink() or not pending_wav.is_file():
+        if not audio_exists(pending_wav):
             raise RenderBlocked("Pending reference verification requires the saved attempt and audio")
 
     accepted = None
@@ -463,7 +464,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             write_json(diagnostic_path, accepted)
             accepted_path.unlink()
             accepted = None
-        elif not wav.exists() and not wav.is_symlink():
+        elif not audio_present(wav):
             missing_accepted_attempt = accepted.get("attempt")
             if (type(missing_accepted_attempt) is not int or missing_accepted_attempt < 1
                     or (purpose != "speech" and missing_accepted_attempt > 10)):
@@ -473,7 +474,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             accepted = None
         else:
             try:
-                checksum = file_hash(regular_file(wav))
+                checksum = audio_hash(wav)
             except (ValueError, OSError) as exc:
                 raise RenderBlocked("Cached accepted audio is not a readable regular file") from exc
             if checksum != accepted.get("audio_sha256"):
@@ -664,9 +665,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     if direction_session is None or not direction_session.abandoned(number)]
         latest = resolution_session.records[max(eligible)]
         name = latest.get("audio_file")
-        if isinstance(name, str) and (directory / name).exists():
+        if isinstance(name, str) and audio_present(directory / name):
             name = validate_audio_filename(name, suffix=".wav")
-            if file_hash(regular_file(directory / name)) != latest.get("audio_sha256"):
+            if audio_hash(directory / name) != latest.get("audio_sha256"):
                 raise RenderBlocked("Speech recovery candidate changed on disk")
             # Pending decisions and recurring failures are reconsidered; no saved
             # transcript is substituted for independent recognition here.
@@ -745,9 +746,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 wav = directory / validate_audio_filename(previous["audio_file"], suffix=".wav")
             if previous.get("raw_file") is not None:
                 raw = directory / validate_audio_filename(previous["raw_file"], suffix=".wav")
-            elif (directory / (prefix + "-raw.wav")).exists():
+            elif audio_present(directory / (prefix + "-raw.wav")):
                 raw = directory / (prefix + "-raw.wav")
-            if (fresh_speech and not wav.exists() and attempt != missing_accepted_attempt
+            if (fresh_speech and not audio_present(wav) and attempt != missing_accepted_attempt
                     and not previous.get("report", {}).get("passed")):
                 # No waveform exists to recheck, even if verification settings
                 # changed. Preserve the failed request and append a new take.
@@ -762,7 +763,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 last_report = previous.get("report", {})
                 continue
             metadata = previous.get("engine_metadata", {})
-        if (fresh_speech and attempt in saved_attempts and not wav.exists()
+        if (fresh_speech and attempt in saved_attempts and not audio_present(wav)
                 and attempt != missing_accepted_attempt):
             # Interrupted raw-only takes reserve their IDs but cannot be
             # verified. Append a new seed rather than recycling an orphan.
@@ -772,13 +773,13 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     and (generation_path.exists() or generation_path.is_symlink())):
                 raw, metadata, generation = _load_elevenlabs_generation(
                     generation_path, request, attempt, seed)
-            if wav.exists():
+            if audio_present(wav):
                 if result_path.exists():
                     expected_hash = read_json(result_path).get("audio_sha256")
-                    if expected_hash and file_hash(wav) != expected_hash:
+                    if expected_hash and audio_hash(wav) != expected_hash:
                         raise RenderBlocked("Candidate audio changed on disk")
                 if generation is not None:
-                    checksum = file_hash(regular_file(wav))
+                    checksum = audio_hash(wav)
                     if generation.get("normalized_sha256") is None:
                         # A crash may occur between normalization and recording
                         # its checksum. Recreate privately and compare, retaining
@@ -798,9 +799,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 if attempt == missing_accepted_attempt:
                     raw = directory / speech_take_filename(
                         request, attempt, role="regenerated-" + os.urandom(8).hex())
-                elif raw.exists() and generation is None:
+                elif audio_present(raw) and generation is None:
                     raw = directory / speech_take_filename(request, attempt, role="recovery-raw")
-                    if raw.exists():
+                    if audio_present(raw):
                         raise RenderBlocked("Repeated interrupted generation requires inspecting the work directory")
                 if generation is None:
                     # A running take finishes its quality checks and cache
@@ -878,7 +879,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     if elevenlabs:
                         generation = {"version": 1, "request_hash": digest(request), "attempt": attempt,
                                       "seed": seed, "raw_file": raw.name,
-                                      "raw_sha256": file_hash(regular_file(raw)),
+                                      "raw_sha256": audio_hash(raw),
                                       "engine_metadata": metadata, "normalized_sha256": None}
                         _save_elevenlabs_generation(generation_path, generation)
                 report_worker_activity(notify, "source", metadata.get("render_worker"))
@@ -887,12 +888,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                                ffmpeg=config["render"]["ffmpeg"])
                 if "continuity_codes" in metadata:
                     marker = metadata["continuity_codes"]
-                    if marker["raw_audio_sha256"] != file_hash(regular_file(raw)):
+                    if marker["raw_audio_sha256"] != audio_hash(raw):
                         raise ValueError("Continuity generated audio changed before normalization")
                     metadata = dict(metadata, continuity_codes=dict(
-                        marker, accepted_audio_sha256=file_hash(regular_file(wav))))
+                        marker, accepted_audio_sha256=audio_hash(wav)))
                 if generation is not None:
-                    generation["normalized_sha256"] = file_hash(regular_file(wav))
+                    generation["normalized_sha256"] = audio_hash(wav)
                     _save_elevenlabs_generation(generation_path, generation)
                 # Persist the actual synthesis input and its byte binding before
                 # recognition can be interrupted. In particular, a pronunciation
@@ -905,7 +906,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         "report": {"passed": False, "reasons": ["generation_incomplete"],
                                    "retry_on_resume": True},
                         "engine_metadata": metadata, "audio_file": wav.name, "raw_file": raw.name,
-                        "audio_sha256": file_hash(regular_file(wav)),
+                        "audio_sha256": audio_hash(wav),
                     })
                 if attempt_ticket is not None:
                     attempt_ticket.materialize(regular_file(wav).stat().st_size)
@@ -954,18 +955,21 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             echo = attempt_evidence(report, metadata, text)
             if echo is not None:
                 report = {**report, "history_echo": echo}
-        if wav.exists():
+        if audio_present(wav):
             report = _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify)
             if "history_echo" not in report:
                 report = _skipped_word_check(report, verifier, request_hash, wav, directory, purpose, notify, metadata)
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
-            "audio_file": wav.name if wav.exists() else None,
-            "raw_file": raw.name if raw.exists() else None,
-            "audio_sha256": file_hash(wav) if wav.exists() else None,
+            "audio_file": wav.name if audio_present(wav) else None,
+            "raw_file": raw.name if audio_present(raw) else None,
+            "audio_sha256": audio_hash(wav) if audio_present(wav) else None,
         }
         write_json(result_path, record)
+        if record["audio_file"] is not None and purpose == "speech":
+            # Kept takes live as exact FLAC copies; the record still names the WAV.
+            store_quietly(wav, expected_sha256=record["audio_sha256"])
         last_report = report
         if report.get("passed") is True:
             chosen = chosen_meanwhile()
@@ -1886,10 +1890,10 @@ def _saved_chapter_clips_present(work, record):
                         or cached.get("request_hash") != key):
                     raise ValueError("Invalid accepted clip metadata")
                 wav = directory / name
-                if not wav.exists() and not wav.is_symlink():
+                if not audio_present(wav):
                     present = False
                     continue
-                checksum = file_hash(regular_file(wav))
+                checksum = audio_hash(wav)
                 if checksum != cached.get("audio_sha256"):
                     raise ValueError("Cached audio changed")
                 if checksum != lane.get("audio_sha256"):
@@ -2227,9 +2231,9 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
         except ValueError as exc:
             raise RenderBlocked("Invalid saved whole speech candidate path") from exc
         wav = directory / filename
-        if not wav.exists() and not wav.is_symlink():
+        if not audio_present(wav):
             continue
-        if file_hash(regular_file(wav)) != record.get("audio_sha256"):
+        if audio_hash(wav) != record.get("audio_sha256"):
             raise RenderBlocked("Saved whole speech candidate changed on disk")
         metadata = record.get("engine_metadata")
         if not isinstance(metadata, dict):

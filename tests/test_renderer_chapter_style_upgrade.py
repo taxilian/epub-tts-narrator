@@ -9,6 +9,8 @@ from epub_tts_narrator.renderer.common import digest, file_hash, read_json, writ
 from epub_tts_narrator.renderer.workflow import RenderBlocked
 import test_renderer_incremental as incremental
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 class DirectedFixtureEngine(FixtureEngine):
@@ -127,15 +129,15 @@ class ChapterStyleUpgradeTests(unittest.TestCase):
                       if read_json(path)["request"]["chunk"]["segment"]["delivery"]["direction"])
         record = read_json(styled)
         audio = styled.parent / record["audio_file"]
-        audio.write_bytes(audio.read_bytes() + b"changed")
-        changed_checksum = file_hash(audio)
+        audio.write_bytes(stored_audio.read_bytes(audio) + b"changed")
+        changed_checksum = audio_hash(audio)
         counts, published = self.model_counts(), self.output_bytes()
 
         with self.assertRaisesRegex(RenderBlocked, "[Cc]ached.*changed|[Aa]udio.*changed"):
             self.run_render()
 
         self.assertEqual(self.model_counts(), counts)
-        self.assertEqual(file_hash(audio), changed_checksum)
+        self.assertEqual(audio_hash(audio), changed_checksum)
         self.assertEqual(self.output_bytes(), published)
 
     def test_assemble_identifies_stale_style_and_preserves_published_book(self):

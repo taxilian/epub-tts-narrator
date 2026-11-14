@@ -14,6 +14,7 @@ from .assembly import _wave_info
 from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .common import digest, file_hash, read_json, write_json
 from .interrupts import run_subprocess
+from .stored_audio import StoredAudioError, audio_exists, audio_hash, store_quietly, tool_path
 
 
 class SampleNormalizer:
@@ -39,7 +40,7 @@ class SampleNormalizer:
 
     def _run(self, source, audio_filter, output):
         command = [self.ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-n",
-                   "-protocol_whitelist", "file,pipe", "-i", str(source),
+                   "-protocol_whitelist", "file,pipe", "-i", str(tool_path(source)),
                    "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", audio_filter]
         if output is None:
             command += ["-f", "null", "-"]
@@ -78,10 +79,14 @@ class SampleNormalizer:
             raise ValueError("Voice preview cache failed integrity checks; remove this preview directory and retry: " + str(folder))
         filename = validate_audio_filename(record.get("audio_file", "sample.wav"), suffix=".wav")
         audio = folder / filename
-        if audio.is_symlink() or not audio.is_file():
+        if not audio_exists(audio):
             raise ValueError("Voice preview cache is incomplete; remove this preview directory and retry: " + str(folder))
+        try:
+            checksum = audio_hash(audio)
+        except StoredAudioError:
+            checksum = None  # A damaged stored FLAC fails like a changed WAV.
         if (record.get("identity") != identity
-                or record.get("audio_sha256") != file_hash(audio)
+                or record.get("audio_sha256") != checksum
                 or _wave_info(audio, 44100) != info):
             raise ValueError("Voice preview cache failed integrity checks; remove this preview directory and retry: " + str(folder))
         return audio.resolve()
@@ -90,7 +95,7 @@ class SampleNormalizer:
         """Return a ready preview, without loading models or altering a voice."""
         source = Path(path).resolve()
         info = _wave_info(source, 44100)
-        identity = {"source_sha256": file_hash(source), "settings": self.settings}
+        identity = {"source_sha256": audio_hash(source), "settings": self.settings}
         # Book path validation protects the work root. Reject symlinks in the
         # preview directory and its work parent, while allowing OS aliases such
         # as macOS /var -> /private/var higher up the absolute path.
@@ -117,7 +122,7 @@ class SampleNormalizer:
             result = self._run(source, audio_filter, audio)
             if _wave_info(audio, 44100) != info:
                 raise ValueError("Voice sample normalization changed the audio length")
-            if file_hash(source) != identity["source_sha256"]:
+            if audio_hash(source) != identity["source_sha256"]:
                 raise ValueError("Voice sample changed while preparing its preview")
             if (abs(float(result["output_i"]) - self.settings["target_lufs"]) > 1.0
                     or float(result["output_tp"]) > self.settings["true_peak_db"] + .2):
@@ -130,6 +135,7 @@ class SampleNormalizer:
                 "output_true_peak_db": float(result["output_tp"]),
                 "normalization_type": result.get("normalization_type"),
             })
+            store_quietly(audio)
             try:
                 os.rename(staged, folder)
             except OSError:

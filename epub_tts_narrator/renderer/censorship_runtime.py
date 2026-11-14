@@ -6,7 +6,8 @@ from pathlib import Path
 from ..spoken_text import build_spoken
 from .assembly import _wave_info
 from .censorship import CensorshipAlignmentRequired, matches, plan_masks, validate_policy
-from .common import file_hash, read_json, regular_file
+from .common import read_json, regular_file
+from .stored_audio import audio_hash, regular_audio
 
 
 def censorship_targets(chunk, policy):
@@ -74,8 +75,8 @@ def prepare_chapter_censorship(clips, acceptance, policy, *, verifier=None,
 
     def prepare(chunk, path, accepted):
         nonlocal verifier, censored
-        path = regular_file(path)
-        checksum = file_hash(path)
+        path = regular_audio(path)
+        checksum = audio_hash(path)
         if (checksum != accepted.get("audio_sha256")
                 or accepted.get("report", {}).get("passed") is not True):
             raise ValueError("Censorship requires unchanged independently accepted audio")
@@ -142,9 +143,9 @@ def restore_verified_clips(chapter, acceptance, work, *, sample_rate, notify=pri
         name = saved.get("audio_file")
         if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
             raise ValueError("Invalid original accepted audio filename")
-        path = regular_file(directory / name)
+        path = regular_audio(directory / name)
         if (saved.get("request_hash") != request or saved.get("audio_sha256") != entry["audio_sha256"]
-                or file_hash(path) != entry["audio_sha256"] or saved.get("report", {}).get("passed") is not True):
+                or audio_hash(path) != entry["audio_sha256"] or saved.get("report", {}).get("passed") is not True):
             raise ValueError("Original accepted audio changed before recomposition")
         return str(path)
 

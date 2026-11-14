@@ -53,6 +53,7 @@ def apply_effect(source: str | Path, target: str | Path, preset: str, *, ffmpeg:
                  sample_rate: int, run=None) -> Path:
     """Write ``preset`` applied to ``source`` at ``target`` with the same frame count."""
     from .assembly import _run, _wave_info
+    from .stored_audio import tool_path
     source, target = Path(source), Path(target)
     if preset not in CHAINS:
         raise ValueError(f"Unknown voice effect preset: {preset!r}")
@@ -61,7 +62,7 @@ def apply_effect(source: str | Path, target: str | Path, preset: str, *, ffmpeg:
         raise ValueError(f"Output already exists: {target}")
     chain = f"{CHAINS[preset]},apad,atrim=end_sample={frames},aformat=sample_fmts=s16:channel_layouts=mono"
     (run or _run)([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-                   "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", "0:a:0",
+                   "-protocol_whitelist", "file,pipe", "-i", str(tool_path(source)), "-map", "0:a:0",
                    "-af", chain, "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(target)])
     result = _wave_info(target, sample_rate)["frames"]
     if result != frames:

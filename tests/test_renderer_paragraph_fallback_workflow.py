@@ -22,6 +22,7 @@ from shared_fixtures import fixture_codes
 import test_renderer_paragraph_workflow as paragraph_fixtures
 from test_renderer_recurring_resolution import PlanClient
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureVerifier
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 
 class TransportFailure(RuntimeError):
@@ -95,13 +96,13 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertTrue(all("paragraph_turns" not in chunk for chunk in chunks))
 
     def snapshot_accepted(self):
-        return {path: (record, file_hash(path.parent / record["audio_file"]))
+        return {path: (record, audio_hash(path.parent / record["audio_file"]))
                 for path, record in self.accepted_clips().items()}
 
     def assert_snapshot_unchanged(self, before):
         for path, (record, checksum) in before.items():
             self.assertEqual(read_json(path), record)
-            self.assertEqual(file_hash(path.parent / record["audio_file"]), checksum)
+            self.assertEqual(audio_hash(path.parent / record["audio_file"]), checksum)
 
     def test_failed_group_recovers_in_same_run_with_original_voices_and_source_sync(self):
         original = deepcopy(self.target())

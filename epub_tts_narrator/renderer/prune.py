@@ -43,7 +43,8 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _HEX24 = re.compile(r"[0-9a-f]{24}")
 _TOKEN = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 _CODES = re.compile(r"[0-9a-f]{64}\.codes\.json")
-_TAKE_AUDIO = re.compile(r"(?:attempt|selection)-.+\.wav")
+# A take is a WAV or its stored FLAC (``stored_audio``); records name the WAV.
+_TAKE_AUDIO = re.compile(r"(?:attempt|selection)-.+\.(?:wav|flac)")
 # A casting take with any of these and no cleanup record still owns a hosted voice.
 _HOSTED = ("gemini-voice-cleanup-request.json", "gemini-voice.json", "gemini-voice-pending.json")
 _LABELS = {
@@ -327,11 +328,12 @@ def _prune_clips(work, plan, needed, chapter_tokens):
             continue  # Pending work and judged takes stay exactly as they are.
         raw = accepted.get("raw_file")
         for path in sorted(directory.iterdir()):
-            if path.is_symlink() or not path.is_file() or path.name == accepted.get("audio_file"):
+            logical = path.name[:-len(".flac")] + ".wav" if path.name.endswith(".flac") else path.name
+            if path.is_symlink() or not path.is_file() or logical == accepted.get("audio_file"):
                 continue
-            named = f'"{path.name}"' in take["text"]
-            if _TAKE_AUDIO.fullmatch(path.name) and (not named or path.name == raw):
-                plan.remove_file(path, "intermediates" if path.name == raw else "rejected_takes")
+            named = f'"{logical}"' in take["text"]
+            if _TAKE_AUDIO.fullmatch(path.name) and (not named or logical == raw):
+                plan.remove_file(path, "intermediates" if logical == raw else "rejected_takes")
             elif _CODES.fullmatch(path.name) and not named:
                 plan.remove_file(path, "rejected_codes")
     kept_audio = {take["accepted"].get("audio_sha256") for name, take in takes.items()

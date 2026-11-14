@@ -11,6 +11,7 @@ from epub_tts_narrator.renderer.workflow import assemble, render
 from audition_fixtures import prepare_bundle
 from test_renderer_clip_repair import BroadClient
 import test_renderer_workflow as fixtures
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(fixtures.FFMPEG and fixtures.FFPROBE, 'FFmpeg and ffprobe required')
@@ -52,10 +53,10 @@ class ExhaustionAssemblyTests(unittest.TestCase):
             accepted_path = work / 'clips' / row['request_hash'] / 'accepted.json'
             current = accepted_path.parent / row['audio_file']
             old = current.with_name('selection-' + row['audio_sha256'] + '.wav')
-            current.rename(old)
+            stored_audio.rename_audio(current, old)
             row['audio_file'] = old.name
             write_json(accepted_path, row)
-            legacy[accepted_path] = (accepted_path.read_bytes(), old.read_bytes())
+            legacy[accepted_path] = (accepted_path.read_bytes(), stored_audio.read_bytes(old))
         calls = len(self.engine.speech_calls), len(client.selection_calls), len(self.verifier.calls)
         with patch.object(self.engine, 'synthesize', side_effect=AssertionError('cached render invoked TTS')):
             render(self.bundle, self.config, self.engine, verifier, notify=lambda _: None, chapters_only=True)
@@ -65,4 +66,4 @@ class ExhaustionAssemblyTests(unittest.TestCase):
         self.assertEqual((len(self.engine.speech_calls), len(client.selection_calls), len(self.verifier.calls)), calls)
         for path, (metadata, audio) in legacy.items():
             self.assertEqual(path.read_bytes(), metadata)
-            self.assertEqual((path.parent / read_json(path)['audio_file']).read_bytes(), audio)
+            self.assertEqual(stored_audio.read_bytes(path.parent / read_json(path)['audio_file']), audio)

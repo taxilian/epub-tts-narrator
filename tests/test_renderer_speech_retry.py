@@ -15,6 +15,7 @@ from epub_tts_narrator.renderer.workflow import (
 )
 import epub_tts_narrator.renderer.workflow as workflow
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required for retry integration")
@@ -54,7 +55,7 @@ class SpeechRetryTests(unittest.TestCase):
 
     def assert_snapshot_unchanged(self, before):
         for path, contents in before.items():
-            self.assertEqual(path.read_bytes(), contents, path.name)
+            self.assertEqual(stored_audio.read_bytes(path), contents, path.name)
 
     def test_moving_speech_preserves_generation_seed_when_synthesis_identity_is_unchanged(self):
         identity = {"text": self.text, "voice": "fixture-voice"}
@@ -141,7 +142,7 @@ class SpeechRetryTests(unittest.TestCase):
         rejected = read_json(directory / "attempt-002.json")
         write_json(directory / "accepted.json", rejected)
         (directory / "attempt-002.json").unlink()
-        old_wav = (directory / rejected["audio_file"]).read_bytes()
+        old_wav = stored_audio.read_bytes((directory / rejected["audio_file"]))
 
         def unavailable(path, seed):
             self.assertFalse((directory / "accepted.json").exists())
@@ -151,7 +152,7 @@ class SpeechRetryTests(unittest.TestCase):
             self.take(SpeechRetryBudget(), generate=unavailable)
         self.assertFalse((directory / "accepted.json").exists())
         self.assertEqual(read_json(directory / "attempt-002.json"), rejected)
-        self.assertEqual((directory / rejected["audio_file"]).read_bytes(), old_wav)
+        self.assertEqual(stored_audio.read_bytes((directory / rejected["audio_file"])), old_wav)
         self.assertEqual(len(self.verifier.calls), 2)
 
     def test_failed_legacy_acceptance_never_survives_pending_verification(self):
@@ -201,7 +202,7 @@ class SpeechRetryTests(unittest.TestCase):
         before = {path: contents for path, contents in self.snapshot().items() if path != pending_path}
         resumed, accepted = self.take(SpeechRetryBudget())
         self.assertEqual(resumed, wav)
-        self.assertEqual(resumed.read_bytes(), original_bytes)
+        self.assertEqual(stored_audio.read_bytes(resumed), original_bytes)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 1)
         self.assert_snapshot_unchanged(before)
@@ -309,9 +310,9 @@ class SpeechRetryTests(unittest.TestCase):
         self.assertEqual(accepted["attempt"], 13)
         self.assertEqual(wav.name, accepted["audio_file"])
         self.assert_snapshot_unchanged(failures)
-        wav.unlink()
+        stored_audio.remove_audio(wav)
         replacement, replacement_record = self.take(SpeechRetryBudget())
-        self.assertTrue(replacement.is_file())
+        self.assertTrue(stored_audio.audio_exists(replacement))
         self.assertTrue(replacement_record["report"]["passed"])
         self.assertEqual(len(self.calls), 14)
         self.assert_snapshot_unchanged(failures)

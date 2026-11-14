@@ -25,6 +25,7 @@ from .chapter_records import (
     verification_record,
 )
 from .common import digest, file_hash, pcm_sha256, read_json, regular_file, write_json, verify_flac_pcm
+from .stored_audio import audio_hash
 from .quality import QUALITY_VERSION
 from .render_metrics import METRICS
 from .retry_budget import SpeechRetryBudget
@@ -37,7 +38,8 @@ MAX_PARALLEL_CHAPTERS = 16
 
 
 def _pcm_data_hash(path):
-    return pcm_sha256(path, format_error=ValueError("Chapter master must contain mono 16-bit PCM"))
+    from .stored_audio import pcm_sha256 as stored_pcm_sha256
+    return stored_pcm_sha256(path, format_error=ValueError("Chapter master must contain mono 16-bit PCM"))
 
 
 def _flac_master(wav, target, ffmpeg):
@@ -46,7 +48,8 @@ def _flac_master(wav, target, ffmpeg):
     base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
             "-protocol_whitelist", "file,pipe"]
     try:
-        result = subprocess.run(base + ["-i", str(wav), "-map", "0:a:0", "-vn", "-sn", "-dn",
+        from .stored_audio import tool_path
+        result = subprocess.run(base + ["-i", str(tool_path(wav)), "-map", "0:a:0", "-vn", "-sn", "-dn",
                                         "-map_metadata", "-1", "-c:a", "flac",
                                         "-compression_level", "8", str(target)],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -257,7 +260,7 @@ class ChapterExecutor:
                 continue
             accepted = expected.get(clip["chunk_id"], {})
             if (accepted.get("report", {}).get("passed") is not True
-                    or file_hash(regular_file(clip["wav_path"])) != accepted.get("audio_sha256")):
+                    or audio_hash(clip["wav_path"]) != accepted.get("audio_sha256")):
                 raise ValueError("Verified chapter audio changed before assembly")
         work = Path(work).resolve()
         export_identity = {"spec_hash": digest(spec), "context": prepared["context"],

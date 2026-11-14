@@ -18,6 +18,8 @@ from shared_fixtures import renderer_config
 from test_chapter_export import chapter_document
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
 from audition_fixtures import prepare_bundle
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -54,7 +56,7 @@ class StagedWorkflowTests(unittest.TestCase):
         stale = checkpoint.read_bytes()
         directory = self.root / "work" / "clips" / request_hash
         accepted = read_json(directory / "accepted.json")
-        (directory / accepted["audio_file"]).unlink()
+        stored_audio.remove_audio((directory / accepted["audio_file"]))
         write = self.engine._write
 
         def replacement_take(text, path, seed):
@@ -78,8 +80,8 @@ class StagedWorkflowTests(unittest.TestCase):
         self.assertEqual(final["status"], "complete")
         self.assertFalse(final["partial_book"])
         for c in result["chapters"]:
-            self.assertEqual(file_hash(c["audio_file"]),
-                             file_hash(self.root / "output" / "chapters" / f"chapter-{c['number']:04d}.m4a"))
+            self.assertEqual(audio_hash(c["audio_file"]),
+                             audio_hash(self.root / "output" / "chapters" / f"chapter-{c['number']:04d}.m4a"))
         output = self.root / "output"
         book_path = output / final["audio"]["audiobook"]["path"]
         self.assertEqual(len(probe_audio(book_path, ffprobe=FFPROBE)["chapters"]), 2)
@@ -92,7 +94,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.chapters()
         checkpoint = read_json(self.checkpoint(1))
         self.assertTrue(checkpoint["audio_file"].endswith("/chapter-0001.m4a"))
-        self.assertTrue((self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter-0001.wav").is_file())
+        self.assertTrue(stored_audio.audio_exists(self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter-0001.wav"))
         for number in (1, 2):
             link = self.root / "work" / "chapter-links" / f"chapter-{number:02d}.m4a"
             self.assertTrue(link.is_symlink())
@@ -176,10 +178,10 @@ class StagedWorkflowTests(unittest.TestCase):
         first = read_json(self.checkpoint())
         self.assertTrue(Path(first["audio_file"]).is_file())
         self.assertFalse(self.checkpoint(2).exists())
-        checksum = file_hash(first["audio_file"])
+        checksum = audio_hash(first["audio_file"])
         self.engine.interrupt_speech_number = None
         self.chapters()
-        self.assertEqual(file_hash(first["audio_file"]), checksum)
+        self.assertEqual(audio_hash(first["audio_file"]), checksum)
         self.assertEqual(len(self.engine.speech_calls), 5)
         self.assertTrue(any("Reusing completed chapter 1 / 2" in item for item in self.messages))
         self.assertFalse((self.root / "work" / ".render.lock").exists())
@@ -209,7 +211,7 @@ class StagedWorkflowTests(unittest.TestCase):
     def test_deleted_chapter_directory_is_rebuilt_without_new_tts_or_asr(self):
         first = self.chapters()
         folder = Path(first["chapters"][0]["cache_directory"])
-        pcm_hash = file_hash(folder / "chapter-0001.wav")
+        pcm_hash = audio_hash(folder / "chapter-0001.wav")
         untouched_checkpoint = self.checkpoint(2).read_bytes()
         accepted = {str(path): path.read_bytes()
                     for path in (self.root / "work" / "clips").rglob("accepted.json")}
@@ -219,7 +221,7 @@ class StagedWorkflowTests(unittest.TestCase):
             rebuilt = self.chapters()
         self.assertEqual(rebuilt["chapters"][0]["audio_file"], first["chapters"][0]["audio_file"])
         self.assertTrue(Path(rebuilt["chapters"][0]["audio_file"]).is_file())
-        self.assertEqual(file_hash(folder / "chapter-0001.wav"), pcm_hash)
+        self.assertEqual(audio_hash(folder / "chapter-0001.wav"), pcm_hash)
         self.assertEqual(self.checkpoint(2).read_bytes(), untouched_checkpoint)
         self.assertEqual(accepted, {str(path): path.read_bytes()
                                    for path in (self.root / "work" / "clips").rglob("accepted.json")})
@@ -300,7 +302,7 @@ class StagedWorkflowTests(unittest.TestCase):
         self.chapters()
         clip_directory = next((self.root / "work" / "clips").iterdir())
         accepted = read_json(clip_directory / "accepted.json")
-        (clip_directory / accepted["audio_file"]).unlink()
+        stored_audio.remove_audio((clip_directory / accepted["audio_file"]))
         before = len(self.engine.speech_calls), len(self.verifier.calls)
         with self.assertRaisesRegex(RenderBlocked, "saved clip.*removed"):
             self.package()
@@ -317,7 +319,7 @@ class StagedWorkflowTests(unittest.TestCase):
         clip_directory = self.root / "work" / "clips" / request_hash
         accepted = read_json(clip_directory / "accepted.json")
         wav = clip_directory / accepted["audio_file"]
-        wav.write_bytes(wav.read_bytes()[:-2] + b"xx")
+        wav.write_bytes(stored_audio.read_bytes(wav)[:-2] + b"xx")
         with patch.object(self.engine, "synthesize", side_effect=AssertionError("No TTS")), \
              patch.object(self.verifier, "transcribe", side_effect=AssertionError("No ASR")):
             for action in (self.package, self.chapters):
@@ -329,7 +331,7 @@ class StagedWorkflowTests(unittest.TestCase):
         clip_directory = next((self.root / "work" / "clips").iterdir())
         accepted = read_json(clip_directory / "accepted.json")
         wav = clip_directory / accepted["audio_file"]
-        wav.write_bytes(wav.read_bytes()[:-2] + b"xx")
+        wav.write_bytes(stored_audio.read_bytes(wav)[:-2] + b"xx")
         for action in (self.package, self.chapters):
             with self.subTest(action=action), self.assertRaisesRegex(RenderBlocked, "Cached audio changed"):
                 action()
@@ -365,7 +367,7 @@ class StagedWorkflowTests(unittest.TestCase):
         second_directory = self.root / "work" / "clips" / second_hash
         second_accepted = read_json(second_directory / "accepted.json")
         second_wav = second_directory / second_accepted["audio_file"]
-        second_wav.write_bytes(second_wav.read_bytes()[:-2] + b"xx")
+        second_wav.write_bytes(stored_audio.read_bytes(second_wav)[:-2] + b"xx")
         with self.assertRaisesRegex(RenderBlocked, f"Invalid saved chapter clip {second_hash}: Cached audio changed"):
             self.package()
 
@@ -382,7 +384,7 @@ class StagedWorkflowTests(unittest.TestCase):
     def test_corrupt_pcm_or_index_cannot_be_assembled_or_silently_regenerated(self):
         result = self.chapters()
         wav = Path(result["chapters"][0]["cache_directory"]) / "chapter-0001.wav"
-        original = wav.read_bytes()
+        original = stored_audio.read_bytes(wav)
         wav.write_bytes(original[:-2] + b"xx")
         for action in (self.package, self.chapters):
             with self.assertRaisesRegex(RenderBlocked, "PCM failed integrity"):

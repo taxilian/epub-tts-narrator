@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.cli import export_bundle
-from epub_tts_narrator.renderer import workflow
+from epub_tts_narrator.renderer import stored_audio, workflow
 from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.cli import main
 from epub_tts_narrator.renderer.common import file_hash, read_json, write_json
@@ -49,8 +49,8 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.directory = self.root / kind
                 audio, accepted = self.take(kind=kind)
-                self.assertTrue(audio.is_file())
-                self.assertEqual(file_hash(audio), accepted["audio_sha256"])
+                self.assertTrue(stored_audio.is_stored(audio), "the accepted take is kept as FLAC")
+                self.assertEqual(stored_audio.audio_hash(audio), accepted["audio_sha256"])
                 self.assertTrue((self.directory / "attempt-001.json").is_file())
                 self.assertFalse(list(self.directory.glob("*-raw.wav")))
                 self.assertEqual(read_json(self.directory / "accepted.json"), accepted)
@@ -68,7 +68,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
               patch.object(self.verifier, "transcribe", side_effect=AssertionError("reverified speech"))):
             self.assertEqual((audio, accepted), self.take())
         self.assertFalse(raw.exists())
-        self.assertEqual(file_hash(audio), accepted["audio_sha256"])
+        self.assertEqual(stored_audio.audio_hash(audio), accepted["audio_sha256"])
 
     def test_reference_purpose_keeps_original_audio_even_for_recognized_request(self):
         # Purpose alone must protect a sample even if a caller supplies a speech
@@ -96,7 +96,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
         self.assertFalse((self.directory / "accepted.json").exists())
         for number in (1, 2):
             prefix = f"attempt-{number:03d}"
-            self.assertTrue(self.attempt_path(number).is_file())
+            self.assertTrue(stored_audio.audio_exists(self.attempt_path(number)))
             self.assertTrue(self.attempt_path(number, "raw_file").is_file())
             self.assertFalse(read_json(self.directory / f"{prefix}.json")["report"]["passed"])
 
@@ -107,7 +107,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
             audio, accepted = self.take()
         self.assertEqual(audio, self.attempt_path(2))
         self.assertEqual(accepted["attempt"], 2)
-        self.assertTrue(self.attempt_path(1).is_file())
+        self.assertTrue(stored_audio.audio_exists(self.attempt_path(1)))
         self.assertFalse(read_json(self.directory / "attempt-001.json")["report"]["passed"])
         self.assertTrue((self.directory / "attempt-002.json").is_file())
         self.assertFalse(list(self.directory.glob("*-raw.wav")))
@@ -119,7 +119,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
             with self.assertRaises(workflow.VerificationUnavailable):
                 self.take()
         self.assertFalse((self.directory / "accepted.json").exists())
-        self.assertTrue(self.attempt_path().is_file())
+        self.assertTrue(stored_audio.audio_exists(self.attempt_path()))
         self.assertTrue(self.attempt_path(field="raw_file").is_file())
         self.assertEqual(read_json(self.directory / "attempt-001.json")["report"], pending)
 
@@ -146,7 +146,7 @@ class AcceptedSpeechCleanupTests(unittest.TestCase):
                 self.assertEqual((audio, accepted), self.take())
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(read_json(self.directory / "accepted.json"), accepted)
-        self.assertEqual(file_hash(audio), accepted["audio_sha256"])
+        self.assertEqual(stored_audio.audio_hash(audio), accepted["audio_sha256"])
         self.assertTrue(self.attempt_path(field="raw_file").is_file())
         self.assertTrue(any("test disk permission failure" in message for message in self.messages))
 

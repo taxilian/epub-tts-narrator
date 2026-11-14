@@ -13,6 +13,7 @@ from epub_tts_narrator.renderer.common import file_hash
 from epub_tts_narrator.renderer.workflow import assemble, render
 from shared_fixtures import renderer_config
 from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required")
@@ -59,7 +60,7 @@ class CensorshipEncodingTests(unittest.TestCase):
             again = reencode_chapter(before, self.root / "other-cache", book=self.bundle["source"]["book"],
                                      render_settings=settings, context=context, notify=lambda _: None)
         self.assertEqual(updated, again)
-        self.assertEqual(file_hash(before["wav_path"]), file_hash(updated["wav_path"]))
+        self.assertEqual(audio_hash(before["wav_path"]), audio_hash(updated["wav_path"]))
         with self.assertRaisesRegex(ValueError, "PCM settings"):
             reencode_chapter(before, self.root / "other-cache", book=self.bundle["source"]["book"],
                              render_settings=dict(settings, paragraph_pause_ms=123), context=context)

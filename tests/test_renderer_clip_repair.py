@@ -17,6 +17,7 @@ import test_renderer_direction_repair as fixtures
 from test_renderer_recurring_resolution import PlanClient
 from test_renderer_speech_identity import reference, speech_request
 from test_renderer_workflow import FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 class BroadClient(PlanClient):
@@ -188,7 +189,7 @@ class BroadRepairTests(unittest.TestCase):
             self.render_chunk()
         metadata = next((self.work / 'clips').glob('*/attempt-001.json'))
         wav = metadata.parent / read_json(metadata)['audio_file']
-        wav.write_bytes(wav.read_bytes() + b'changed')
+        wav.write_bytes(stored_audio.read_bytes(wav) + b'changed')
         calls = len(self.engine.calls)
         self.client.outage = False
         with self.assertRaisesRegex(ValueError, 'audio changed'):

@@ -78,8 +78,9 @@ class FasterWhisperVerifier:
                 self._model = WhisperModel(
                     str(self.model_path), device=self.device, compute_type=self.compute_type,
                     cpu_threads=self.cpu_threads, num_workers=1, local_files_only=True)
+            from .stored_audio import tool_path
             segments, info = self._model.transcribe(
-                str(path), language=self.language, **self._options(timed))
+                str(tool_path(path)), language=self.language, **self._options(timed))
             result = []
             for segment in segments:
                 item = {name: getattr(segment, name) for name in

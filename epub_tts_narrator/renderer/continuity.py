@@ -30,7 +30,8 @@ from copy import deepcopy
 from pathlib import Path
 import re
 
-from .common import digest, file_hash, regular_file
+from .common import digest
+from .stored_audio import audio_hash
 
 
 _CURRENT = ContextVar("accepted_chapter_continuity", default=None)
@@ -215,7 +216,7 @@ class ChapterContinuity:
         if marker is None:
             raise ValueError("Accepted take has no generated codec evidence for chapter continuity")
         if (accepted.get("report", {}).get("passed") is not True
-                or file_hash(regular_file(path)) != accepted.get("audio_sha256")):
+                or audio_hash(path) != accepted.get("audio_sha256")):
             raise ValueError("Invalid continuity accepted audio")
         # The speech cache already proved this accepted take is the current
         # request (possibly through a compatible transport or alias).

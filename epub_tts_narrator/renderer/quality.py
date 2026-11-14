@@ -429,7 +429,8 @@ def _audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
 
 
 def _measure_audio_metrics(path: Path, policy: dict, *, include_silences=False) -> dict:
-    with wave.open(str(path), "rb") as audio:
+    from .stored_audio import open_wave
+    with open_wave(path) as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (
             1, 2, _SAMPLE_RATE, "NONE"
         ):
@@ -1099,15 +1100,18 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     recovery or review work.
     """
     from .render_backlog import begin_attempt_ticket
+    from .stored_audio import locate, materialize
 
     try:
-        materialized = Path(path).stat().st_size
+        materialized = locate(path).stat().st_size
     except OSError:
         materialized = 0  # the report below records the invalid_audio reason
     ticket = begin_attempt_ticket(False, materialized)
     try:
-        return _checked_audio_report(path, expected_text, verifier, policy,
-                                     purpose=purpose, performance=performance, ticket=ticket)
+        # A take kept as its stored FLAC is checked as its exact WAV, as before.
+        with materialize(path) as wav:
+            return _checked_audio_report(wav, expected_text, verifier, policy,
+                                         purpose=purpose, performance=performance, ticket=ticket)
     finally:
         if ticket is not None:
             ticket.release()
@@ -1325,8 +1329,9 @@ class MlxWhisperVerifier:
             import mlx_whisper
         except ImportError as exc:
             raise RuntimeError("mlx-whisper is required for local speech verification") from exc
+        from .stored_audio import tool_path
         return mlx_whisper.transcribe(
-            str(path),
+            str(tool_path(path)),
             path_or_hf_repo=str(self.model_path),
             language=self.language,
             **options,

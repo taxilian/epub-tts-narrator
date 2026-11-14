@@ -23,6 +23,8 @@ from audition_fixtures import prepare_document
 from test_chapter_export import chapter_document
 from shared_fixtures import rebind_audiobook_filename
 from test_renderer_workflow import FixtureEngine, FixtureVerifier, FFMPEG, FFPROBE
+from epub_tts_narrator.renderer.stored_audio import audio_hash
+from epub_tts_narrator.renderer import stored_audio
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
@@ -109,7 +111,7 @@ class IncrementalRendererTests(unittest.TestCase):
     def test_script_revision_replaces_book_and_only_generates_changed_passage(self):
         original = self.run_render()
         before = self.model_counts()
-        old_book = file_hash(self.book_path(original))
+        old_book = audio_hash(self.book_path(original))
         old_manifest = (self.output / "audio-manifest.json").read_bytes()
         first_checkpoint = self.checkpoint(1).read_bytes()
         unaffected_checkpoint = self.checkpoint(2).read_bytes()
@@ -127,7 +129,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(self.model_counts(), (before[0], before[1] + 1, before[2] + 1))
         self.assertEqual([call["text"] for call in self.engine.speech_calls[-1:]],
                          [self.document["segments"][1]["text"]])
-        self.assertNotEqual(old_book, file_hash(self.book_path()))
+        self.assertNotEqual(old_book, audio_hash(self.book_path()))
         self.assertNotEqual(old_manifest, (self.output / "audio-manifest.json").read_bytes())
         self.assertNotEqual(first_checkpoint, self.checkpoint(1).read_bytes())
         self.assertEqual(unaffected_checkpoint, self.checkpoint(2).read_bytes())
@@ -139,10 +141,10 @@ class IncrementalRendererTests(unittest.TestCase):
         corrected = next(segment for segment in sync["segments"] if segment["segment_id"] == "s2")
         self.assertEqual(corrected["role_id"], "mara")
         self.assertEqual(corrected["voice_id"], "v1")
-        self.assertEqual(sync["audio_sha256"], file_hash(self.book_path()))
+        self.assertEqual(sync["audio_sha256"], audio_hash(self.book_path()))
         manifest = read_json(self.output / "audio-manifest.json")
-        self.assertEqual(manifest["sync"]["sha256"], file_hash(self.output / "sync.json"))
-        self.assertEqual(manifest["audiobook"]["sha256"], file_hash(self.book_path()))
+        self.assertEqual(manifest["sync"]["sha256"], audio_hash(self.output / "sync.json"))
+        self.assertEqual(manifest["audiobook"]["sha256"], audio_hash(self.book_path()))
 
     def test_unchanged_published_book_is_reused_without_models_or_encoding(self):
         original = self.run_render()
@@ -282,7 +284,7 @@ class IncrementalRendererTests(unittest.TestCase):
         original = self.run_render()
         old_checkpoint, old_cache = self.chapter_record(1)
         old_pcm = self.work / "chapters" / old_checkpoint["cache_key"] / old_cache["wav_file"]
-        old_pcm_bytes = old_pcm.read_bytes()
+        old_pcm_bytes = stored_audio.read_bytes(old_pcm)
         old_chapter_bytes = self.chapter_audio(1).read_bytes()
         old_book_probe = probe_audio(self.book_path(original), ffprobe=FFPROBE)
         old_sync = read_json(self.output / "sync.json")
@@ -304,7 +306,7 @@ class IncrementalRendererTests(unittest.TestCase):
         # Then speech, PCM, timings and ordering are retained while every title surface advances.
         self.assertEqual(self.model_counts(), counts)
         self.assertEqual(self.accepted_files(), accepted)
-        self.assertEqual(old_pcm.read_bytes(), old_pcm_bytes)
+        self.assertEqual(stored_audio.read_bytes(old_pcm), old_pcm_bytes)
         self.assertEqual(old_chapter_bytes, Path(old_checkpoint["audio_file"]).read_bytes())
         checkpoint, cache = self.chapter_record(1)
         self.assertNotEqual(checkpoint["cache_key"], old_checkpoint["cache_key"])
@@ -316,7 +318,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(cache["chapter"]["frames"], old_cache["chapter"]["frames"])
         self.assertEqual(cache["chapter"]["segments"], old_cache["chapter"]["segments"])
         new_pcm = self.work / "chapters" / checkpoint["cache_key"] / cache["wav_file"]
-        self.assertEqual(new_pcm.read_bytes(), old_pcm_bytes)
+        self.assertEqual(stored_audio.read_bytes(new_pcm), old_pcm_bytes)
         ignored = {"bundle_hash", "chapter_hash", "plan_audio_hash"}
         self.assertEqual({key: value for key, value in checkpoint["context"].items() if key not in ignored},
                          {key: value for key, value in old_checkpoint["context"].items() if key not in ignored})
@@ -360,7 +362,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.run_render()
         old_checkpoint, old_cache = self.chapter_record(1)
         old_pcm = self.work / "chapters" / old_checkpoint["cache_key"] / old_cache["wav_file"]
-        old_pcm_bytes = old_pcm.read_bytes()
+        old_pcm_bytes = stored_audio.read_bytes(old_pcm)
         accepted = self.accepted_files()
         counts = self.model_counts()
         new_title = "Chapter Eight"
@@ -384,7 +386,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual(cache["pcm_sha256"], old_cache["pcm_sha256"])
         self.assertEqual(cache["chapter"]["segments"], old_cache["chapter"]["segments"])
         new_pcm = self.work / "chapters" / checkpoint["cache_key"] / cache["wav_file"]
-        self.assertEqual(new_pcm.read_bytes(), old_pcm_bytes)
+        self.assertEqual(stored_audio.read_bytes(new_pcm), old_pcm_bytes)
         chapter_probe = probe_audio(self.chapter_audio(1), ffprobe=FFPROBE)
         self.assertEqual(chapter_probe["format"]["tags"]["title"], new_title)
         self.assertEqual(next(stream for stream in chapter_probe["streams"]
@@ -460,7 +462,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertFalse((self.output / "book.m4b").exists())
         self.assertEqual(current["audio"]["book"]["title"], "Changed Fixture Title")
         self.assertEqual(read_json(self.output / "sync.json")["audio_file"], book.name)
-        self.assertEqual(current["files_sha256"][book.name], file_hash(book))
+        self.assertEqual(current["files_sha256"][book.name], audio_hash(book))
 
     def test_legacy_book_without_recorded_path_resumes_without_any_encoding(self):
         # Given an old complete publication with book.m4b and no audiobook.path field.
@@ -498,7 +500,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertTrue((self.output / "book.m4b").is_file())
         self.assertFalse((self.output / original_name).exists())
         self.assertEqual(read_json(self.output / "sync.json")["audio_file"], "book.m4b")
-        self.assertEqual(result["files_sha256"]["book.m4b"], file_hash(self.output / "book.m4b"))
+        self.assertEqual(result["files_sha256"]["book.m4b"], audio_hash(self.output / "book.m4b"))
         self.assertEqual(self.model_counts(), counts)
 
     def test_runtime_update_reuses_published_book_without_model_alias(self):
@@ -605,7 +607,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.run_render()
         counts = self.model_counts()
         unaffected_chapter = read_json(self.checkpoint(2))["audio_file"]
-        unaffected_audio = file_hash(unaffected_chapter)
+        unaffected_audio = audio_hash(unaffected_chapter)
 
         self.document = repair_narration_boundaries(self.document)
         repaired = [segment for segment in self.document["segments"] if segment["block_id"] == "b2"]
@@ -621,7 +623,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.assertEqual([call["text"] for call in self.engine.speech_calls[counts[1]:]],
                          [trim_speech_text(segment["text"]) for segment in repaired])
         self.assertEqual(read_json(self.checkpoint(2))["audio_file"], unaffected_chapter)
-        self.assertEqual(file_hash(unaffected_chapter), unaffected_audio)
+        self.assertEqual(audio_hash(unaffected_chapter), unaffected_audio)
 
     def test_failed_updated_speech_keeps_previously_published_book_intact(self):
         self.run_render()
@@ -787,7 +789,7 @@ class IncrementalRendererTests(unittest.TestCase):
         # Then the edited file does not block the render and the publication is recreated.
         self.assertEqual(result["status"], "complete")
         self.assertNotIn(b"User changes", book.read_bytes())
-        self.assertEqual(file_hash(book), result["files_sha256"][book.name])
+        self.assertEqual(audio_hash(book), result["files_sha256"][book.name])
 
 
 if __name__ == "__main__":

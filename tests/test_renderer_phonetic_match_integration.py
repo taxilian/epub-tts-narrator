@@ -10,6 +10,7 @@ import test_renderer_reference_consensus as consensus
 from test_renderer_jev_verification import Judge
 import test_renderer_speech_retry as retry
 from test_renderer_workflow import FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 class LocalPhoneticVerificationTests(unittest.TestCase):
@@ -153,7 +154,7 @@ class LocalPhoneticResumeTests(unittest.TestCase):
         verifier = ReferenceTextJudgingVerifier(recognizer, judge)
         first, original = self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(len(self.calls), 1)
-        saved_bytes = first.read_bytes()
+        saved_bytes = stored_audio.read_bytes(first)
         report_path = first.parent / f"attempt-{original['attempt']:03d}.json"
         saved_report = report_path.read_bytes()
         previous_judge_calls = len(judge.calls)
@@ -161,7 +162,7 @@ class LocalPhoneticResumeTests(unittest.TestCase):
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(wav, first)
         self.assertEqual(accepted, original)
-        self.assertEqual(first.read_bytes(), saved_bytes)
+        self.assertEqual(stored_audio.read_bytes(first), saved_bytes)
         self.assertEqual(report_path.read_bytes(), saved_report)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(judge.calls), previous_judge_calls)

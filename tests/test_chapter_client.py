@@ -29,6 +29,7 @@ from shared_fixtures import rebind_audiobook_filename
 from test_contracts import valid_document
 from test_chapter_export import chapter_document
 from test_renderer_workflow import write_tone, FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 def fixture_artifacts(spec, mutate=None, mutate_manifest=None, *, descriptive=False):
@@ -1014,7 +1015,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self._render_local_revision_fixture()
         checkpoint = read_json(self.root / "work" / "completed-chapters" / "chapter-0001.json")
         audio = self.root / "work" / "chapters" / checkpoint["cache_key"] / "chapter-0001.wav"
-        audio.write_bytes(audio.read_bytes()[:-2] + b"xx")
+        audio.write_bytes(stored_audio.read_bytes(audio)[:-2] + b"xx")
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
             with self.assertRaisesRegex(ChapterClientError, "PCM failed integrity"):
                 _render_remote_locked(self.bundle, self.config, self.plan, self.store,
@@ -1026,7 +1027,7 @@ class ChapterOrchestrationTests(unittest.TestCase):
         accepted_path = next((self.root / "work" / "clips").glob("*/accepted.json"))
         accepted = read_json(accepted_path)
         audio = accepted_path.parent / accepted["audio_file"]
-        audio.write_bytes(audio.read_bytes()[:-2] + b"xx")
+        audio.write_bytes(stored_audio.read_bytes(audio)[:-2] + b"xx")
         with patch("epub_tts_narrator.renderer.chapter_client.ChapterClient") as factory:
             with self.assertRaisesRegex(ChapterClientError, "Cached audio changed"):
                 _render_remote_locked(self.bundle, self.config, self.plan, self.store,

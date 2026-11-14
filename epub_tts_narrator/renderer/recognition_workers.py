@@ -179,7 +179,8 @@ class RemoteRecognizer:
             raise EngineError("Unsupported recognition call")
         from .fish_http import FishHTTPError, _NoRedirect, redact
         import msgpack
-        audio = Path(path).read_bytes()
+        from .stored_audio import read_bytes
+        audio = read_bytes(path)
         if not audio or len(audio) > MAX_AUDIO_BYTES:
             raise EngineError("Recognition audio must be nonempty and at most 100 MiB")
         payload = msgpack.packb({"call": call, "audio": audio}, use_bin_type=True)

@@ -20,6 +20,8 @@ from epub_tts_narrator.renderer.workflow import RenderBlocked, render, verified_
 from epub_tts_narrator.cli import export_bundle
 from audition_fixtures import prepare_bundle
 from shared_fixtures import fixture_codes, renderer_config, timed_transcript
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
+from epub_tts_narrator.renderer import stored_audio
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "last-lantern"
@@ -28,7 +30,7 @@ FFPROBE = shutil.which("ffprobe")
 
 
 def pcm_key(path):
-    with wave.open(str(path), "rb") as handle:
+    with open_wave(path) as handle:
         return hashlib.sha256(handle.readframes(handle.getnframes())).hexdigest()
 
 
@@ -171,19 +173,19 @@ class RendererWorkflowTests(unittest.TestCase):
 
         # Given the same accepted record in its old explicit attempt-001.wav form.
         legacy = wav.with_name("attempt-001.wav")
-        wav.rename(legacy)
+        stored_audio.rename_audio(wav, legacy)
         for path in (self.root / "takes" / "accepted.json", self.root / "takes" / "attempt-001.json"):
             saved = read_json(path)
             saved["audio_file"] = legacy.name
             write_json(path, saved)
         accepted_before = (self.root / "takes" / "accepted.json").read_bytes()
-        audio_before = legacy.read_bytes()
+        audio_before = stored_audio.read_bytes(legacy)
 
         # When reopening it, no synthesis or path migration is needed.
         with patch.object(self.engine, "_write", side_effect=AssertionError("unexpected synthesis")):
             resumed, _ = self.take(request=request)
         self.assertEqual(resumed, legacy)
-        self.assertEqual(legacy.read_bytes(), audio_before)
+        self.assertEqual(stored_audio.read_bytes(legacy), audio_before)
         self.assertEqual((self.root / "takes" / "accepted.json").read_bytes(), accepted_before)
 
     def test_chapters_only_does_not_require_an_available_original_epub(self):
@@ -203,7 +205,7 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(first, resumed)
         self.assertEqual(len(self.verifier.calls), calls)
         self.assertEqual(len(self.fixtures), fixture_count)
-        self.assertEqual(file_hash(wav), first["audio_sha256"])
+        self.assertEqual(audio_hash(wav), first["audio_sha256"])
 
     def chapter_contexts(self):
         from epub_tts_narrator.renderer.workflow import (_chapter_context, make_render_plan)
@@ -303,7 +305,7 @@ class RendererWorkflowTests(unittest.TestCase):
     def test_missing_accepted_audio_regenerates_and_verifies_only_that_take(self):
         wav, first = self.take()
         for _ in range(2):
-            wav.unlink()
+            stored_audio.remove_audio(wav)
             with patch.object(self.engine, "_write", wraps=self.engine._write) as generate:
                 replacement, accepted = self.take()
             self.assertEqual(replacement, wav)
@@ -326,7 +328,7 @@ class RendererWorkflowTests(unittest.TestCase):
     def test_corrupt_accepted_audio_is_blocked_before_asr(self):
         wav, _ = self.take()
         before = len(self.verifier.calls)
-        data = bytearray(wav.read_bytes())
+        data = bytearray(stored_audio.read_bytes(wav))
         data[-1] ^= 1
         wav.write_bytes(data)
         with self.assertRaisesRegex(RenderBlocked, "Cached audio changed"):
@@ -390,7 +392,7 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(read_json(output / "source.json"), self.bundle["source"])
         self.assertEqual(read_json(output / "cast.json"), self.bundle["cast"])
         for name, checksum in first["files_sha256"].items():
-            self.assertEqual(file_hash(output / name), checksum)
+            self.assertEqual(audio_hash(output / name), checksum)
         self.assertFalse((output / "pcm").exists())
         self.assertTrue((output / "chapters" / "chapter-0001.m4a").is_file())
         book_path = output / first["audio"]["audiobook"]["path"]
@@ -403,7 +405,7 @@ class RendererWorkflowTests(unittest.TestCase):
         sync = read_json(output / "sync.json")
         self.assertEqual(sync["source_fingerprint"], self.bundle["manifest"]["source_fingerprint"])
         self.assertEqual(sync["book_id"], self.bundle["source"]["book"]["id"])
-        self.assertEqual(sync["audio_sha256"], file_hash(book_path))
+        self.assertEqual(sync["audio_sha256"], audio_hash(book_path))
         rows = {row["id"]: row for chapter in self.bundle["chapters"] for row in chapter["rows"]}
         self.assertEqual(len(sync["segments"]), len(rows))
         previous_end = 0

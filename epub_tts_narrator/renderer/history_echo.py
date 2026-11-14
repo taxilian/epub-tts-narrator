@@ -204,6 +204,10 @@ def archive(directory, names, evidence):
     directory = Path(directory)
     suffix = digest(evidence)[:12]
     moved = []
+    from .stored_audio import stored_path
+    # A WAV kept as its stored FLAC is retired in that form too.
+    names = [item for name in names
+             for item in ((name, stored_path(name).name) if name.endswith(".wav") else (name,))]
     for name in names:
         path = directory / name
         if not path.exists() and not path.is_symlink():

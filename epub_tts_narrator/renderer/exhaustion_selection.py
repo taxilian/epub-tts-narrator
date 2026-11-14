@@ -6,7 +6,8 @@ import shutil
 import tempfile
 
 from .audio_naming import speech_take_filename
-from .common import digest, file_hash, read_json, regular_file, write_json
+from .common import digest, read_json, regular_file, write_json
+from .stored_audio import StoredAudioError, audio_hash, audio_present, copy_audio
 from .clip_repair_contract import logical_text, plain, synthesis_request
 from .clip_repair_prompts import SELECT
 from .clip_repair_state import ClipRecoveryUnavailable, model_call
@@ -233,7 +234,7 @@ def select_retained(directory, request, client, *, failure_report=None):
     report = deepcopy(record['report'])
     filename = speech_take_filename(request, record['attempt'], role='selection')
     legacy_name = 'selection-' + record['audio_sha256'] + '.wav'
-    if (directory / legacy_name).exists() or (directory / legacy_name).is_symlink():
+    if audio_present(directory / legacy_name):
         filename = legacy_name
     record.update(request=deepcopy(request), request_hash=digest(request),
                   audio_file=filename,
@@ -246,17 +247,16 @@ def select_retained(directory, request, client, *, failure_report=None):
     record['engine_metadata'] = {**record.get('engine_metadata', {}), 'exhaustion_selection': marker}
     validate_record(record)
     target = directory / record['audio_file']
-    if target.exists() or target.is_symlink():
-        if file_hash(regular_file(target)) != record['audio_sha256']:
+    if audio_present(target):
+        if audio_hash(target) != record['audio_sha256']:
             raise ValueError('Previously selected audio changed')
     else:
         with tempfile.TemporaryDirectory(prefix='.selection-', dir=directory) as staging:
-            copied = Path(staging) / target.name
-            shutil.copyfile(regular_file(selected['audio']), copied)
-            if file_hash(copied) != record['audio_sha256']:
-                raise ValueError('Selected audio changed during publication')
-            os.replace(copied, target)
-    if file_hash(regular_file(target)) != record['audio_sha256']:
+            try:
+                copy_audio(selected['audio'], target, expected_sha256=record['audio_sha256'], staging=staging)
+            except StoredAudioError as exc:
+                raise ValueError('Selected audio changed during publication') from exc
+    if audio_hash(target) != record['audio_sha256']:
         raise ValueError('Selected audio changed during publication')
     from .take_selection import current_acceptance
     chosen = current_acceptance(directory, digest(request))

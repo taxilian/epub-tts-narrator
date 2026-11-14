@@ -7,7 +7,8 @@ import re
 import sys
 import wave
 
-from .common import digest, file_hash, read_json, regular_file
+from .common import digest, read_json, regular_file
+from .stored_audio import audio_hash, audio_present
 from .clip_repair_contract import logical_text
 
 
@@ -18,7 +19,8 @@ def same_span(request, candidate):
 
 def physical_audio(path):
     try:
-        with wave.open(str(regular_file(path)), 'rb') as audio:
+        from .stored_audio import open_wave, regular_audio
+        with open_wave(regular_audio(path)) as audio:
             channels, width, rate, frames = audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getnframes()
             if channels != 1 or width != 2 or rate <= 0 or frames <= 0 or audio.getcomptype() != 'NONE':
                 return None
@@ -105,9 +107,9 @@ def retained_candidates(directory, request):
             if not isinstance(name, str) or Path(name).name != name:
                 raise ValueError('Invalid retained candidate audio filename')
             audio = folder / name
-            if not audio.exists() and not audio.is_symlink():
+            if not audio_present(audio):
                 continue
-            if file_hash(regular_file(audio)) != record.get('audio_sha256'):
+            if audio_hash(audio) != record.get('audio_sha256'):
                 raise ValueError('Retained candidate audio changed')
             from .exhaustion_selection import validate_record
             validate_record(record)

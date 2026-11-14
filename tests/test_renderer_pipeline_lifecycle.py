@@ -32,6 +32,7 @@ from audition_fixtures import prepare_bundle
 from shared_fixtures import FFMPEG, FFPROBE, renderer_config, timed_transcript
 from test_chapter_export import chapter_document
 from test_renderer_workflow import EXAMPLE, FixtureEngine, FixtureVerifier, pcm_key
+from epub_tts_narrator.renderer.stored_audio import audio_hash
 
 WATCHDOG = 30
 
@@ -135,7 +136,7 @@ class PipelineLifecycleTests(unittest.TestCase):
             return {path.parent.name: read_json(path) for path in self.accepted_records()}
 
         def audio_snapshot(records):
-            return {name: file_hash(self.root / "work" / "clips" / name / record["audio_file"])
+            return {name: audio_hash(self.root / "work" / "clips" / name / record["audio_file"])
                     for name, record in records.items()}
 
         def cache_snapshot():
@@ -226,7 +227,7 @@ class PipelineLifecycleTests(unittest.TestCase):
         }
         self.assertEqual(set(checkpoints), {2, 3, 4, 5})
         completed_audio = {
-            number: file_hash(read_json(path)["audio_file"])
+            number: audio_hash(read_json(path)["audio_file"])
             for number, path in checkpoints.items()
         }
         self.assertFalse((self.root / "output").exists())
@@ -257,7 +258,7 @@ class PipelineLifecycleTests(unittest.TestCase):
         }
         self.assertEqual(set(resumed), {1, 2, 3, 4, 5})
         for number, checksum in completed_audio.items():
-            self.assertEqual(file_hash(read_json(resumed[number])["audio_file"]), checksum)
+            self.assertEqual(audio_hash(read_json(resumed[number])["audio_file"]), checksum)
         self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
     def test_permanent_chapter_generation_failure_continues_remaining_chapters(self):

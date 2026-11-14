@@ -11,6 +11,7 @@ from test_renderer_phonetic_fallback import PairClient
 import test_renderer_reference_consensus as consensus
 import test_renderer_speech_retry as retry
 from test_renderer_workflow import FFMPEG, FFPROBE
+from epub_tts_narrator.renderer import stored_audio
 
 
 class LetterNamesVerificationTests(unittest.TestCase):
@@ -224,7 +225,7 @@ class LetterNamesResumeTests(unittest.TestCase):
         judge = Judge("different")
         verifier = ReferenceTextJudgingVerifier(recognizer, judge)
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
-        waveform = wav.read_bytes()
+        waveform = stored_audio.read_bytes(wav)
         report_path = wav.parent / f"attempt-{accepted['attempt']:03d}.json"
         saved_report = report_path.read_bytes()
         recognitions = list(recognizer.calls)
@@ -235,7 +236,7 @@ class LetterNamesResumeTests(unittest.TestCase):
                          "letter_names")
         again = self.take(SpeechRetryBudget(), verifier=verifier)
         self.assertEqual(again, (wav, accepted))
-        self.assertEqual(wav.read_bytes(), waveform)
+        self.assertEqual(stored_audio.read_bytes(wav), waveform)
         self.assertEqual(report_path.read_bytes(), saved_report)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(recognizer.calls, recognitions)

@@ -33,6 +33,10 @@ assemble *args:
 cleanup *args:
     @"{{ python }}" -m epub_tts_narrator.renderer prune "$@"
 
+# BOOK... [--only clips,chapters,mixes,previews] [--dry-run] [--yes]: keep render WAVs as exact FLAC copies.
+convert-flac *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer convert-flac "$@"
+
 runpod-cleanup *args:
     @"{{ python }}" -m epub_tts_narrator.renderer runpod cleanup "$@"
 

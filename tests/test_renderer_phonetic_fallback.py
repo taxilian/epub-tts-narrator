@@ -20,6 +20,7 @@ import test_renderer_reference_consensus as consensus
 from test_renderer_reference_consensus import PrimaryVerifier
 from test_renderer_verification_factory import fake_primary
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
+from epub_tts_narrator.renderer import stored_audio
 
 
 # This missing consonant has different phonetic keys, so it still exercises
@@ -223,13 +224,13 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         old_report_path = self.root / "takes" / "attempt-001.json"
         old_report = read_json(old_report_path)
         wav = self.root / "takes" / old_report["audio_file"]
-        old_bytes = wav.read_bytes()
+        old_bytes = stored_audio.read_bytes(wav)
         reviewer = PronunciationReviewer(PairClient())
         after = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge, reviewer)
         regenerated, accepted = self.take(after)
         self.assertEqual(accepted["attempt"], 2)
         self.assertEqual(regenerated, self.root / "takes" / accepted["audio_file"])
-        self.assertEqual(wav.read_bytes(), old_bytes)
+        self.assertEqual(stored_audio.read_bytes(wav), old_bytes)
         self.assertEqual(read_json(old_report_path), old_report)
         self.assertEqual(len(self.calls), 2)
         self.assertTrue(accepted["report"]["passed"])
@@ -247,11 +248,11 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         pending = read_json(self.root / "takes" / "attempt-001.json")
         wav = self.root / "takes" / pending["audio_file"]
-        old_bytes = wav.read_bytes()
+        old_bytes = stored_audio.read_bytes(wav)
         client.error = None
         reused, accepted = self.take(verifier)
         self.assertEqual(reused, wav)
-        self.assertEqual(reused.read_bytes(), old_bytes)
+        self.assertEqual(stored_audio.read_bytes(reused), old_bytes)
         self.assertEqual(len(self.calls), 1)
         self.assertTrue(accepted["report"]["passed"])
 

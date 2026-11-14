@@ -14,7 +14,8 @@ import re
 from threading import RLock
 import wave
 
-from .common import digest, file_hash, read_json, regular_file, write_json
+from .common import digest, read_json, regular_file, write_json
+from .stored_audio import StoredAudioError, audio_hash, materialize, open_wave, regular_audio, tool_path
 from .run_locks import acquire_directory_lock
 
 
@@ -53,11 +54,11 @@ def _covers(expected, transcript):
 
 def _duration(path):
     try:
-        with wave.open(str(path), "rb") as source:
+        with open_wave(path) as source:
             frames, rate = source.getnframes(), source.getframerate()
             if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getcomptype() != "NONE":
                 raise CensorshipAlignmentUnavailable("Censorship alignment requires saved mono PCM16 speech")
-    except (wave.Error, EOFError):
+    except (wave.Error, EOFError, StoredAudioError):
         # Saved accepted clips can be losslessly compressed. This import does
         # not allocate a model or decode the audio into a large buffer.
         try:
@@ -232,9 +233,9 @@ def align_saved_audio(audio_path, expected_text, verifier, cache_dir, *, report=
     """
     if not isinstance(expected_text, str) or not expected_text.strip():
         raise CensorshipAlignmentUnavailable("Censorship alignment needs the accepted nonempty spoken text")
-    path = regular_file(audio_path)
+    path = regular_audio(audio_path)
     duration = _duration(path)
-    binding = {"audio_sha256": file_hash(path), "text_sha256": hashlib.sha256(expected_text.encode("utf-8")).hexdigest(), "version": _VERSION}
+    binding = {"audio_sha256": audio_hash(path), "text_sha256": hashlib.sha256(expected_text.encode("utf-8")).hexdigest(), "version": _VERSION}
     directory = Path(cache_dir)
     if directory.is_symlink():
         raise CensorshipAlignmentUnavailable("Censorship alignment cache must not be a symlink")
@@ -285,7 +286,8 @@ def align_saved_audio(audio_path, expected_text, verifier, cache_dir, *, report=
                         transcribe = getattr(primary, "transcribe", None)
                         if not callable(transcribe):
                             raise CensorshipAlignmentUnavailable("Censorship needs independent audio-only recognition before known-text alignment")
-                        raw = transcribe(path)
+                        with materialize(path) as wav:
+                            raw = transcribe(wav)
                         if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
                             raise CensorshipAlignmentFailed("Censorship alignment recognition returned no transcript")
                         # Retain no provider/configuration fields, only the
@@ -323,10 +325,10 @@ def align_saved_audio(audio_path, expected_text, verifier, cache_dir, *, report=
                     segment_source = "fresh_audio_only_asr"
                 state.update(windows=windows, windows_sha256=digest(windows), segment_source=segment_source)
                 write_json(target, state)
-                return (runner or _mlx_align)(path, expected_text, primary, windows)
+                return (runner or _mlx_align)(tool_path(path), expected_text, primary, windows)
             words = facade._call("align_saved_audio", align, (), {}) if facade is not None else align()
             words = _checked_words(words, expected_text, duration)
-            if file_hash(path) != binding["audio_sha256"]:
+            if audio_hash(path) != binding["audio_sha256"]:
                 raise CensorshipAlignmentFailed("Saved audio changed during censorship alignment")
             if _model_identity(primary) != model:
                 raise CensorshipAlignmentUnavailable("ASR model changed during censorship alignment")

@@ -9,6 +9,7 @@ from epub_tts_narrator.renderer.verification import RecurringSpeechVerifier
 from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
 import test_renderer_speech_recovery_integration as fixtures
 from test_renderer_recurring_resolution import PlanClient
+from epub_tts_narrator.renderer import stored_audio
 
 
 TEXT = "Several people wait—then others return—before daylight comes!"
@@ -69,7 +70,7 @@ class DashRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual([row["text"] for row in self.engine.calls], [TEXT] * 3 + PARTS)
         self.assertEqual(acceptance["report"]["expected_text"], TEXT)
         self.assertEqual(acceptance["report"]["metrics"]["duration_seconds"], 3)
-        self.assertTrue(Path(result["wav_path"]).is_file())
+        self.assertTrue(stored_audio.audio_exists(Path(result["wav_path"])))
         marker = next((self.work / "clips").glob("*/speech-recovery.json"))
         record = read_json(marker.parent / "attempt-003.json")
         self.assertEqual(record["report"]["planner_resolution_action"], "stop")

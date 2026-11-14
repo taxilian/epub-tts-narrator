@@ -32,6 +32,7 @@ from epub_tts_narrator.renderer.workflow import (
 from shared_fixtures import timed_transcript
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
 
+from epub_tts_narrator.renderer import stored_audio
 from epub_tts_narrator.renderer.render_backlog import (
     DEFAULT_MAX_MATERIALIZED_BYTES,
     BacklogBudget,
@@ -761,7 +762,7 @@ class BacklogAttemptHookTests(unittest.TestCase):
         landing = self.asr_samples()
         self.assertEqual(len(landing), 1)
         self.assertEqual(landing[0]["pending_count"], 1)
-        expected_bytes = (self.root / "takes" / accepted["audio_file"]).stat().st_size
+        expected_bytes = len(stored_audio.read_bytes(self.root / "takes" / accepted["audio_file"]))
         self.assertEqual(landing[0]["materialized_bytes"], expected_bytes)
         settled = self.budget.snapshot()
         self.assertEqual(settled["pending_count"], 0)
@@ -783,7 +784,7 @@ class BacklogAttemptHookTests(unittest.TestCase):
             snapshot["pending_count"] == 1
             for _, snapshot in self.probe.samples))
         failed = read_json(self.root / "takes" / "attempt-001.json")
-        self.assertTrue((self.root / "takes" / failed["audio_file"]).exists())
+        self.assertTrue(stored_audio.audio_present(self.root / "takes" / failed["audio_file"]))
         settled = self.budget.snapshot()
         self.assertEqual(settled["pending_count"], 0)
         self.assertEqual(settled["materialized_bytes"], 0)
@@ -822,7 +823,7 @@ class BacklogAttemptHookTests(unittest.TestCase):
         landing = self.asr_samples()
         self.assertEqual(len(landing), 1)
         self.assertEqual(landing[0]["pending_count"], 1)
-        self.assertEqual(landing[0]["materialized_bytes"], wav.stat().st_size)
+        self.assertEqual(landing[0]["materialized_bytes"], len(stored_audio.read_bytes(wav)))
         self.assertEqual(self.budget.snapshot()["pending_count"], 0)
 
     def test_adopt_waits_for_a_count_slot_and_bypasses_the_byte_high_water(self):
@@ -1303,7 +1304,7 @@ class BacklogClipRepairBoundaryTests(unittest.TestCase):
         landing = [snapshot for _, snapshot in self.samples]
         self.assertEqual(len(landing), 1)
         self.assertEqual(landing[0]["pending_count"], 1)
-        self.assertEqual(landing[0]["materialized_bytes"], wav.stat().st_size)
+        self.assertEqual(landing[0]["materialized_bytes"], len(stored_audio.read_bytes(wav)))
         self.assertGreater(landing[0]["materialized_bytes"], entries[1][2])
         settled = self.budget.snapshot()
         self.assertEqual(settled["pending_count"], 0)

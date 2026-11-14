@@ -46,9 +46,10 @@ def recheck_retained_candidates(session, verifier, config, *, notify):
             raise RenderBlocked("Retained speech candidate does not match its original request")
         name = validate_audio_filename(name, suffix=".wav")
         audio = directory / name
-        if not audio.exists() and not audio.is_symlink():
+        from .stored_audio import audio_hash, audio_present
+        if not audio_present(audio):
             continue
-        if file_hash(regular_file(audio)) != saved.get("audio_sha256"):
+        if audio_hash(audio) != saved.get("audio_sha256"):
             raise RenderBlocked("Retained speech candidate changed on disk")
         checked += 1
         notify(f"  Rechecking retained candidate {number} with complete reviewable wording; no new synthesis.")

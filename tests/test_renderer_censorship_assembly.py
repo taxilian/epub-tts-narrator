@@ -16,6 +16,7 @@ from epub_tts_narrator.renderer.chapter_cache import (
 from epub_tts_narrator.renderer.censorship import DEFAULT_POLICY, plan_masks, policy_identity
 from epub_tts_narrator.renderer.common import file_hash
 from test_renderer_assembly import clip
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
 
 
 RATE = 8000
@@ -29,7 +30,7 @@ def pcm(path, values):
 
 
 def samples(path):
-    with wave.open(str(path), "rb") as stream:
+    with open_wave(path) as stream:
         data = stream.readframes(stream.getnframes())
     return list(struct.unpack("<" + "h" * (len(data) // 2), data))
 
@@ -52,10 +53,10 @@ class CensorshipAssemblyTests(unittest.TestCase):
 
     def audit(self, item=None, *, report=None):
         item = item or self.item
-        with wave.open(str(item["wav_path"]), "rb") as source:
+        with open_wave(item["wav_path"]) as source:
             frames = source.getnframes()
         return plan_masks(item["spoken_text"], report or self.report(), self.policy,
-                          sample_rate=RATE, frames=frames, audio_sha256=file_hash(item["wav_path"]))
+                          sample_rate=RATE, frames=frames, audio_sha256=audio_hash(item["wav_path"]))
 
     def compose(self, name, items=None, *, policy=None, normalize=False):
         return compose_chapter(items or [self.item], self.root / name, sample_rate=RATE,
@@ -118,10 +119,10 @@ class CensorshipAssemblyTests(unittest.TestCase):
     def test_simultaneous_lanes_mute_independently_before_average(self):
         other = pcm(self.root / "other.wav", [4000] * RATE)
         lanes = [{"role_id": "first", "voice_id": "voice_1", "wav_path": self.wav,
-                  "audio_sha256": file_hash(self.wav), "request_hash": "first", "validation_key": "first",
+                  "audio_sha256": audio_hash(self.wav), "request_hash": "first", "validation_key": "first",
                   "report": self.report()},
                  {"role_id": "second", "voice_id": "voice_2", "wav_path": other,
-                  "audio_sha256": file_hash(other), "request_hash": "second", "validation_key": "second",
+                  "audio_sha256": audio_hash(other), "request_hash": "second", "validation_key": "second",
                   "report": self.report(.4, .7)}]
         mixed = prepare_mixture(lanes, self.root / "mixes", sample_rate=RATE,
                                 preserve_lanes=True, notify=lambda _: None)
@@ -134,14 +135,14 @@ class CensorshipAssemblyTests(unittest.TestCase):
                                       for lane in mixed["speaker_lanes"]]
         for lane in self.item["censorship_lanes"]:
             lane["censorship"] = self.audit(dict(self.item, wav_path=lane["wav_path"]), report=lane["report"])
-        plain_hash = file_hash(mixed["wav_path"])
+        plain_hash = audio_hash(mixed["wav_path"])
         result = self.compose("separate.wav", policy=self.policy)
         data = samples(result["wav_path"])
         self.assertEqual(data[0], 3000)
         # At 350 ms only lane one has reached its muted tail. Lane two's
         # unaffected voice remains audible instead of a union-of-masks mute.
         self.assertEqual(data[2800], 2000)
-        self.assertEqual(file_hash(mixed["wav_path"]), plain_hash)
+        self.assertEqual(audio_hash(mixed["wav_path"]), plain_hash)
         self.assertEqual(result["frames"], RATE)
         _timings(result)
 
@@ -159,7 +160,7 @@ class CensorshipAssemblyTests(unittest.TestCase):
         self.item["censorship"] = self.audit()
         result = self.compose("muted.wav", policy=self.policy)
         spec = {"censorship_policy": self.policy, "chapter": {"chunks": [self.item]}}
-        accepted = [{"chunk_id": self.item["chunk_id"], "audio_sha256": file_hash(self.wav)}]
+        accepted = [{"chunk_id": self.item["chunk_id"], "audio_sha256": audio_hash(self.wav)}]
         _validate_censorship_sources(result, spec, accepted)
         with self.assertRaisesRegex(ChapterClientError, "unrequested"):
             _validate_censorship_sources(result, {"chapter": spec["chapter"]}, accepted)
@@ -180,7 +181,7 @@ class CensorshipAssemblyTests(unittest.TestCase):
                                    render_settings=settings, context={}, censorship_policy=policy,
                                    notify=lambda _: None)
         before = prepare()
-        original = file_hash(self.wav)
+        original = audio_hash(self.wav)
         after = prepare(self.policy)
         self.assertNotEqual(before["cache_key"], after["cache_key"])
         self.assertEqual(before["frames"], after["frames"])
@@ -189,7 +190,7 @@ class CensorshipAssemblyTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_cache.compose_chapter", side_effect=AssertionError("recomposed")):
             self.assertEqual(prepare(self.policy), after)
             self.assertEqual(prepare(DEFAULT_POLICY), before)
-        self.assertEqual(file_hash(self.wav), original)
+        self.assertEqual(audio_hash(self.wav), original)
         from epub_tts_narrator.renderer.assembly import package_audio
         from epub_tts_narrator.renderer.common import read_json
         package_audio([before, dict(after, number=2, id="chapter-0002")], self.root / "book",

@@ -30,11 +30,12 @@ from .book_output import (
 )
 from .pacing import audio_edges, punctuation_pause
 from .interrupts import run_subprocess
+from .stored_audio import StoredAudioError, audio_hash, audio_present, is_stored, materialize, open_wave, tool_path
 
 
 def _hash(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    """SHA-256 of a file; a logical WAV kept as its stored FLAC hashes as the WAV (``stored_audio``)."""
+    return audio_hash(path)
 
 
 def _run(arguments: list[str], *, timeout: int = 3600) -> str:
@@ -65,7 +66,7 @@ def _pause_frames(milliseconds: float, sample_rate: int) -> int:
 
 def _wave_info(path: Path, sample_rate: int | None = None) -> dict:
     try:
-        with wave.open(str(path), "rb") as audio:
+        with open_wave(path) as audio:
             rate = audio.getframerate()
             if (audio.getcomptype() != "NONE" or audio.getsampwidth() != 2
                     or audio.getnchannels() != 1):
@@ -74,7 +75,7 @@ def _wave_info(path: Path, sample_rate: int | None = None) -> dict:
                 raise ValueError(f"WAV sample rate {rate} differs from {sample_rate}: {path}")
             _rate(rate)
             return {"sample_rate": rate, "channels": 1, "frames": audio.getnframes()}
-    except (OSError, wave.Error, EOFError) as exc:
+    except (OSError, wave.Error, EOFError, StoredAudioError) as exc:
         raise ValueError(f"Invalid PCM WAV {path}: {exc}") from exc
 
 
@@ -96,13 +97,13 @@ def _normalize_clip(input_path: str | Path, output_path: str | Path, *,
                     sample_rate: int = 44100, ffmpeg: str = "ffmpeg") -> dict:
     _rate(sample_rate)
     source, target = Path(input_path).resolve(), Path(output_path)
-    if target.exists() or target.is_symlink():
+    if audio_present(target):
         raise ValueError(f"Output already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".normalize-", dir=target.parent) as temporary:
         staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-              "-protocol_whitelist", "file,pipe", "-i", str(source),
+              "-protocol_whitelist", "file,pipe", "-i", str(tool_path(source)),
               "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar",
               str(sample_rate), "-c:a", "pcm_s16le", "-f", "wav", str(staged)],
              timeout=600)
@@ -141,7 +142,7 @@ def mix_speakers(lanes: Sequence[dict], output_wav: str | Path, *, sample_rate=4
     with tempfile.TemporaryDirectory(prefix=".mix-", dir=target.parent) as temporary:
         staged = Path(temporary) / target.name
         with ExitStack() as handles:
-            inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
+            inputs = [handles.enter_context(open_wave(lane["wav_path"])) for lane in lanes]
             destination = handles.enter_context(wave.open(str(staged), "wb"))
             destination.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
             cursor = 0
@@ -215,7 +216,7 @@ def _masked_pcm(lanes, start, end):
     """Yield masked PCM, averaging simultaneous lanes only after each mask."""
     from .censorship import apply_masks
     with ExitStack() as handles:
-        inputs = [handles.enter_context(wave.open(str(lane["wav_path"]), "rb")) for lane in lanes]
+        inputs = [handles.enter_context(open_wave(lane["wav_path"])) for lane in lanes]
         for source, lane in zip(inputs, lanes):
             source.setpos(min(start, lane["frames"]))
         cursor = start
@@ -424,7 +425,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                             destination.writeframesraw(data)
                             count += len(data) // 2
                     else:
-                        with wave.open(str(read_path), "rb") as audio:
+                        with open_wave(read_path) as audio:
                             position = edges["start"]
                             # Interior pause edits cut or extend quiet stretches only.
                             for edit in pause_edits + [{"source_frame": edges["end"]}]:
@@ -658,7 +659,7 @@ def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=target.parent) as temporary:
         staged = Path(temporary) / target.name
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-              "-i", str(Path(chapter["wav_path"]).resolve()), "-map", "0:a:0"]
+              "-i", str(tool_path(Path(chapter["wav_path"]).resolve())), "-map", "0:a:0"]
              + codec + ["-metadata", f"title={chapter['title']}",
                         "-metadata", f"album={book.get('title', 'Audiobook')}",
                         "-metadata", f"artist={'; '.join(book.get('authors', []))}",
@@ -776,13 +777,22 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
                            ffmpeg=ffmpeg, ffprobe=ffprobe)
         record["sha256"] = _hash(output)
     notify(f"Combining {len(audio_chapters)} chapters into {filename}")
-    with tempfile.TemporaryDirectory(prefix=".encode-", dir=target) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".encode-", dir=target) as temporary, ExitStack() as restored:
         scratch = Path(temporary)
         concat = scratch / "chapters.ffconcat"
+        sources = [Path(chapter["wav_path"]) for chapter, _ in audio_chapters]
+        stored = [is_stored(path) for path in sources]
+        if any(stored) and not all(stored):
+            # FFmpeg's concat demuxer needs one codec throughout: a book whose
+            # chapters are partly WAV and partly FLAC joins exact WAV copies.
+            sources = [restored.enter_context(materialize(path, directory=scratch)) if kept else path
+                       for path, kept in zip(sources, stored)]
+        else:
+            sources = [tool_path(path) for path in sources]
         concat.write_text("ffconcat version 1.0\n" + "".join(
-            f"file {_concat_path(Path(chapter['wav_path']))}\n"
+            f"file {_concat_path(source)}\n"
             f"duration {chapter['frames'] / sample_rate:.12f}\n"
-            for chapter, _ in audio_chapters), encoding="utf-8")
+            for source, (chapter, _) in zip(sources, audio_chapters)), encoding="utf-8")
         metadata = scratch / "book.ffmetadata"
         metadata.write_text(
             ";FFMETADATA1\n" + "".join(

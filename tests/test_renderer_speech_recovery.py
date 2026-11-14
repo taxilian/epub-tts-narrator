@@ -21,6 +21,8 @@ from epub_tts_narrator.renderer.workflow import (
 from epub_tts_narrator.renderer.assembly import normalize_clip
 from test_renderer_jev_verification import Judge
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, timed_transcript
+from epub_tts_narrator.renderer.stored_audio import audio_hash, open_wave
+from epub_tts_narrator.renderer import stored_audio
 
 
 TEXT = "Insang Mortuary Services! What does it—"
@@ -61,7 +63,7 @@ class AudioVerifier:
 
     def transcribe(self, path):
         self.calls.append(Path(path))
-        with wave.open(str(path), "rb") as source:
+        with open_wave(path) as source:
             frames = source.getnframes()
             data = source.readframes(frames)
         if frames > 44100 and self.final_error is not None:
@@ -122,7 +124,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.assertEqual(accepted["request"]["chunk"], self.request["chunk"])
         self.assertEqual(wav.parent.name, accepted["request_hash"])
         self.assertEqual(digest(accepted["request"]), accepted["request_hash"])
-        self.assertEqual(file_hash(wav), accepted["audio_sha256"])
+        self.assertEqual(audio_hash(wav), accepted["audio_sha256"])
         self.assertEqual(accepted["report"]["expected_text"], TEXT)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["transcript"], TEXT)
@@ -132,10 +134,10 @@ class SpeechRecoveryTests(unittest.TestCase):
         for part in audit["parts"]:
             audio = wav.parent / part["audio_file"]
             record = read_json(audio.parent / "accepted.json")
-            self.assertEqual(part["audio_sha256"], file_hash(audio))
+            self.assertEqual(part["audio_sha256"], audio_hash(audio))
             self.assertEqual(part["request_hash"], digest(record["request"]))
             self.assertTrue(record["report"]["passed"])
-        with wave.open(str(wav), "rb") as audio:
+        with open_wave(wav) as audio:
             self.assertEqual(audio.getnframes(), 88200)
         cache = SpeechCache(self.root, {"voice": self.voice})
         identity = cache.identity(self.request)
@@ -155,7 +157,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(sum(text.startswith("Insang") for text, _ in self.calls), 1)
-        self.assertTrue(wav.is_file())
+        self.assertTrue(stored_audio.audio_exists(wav))
 
     def test_missing_word_in_child_cannot_publish_but_new_run_retries_only_failed_part(self):
         self.bad_part = "What does it—"
@@ -172,7 +174,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.bad_part = None
         wav, accepted = self.recover(retry_budget=SpeechRetryBudget())
         self.assertTrue(accepted["report"]["passed"])
-        self.assertTrue(wav.is_file())
+        self.assertTrue(stored_audio.audio_exists(wav))
         self.assertEqual(len(self.calls), 4)
         self.assertEqual(sum(text.startswith("Insang") for text, _ in self.calls), 1)
         self.assertEqual(len({seed for text, seed in self.calls if text == "What does it—"}), 3)
@@ -211,11 +213,11 @@ class SpeechRecoveryTests(unittest.TestCase):
         marker = read_json(self.parent / "speech-recovery.json")
         directory = self.parent.parent / marker["recovery_request_hash"]
         wav = directory / read_json(directory / "attempt-001.json")["audio_file"]
-        previous = wav.read_bytes()
+        previous = stored_audio.read_bytes(wav)
         self.verifier.final_transcript = None
         reused, accepted = self.recover(verifier=wrapped)
         self.assertEqual(reused, wav)
-        self.assertEqual(wav.read_bytes(), previous)
+        self.assertEqual(stored_audio.read_bytes(wav), previous)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.verifier.calls), 4)
         self.assertTrue(accepted["report"]["passed"])
@@ -227,14 +229,14 @@ class SpeechRecoveryTests(unittest.TestCase):
         marker = read_json(self.parent / "speech-recovery.json")
         directory = self.parent.parent / marker["recovery_request_hash"]
         wav = directory / read_json(directory / "attempt-001.json")["audio_file"]
-        previous = wav.read_bytes()
+        previous = stored_audio.read_bytes(wav)
         record = read_json(directory / "attempt-001.json")
         self.assertTrue(record["report"]["retry_on_resume"])
         self.assertFalse((directory / "accepted.json").exists())
         self.verifier.final_error = None
         reused, accepted = self.recover()
         self.assertEqual(reused, wav)
-        self.assertEqual(wav.read_bytes(), previous)
+        self.assertEqual(stored_audio.read_bytes(wav), previous)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.verifier.calls), 4)
         self.assertTrue(accepted["report"]["passed"])
@@ -243,7 +245,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         normalization_calls = []
 
         def fail_final_normalization(source, target, **kwargs):
-            with wave.open(str(source), "rb") as audio:
+            with open_wave(source) as audio:
                 is_final = audio.getnframes() > 44100
             if is_final:
                 normalization_calls.append(Path(source))
@@ -281,7 +283,7 @@ class SpeechRecoveryTests(unittest.TestCase):
         with self.assertRaises(RenderBlocked):
             self.recover()
         write_json(marker_path, marker)
-        wav.write_bytes(wav.read_bytes() + b"changed")
+        wav.write_bytes(stored_audio.read_bytes(wav) + b"changed")
         with self.assertRaisesRegex(RenderBlocked, "changed"):
             self.recover()
         self.assertEqual(len(self.calls), 2)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .audio_naming import validate_audio_filename
 from .common import digest, file_hash, read_json, regular_file, write_json
+from .stored_audio import audio_hash
 from .quality import compare_words
 from .retry_budget import generation_attempts
 from .speech_resolver import _ACOUSTIC_REASONS
@@ -315,7 +316,7 @@ class RecurringResolution:
     def _check_candidate_audio(self, record):
         filename = validate_audio_filename(record.get('audio_file'), suffix='.wav')
         wav = self.directory / filename
-        if file_hash(regular_file(wav)) != record.get('audio_sha256'):
+        if audio_hash(wav) != record.get('audio_sha256'):
             raise ValueError('Speech resolution candidate audio changed')
 
     def _failed_takes(self):
@@ -523,7 +524,7 @@ def confirm_recovery_report(report, request, metadata, directory):
                 or digest(acceptance.get('request')) != row['request_hash']
                 or acceptance.get('audio_sha256') != row['audio_sha256']
                 or acceptance.get('audio_file') != audio.name
-                or file_hash(regular_file(audio)) != row['audio_sha256']
+                or audio_hash(audio) != row['audio_sha256']
                 or child.get('passed') is not True or child.get('reasons')
                 or child.get('expected_text') != part['text']):
             raise ValueError('Recovered speech part lost its verified source binding')
