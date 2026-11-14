@@ -10,9 +10,11 @@ verification's own measure (25 ms windows below -60 dBFS RMS), for
 raises the usual unfinished-take error, which the render records as a rejected
 attempt and retries at once.
 
-Verification already rejects any take with more than 2.5 seconds of internal
-silence that is not a requested pause, so a take that resumes after the watch
-would have stopped it is never one that could have been accepted. Takes that
+A take may pause once for up to twice verification's internal-silence limit
+(2.5 seconds by default) and still be accepted, because assembly shortens the
+pause (``stall_recovery``). The watch therefore waits longer than that
+(``STOP_SECONDS``) before it stops a take, so a take that would have resumed
+after such a pause and passed is never cut off. Takes that
 end on their own are bit-identical with and without the watch: it only reads
 frames, never the sampler, which is why it is not part of any engine or cache
 identity.
@@ -29,7 +31,10 @@ import math
 
 import re
 
-STOP_SECONDS = 3.0
+# Longer than the longest single pause stall recovery accepts (2 x 2.5 s): a
+# take that resumes after a pause it would accept must never be stopped. At
+# 3 s the watch cut such takes off, and they failed for their missing words.
+STOP_SECONDS = 5.5
 SILENCE_DBFS = -60.0
 WINDOW_SECONDS = 0.025
 # Frames decoded before the new ones so the codec has left context; a window

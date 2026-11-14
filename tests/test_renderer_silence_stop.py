@@ -78,9 +78,9 @@ class SilenceWatchTests(unittest.TestCase):
         self.assertEqual(stop_seconds("[pause for 1 seconds] a [pause for 0.5 seconds] b"), STOP_SECONDS + 1.5)
         self.assertEqual(stop_seconds("[Sheepish and slightly deflated] Fine."), STOP_SECONDS)
         watch, _codec = self.watch(text)
-        self.assertIsNone(run(watch, seconds(LOUD, 1) + seconds(QUIET, 5) + seconds(LOUD, 1)))
+        self.assertIsNone(run(watch, seconds(LOUD, 1) + seconds(QUIET, STOP_SECONDS + 2) + seconds(LOUD, 1)))
         watch, _codec = self.watch(text)
-        self.assertIsNotNone(run(watch, seconds(LOUD, 1) + seconds(QUIET, 8)))
+        self.assertIsNotNone(run(watch, seconds(LOUD, 1) + seconds(QUIET, STOP_SECONDS + 3.5)))
 
     def test_continuous_speech_is_never_stopped(self):
         watch, _codec = self.watch()
@@ -130,6 +130,17 @@ class SpokenFramesTests(unittest.TestCase):
         from epub_tts_narrator.renderer.silence_stop import spoken_frames
         self.assertEqual(spoken_frames(np.zeros(50 * HOP, dtype=np.float32), RATE, 50), 0)
         self.assertEqual(spoken_frames(np.zeros(0, dtype=np.float32), RATE, 0), 0)
+
+
+class AcceptablePauseTests(unittest.TestCase):
+    def test_the_watch_never_stops_a_pause_stall_recovery_would_accept(self):
+        # A take that pauses once for up to twice the internal-silence limit and
+        # then finishes is accepted (assembly shortens the pause); stopping it
+        # earlier turned acceptable takes into truncated ones.
+        from epub_tts_narrator.renderer.quality import validate_policy
+        from epub_tts_narrator.renderer.stall_recovery import LIMIT_FACTOR
+        accepted = validate_policy({})["max_internal_silence_seconds"] * LIMIT_FACTOR
+        self.assertGreater(STOP_SECONDS, accepted)
 
 
 if __name__ == "__main__":
