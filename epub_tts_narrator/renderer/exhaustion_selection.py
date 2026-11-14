@@ -258,5 +258,9 @@ def select_retained(directory, request, client, *, failure_report=None):
             os.replace(copied, target)
     if file_hash(regular_file(target)) != record['audio_sha256']:
         raise ValueError('Selected audio changed during publication')
+    from .take_selection import current_acceptance
+    chosen = current_acceptance(directory, digest(request))
+    if chosen is not None:  # A person chose a take while the selection ran: theirs is used.
+        return directory / chosen['audio_file'], chosen
     write_json(directory / 'accepted.json', record)
     return target, record

@@ -490,6 +490,23 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 accepted = None
             elif isinstance(accepted.get("report"), dict) and accepted["report"].get("passed") is True:
                 return finish(wav, accepted)
+    if purpose == "speech" and accepted is None:
+        # A person who marked a retained take good wants it used: no new take.
+        from .take_review import use_judged_good
+        judged = use_judged_good(directory, request_hash)
+        if judged is not None:
+            notify(f"  Using take {judged.get('attempt')}, which you marked good.")
+            return finish(directory / judged["audio_file"], judged)
+
+    def chosen_meanwhile():
+        """A take chosen while this passage rendered (by a person in the run shell): used at once."""
+        from .take_selection import current_acceptance
+        chosen = current_acceptance(directory, request_hash)
+        if chosen is None:
+            return None
+        notify(f"  Using take {chosen.get('attempt')}, which you chose; no further takes are made.")
+        return finish(directory / chosen["audio_file"], chosen)
+
     from .performance_runtime import verification_options
     performance_options = verification_options(request)
     validation_key = make_validation_key(text, verifier, config["quality"], purpose=purpose, **performance_options)
@@ -593,6 +610,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 + ("\n" + result["audit"]["error"] if result["audit"].get("error") else ""))
         notify("  Speech recovery: " + action + " — " + _diagnostic_text(result.get("reason", ""), 240))
         if action == "accept":
+            chosen = chosen_meanwhile()
+            if chosen is not None:
+                return chosen
             record = deepcopy(record)
             record["report"] = accepted_report(record["report"], result)
             record["validation_key"] = validation_key
@@ -697,6 +717,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     for attempt in attempt_numbers:
         if not fresh_speech and attempt > max(attempts, first_attempt):
             break
+        chosen = chosen_meanwhile()
+        if chosen is not None:
+            return chosen
         if direction_session is not None and direction_session.abandoned(attempt):
             continue
         prefix = f"attempt-{attempt:03d}"
@@ -945,6 +968,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         write_json(result_path, record)
         last_report = report
         if report.get("passed") is True:
+            chosen = chosen_meanwhile()
+            if chosen is not None:
+                return chosen
             write_json(accepted_path, record)
             judgment = report.get("text_judge", {})
             if judgment.get("decision") == "equivalent":

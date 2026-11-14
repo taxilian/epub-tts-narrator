@@ -183,6 +183,10 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
         state['phase'] = 'evaluated'
         session.save()
         if report.get('passed') is True:
+            from .take_selection import current_acceptance
+            chosen = current_acceptance(directory, digest(request))
+            if chosen is not None:  # A person chose a take while the repair ran: theirs is used.
+                return directory / chosen['audio_file'], chosen
             write_json(directory / 'accepted.json', record)
             return target, record
         return None

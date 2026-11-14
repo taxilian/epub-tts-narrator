@@ -187,6 +187,62 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertEqual(calls[0], 2)
         self.assertEqual(listed, [2])
 
+    def passage(self):
+        from epub_tts_narrator.renderer.common import digest
+        text = "The lantern shone above the quiet harbor."
+        request = {"kind": "speech", "engine": self.engine.identity,
+                   "chunk": {"chunk_id": "chunk-007", "spoken_text": text, "segment": {"voice_id": "narrator"}}}
+        clips = self.root / "render-work" / "clips"
+        return text, request, clips, clips / digest(request), digest(request)
+
+    def test_a_take_chosen_while_the_passage_renders_is_used_and_no_more_are_made(self):
+        from epub_tts_narrator.renderer.take_selection import select_take
+        text, request, clips, directory, request_hash = self.passage()
+        self.verifier.wrong_texts.add(text)
+        self.config["render"]["max_attempts"] = 5
+        for passes in (False, True):
+            with self.subTest(in_flight_take_passes=passes):
+                if directory.exists():
+                    __import__("shutil").rmtree(directory)
+                calls = []
+
+                def generate(path, seed):
+                    calls.append(seed)
+                    if len(calls) == 2:
+                        # The person uses take 1 while take 2 is being made.
+                        select_take(clips, request_hash, 1, note="fixture choice")
+                        if passes:
+                            self.verifier.wrong_texts.discard(text)
+                    return self.engine._write(text, path, seed)
+
+                wav, accepted = verified_take(text, generate, directory, request, self.verifier, self.config,
+                                              notify=self.messages.append)
+                self.verifier.wrong_texts.add(text)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(accepted["attempt"], 1)
+                self.assertIn("manual_selection", accepted["engine_metadata"])
+                self.assertEqual(read_json(directory / "accepted.json"), accepted)
+                self.assertTrue(any("which you chose; no further takes are made" in line for line in self.messages))
+
+    def test_a_take_marked_good_is_used_when_the_passage_renders_again(self):
+        from epub_tts_narrator.renderer.take_review import TakeReview
+        text, request, clips, directory, request_hash = self.passage()
+        self.verifier.wrong_texts.add(text)
+        generate = lambda path, seed: self.engine._write(text, path, seed)
+        with self.assertRaises(RenderBlocked):
+            verified_take(text, generate, directory, request, self.verifier, self.config, notify=self.messages.append)
+        review = TakeReview(clips.parent, {}, None, request_hash)
+        review.mark(1, "bad")
+        review.mark(2, "good")
+        self.assertFalse((directory / "accepted.json").exists())  # A mark alone changes nothing.
+
+        wav, accepted = verified_take(text, lambda *_: self.fail("made a new take"), directory, request,
+                                      self.verifier, self.config, notify=self.messages.append)
+        self.assertEqual(accepted["attempt"], 2)
+        self.assertIn("manual_selection", accepted["engine_metadata"])
+        self.assertIn("  Using take 2, which you marked good.", self.messages)
+        self.assertEqual([row["accepted"] for row in review.takes()], [False, True])
+
     def test_interrupted_paragraph_counts_only_verified_work_and_resumes_exact_audio(self):
         bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
         # Both targets have one role/voice so they still exercise grouped

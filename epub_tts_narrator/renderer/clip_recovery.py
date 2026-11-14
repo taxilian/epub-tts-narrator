@@ -50,6 +50,13 @@ def _saved_failure_report(directory, request):
     return latest['report']
 
 
+def _chosen(directory, request):
+    """``(audio, record)`` of a take chosen for this passage while it rendered, or None."""
+    from .take_selection import current_acceptance
+    record = current_acceptance(directory, digest(request))
+    return None if record is None else (Path(directory) / record['audio_file'], record)
+
+
 def run(ordinary, text, generate, directory, request, verifier, config, *, generate_plan_part=None, **options):
     from .workflow import SpeechVerificationFailed, VerificationUnavailable
     resolver = getattr(verifier, 'speech_resolver', None)
@@ -85,10 +92,23 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
             return ordinary(text, generate, directory, request, verifier, config,
                             broad_recovery=enabled and generate_plan_part is not None, **ordinary_options)
         except SpeechVerificationFailed as exc:
+            chosen = _chosen(directory, request)
+            if chosen is not None:
+                return chosen
             if not enabled or exc.request != request or exc.report.get('resolution_action') == 'split':
                 raise
             failure_report = exc.report
     notify = options.get('notify', print)
+    chosen = _chosen(directory, request)
+    if chosen is None and options.get('purpose', 'speech') == 'speech':
+        # A resumed repair or best-effort choice: a take a person marked good comes first.
+        from .take_review import use_judged_good
+        judged = use_judged_good(directory, digest(request))
+        if judged is not None:
+            notify(f"  Using take {judged.get('attempt')}, which you marked good.")
+            chosen = (directory / judged['audio_file'], judged)
+    if chosen is not None:
+        return chosen
     resume_approved = repair_session is not None and (
         repair_session.state['phase'] in {'approved', 'executing', 'evaluated'}
         or (repair_session.state['phase'] == 'failed'

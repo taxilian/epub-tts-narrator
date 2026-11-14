@@ -148,5 +148,44 @@ class TakeReview:
         return {"attempt": attempt, "verdict": verdict, "learned": learned}
 
 
+GOOD_NOTE = "A take a person marked good while listening in the run shell"
+
+
+def use_judged_good(directory, request_hash):
+    """Accept a retained take of this passage that a person marked good; its record, or None.
+
+    The most recently judged good take whose audio is unchanged and usable is
+    accepted through ``take_selection.select_take`` (a failed take becomes an
+    audited manual selection, never a pass). Only passage folders directly in
+    ``render-work/clips`` have person verdicts.
+    """
+    from .take_feedback import load
+    from .take_selection import current_acceptance, list_takes, select_take
+    directory = Path(directory)
+    if directory.parent.name != "clips":
+        return None
+    try:
+        good = [entry for entry in load(directory.parent.parent)["takes"].values()
+                if entry.get("request_hash") == request_hash and entry.get("verdict") == "good"]
+        if not good:
+            return None
+        rows = {row["attempt"]: row for row in list_takes(directory.parent, request_hash)}
+    except (ValueError, OSError):
+        return None
+    for entry in sorted(good, key=lambda item: (str(item.get("recorded_at") or ""), item.get("attempt") or 0),
+                        reverse=True):
+        row = rows.get(entry.get("attempt"))
+        if row is None or not row["eligible"] or row["record"].get("audio_sha256") != entry.get("audio_sha256"):
+            continue
+        try:
+            select_take(directory.parent, request_hash, row["attempt"], note=GOOD_NOTE)
+        except (ValueError, OSError):
+            continue
+        record = current_acceptance(directory, request_hash)
+        if record is not None:
+            return record
+    return None
+
+
 # The name the failed-passage repair first had.
 FailedTakeRepair = TakeReview

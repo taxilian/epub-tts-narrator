@@ -124,6 +124,38 @@ def _take_row(number, record, audio, accepted):
     }
 
 
+def current_acceptance(directory, request_hash):
+    """This passage's saved passed acceptance with intact audio, or None.
+
+    The take loops ask before each new take and before publishing their own
+    choice, so a take a person chose while the passage was still rendering is
+    used at once instead of being replaced.
+    """
+    directory = Path(directory)
+    path = directory / "accepted.json"
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        record = read_json(path)
+        if (not isinstance(record, dict) or record.get("request_hash") != request_hash
+                or not isinstance(record.get("report"), dict) or record["report"].get("passed") is not True):
+            return None
+        name = record.get("audio_file")
+        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
+            return None
+        audio = directory / name
+        if audio.is_symlink() or not audio.is_file() or file_hash(audio) != record.get("audio_sha256"):
+            return None
+        if "manual_selection" in (record.get("engine_metadata") or {}):
+            validate_manual_selection(record)
+        else:
+            from .exhaustion_selection import validate_record
+            validate_record(record)
+    except (ValueError, OSError):
+        return None
+    return record
+
+
 def retained_attempts(clips_directory, request_hash) -> list[tuple[int, dict]]:
     """``[(attempt, record)]`` for every retained take with audio, read without touching the audio."""
     directory = _clip_directory(clips_directory, request_hash)
