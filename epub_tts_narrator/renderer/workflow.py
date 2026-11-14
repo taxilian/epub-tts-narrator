@@ -154,6 +154,9 @@ def _verification_failure_detail(report):
     others are not, the ones that actually failed come first, with a word of
     context on each side, so a dropped word is not hidden behind "+N more".
     """
+    if isinstance(report.get("name_shape"), dict):
+        from .name_shape import describe
+        return describe(report)
     alignment = report.get("metrics", {}).get("alignment", [])
     groups, expected, actual, previous = [], [], [], [None]
 
@@ -2977,6 +2980,16 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             raise RenderBlocked(f"Could not read the takes marked while listening: {exc}") from exc
         if rejected:
             notify(f"Rendering {len(rejected)} passage(s) again whose used take you marked bad.")
+        # Takes in use whose chosen pronunciation was heard with its syllables
+        # rearranged (accepted before the check existed) are rendered again.
+        from .name_shape import retire_misread
+        try:
+            misread = retire_misread(work)
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Could not check the takes in use for misread names: {exc}") from exc
+        if misread:
+            notify(f"Rendering {len(misread)} passage(s) again whose chosen pronunciation was heard "
+                   "with its syllables rearranged.")
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
         voice_lock = store.lock()
         store.persist_aliases()

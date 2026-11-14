@@ -1,0 +1,199 @@
+"""Reject a take whose chosen pronunciation came out with its syllables rearranged.
+
+A confirmed pronunciation reaches the engine as phonemes, but Drama 3 does not
+always follow them: ``Ce'Nedra`` (``S EH2 N EH1 D R AH0``, seh-NED-ruh) can come
+out as "SEN-dra-ruh". The recognizer hears that difference ("Sinedra" against
+"Sendera"), but every word-level check accepts both: Double Metaphone ignores
+vowels, so both spellings reduce to the same consonants.
+
+This check compares the *shape* of the chosen reading with the shape of what
+was heard for that word: how many consonants come before, between and after
+its vowels. A recognizer spelling a name differently keeps the shape
+(``Sinedra``, ``Senedra`` and ``Sinatra`` all have one consonant, a vowel, one
+consonant, a vowel, two consonants and a vowel), while the misreading moves a
+consonant across a vowel (``Sendera``: one, two, one). The take is rejected
+only when the heard word has the same number of vowel groups and the same
+number of consonants as the reading but they sit differently. Anything else
+(a heard word with other consonants, a dropped syllable, a dictionary word in
+its place) is left to the ordinary checks, which already decided the take.
+
+Only person-chosen CMU readings are checked (``pronunciation`` controls with
+``cmu_arpabet``), one word at a time; respellings and multi-word readings are
+not. It runs on chapter speech that otherwise passed verification.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import time
+
+NAME_SHAPE_VERSION = 1
+REASON = "pronunciation_mismatch"
+_VOWELS = frozenset("aeiou")
+_DIGRAPHS = ("th", "sh", "ch", "ph", "wh", "gh", "ck")
+_POSSESSIVE = re.compile(r"['’]s$")
+SWEEP_FILENAME = "name-shape-sweep.json"
+_STRETCH = 40  # words: a longer differing stretch is not a misheard name
+_MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
+
+
+def _clusters(units):
+    """Consonant counts before, between and after each run of vowels: ``[1, 1, 2, 0]``."""
+    clusters, run, after_vowel = [], 0, False
+    for unit in units:
+        if unit is None:  # a vowel
+            if not after_vowel:
+                clusters.append(run)
+                run = 0
+            after_vowel = True
+        else:
+            run += unit
+            after_vowel = False
+    clusters.append(run)
+    return clusters
+
+
+def reading_shape(phonemes):
+    """The shape of a CMU reading: vowels carry a stress digit, everything else is one consonant."""
+    phones = phonemes.replace("|", " ").split()
+    return _clusters([None if phone[-1:].isdigit() else 1 for phone in phones])
+
+
+def spelling_shape(word):
+    """The shape of a heard spelling, reading English letter groups as one sound each."""
+    letters = re.sub(r"[^a-z]", "", word.lower())
+    units, index = [], 0
+    while index < len(letters):
+        letter = letters[index]
+        following = letters[index + 1] if index + 1 < len(letters) else ""
+        if letter in _VOWELS or (letter == "y" and following not in _VOWELS):
+            units.append(None)
+        elif letters[index:index + 2] in _DIGRAPHS:
+            units.append(1)
+            index += 1
+        elif letter == "h" and units and units[-1] is not None:
+            pass  # A breathy "h" after a consonant (dh, nh, kh) adds no consonant of its own.
+        elif index and letters[index - 1] == letter:
+            pass  # A doubled letter is one sound.
+        else:
+            units.append(2 if letter == "x" else 1)
+        index += 1
+    return _clusters(units)
+
+
+def rearranged(phonemes, heard):
+    """Whether ``heard`` has the reading's vowels and consonants but in other places."""
+    expected, actual = reading_shape(phonemes), spelling_shape(heard)
+    return len(expected) == len(actual) and sum(expected) == sum(actual) and expected != actual
+
+
+def check(expected_text, transcript, performance):
+    """``[{"text", "heard", "expected_shape", "heard_shape"}]`` for every chosen reading heard rearranged."""
+    from difflib import SequenceMatcher
+    from .close_match import _alignment
+    from .quality import normalize_words
+    controls = [control for control in (performance or {}).get("controls", [])
+                if control.get("kind") == "pronunciation" and control.get("alphabet") == "cmu_arpabet"]
+    if not controls or not isinstance(transcript, str) or not transcript.strip():
+        return []
+    expected, heard = normalize_words(expected_text), normalize_words(transcript)
+    if not heard:
+        return []
+    # Matching runs come from difflib; only the differing stretch around a
+    # name is aligned word by word, so long paragraphs stay cheap.
+    opcodes = SequenceMatcher(None, expected, heard, autojunk=False).get_opcodes()
+    found = []
+    for control in controls:
+        if len(normalize_words(control["text"])) != 1:
+            continue
+        index = len(normalize_words(expected_text[:control["start"]]))
+        opcode = next((item for item in opcodes if item[1] <= index < item[2]), None)
+        if opcode is None or opcode[0] != "replace" or opcode[2] - opcode[1] > _STRETCH or opcode[4] - opcode[3] > _STRETCH:
+            continue
+        _, first, last, heard_first, heard_last = opcode
+        change = next((item for item in _alignment(expected[first:last], heard[heard_first:heard_last])
+                       if item["expected_start"] <= index - first < item["expected_end"]), None)
+        if (change is None or change["operation"] in {"equal", "deleted", "added"}
+                or change["expected_end"] - change["expected_start"] != 1 or not change["actual"]):
+            continue
+        word, phonemes = "".join(change["actual"]), control["phonemes"].strip()
+        if _POSSESSIVE.search(expected[index]):
+            # The reading of a possessive ends in its "s" sound; compare the name itself.
+            phonemes = re.sub(r"\s+[SZ]$", "", phonemes)
+        word = _POSSESSIVE.sub("", word)
+        if rearranged(phonemes, word):
+            found.append({"text": control["text"], "heard": "".join(change["actual"]),
+                          "expected_shape": reading_shape(phonemes), "heard_shape": spelling_shape(word)})
+    return found
+
+
+def apply(report, expected_text, performance, *, purpose="speech"):
+    """Fail a passed chapter-speech report whose chosen readings were heard rearranged; the report."""
+    if purpose != "speech" or report.get("passed") is not True or performance is None:
+        return report
+    transcript = report.get("verified_transcript") or report.get("transcript")
+    found = check(expected_text, transcript, performance)
+    if not found:
+        return report
+    return {**report, "passed": False, "reasons": [REASON],
+            "name_shape": {"version": NAME_SHAPE_VERSION, "words": found,
+                           "passed_method": report.get("text_confirmation_method")},
+            "text_confirmation_method": None}
+
+
+def describe(report):
+    """``Ce'Nedra heard as Sendera`` for a rejected report, or ``""``."""
+    words = (report.get("name_shape") or {}).get("words") or []
+    return "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
+
+
+def retire_misread(work):
+    """Retire every take in use whose chosen reading was heard rearranged; their take folders.
+
+    Takes accepted before this check existed are found from their saved
+    transcripts (no recognition runs), so the passages render again under the
+    check. A take a person chose or marked good, and a best-effort choice, are
+    kept: a person or the audited chooser already decided them.
+    """
+    from .common import read_json, write_json
+    from .performance_runtime import verification_options
+    from .take_feedback import load
+    from .take_review import retire_acceptance
+    work = Path(work)
+    clips = work / "clips"
+    if not clips.is_dir() or clips.is_symlink():
+        return []
+    good = {entry.get("audio_sha256") for entry in load(work)["takes"].values() if entry.get("verdict") == "good"}
+    # Takes accepted under this check passed it already; only acceptances
+    # written since the last sweep (by any renderer) are read again.
+    marker = work / SWEEP_FILENAME
+    saved = read_json(marker) if marker.is_file() and not marker.is_symlink() else {}
+    since = saved.get("checked_through", 0) if saved.get("version") == NAME_SHAPE_VERSION else 0
+    started = time.time()
+    retired = []
+    for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
+        if path.is_symlink() or not path.is_file() or path.stat().st_mtime < since - _MTIME_SLACK:
+            continue
+        if b'"cmu_arpabet"' not in path.read_bytes():
+            continue
+        record = read_json(path)
+        if not isinstance(record, dict) or not isinstance(record.get("report"), dict):
+            continue
+        report, metadata = record["report"], record.get("engine_metadata") or {}
+        if (report.get("passed") is not True or "manual_selection" in metadata or "exhaustion_selection" in metadata
+                or record.get("audio_sha256") in good or not isinstance(record.get("request"), dict)
+                or record["request"].get("kind") not in {"speech", "paragraph_speech", "speech_recovery_part"}):
+            continue
+        try:
+            performance = verification_options(record["request"]).get("performance")
+        except (ValueError, KeyError, TypeError):
+            continue
+        found = check(report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript"),
+                      performance)
+        if found:
+            retire_acceptance(path.parent, record, "name-shape",
+                              {"reason": REASON, "version": NAME_SHAPE_VERSION, "words": found})
+            retired.append(path.parent)
+    write_json(marker, {"version": NAME_SHAPE_VERSION, "checked_through": started})
+    return retired

@@ -217,9 +217,7 @@ def retire_judged_bad(directory):
     chapter checkpoint, the speech cache and every later render find no take,
     so the passage renders again.
     """
-    from datetime import datetime, timezone
-    import os
-    from .common import digest, read_json, write_json
+    from .common import read_json
     from .take_feedback import judged_bad_audio
     directory = Path(directory)
     path = directory / "accepted.json"
@@ -229,8 +227,21 @@ def retire_judged_bad(directory):
     record = read_json(path) if bad else None
     if not isinstance(record, dict) or record.get("audio_sha256") not in bad:
         return []
-    evidence = {"reason": "judged_bad", "attempt": record.get("attempt"),
-                "audio_sha256": record["audio_sha256"],
+    return retire_acceptance(directory, record, "judged-bad", {"reason": "judged_bad"})
+
+
+def retire_acceptance(directory, record, label, evidence):
+    """Rename a passage's acceptance (and any choice or repair that would publish it again) under ``label``.
+
+    ``record`` is the acceptance being retired; ``evidence`` says why and is
+    saved in ``LABEL-SUFFIX.json`` with the names it retired. Nothing is
+    deleted. Returns the retired names.
+    """
+    from datetime import datetime, timezone
+    import os
+    from .common import digest, write_json
+    directory = Path(directory)
+    evidence = {**evidence, "attempt": record.get("attempt"), "audio_sha256": record.get("audio_sha256"),
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     # The same take can be retired again (restored by hand, say): each
     # retirement keeps its own names.
@@ -241,12 +252,12 @@ def retire_judged_bad(directory):
         if not source.exists() and not source.is_symlink():
             continue
         stem, dot, extension = name.partition(".")
-        target = directory / (f"{stem}.judged-bad-{suffix}{dot}{extension}" if dot else f"{stem}.judged-bad-{suffix}")
+        target = directory / (f"{stem}.{label}-{suffix}{dot}{extension}" if dot else f"{stem}.{label}-{suffix}")
         if target.exists() or target.is_symlink():
-            raise ValueError(f"A retired judged-bad record already exists: {target.name}")
+            raise ValueError(f"A retired {label} record already exists: {target.name}")
         source.rename(target)
         moved.append(target.name)
-    write_json(directory / f"judged-bad-{suffix}.json", {"version": 1, "evidence": evidence, "retired": moved})
+    write_json(directory / f"{label}-{suffix}.json", {"version": 1, "evidence": evidence, "retired": moved})
     return moved
 
 

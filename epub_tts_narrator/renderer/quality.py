@@ -115,6 +115,11 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
         from .performance_audio import PERFORMANCE_AUDIO_VERSION
         identity["performance"] = validate_performance(performance, expected_text)
         identity["performance_audio_version"] = PERFORMANCE_AUDIO_VERSION
+        if purpose == "speech" and any(control["kind"] == "pronunciation" and control.get("alphabet") == "cmu_arpabet"
+                                       for control in identity["performance"]["controls"]):
+            # Only passages with a chosen reading are checked for its shape.
+            from .name_shape import NAME_SHAPE_VERSION
+            identity["name_shape_version"] = NAME_SHAPE_VERSION
     judge_identity = getattr(verifier, "reference_judge_identity", None)
     if judge_identity is not None:
         from .speech_coverage import SPEECH_COVERAGE_VERSION
@@ -1101,7 +1106,9 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     report, which can be retained alongside a rejected synthesis attempt.
     References do not require timing alignment that cloning never consumes.
     Exact word-spacing differences are accepted with their original audit.
-    Other nonexact transcripts reach JEV when enabled. Hard acoustic checks
+    Other nonexact transcripts reach JEV when enabled. Chapter speech with a
+    person-chosen pronunciation fails as ``pronunciation_mismatch`` when that
+    word was heard with its syllables rearranged (``name_shape``). Hard acoustic checks
     still apply; unusable optional word timing
     is omitted with a warning rather than causing speech regeneration.
 
@@ -1122,8 +1129,12 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
     try:
         # A take kept as its stored FLAC is checked as its exact WAV, as before.
         with materialize(path) as wav:
-            return _checked_audio_report(wav, expected_text, verifier, policy,
-                                         purpose=purpose, performance=performance, ticket=ticket)
+            report = _checked_audio_report(wav, expected_text, verifier, policy,
+                                           purpose=purpose, performance=performance, ticket=ticket)
+        # A chosen pronunciation heard with its syllables rearranged is a
+        # wrong rendition even when every word-level check accepted it.
+        from .name_shape import apply
+        return apply(report, expected_text, performance, purpose=purpose)
     finally:
         if ticket is not None:
             ticket.release()
