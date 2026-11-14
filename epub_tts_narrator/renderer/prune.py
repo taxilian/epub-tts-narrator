@@ -527,13 +527,17 @@ def _prune_voices(bundle, store, work, plan):
 
 # Entry points --------------------------------------------------------------------------------------
 
+class ClipsUnavailable(ValueError):
+    """The clips group cannot tell which takes the next render needs; other groups can still run."""
+
+
 def plan_takes(bundle, config):
     """(reused, resumed) take directories of the next render, from the current plan and speech cache."""
     if config.get("remote_chapters", {}).get("url"):
-        raise ValueError("Cleaning clips needs this book's own render plan; it cannot tell which takes a "
+        raise ClipsUnavailable("Cleaning clips needs this book's own render plan; it cannot tell which takes a "
                          "remote chapter service will reuse. Use --only voices,chapters")
     if config["engine"]["type"] != "drama3_mlx":
-        raise ValueError("Cleaning clips supports the built-in Drama/Fish engines only; use --only voices,chapters")
+        raise ClipsUnavailable("Cleaning clips supports the built-in Drama/Fish engines only; use --only voices,chapters")
     from .cache_report import cache_report
     from .pool import create_render_engine
     engine = create_render_engine(config)
@@ -544,7 +548,13 @@ def plan_takes(bundle, config):
         cache_report(bundle, config, identity, multi_speaker=engine.capabilities.get("multi_speaker", False),
                      max_examples=0, needed=reused, resumed=resumed)
     except ValueError as exc:
-        raise ValueError(f"Cleaning clips needs a render plan, and this book's plan has problems: {exc}") from exc
+        problems = [line for line in str(exc).splitlines() if line.strip()]
+        advice = ("Choose speakers for its unassigned lines (epub-tts-narrator resolve-speakers BOOK, or "
+                  "just review-ui BOOK), then rerun"
+                  if any(line.startswith("Missing voice") for line in problems) else "Fix them, then rerun")
+        raise ClipsUnavailable(f"Cleaning clips needs a render plan, and this book's plan has {len(problems)} "
+                               f"problem(s). {advice}, or use --only voices,chapters:\n"
+                               + "\n".join(problems)) from exc
     return reused, resumed
 
 
@@ -553,7 +563,9 @@ def prune_book(bundle, config, *, groups=GROUPS, dry_run=False, confirm=None, ne
 
     Holds the render-work, book audio and voice store locks throughout, so a
     render, assembly or casting session on this book refuses to start, and
-    this refuses while one runs. ``confirm(report)`` sees the full dry-run
+    this refuses while one runs. When other groups are selected too, a book
+    whose takes cannot be judged (``ClipsUnavailable``) skips the clips group
+    and says why in ``skipped``; with clips alone it raises. ``confirm(report)`` sees the full dry-run
     report and returns True to delete; without it, deletion follows ``dry_run``.
     """
     from .book_context import resolve_book_config, voice_store
@@ -581,7 +593,7 @@ def prune_book(bundle, config, *, groups=GROUPS, dry_run=False, confirm=None, ne
                 locks.append(acquire_directory_lock(store.directory / ".lock"))
             except FileExistsError as exc:
                 raise RenderBlocked(busy.format(store.directory / ".lock")) from exc
-        plan = _Removal(book)
+        plan, skipped = _Removal(book), {}
         if work.is_dir():
             plan.group = "chapters"
             versions = _chapter_versions(work, plan)
@@ -599,12 +611,19 @@ def prune_book(bundle, config, *, groups=GROUPS, dry_run=False, confirm=None, ne
                 tokens |= _tokens(versions[name]["path"] / "chapter.json")
             for path, _ in checkpoints:
                 tokens |= _tokens(path)
-            _prune_clips(work, plan, (needed_takes or plan_takes)(bundle, config), tokens)
-        report = plan.report(dry_run=True, groups=groups)
+            try:
+                needed = (needed_takes or plan_takes)(bundle, config)
+            except ClipsUnavailable as exc:
+                if groups == ("clips",):
+                    raise
+                skipped["clips"] = str(exc)
+            else:
+                _prune_clips(work, plan, needed, tokens)
+        report = dict(plan.report(dry_run=True, groups=groups), skipped=skipped)
         delete = (not dry_run and bool(plan.files)
                   and (confirm is None or confirm(dict(report, book=str(book)))))
         if delete:
-            report = plan.report(dry_run=False, groups=groups)
+            report = dict(plan.report(dry_run=False, groups=groups), skipped=skipped)
         return dict(report, book=str(book), dry_run=dry_run, deleted=delete)
     finally:
         for lock in reversed(locks):
@@ -621,6 +640,14 @@ def _size(count):
 def summary_lines(report):
     lines = [f"Book: {report['book']}"]
     for group, entry in report["groups"].items():
+        if group in report.get("skipped", {}):
+            reason = report["skipped"][group].splitlines()
+            more = len(reason) - 2
+            lines.append(f"  {group:<9}skipped: {reason[0]}")
+            lines.extend(f"           {line}" for line in reason[1:2])
+            if more > 0:
+                lines.append(f"           and {more} more (--json lists them)")
+            continue
         parts = ", ".join(f"{_LABELS.get(group + '.' + name, name)} {counts['files']}"
                           for name, counts in sorted(entry["categories"].items()))
         lines.append(f"  {group:<9}{entry['files']:>7} file(s) {_size(entry['bytes']):>11}"

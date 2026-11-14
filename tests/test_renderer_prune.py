@@ -301,6 +301,42 @@ class ClipsGroupTests(PruneFixture):
             prune.prune_book(self.bundle, self.config, groups=("clips",))
         self.assertTrue(stale.is_dir())
 
+    def test_a_plan_with_problems_skips_only_the_clips_group(self):
+        # Given a book whose plan has an unassigned line, an old chapter version and an unused take.
+        old = self.chapter("chapter-0001", 1, "old", age=1_000)
+        newest = self.chapter("chapter-0001", 1, "new", age=2_000)
+        stale, _ = self.take("superseded line")
+        problems = ValueError("Missing voice for segment b1:0:5; resolve attribution before synthesis\n"
+                              "Missing voice for segment b2:0:9; resolve attribution before synthesis\n"
+                              "Missing voice for segment b3:0:4; resolve attribution before synthesis")
+
+        class Engine:
+            identity = {"engine": "fixture"}
+            capabilities = {}
+
+        def failing_report(*args, **kwargs):
+            raise problems
+
+        with (patch("epub_tts_narrator.renderer.cache_report.cache_report", failing_report),
+              patch("epub_tts_narrator.renderer.pool.create_render_engine", lambda config: Engine())):
+            report = prune.prune_book(self.bundle, self.config, dry_run=False)
+            with self.assertRaisesRegex(prune.ClipsUnavailable, "resolve-speakers"):
+                prune.prune_book(self.bundle, self.config, groups=("clips",), dry_run=False)
+
+        self.assertFalse(old.exists())
+        self.assertTrue(newest.is_dir())
+        self.assertTrue(stale.is_dir())
+        self.assertEqual(report["groups"]["clips"]["files"], 0)
+        reason = report["skipped"]["clips"]
+        self.assertIn("3 problem(s)", reason)
+        self.assertIn("resolve-speakers", reason)
+        self.assertIn("b3:0:4", reason)
+        summary = "\n".join(prune.summary_lines(report))
+        self.assertIn("clips    skipped:", summary)
+        self.assertIn("b1:0:5", summary)
+        self.assertIn("and 2 more", summary)
+        self.assertNotIn("b3:0:4", summary)
+
 
 class PruneSafetyTests(PruneFixture):
     def stale_material(self):
