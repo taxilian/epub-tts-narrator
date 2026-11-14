@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 
 from .common import digest
 
 
 _GROUP_VERSION = 1
 _MAX_SPEAKERS = 16
+# Where a passage that must end for length may end: after a sentence, else a
+# clause at a semicolon or colon (closing quotes and brackets aside).
+_SENTENCE_END = re.compile(r"[.!?\u2026][\"'\u201d\u2019\u00bb)\]]*\s*$")
+_CLAUSE_END = re.compile(r"[;:][\"'\u201d\u2019\u00bb)\]]*\s*$")
+
+
+def _break_after(pending):
+    """How many leading chunks of ``pending`` end at the best place to end a passage."""
+    for pattern in (_SENTENCE_END, _CLAUSE_END):
+        for index in range(len(pending) - 1, -1, -1):
+            if pattern.search(pending[index]["spoken_text"]):
+                return index + 1
+    return len(pending)
 
 
 def paragraph_supported(capabilities, chunk):
@@ -90,10 +104,17 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
         return chunks
     result, pending, voices, performers, characters = [], [], set(), set(), 0
 
-    def flush():
+    def flush(keep=0):
+        """End the passage; ``keep`` trailing chunks start the next one instead."""
         nonlocal pending, voices, performers, characters
-        result.extend(_group(pending))
+        ended, carried = (pending[:len(pending) - keep], pending[len(pending) - keep:]) if keep else (pending, [])
+        result.extend(_group(ended))
         pending, voices, performers, characters = [], set(), set(), 0
+        for chunk in carried:
+            pending.append(chunk)
+            voices.add(chunk["segment"].get("voice_id"))
+            performers.add((chunk["segment"]["role_id"], chunk["segment"].get("voice_id")))
+            characters += len(chunk["spoken_text"])
 
     for chunk in chunks:
         voice = chunk["segment"].get("voice_id")
@@ -104,13 +125,16 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
             flush()
             result.append(chunk)
             continue
-        proposed_voices = voices | {voice}
         performer = (chunk["segment"]["role_id"], voice)
-        if pending and (characters + len(chunk["spoken_text"]) > max_chars
-                        or len(proposed_voices) > _MAX_SPEAKERS
+        if pending and (len(voices | {voice}) > _MAX_SPEAKERS
                         or (not multi_speaker and performer not in performers)
                         or _source_piece(pending[-1])[1] != _source_piece(chunk)[0]):
             flush()
+        while pending and characters + len(chunk["spoken_text"]) > max_chars:
+            # Too long to add this chunk: end the passage at its last sentence end
+            # (else clause end), and the chunks after it start the next passage.
+            keep = len(pending) - _break_after(pending)
+            flush(keep)
         pending.append(chunk)
         voices.add(voice)
         performers.add(performer)

@@ -131,6 +131,20 @@ class ParagraphGroupingTests(unittest.TestCase):
         self.assertEqual([len(chunk["spoken_text"]) for chunk in groups], [960, 320])
         self.assertEqual(groups[1], oversized[-1])
 
+    def test_a_passage_that_must_end_for_length_ends_after_a_sentence(self):
+        # The second chunk ends mid-sentence; the passage ends after the first, at the sentence end.
+        members = passages(["One went. ", "Two was cut ", "off here. ", "Four. "])
+        groups = chunks_of(group_paragraphs(plan(members), max_chars=24))
+        self.assertEqual([chunk["spoken_text"] for chunk in groups],
+                         ["One went. ", "Two was cut off here. ", "Four. "])
+        # Without a sentence end, a semicolon or colon will do; without either, it ends where it must.
+        clauses = passages(["He stayed; ", "she was cut ", "off there "])
+        self.assertEqual([chunk["spoken_text"] for chunk in chunks_of(group_paragraphs(plan(clauses), max_chars=24))],
+                         ["He stayed; ", "she was cut off there "])
+        plain = passages(["aaa ", "bbb ", "ccc "])
+        self.assertEqual([chunk["spoken_text"] for chunk in chunks_of(group_paragraphs(plan(plain), max_chars=8))],
+                         ["aaa bbb ", "ccc "])
+
     def test_partial_chunks_of_one_source_row_do_not_duplicate_source_text(self):
         base = passages(["aaaaa bbbbb ccccc ddddd "], offset=20)[0]
         base["segment"]["break_before"] = "blank_paragraph"
