@@ -346,7 +346,8 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         elif scope == "character-merge":
             if path in revisions:
                 from .character_merge import validate_character_merge
-                validate_character_merge(document, candidate)
+                validate_character_merge(document, candidate, earlier_character_ids={
+                    row["id"] for book in registry["books"][:-1] for row in book["cast"]["characters"]})
         elif scope == "voice-profiles":
             differences = profile_revision_differences(document, candidate)
             if differences:

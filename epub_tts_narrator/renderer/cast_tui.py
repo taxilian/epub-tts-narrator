@@ -504,10 +504,17 @@ class CastApp(CapturePrintMixin, App):
             plan = self._attempt(lambda: self.controller.merge_plan(row, other))
             if plan is None:
                 return
+            if plan.fixed:
+                # A character from an earlier book is always the one kept: nothing to choose.
+                self._confirm(plan.text + "\n\nSave this merge?",
+                              lambda: self._attempt(lambda: self.controller.merge(plan)), title="Merge characters?")
+                return
             kept = self.controller.row(plan.kept["voice_id"])
             absorbed = self.controller.row(plan.absorbed["voice_id"])
-            survivors = [(kept["voice_id"], f"Keep {label(kept)} (because {plan.reason})"),
-                         (absorbed["voice_id"], f"Keep {label(absorbed)}")]
+            survivors = [(kept["voice_id"], f"Keep {label(kept)} — {plan.kept_voice}, {plan.kept_lines} line(s) "
+                                            f"({kept['voice_id']}; suggested because {plan.reason})"),
+                         (absorbed["voice_id"], f"Keep {label(absorbed)} — {plan.absorbed_voice}, "
+                                                f"{plan.absorbed_lines} line(s) ({absorbed['voice_id']})")]
 
             def kept_one(voice_id):
                 if voice_id is None:

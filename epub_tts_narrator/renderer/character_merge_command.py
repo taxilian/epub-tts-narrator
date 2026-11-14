@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 import sys
 
-from ..character_merge import (character_lines, character_roles, combined_names, kept_records_for,
+from ..character_merge import (character_lines, character_roles, combined_names, first_line, kept_records_for,
                                merge_document, name_key, receipt, remap_decisions, resolve_character,
                                segment_speakers)
 from ..pipeline import fingerprint
@@ -65,6 +65,9 @@ class MergePlan:
     absorbed_voice: str
     books: list
     earlier: list
+    fixed: str = ""  # the earlier book the kept entry comes from, when the other is new: it cannot be swapped
+    kept_first: str = ""
+    absorbed_first: str = ""
 
     @property
     def names(self):
@@ -212,10 +215,26 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
         store = voice_store(bundle, config)
     states = {row["id"]: _voice_state(store, row["voice_id"]) for row in (one, other)}
     lines = {row["id"]: character_lines(document, row["id"]) for row in (one, other)}
+    # A character an earlier book already has keeps its identity: a new entry merges into it, never the reverse.
+    origins = {}
+    for book in registry["books"][:-1]:
+        for row in book["cast"]["characters"]:
+            origins.setdefault(row["id"], book["book"].get("title") or book["source_fingerprint"][:12])
+    inherited = [row for row in (one, other) if row["id"] in origins]
+    fixed = ""
+    chosen = None
     if keep is not None:
         chosen = resolve_character(document, keep)
         if chosen["id"] not in {one["id"], other["id"]}:
             raise ValueError(f"--keep must name one of the two characters being merged, not {chosen['name']!r}")
+    if len(inherited) == 1:
+        kept = inherited[0]
+        if chosen is not None and chosen["id"] != kept["id"]:
+            raise ValueError(f"{kept['name']} comes from an earlier book ({origins[kept['id']]}), so it must be kept; "
+                             f"{chosen['name']} is merged into it")
+        fixed = origins[kept["id"]]
+        reason = f"it comes from an earlier book ({fixed}), so it must be kept"
+    elif chosen is not None:
         kept = chosen
         reason = "you chose it"
     else:
@@ -256,7 +275,8 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
     return MergePlan(directory=directory, paths=paths, hashes=hashes, kept=kept, absorbed=absorbed, name=name,
                      reason=reason, kept_lines=lines[kept["id"]], absorbed_lines=lines[absorbed["id"]],
                      kept_voice=_describe_state(states[kept["id"]]),
-                     absorbed_voice=_describe_state(states[absorbed["id"]]), books=books, earlier=earlier)
+                     absorbed_voice=_describe_state(states[absorbed["id"]]), books=books, earlier=earlier, fixed=fixed,
+                     kept_first=first_line(document, kept["id"]), absorbed_first=first_line(document, absorbed["id"]))
 
 
 def _describe_state(state):
@@ -272,12 +292,19 @@ def describe(plan):
     """The change, in the words a person reads before confirming it."""
     kept, absorbed = plan.kept, plan.absorbed
     selected = plan.books[0]
-    lines = [f"Merge two cast entries of {selected.title} into one character:",
-             f"  Keep:   {kept['name']}  ({kept['id']}, voice {kept['voice_id']}) — "
-             f"{plan.kept_voice}; {plan.kept_lines} line(s)",
-             f"  Absorb: {absorbed['name']}  ({absorbed['id']}, voice {absorbed['voice_id']}) — "
-             f"{plan.absorbed_voice}; {plan.absorbed_lines} line(s)",
-             f"  Kept because {plan.reason}. The kept entry's voice, description and accent stay.",
+    lines = [f"Merge two cast entries of {selected.title} into one character:"]
+    for title, entry, voice, count, first in (("Keep:  ", kept, plan.kept_voice, plan.kept_lines, plan.kept_first),
+                                              ("Absorb:", absorbed, plan.absorbed_voice, plan.absorbed_lines,
+                                               plan.absorbed_first)):
+        lines.append(f"  {title} {entry['name']}  ({entry['id']}, voice {entry['voice_id']}) — {voice}; "
+                     f"{count} line(s)")
+        # Two entries often share a name: what each is and says tells them apart.
+        description = " ".join(entry["description"].split())
+        if description:
+            lines.append("          " + (description if len(description) <= 100 else description[:99].rstrip() + "…"))
+        if first:
+            lines.append(f"          first line: {first}")
+    lines += [f"  Kept because {plan.reason}. The kept entry's voice, description and accent stay.",
              f"  Afterwards: {plan.name}" + (", also called " + ", ".join(
                  name for name in plan.names if name_key(name) != name_key(plan.name))
                  if len(plan.names) > 1 else "")]
@@ -352,11 +379,15 @@ def run_merge_command(bundle, config, args, *, input_stream=None, output_stream=
         if not getattr(input_stream, "isatty", lambda: False)():
             print("Nothing was changed. Rerun with --yes to merge, or in a terminal to confirm.", file=output_stream)
             return 0
-        answer = _ask("Merge them? [y]es, [s]wap which entry is kept, [c]hoose the name, [n]o: ",
-                      input_stream, output_stream)
+        answer = _ask("Merge them? [y]es, " + ("" if plan.fixed else "[s]wap which entry is kept, ")
+                      + "[c]hoose the name, [n]o: ", input_stream, output_stream)
         choice = (answer or "n").casefold()[:1]
         if choice == "y":
             break
+        if choice == "s" and plan.fixed:
+            print(f"{plan.kept['name']} comes from an earlier book ({plan.fixed}), so it is the one kept.",
+                  file=output_stream)
+            continue
         if choice == "s":
             keep = plan.absorbed["id"]
             plan = plan_merge(bundle, config, args.first, args.second, keep=keep, name=name)

@@ -61,6 +61,19 @@ def character_lines(document, character_id):
                if any(role in roles for role, _ in segment_speakers(segment)))
 
 
+def first_line(document, character_id, *, limit=80):
+    """The first passage this character speaks (or narrates), shortened, to tell same-named entries apart."""
+    roles = {role["id"] for role in character_roles(document, character_id)}
+    spoken = [segment for segment in document["segments"]
+              if any(role in roles for role, _ in segment_speakers(segment))]
+    spoken.sort(key=lambda segment: segment["kind"] not in SPOKEN_KINDS)
+    for segment in spoken:
+        text = " ".join(segment["text"].split())
+        if text:
+            return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    return ""
+
+
 def resolve_character(document, text):
     """The one cast character a person means by an ID, its voice ID, or a name/alias."""
     if not isinstance(text, str) or not text.strip():
@@ -270,13 +283,21 @@ def merge_document(document, merge):
     return result
 
 
-def validate_character_merge(original, candidate):
-    """Require ``candidate`` to be exactly ``original`` with its one new recorded merge applied."""
+def validate_character_merge(original, candidate, *, earlier_character_ids=frozenset()):
+    """Require ``candidate`` to be exactly ``original`` with its one new recorded merge applied.
+
+    ``earlier_character_ids`` are the characters earlier books in the series
+    already have: one of those is never merged into a character new to this book.
+    """
     before = original["provenance"].get("character_merges", [])
     after = candidate.get("provenance", {}).get("character_merges")
     if (not isinstance(after, list) or len(after) != len(before) + 1 or after[:-1] != before
             or not isinstance(after[-1], dict) or set(after[-1]) - _RECORD_FIELDS):
         raise ValueError("Invalid character-merge revision: it must add exactly one merge record")
+    if (after[-1].get("absorbed_character_id") in earlier_character_ids
+            and after[-1].get("kept_character_id") not in earlier_character_ids):
+        raise ValueError("Invalid character-merge revision: a character from an earlier book must be kept, "
+                         "with the new entry merged into it")
     expected = merge_document(original, {key: after[-1][key] for key in (_RECEIPT_FIELDS | {"kept_records"})
                                          if key in after[-1]})
     if candidate != expected:

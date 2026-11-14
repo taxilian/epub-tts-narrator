@@ -434,9 +434,25 @@ class CastController:
     def merge_options(self, row):
         """``[(voice_id, label)]``: the other characters this one could be the same person as."""
         self.character(row)
-        voices = {character["voice_id"] for character in self.session.bundle["cast"]["characters"]}
-        return [(other["voice_id"], f"{label(other)}  ({other['voice_id']})") for other in self._rows
-                if other["voice_id"] != row["voice_id"] and other["voice_id"] in voices]
+        characters = {character["voice_id"]: character for character in self.session.bundle["cast"]["characters"]}
+        lines = {}
+        for chapter in self.session.bundle.get("chapters", []):
+            for segment in chapter.get("rows", []):
+                speakers = segment.get("simultaneous_speakers") or [{"voice_id": segment.get("voice_id")}]
+                for speaker in speakers:
+                    lines[speaker["voice_id"]] = lines.get(speaker["voice_id"], 0) + 1
+        options = []
+        for other in self._rows:
+            if other["voice_id"] == row["voice_id"] or other["voice_id"] not in characters:
+                continue
+            # Entries often share a name, so each option says what tells it apart.
+            status, _ = self.status(other)
+            description = " ".join(characters[other["voice_id"]].get("description", "").split())
+            text = f"{label(other)} — {status}, {lines.get(other['voice_id'], 0)} line(s)"
+            if description:
+                text += " · " + (description if len(description) <= 60 else description[:59].rstrip() + "…")
+            options.append((other["voice_id"], f"{text}  ({other['voice_id']})"))
+        return options
 
     def merge_plan(self, row, other, keep=None):
         """The planned merge of two rows' characters (``keep``: a row, else the default survivor)."""

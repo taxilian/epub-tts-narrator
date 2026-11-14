@@ -127,7 +127,7 @@ For a passage that has been rendered, the metadata dialog also plays its audio (
 
 Chapters whose render failed (`ChaptersRenderFailed`) are marked `FAILED` in the chapter list with the saved error; `F` jumps to the first failed passage when the renderer recorded exact segment linkage, and failed passages say no audio exists instead of offering playback. Editing a failed chapter still saves the usual attribution revision, but the recorded failure remains until a successful rerender.
 
-If two cast entries are really one person (a stranger later named, a nickname read as someone else), merge them so every line of one becomes the other's and only one character is cast and rendered (the cast screen's `j` does the same):
+If two cast entries are really one person (a stranger later named, a nickname read as someone else), merge them so every line of one becomes the other's and only one character is cast and rendered. The cast screen's `j` does the same and is easiest when both have the same name. A character from an earlier book in the series is always the one kept:
 
 ```sh
 just merge-characters runs/book-01 "the old man" Belgarath
