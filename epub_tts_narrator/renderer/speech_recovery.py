@@ -287,6 +287,7 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 return synthesize_part(piece, output, child_seed)
             notify(f"  Recovery part {number}/{len(request['recovery']['parts'])}: checking saved audio.")
             from .fragment_recovery import fragment_part_take
+            from .take_completion import tail_generator
             wav, record = fragment_part_take(
                 part["text"], generate_part, child_directory, child_request, verifier, config,
                 notify=notify, retry_budget=retry_budget, synthesize_part=synthesize_part,
@@ -295,7 +296,9 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 generate_plan_part=(synthesize_plan_part if "synthesis_request" in child_request else None),
                 resolution_episode=resolution_episode,
                 episode_reserve=len(request["recovery"]["parts"]) - number,
-                allow_fragments=parent_request["kind"] == "speech" and not scoped)
+                allow_fragments=parent_request["kind"] == "speech" and not scoped,
+                # A part that said its start and stopped keeps that start.
+                generate_tail=tail_generator(part["text"], synthesize_part, offset=part["start"]))
             verified.append((wav, record))
             audit.append({**part, "request_hash": record["request_hash"],
                           "audio_sha256": record["audio_sha256"],

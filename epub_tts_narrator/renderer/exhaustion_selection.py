@@ -169,17 +169,20 @@ def select_retained(directory, request, client, *, failure_report=None):
     bad_audio = judged_bad_audio(directory)
     judged_bad = {item['summary']['candidate_id'] for item in retained
                   if item['record'].get('audio_sha256') in bad_audio}
-    # A take that went silent before ending stopped short of its text.
+    # A take that went silent before ending stopped short of its text; a take
+    # finished from such a start (take_completion) that still failed is a
+    # splice of one, never a whole best-effort rendition.
     stopped = {item['summary']['candidate_id'] for item in retained
-               if (item['record'].get('report') or {}).get('generation_stopped') == 'silence'}
+               if (item['record'].get('report') or {}).get('generation_stopped') == 'silence'
+               or 'completion' in (item['record'].get('engine_metadata') or {})}
     candidates = [item for item in retained
                   if item['summary']['candidate_id'] not in echoes and item['summary']['candidate_id'] not in judged_bad
                   and item['summary']['candidate_id'] not in stopped]
     if not candidates:
         context = _failure_context(failure_report) + f'. Inspect {directory}'
         if stopped and not echoes and not judged_bad:
-            raise ValueError('Every retained take went silent before finishing its text, so none is '
-                             'published' + context)
+            raise ValueError('Every retained take went silent before finishing its text (or was finished '
+                             'from such a start and still failed), so none is published' + context)
         if judged_bad:
             raise ValueError('Every usable retained take was marked bad by a person listening, so none is '
                              'published' + context)

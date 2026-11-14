@@ -106,7 +106,7 @@ def fragment_started(directory, child_request, text, config):
 def fragment_part_take(text, generate, directory, request, verifier, config, *, notify=print,
                        retry_budget=None, synthesize_part=None, generate_plain=None,
                        resolution_episode=None, episode_reserve=0, allow_fragments=False,
-                       generate_direction=None, generate_plan_part=None):
+                       generate_direction=None, generate_plan_part=None, generate_tail=None):
     """Verify one recovery part; engage the bounded cutoff-tail strategy only on a definite tail loss."""
     from .workflow import SpeechVerificationFailed, verified_take
 
@@ -128,7 +128,7 @@ def fragment_part_take(text, generate, directory, request, verifier, config, *, 
                               generate_direction=generate_direction,
                               generate_plan_part=generate_plan_part,
                              resolution_episode=resolution_episode, episode_reserve=episode_reserve,
-                             fallback_parts=fallback)
+                             fallback_parts=fallback, generate_tail=generate_tail)
     except SpeechVerificationFailed as exc:
         from .speech_resolver import _ACOUSTIC_REASONS
         reasons = set(exc.report.get("reasons", []))

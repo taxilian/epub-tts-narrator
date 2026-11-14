@@ -162,17 +162,32 @@ class SilenceStoppedTakeTests(unittest.TestCase):
         self.assertEqual(record["engine_metadata"]["finish_reason"], "silence")
         self.assertEqual(self.markers(), [])
 
-    def test_a_stopped_take_missing_words_is_a_truncation_that_splits(self):
+    def test_a_stopped_take_that_said_its_start_is_finished_with_only_the_missing_words(self):
         self.engine = SilentStopEngine(self.registry, FIRST)
         result, accepted = self.render_chunk()
-        self.assertEqual(self.call_texts(), [TEXT, TEXT, FIRST, SECOND])
+        self.assertEqual(self.call_texts(), [TEXT, SECOND])
+        self.assertTrue(accepted["report"]["passed"])
+        record = read_json(Path(result["wav_path"]).parent / "accepted.json")
+        self.assertEqual(record["engine_metadata"]["completion"]["tail_text"], SECOND)
+        self.assertEqual(self.markers(), [])
+
+    def test_a_stopped_take_missing_words_is_a_truncation_that_splits(self):
+        # The completion is spent on the first stopped take and fails too.
+        self.engine = SilentStopEngine(self.registry, FIRST)
+        heard = self.engine.heard
+        self.engine.heard = lambda text, number: "Everyone" if text == SECOND and number == 2 else heard(text, number)
+        result, accepted = self.render_chunk()
+        self.assertEqual(self.call_texts(), [TEXT, SECOND, TEXT, FIRST, SECOND])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.markers()), 1)
-        stopped = [read_json(path)["report"] for path in (self.work / "clips").glob("*/attempt-*.json")
-                   if read_json(path)["request"]["kind"] == "speech" and "recovery" not in read_json(path)["request"]
-                   and read_json(path)["request"]["chunk"]["spoken_text"] == TEXT]
+        whole = [read_json(path) for path in sorted((self.work / "clips").glob("*/attempt-*.json"))
+                 if read_json(path)["request"]["kind"] == "speech" and "recovery" not in read_json(path)["request"]
+                 and read_json(path)["request"]["chunk"]["spoken_text"] == TEXT]
+        stopped = [record["report"] for record in whole if "completion" not in record["engine_metadata"]]
         self.assertEqual([report.get("generation_stopped") for report in stopped], ["silence", "silence"])
-        self.assertTrue(all(report["passed"] is False for report in stopped))
+        self.assertTrue(all(record["report"]["passed"] is False for record in whole))
+        self.assertEqual([record["engine_metadata"]["completion"]["source_attempt"] for record in whole
+                          if "completion" in record["engine_metadata"]], [1])
 
     def test_a_stopped_take_is_never_a_best_effort_choice(self):
         from epub_tts_narrator.renderer.exhaustion_selection import select_retained

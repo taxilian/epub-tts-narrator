@@ -450,7 +450,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
                   fallback_parts=0, episode_reserve=0, generate_plain=None,
                   allow_split=True, failed_split_report=None, allow_resolution=True,
-                  generate_direction=None, broad_recovery=False):
+                  generate_direction=None, broad_recovery=False, generate_tail=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -814,6 +814,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 return result
     secrets = configured_secrets(config)
     last_report = None
+    # A take that said the start of the passage and stopped is finished once
+    # (take_completion): its next attempt generates only the missing words.
+    completion_source = None
+    completions_left = 1 if (generate_tail is not None and fresh_speech and purpose == "speech") else 0
     # A history echo moves to the next ladder rung with at most one extra
     # attempt per rung, so every rung gets a real test within this request.
     from .history_echo import LADDER as ECHO_LADDER
@@ -989,6 +993,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     from .continuity import history_recovery
                     from .history_echo import ladder_mode
                     echo_mode = ladder_mode(directory, request_hash, text) if purpose == "speech" else None
+                    completing, completion_source = completion_source, None
                     with generation_activity(notify), history_recovery(echo_mode):
                         if direction_marker is not None:
                             direction_session.begin(attempt)
@@ -1005,6 +1010,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         elif rewrite is not None:
                             metadata = generate_repaired(rewrite["tts_text"], raw, seed)
                             metadata = {**metadata, "speech_resolution": deepcopy(rewrite)}
+                        elif completing is not None:
+                            from .take_completion import complete
+                            metadata = complete(completing, generate_tail, raw, seed, text=text,
+                                                directory=directory, config=config)
                         else:
                             metadata = generate(raw, seed)
                     from .continuity_codes import persist
@@ -1180,6 +1189,21 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 used = generation_ordinal if generation_ordinal is not None else attempt
                 if used >= attempts and attempts < echo_cap:
                     attempts += 1
+                continue
+        if completions_left and record.get("audio_file") is not None and policy_recheck is None:
+            from .take_completion import completable, completion_point
+            point = completion_point(report, text) if completable(metadata) else None
+            if point is not None and generate_tail.supports(point["start"]):
+                completions_left -= 1
+                completion_source = {"attempt": attempt, "wav": wav, "metadata": metadata, "point": point}
+                if resolution_session is not None:
+                    # It still counts toward repeated truncation (split recovery).
+                    resolution_session.records[record["attempt"]] = record
+                notify(f"  Take {attempt} said the first {point['heard_words']} words and stopped; the next "
+                       f"attempt keeps them and generates only the last {point['missing_words']} after them.")
+                used = generation_ordinal if generation_ordinal is not None else attempt
+                if used >= attempts:
+                    attempts += 1  # finishing this take does not cost the passage a fresh one
                 continue
         resolved = resolve_failure(record)
         if resolved is not None:
@@ -2521,6 +2545,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 request = dict(request, synthesis_identity=identity)
                 directory = work / "clips" / digest(request)
                 from .speech_recovery import recovery_available, recover_speech, split_recovery_text
+                from .take_completion import tail_generator
 
                 def recover_or_retry_whole():
                     try:
@@ -2550,7 +2575,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             generate_plain=generate_plain, resolution_episode=resolution_episode,
                             generate_direction=generate_direction,
                             generate_plan_part=generate_plan_part,
-                            allow_split=False, failed_split_report=exc.report)
+                            allow_split=False, failed_split_report=exc.report,
+                            generate_tail=tail_generator(text, synthesize_part))
 
                 if synthesize_part is not None and recovery_available(
                         directory, request, text, verifier, config, voices_by_asset=voices_by_asset):
@@ -2579,7 +2605,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                resolution_episode=resolution_episode,
                                                paragraph_split_available=(paragraph_split_available or
                                                    sentence_parts is not None),
-                                               fallback_parts=fallback_parts)
+                                               fallback_parts=fallback_parts,
+                                               generate_tail=tail_generator(text, synthesize_part))
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
@@ -2731,6 +2758,12 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             return engine.synthesize(text, v, path, seed=seed, direction=direction, performance=performance,
                                      traits=expressive_options.get("traits", ""))
         synthesize_scoped_part.needs_span = True
+
+        def check_scoped_span(span):
+            # Raises ValueError when the span would cut a control (take_completion asks first).
+            from ..performance_plan import slice_performance
+            slice_performance(chunk["expressive_performance"], chunk["spoken_text"], *span)
+        synthesize_scoped_part.check_span = check_scoped_span
 
         from .speech_recovery import scoped_split_parts
         recovery = ({'generate_plan_part': synthesize_plan_part,

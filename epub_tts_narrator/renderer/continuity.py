@@ -46,13 +46,16 @@ from .stored_audio import audio_hash
 _CURRENT = ContextVar("accepted_chapter_continuity", default=None)
 # A history-echo retry's ladder rung (see history_echo); None is ordinary history.
 _RECOVERY = ContextVar("history_echo_recovery", default=None)
+# A take completion's kept start (take_completion): heard as the latest turn.
+_CONTINUATION = ContextVar("take_completion_turn", default=None)
 POLICY = "fish-first-latest-same-voice"
 MAX_SPEAKERS = 16
 SPEAKER_TAG = re.compile(r"<\|speaker:(\d+)\|>")
 # Joins, repairs and best-effort choices remain accepted audio but are not one
 # generation of the exact logical text, so they never become history.
 _NOT_HISTORY = {"recovery", "clip_repair", "speech_resolution", "fragment_recovery",
-                "delivery_recovery", "direction_repair", "exhaustion_selection", "manual_selection"}
+                "delivery_recovery", "direction_repair", "exhaustion_selection", "manual_selection",
+                "completion"}
 
 
 def current():
@@ -72,6 +75,20 @@ def history_recovery(mode):
         yield
     finally:
         _RECOVERY.reset(token)
+
+
+@contextmanager
+def continuation_turn(turn):
+    """Generate with ``turn`` (``{"text", "codes", "speakers"}``, or None) after the chapter's history.
+
+    A take completion speaks a passage's missing words right after its kept
+    start, so that start is the latest thing the voice heard.
+    """
+    token = _CONTINUATION.set(turn)
+    try:
+        yield
+    finally:
+        _CONTINUATION.reset(token)
 
 
 def require_support(engine):
@@ -321,16 +338,23 @@ def compose(text, voices):
         return references, []
     chapter = scope["chapter"]
     history = []
-    for take in scope["takes"]:
-        marker = take["marker"]
+
+    def mapped(speakers):
         mapping = {}
-        for index, asset in enumerate(marker["speakers"]):
+        for index, asset in enumerate(speakers):
             if asset not in order:
                 order.append(asset)
                 references.append(dict(chapter.voices_by_asset[asset], speaker=len(order) - 1))
             mapping[index] = order.index(asset)
+        return mapping
+    for take in scope["takes"]:
+        marker = take["marker"]
+        mapping = mapped(marker["speakers"])
         payload = load_codes(take["path"], marker)
         history.append((_retag(marker["text"], mapping), payload["codes"]))
+    turn = _CONTINUATION.get()
+    if turn is not None:
+        history.append((_retag(turn["text"], mapped(turn["speakers"])), turn["codes"]))
     return references, history
 
 
