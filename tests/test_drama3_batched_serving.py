@@ -191,7 +191,11 @@ class BatchedServingTests(unittest.TestCase):
         url = self.serve(engine, batch_rows=2)
         client = FishHTTPEngine({"url": url, "name": "impatient", "api_key": "", "timeout_seconds": 1},
                                 {"temperature": 0.7})
-        with self.assertRaises(FishHTTPError):
+        from unittest.mock import patch
+        # A flat one-second limit, sent once: this tests serve, not the client's time allowance.
+        with patch("epub_tts_narrator.renderer.fish_http.TIMEOUT_SECONDS_PER_CHARACTER", 0), \
+                patch("epub_tts_narrator.renderer.fish_http.TIMEOUT_RETRIES", 0), \
+                self.assertRaises(FishHTTPError):
             client.synthesize("A passage.", self.voice, self.root / "take.wav", seed=4)
         # The client timed out and closed; serve noticed and stopped the decode.
         self.assertTrue(cancelled.wait(5))

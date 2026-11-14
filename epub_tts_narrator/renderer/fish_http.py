@@ -48,6 +48,15 @@ SUPPORTED_CONTROLS = re.compile(r"</?(?:whisper|emphasis|soft|fast|slow|stress|f
 
 # serve's Retry-After for a full queue (no work was started).
 QUEUE_FULL_RETRY_SECONDS = 2.0
+# A worker's timeout_seconds is the limit for a short passage; each character of
+# the passage adds this much, because a long passage in a full batch decodes for
+# minutes (measured on 8-row MLX batches: about 0.25s per character, with a long
+# tail). Never more than MAX_REQUEST_SECONDS.
+TIMEOUT_SECONDS_PER_CHARACTER = 0.5
+MAX_REQUEST_SECONDS = 3600.0
+# A take that ran out of time is sent once more with twice the limit. The same
+# seed asks for the same take, so this is not a new attempt.
+TIMEOUT_RETRIES = 1
 
 
 class FishHTTPError(EngineError):
@@ -55,10 +64,17 @@ class FishHTTPError(EngineError):
 
     transport_error = True
 
-    def __init__(self, message: str, *, retryable: bool = True, status: int | None = None):
+    def __init__(self, message: str, *, retryable: bool = True, status: int | None = None,
+                 timed_out: bool = False):
         super().__init__(message)
         self.retryable = retryable
         self.status = status
+        # No answer arrived within the request's time limit; the worker may still be up.
+        self.timed_out = timed_out
+
+
+def _is_timeout(exc) -> bool:
+    return isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
 
 
 def redact(message: str, key: str) -> str:
@@ -339,27 +355,40 @@ class FishHTTPEngine(HistorySynthesis):
         with self._reuse_lock:
             self._registered_references.difference_update(content_ids)
 
+    def request_timeout(self, text) -> float:
+        """The time limit for one take of ``text``: longer passages decode for longer."""
+        return min(MAX_REQUEST_SECONDS, self.timeout + TIMEOUT_SECONDS_PER_CHARACTER * len(text))
+
     def _request(self, text, references, history, output, seed, layout="directing"):
-        """Send one take, waiting out a full worker queue instead of failing the attempt.
+        """Send one take, waiting out a full worker queue or a slow batch instead of failing the attempt.
 
         ``serve`` answers 503 (``Retry-After: 2``) before reading a request when
         all its places are taken, so nothing was generated: resend after the
         pause, for at most this worker's timeout, without spending an attempt.
+        A take that gets no answer within its time limit is sent once more
+        with twice the limit (the same seed, so the same take).
         """
+        limit = self.request_timeout(text)
+        timeouts = 0
         deadline = time.monotonic() + self.timeout
         while True:
             try:
-                return self._request_once(text, references, history, output, seed, layout)
+                return self._request_once(text, references, history, output, seed, layout, limit)
             except FishHTTPError as exc:
+                if exc.timed_out and timeouts < TIMEOUT_RETRIES and limit < MAX_REQUEST_SECONDS:
+                    timeouts += 1
+                    limit = min(MAX_REQUEST_SECONDS, 2 * limit)
+                    stop_if_requested()
+                    continue
                 if exc.status != 503 or time.monotonic() + QUEUE_FULL_RETRY_SECONDS > deadline:
                     raise
             stop_if_requested()
             time.sleep(QUEUE_FULL_RETRY_SECONDS)
 
-    def _request_once(self, text, references, history, output, seed, layout="directing"):
+    def _request_once(self, text, references, history, output, seed, layout="directing", limit=None):
         wire, seeded, reused = self._references_for_wire(references)
         try:
-            return self._transmit(text, wire, history, output, seed, seeded + reused, layout)
+            return self._transmit(text, wire, history, output, seed, seeded + reused, layout, limit)
         except FishHTTPError as exc:
             if not reused or exc.status != 400 or UNKNOWN_REFERENCE_MARKER not in str(exc):
                 raise
@@ -367,7 +396,7 @@ class FishHTTPEngine(HistorySynthesis):
             # is stale. The rejected attempt never reached synthesis because
             # unknown ids fail at parse time; resend the audio inline once.
             self._forget_registered(seeded + reused)
-        return self._transmit(text, references, history, output, seed, seeded + reused, layout)
+        return self._transmit(text, references, history, output, seed, seeded + reused, layout, limit)
 
     def _headers(self, content_type=None):
         headers = {"Accept": "application/msgpack", "model": self.model}
@@ -400,7 +429,7 @@ class FishHTTPEngine(HistorySynthesis):
         requested = current_sampling() or {}
         return {key: requested.get(key, value) for key, value in self.sampling.items()}
 
-    def _transmit(self, text, references, history, output, seed, seeded_ids, layout="directing"):
+    def _transmit(self, text, references, history, output, seed, seeded_ids, layout="directing", limit=None):
         sampling = self._request_sampling()
         body = {"text": text, "references": references, "history": history, "format": "wav",
                 "normalize": False, "temperature": float(sampling["temperature"]),
@@ -421,7 +450,8 @@ class FishHTTPEngine(HistorySynthesis):
         output.parent.mkdir(parents=True, exist_ok=True)
         staged = None
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=self.timeout) as response:
+            limit = self.timeout if limit is None else limit
+            with build_opener(_NoRedirect()).open(request, timeout=limit) as response:
                 if response.status != 200:
                     raise FishHTTPError(f"Fish HTTP returned unexpected status {response.status}")
                 if response.headers.get_content_type() != "application/msgpack":
@@ -499,6 +529,9 @@ class FishHTTPEngine(HistorySynthesis):
                 status=exc.code,
             ) from exc
         except (URLError, TimeoutError, socket.timeout, http.client.HTTPException) as exc:
+            if _is_timeout(exc):
+                raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): "
+                                           f"timed out after {limit:g}s", self.api_key), timed_out=True) from exc
             raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
         except OSError as exc:
             raise FishHTTPError(redact(f"Could not receive Fish HTTP audio ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
