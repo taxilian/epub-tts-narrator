@@ -85,6 +85,15 @@ class SpeechRetryBudgetTests(unittest.TestCase):
         self.assertIsNone(budget.claim(self.directory / "second", "second", 12,
                                        episode="parent", episode_maximum=12))
 
+    def test_a_piece_whose_siblings_spent_the_shared_allowance_still_gets_one_take(self):
+        budget = SpeechRetryBudget()
+        for number in range(1, 13):
+            budget.claim(self.directory / "paragraph", "paragraph", 12, episode="parent", episode_maximum=12)
+        self.assertIsNone(budget.claim(self.directory / "paragraph", "paragraph", 12,
+                                       episode="parent", episode_maximum=12))
+        self.assertEqual(budget.claim(self.directory / "last", "last", 12, episode="parent", episode_maximum=12), 1)
+        self.assertIsNone(budget.claim(self.directory / "last", "last", 12, episode="parent", episode_maximum=12))
+
     def test_inventory_includes_saved_orphan_and_high_ids_once_in_numeric_order(self):
         names = ["attempt-003.json", "attempt-003.wav", "attempt-002-raw.wav",
                  "attempt-012-recovery-raw.wav", "attempt-1000.wav",

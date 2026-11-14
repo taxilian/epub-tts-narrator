@@ -67,7 +67,11 @@ class SpeechRetryBudget:
 
     def claim(self, directory, request_hash, maximum, *, episode=None, episode_maximum=None,
               episode_reserve=0):
-        """Return this run's next ordinal, or None if its allowance is spent."""
+        """Return this run's next ordinal, or None if its allowance is spent.
+
+        A shared ``episode`` bounds a passage and its recovery pieces together,
+        except that each request's first start in this run is always granted.
+        """
         if type(maximum) is not int or maximum < 1:
             raise ValueError("Speech generation allowance must be a positive integer")
         if episode is not None and (not isinstance(episode, str) or
@@ -82,7 +86,10 @@ class SpeechRetryBudget:
                 return None
             if episode is not None:
                 total = self._episodes.get(episode, 0)
-                if total >= episode_maximum - episode_reserve:
+                # A passage's first take is never refused for what its siblings
+                # spent: a paragraph's last piece would otherwise get no take at
+                # all and fail its chapter without trying.
+                if total >= episode_maximum - episode_reserve and started > 0:
                     return None
                 self._episodes[episode] = total + 1
             started += 1
