@@ -49,7 +49,10 @@ class PronounceAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause(0.05)
                 if not app.is_running:
                     break
-                await pilot.press(*step)
+                if callable(step):
+                    step(app)
+                else:
+                    await pilot.press(*step)
                 await pilot.pause(0.1)
             deadline = time.monotonic() + 20
             while app.is_running and time.monotonic() < deadline:
@@ -71,6 +74,26 @@ class PronounceAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(defined[0]["spans"])  # the uses in the test sentence are marked
         self.assertEqual(effective_definitions(self.directory)["mara"]["phonemes"], "M AA1 R AH0")
         self.assertTrue(self.player.start.called)
+
+    async def test_a_refused_phoneme_edit_stays_open_to_correct(self):
+        from textual.widgets import Static
+        from epub_tts_narrator.tui_widgets import TextEditScreen
+        model = FakeModel(guesses=[{"phonemes": "M AE1 R AH0", "respelling": "MAR-uh"}])
+        seen = []
+
+        def still_open(app):
+            seen.append((isinstance(app.screen, TextEditScreen),
+                         str(app.screen.query_one("#error", Static).render()) if isinstance(app.screen, TextEditScreen)
+                         else ""))
+        app = await self.drive(self.command(model),
+                               ["e", "ctrl+a", "ctrl+k", *"M AA R AH0", "enter"],  # a vowel without its stress digit
+                               still_open,
+                               ["ctrl+a", "ctrl+k", *"M AA1 R AH0", "enter"],
+                               ["a"])
+        self.assertEqual(app.result, 0)
+        self.assertTrue(seen[0][0], "the box closed on a reading the tool refuses")
+        self.assertIn("stress", seen[0][1])
+        self.assertEqual(effective_definitions(self.directory)["mara"]["phonemes"], "M AA1 R AH0")
 
     async def test_choosing_parts_of_speech_and_quitting_keeps_the_draft(self):
         model = FakeModel(guesses=[{"phonemes": "M AE1 R AH0", "respelling": "MAR-uh"}])
@@ -138,6 +161,16 @@ class PronunciationQueueAppTests(unittest.IsolatedAsyncioTestCase):
         app = await self.drive(self.select("Qarm"), ["p", *"K W AO1 R M", "enter"], ["c"], ["q"])
         self.assertEqual(app.result, 0)
         self.assertEqual(self.row("Qarm")["status"], "confirmed")
+        self.assertEqual(self.row("Qarm")["pronunciation"], queue_tests.CMU_QARM)
+
+    async def test_a_refused_phoneme_edit_in_the_queue_stays_open_to_correct(self):
+        from epub_tts_narrator.tui_widgets import TextEditScreen
+        seen = []
+        app = await self.drive(self.select("Qarm"), ["p", *"K W AO9 R M", "enter"],
+                               lambda app: seen.append(isinstance(app.screen, TextEditScreen)),
+                               ["ctrl+a", "ctrl+k", *"K W AO1 R M", "enter"], ["c"], ["q"])
+        self.assertEqual(app.result, 0)
+        self.assertEqual(seen, [True])
         self.assertEqual(self.row("Qarm")["pronunciation"], queue_tests.CMU_QARM)
 
     async def test_listening_through_the_queue_accepts_every_word_heard_twice(self):

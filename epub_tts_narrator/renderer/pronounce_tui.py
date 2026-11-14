@@ -270,7 +270,9 @@ class PronounceApp(App):
                          "e.g. mile-key · Enter saves and plays · Escape cancels")}
         if key in prompts:
             title, value, help_text = prompts[key]
-            self.push_screen(TextEditScreen(title, value, single_line=True, help_text=help_text),
+            # A reading the tool would refuse keeps the box open with the reason, to correct it.
+            self.push_screen(TextEditScreen(title, value, single_line=True, help_text=help_text,
+                                            validate=_name_reading_check(key)),
                              lambda text: self.answer(f"{key} {text}") if text else None)
         elif key == "s":
             self.push_screen(PartsScreen(state.get("parts", [])),
@@ -450,10 +452,36 @@ class PronunciationQueueApp(PronounceApp):
         if key in {"e", "p"}:
             title = ("Say {word} as this spelling" if key == "e" else "Phonemes for {word} (CMU Arpabet)").format(word=row["word"])
             self.push_screen(TextEditScreen(title, "", single_line=True,
-                                            help_text="Enter saves and plays it · Escape cancels"),
+                                            help_text="Enter saves and plays it · Escape cancels",
+                                            validate=_word_reading_check(key)),
                              lambda text: self.answer(f"{key} {number} {text}") if text else None)
             return
         self.answer(f"{key} {number}")
+
+
+def _name_reading_check(key):
+    """The check ``pronounce`` applies to a typed reading (``e`` phonemes, ``r`` spelling), or None."""
+    from ..name_pronunciations import normalize_phonemes, normalize_say_as, validate_reading
+
+    def check(text):
+        if not text.strip():
+            return  # empty cancels
+        if key == "e":
+            validate_reading({"phonemes": normalize_phonemes(text)})
+        else:
+            validate_reading({"say_as": normalize_say_as(text)})
+    return check if key in {"e", "r"} else None
+
+
+def _word_reading_check(key):
+    """The listening queue's check for a typed reading (``e`` spelling, ``p`` phonemes)."""
+    from .pronunciation_review import _pronunciation
+
+    def check(text):
+        value = text.strip()
+        if value:
+            _pronunciation(say_as=value) if key == "e" else _pronunciation(phonemes=value)
+    return check
 
 
 def run_queue_app(command, *, title):
