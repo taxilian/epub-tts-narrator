@@ -52,7 +52,7 @@ class SpokenVariationCoverageTests(unittest.TestCase):
 
     def test_dictionary_homophones_and_non_rhotic_readings_go_to_the_judges(self):
         self.assertEligible('"High, Lanzecki,"', "Hi, Lanzecki.", "dictionary_homophone")
-        self.assertEligible("Just the two of us.", "Just the to of us.", "dictionary_homophone")
+        self.assertIsNone(rules("Just the two of us.", "Just the to of us."))  # Quantities stay protected.
         self.assertEligible("A crack in the flaw.", "A crack in the floor.", "non_rhotic")
         self.assertEligible("Come on, Killa!", "Come on, killer!", "non_rhotic")
         # Different dictionary vowels stay different words.

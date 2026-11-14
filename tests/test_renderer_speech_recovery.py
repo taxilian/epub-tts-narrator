@@ -85,6 +85,8 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.config = deepcopy(DEFAULTS)
+        # These cases exercise the judges, so close transcripts are not accepted first.
+        self.config["quality"] = {"max_close_mismatch_fraction": 0.0}
         self.config["render"].update(max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE,
                                      keep_intermediate_audio=True)
         self.voice = {"asset_hash": "fixture-voice", "kind": "reference",

@@ -202,6 +202,8 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.config = deepcopy(DEFAULTS)
+        # These cases exercise the judges, so close transcripts are not accepted first.
+        self.config["quality"] = {"max_close_mismatch_fraction": 0.0}
         self.config["render"].update(max_attempts=1, ffmpeg=FFMPEG, ffprobe=FFPROBE)
         self.calls = []
         self.request = {"kind": "speech", "text": REQUESTED, "engine": "fixture"}

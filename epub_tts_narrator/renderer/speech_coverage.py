@@ -20,7 +20,7 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 15
+SPEECH_COVERAGE_VERSION = 16
 _MAX_ALIGNMENT_STATES = 20_000
 # Non-lexical vocal sounds a performance may add or leave out ("Oh,", "Ha!").
 # They carry no words, so omitting, adding or changing one is a performance
@@ -106,8 +106,13 @@ def _one_edit_per_four(first, second):
 
 
 def dictionary_homophone(left, right):
-    """Two different dictionary words that share a reading ("high"/"hi", "two"/"to")."""
-    return left != right and bool(set(_dictionary_phones(left)) & set(_dictionary_phones(right)))
+    """Two different dictionary words that share a reading ("high"/"hi", "aloud"/"allowed").
+
+    Quantities stay protected here; a long passage's "two" heard as "to" is a
+    close transcript (``close_match``) instead.
+    """
+    return (left != right and left not in _PROTECTED_NUMERIC and right not in _PROTECTED_NUMERIC
+            and bool(set(_dictionary_phones(left)) & set(_dictionary_phones(right))))
 
 
 def non_rhotic_homophone(left, right, metaphone):
@@ -430,8 +435,9 @@ def speech_coverage(expected_text, transcript):
         contraction ending ("g'night") marks one to three left-out letters.
         The full form keeps every written letter in order around them.
         """
-        if not _ALPHABETIC_WORD.fullmatch(form) or "n't" in form or contraction_expansions(form):
-            return
+        if (not _ALPHABETIC_WORD.fullmatch(form) or "n't" in form or contraction_expansions(form)
+                or form in _COLLOQUIAL_EXPANSIONS):
+            return  # Contractions and listed colloquial forms have their own rules.
         if "'" in form:
             head, _, tail = form.partition("'")
             if "'" in tail or not head or len(tail) < 2:

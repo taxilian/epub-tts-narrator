@@ -2313,7 +2313,7 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
                 return None  # An obsolete input audit cannot bypass the existing split plan.
         proven = (report.get("metrics", {}).get("wer") == 0
                   or report.get("text_confirmation_method") in {
-                      "word_spacing", "double_metaphone", "pronunciation_rewrite"})
+                      "word_spacing", "double_metaphone", "close_match", "pronunciation_rewrite"})
         if report.get("passed") is not True or not proven:
             return None
         report["saved_whole_take_recheck"] = {

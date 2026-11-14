@@ -30,8 +30,12 @@ QUALITY_DEFAULTS = {
     "max_internal_silence_seconds": 2.5,
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
+    # Chapter speech only: the share of passage words that may differ in a
+    # close transcript (close_match.py). 0 (strict) for direct callers; the
+    # renderer configuration defaults it on (renderer/config.py DEFAULTS).
+    "max_close_mismatch_fraction": 0.0,
 }
-QUALITY_VERSION = 18
+QUALITY_VERSION = 19
 REFERENCE_VARIATION_VERSION = 7
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
@@ -935,7 +939,7 @@ def _confirm_reference_variation(verifier, report):
     return False
 
 
-def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
+def _confirm_text_variation(path: Path, verifier, report: dict, close_fraction: float = 0.0) -> bool:
     """Ask JEV about non-spacing mismatches; another recognizer can recover."""
     expected, primary = report["expected_text"], report["transcript"]
 
@@ -999,6 +1003,14 @@ def _confirm_text_variation(path: Path, verifier, report: dict) -> bool:
         report["phonetic_comparison"] = phonetic
         corroboration["decision"] = "secondary_matches_requested_phonetically"
         return accept(secondary, "secondary_double_metaphone")
+    if report["purpose"] == "speech":
+        from .close_match import close_transcript
+        close = close_transcript(expected, secondary, close_fraction)
+        if close is not None:
+            report.pop("text_judge_source", None)
+            report["close_match"] = close
+            corroboration["decision"] = "secondary_close_to_requested"
+            return accept(secondary, "secondary_close_match")
     secondary_report = {"expected_text": expected, "transcript": secondary}
     confirmed = _judge_reference(verifier, secondary_report, None)
     report["text_judge"] = secondary_report["text_judge"]
@@ -1231,6 +1243,11 @@ def _checked_audio_report(path, expected_text: str, verifier,
     spacing = word_spacing_equivalence(expected_text, transcript) if metrics["wer"] != 0 else None
     phonetic = (phonetic_equivalence(expected_text, transcript)
                 if metrics["wer"] != 0 and spacing is None else None)
+    close = None
+    if purpose == "speech" and metrics["wer"] != 0 and spacing is None and phonetic is None:
+        # Accent and name mishearings: accepted locally, before any judge.
+        from .close_match import close_transcript
+        close = close_transcript(expected_text, transcript, settings["max_close_mismatch_fraction"])
     if spacing is not None:
         report["word_boundary_comparison"] = spacing
         report["verified_transcript"] = transcript
@@ -1243,8 +1260,13 @@ def _checked_audio_report(path, expected_text: str, verifier,
         report["text_confirmation_method"] = "double_metaphone"
         if purpose == "reference":
             report.update(reference_text=transcript, reference_text_adjusted=transcript != expected_text)
+    elif close is not None:
+        report["close_match"] = close
+        report["verified_transcript"] = transcript
+        report["text_confirmation_method"] = "close_match"
     elif metrics["wer"] != 0 and getattr(verifier, "reference_judge_identity", None) is not None:
-        if not _confirm_text_variation(Path(path), verifier, report):
+        if not _confirm_text_variation(Path(path), verifier, report,
+                                       settings["max_close_mismatch_fraction"] if purpose == "speech" else 0.0):
             reasons.append("text_mismatch")
     elif purpose == "reference":
         if metrics["wer"] == 0:

@@ -168,7 +168,8 @@ DEFAULTS = {
         "performance_plan": None,
         **{key: spec["default"] for key, spec in RENDER_CONTRACT.items()},
     },
-    "quality": {},
+    # Close transcripts (accent and name mishearings) are accepted by default.
+    "quality": {"max_close_mismatch_fraction": 0.25},
 }
 
 

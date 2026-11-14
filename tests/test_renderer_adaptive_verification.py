@@ -150,6 +150,8 @@ class AdaptiveVerificationResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = deepcopy(DEFAULTS)
+            # These cases exercise the judges, so close transcripts are not accepted first.
+            config["quality"] = {"max_close_mismatch_fraction": 0.0}
             config["render"].update(max_attempts=3, ffmpeg=FFMPEG, ffprobe=FFPROBE)
             generations = []
 

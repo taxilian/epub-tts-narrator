@@ -223,6 +223,10 @@ padding_ms = 15              # Extend only into the gap after the word
 
 [quality]
 max_wer = 0.0
+# Chapter takes whose transcript is close to the passage are accepted without a
+# judge: no dropped word, no run of more than 2 wrong or added words, numbers and
+# negation exact, at most this share of words different. 0 = strict.
+max_close_mismatch_fraction = 0.25
 min_duration_seconds = 0.08
 max_duration_seconds = 120.0
 min_rms_dbfs = -55.0
