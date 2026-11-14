@@ -1,0 +1,78 @@
+# Pronunciations used by Pawn of Prophecy (Book 1).
+# Import with: audiobook-render pronounce BOOK --import FILE
+format: epub-tts-pronunciations
+version: 1
+pronunciations:
+  - word: "Asharak"
+    phonemes: "AE1 SH AH0 R AE2 K"
+    respelling: "ASH-uh-rak"
+    parts_of_speech: [all]
+  - word: "Barak"
+    phonemes: "B EH1 R EH0 K"
+    parts_of_speech: [proper noun]
+  - word: "Belgarath"
+    phonemes: "B EH1 L G AH0 R AE2 TH"
+    respelling: "BEL-guh-rath"
+    parts_of_speech: [all]
+  - word: "Cherek"
+    phonemes: "K EH1 R EH0 K"
+    parts_of_speech: [all]
+  - word: "Cthol"
+    phonemes: "K AH0 TH OW1 L"
+    respelling: "kuh-THOLE"
+    parts_of_speech: [all]
+  - word: "darine"
+    phonemes: "D AA1 R IY2 N"
+    parts_of_speech: [all]
+  - word: "Doroon"
+    phonemes: "D AH0 R UW1 N"
+    respelling: "duh-ROON"
+    parts_of_speech: [all]
+  - word: "Durnik"
+    phonemes: "D ER1 N IH0 K"
+    respelling: "DUR-nik"
+    parts_of_speech: [all]
+  - word: "Garion"
+    phonemes: "G EH1 R IY0 AH0 N"
+    respelling: "GAIR-ee-uhn"
+    parts_of_speech: [all]
+  - word: "Hettar"
+    phonemes: "HH EH1 T AA2 R"
+    respelling: "HET-ar"
+    parts_of_speech: [all]
+  - word: "Kheldar"
+    phonemes: "K EH1 L D AA2 R"
+    respelling: "KHEL-dar"
+    parts_of_speech: [all]
+  - word: "mallorean"
+    phonemes: "M AE0 L AO1 R IY0 AH0 N"
+    respelling: "mal-LOR-ee-uhn"
+    parts_of_speech: [all]
+  - word: "Polgara"
+    phonemes: "P AH1 L G EH0 R AH0"
+    parts_of_speech: [all]
+  - word: "Porenn"
+    phonemes: "P AO1 R EH0 N"
+    respelling: "POR-en"
+    parts_of_speech: [all]
+  - word: "Riva"
+    phonemes: "R IY1 V AH0"
+    respelling: "REE-vuh"
+    parts_of_speech: [proper noun]
+  - word: "Rivan"
+    phonemes: "R IY1 V AH0 N"
+    respelling: "REE-vuhn"
+    parts_of_speech: [all]
+  - word: "Rundorig"
+    say_as: "run-door-ig"
+    parts_of_speech: [all]
+  - word: "taur"
+    phonemes: "T AA1 AO0 R"
+    parts_of_speech: [all]
+  - word: "Thull"
+    phonemes: "TH AH1 L"
+    respelling: "thuhl"
+    parts_of_speech: [all]
+  - word: "Ul"
+    phonemes: "UW1 L"
+    parts_of_speech: [proper noun]
