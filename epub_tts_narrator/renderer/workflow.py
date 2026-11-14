@@ -345,9 +345,15 @@ def verified_take(text, generate, directory, request, verifier, config, *, gener
 
 
 def _take_review(directory, config, verifier, request_hash):
-    """The person's review handle for one passage's takes (``directory`` is its clip folder)."""
+    """The person's review handle for one passage's takes (``directory`` is its take folder).
+
+    A split part's takes are in ``clips/HASH/parts/PART``, so the review is
+    given the folder itself rather than rebuilding it from the hash.
+    """
+    from .take_feedback import render_work
     from .take_review import TakeReview
-    return TakeReview(Path(directory).parent.parent, config, verifier, request_hash)
+    work = render_work(directory) or Path(directory).parent.parent
+    return TakeReview(work, config, verifier, request_hash, directory=directory)
 
 
 def _rechecks_under_new_policy(previous, validation_key, text, *, stall_limit=None):

@@ -162,6 +162,32 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.assertEqual(([row["attempt"] for row in client.calls[0]["candidates"]], record["attempt"]), ([3], 3))
         self.assertEqual(len(list(self.directory.glob("exhaustion-selection.history-echo-*.json"))), 1)
 
+    def test_takes_of_one_part_of_a_split_passage_can_be_reviewed(self):
+        # A passage split into shorter parts keeps each part's takes in
+        # clips/PASSAGE/parts/PART, not directly in clips.
+        from epub_tts_narrator.renderer.take_feedback import judged_bad_audio
+        from epub_tts_narrator.renderer.take_review import retire_all_judged_bad
+        from epub_tts_narrator.renderer.workflow import _take_review
+        part = self.clips / ("a" * 64) / "parts" / self.fixture.request_hash
+        part.mkdir(parents=True)
+        self.directory.rmdir()
+        failed = self.fixture.attempt(part, 1)
+        passed = self.fixture.attempt(part, 2, passed=True)
+        self.fixture.accept(part, passed)
+        for review in (_take_review(part, self.config, FixtureRecognizer(), self.fixture.request_hash),
+                       TakeReview(self.work, self.config, FixtureRecognizer(), self.fixture.request_hash)):
+            self.assertEqual(review.work, self.work)
+            self.assertEqual([(row["attempt"], row["accepted"]) for row in review.takes()], [(1, False), (2, True)])
+        review.mark(1, "good")
+        self.assertIn(f"{self.fixture.request_hash}:1", load_feedback(self.work)["takes"])
+        # A bad mark on the part's used take retires it there, and the render finds it too.
+        self.assertTrue(review.mark(2, "bad")["retired"])
+        self.assertFalse((part / "accepted.json").exists())
+        self.assertEqual(judged_bad_audio(part), frozenset({passed["audio_sha256"]}))
+        self.fixture.accept(part, passed)
+        self.assertEqual(retire_all_judged_bad(self.work), [self.fixture.request_hash])
+        self.assertNotEqual(failed["audio_sha256"], passed["audio_sha256"])
+
     def test_a_used_take_that_is_not_one_of_the_attempts_is_still_shown(self):
         self.failed_take(1, "quote smiled at the fire tonight.")
         copied = self.fixture.attempt(self.directory, 2, passed=True)

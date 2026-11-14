@@ -34,9 +34,14 @@ NOTE = "Accepted by a person listening in the run shell"
 class TakeReview:
     """Takes of one passage, and a person's decisions about them. Safe to call from a UI thread."""
 
-    def __init__(self, work, config, verifier, request_hash):
+    def __init__(self, work, config, verifier, request_hash, *, directory=None):
+        from .take_feedback import clip_folder
         self.work = Path(work)
-        self.clips = self.work / "clips"
+        # The take folder: ``clips/HASH``, or ``clips/HASH/parts/PART`` for one
+        # part of a passage split into shorter parts.
+        self.directory = (Path(directory) if directory is not None
+                          else clip_folder(self.work, request_hash) or self.work / "clips" / request_hash)
+        self.clips = self.directory.parent
         self.config = config
         self.verifier = verifier
         self.request_hash = request_hash
@@ -74,7 +79,7 @@ class TakeReview:
                     "eligible": False, "ineligible_reason": "it is the take already used",
                     "reasons": list(report.get("reasons") or []), "duration_seconds": None,
                     "transcript": report.get("transcript") or "", "expected_text": report.get("expected_text") or "",
-                    "audio_path": str(self.clips / self.request_hash / used["audio_file"]), "learnable": False,
+                    "audio_path": str(self.directory / used["audio_file"]), "learnable": False,
                     "verdict": marks.get(used.get("attempt")),
                 })
                 rows.sort(key=lambda row: row["attempt"] if type(row["attempt"]) is int else 0)
@@ -95,7 +100,7 @@ class TakeReview:
     def used(self):
         """The accepted record for this passage (a manual selection keeps its own audio copy), or None."""
         from .common import read_json, regular_file
-        path = self.clips / self.request_hash / "accepted.json"
+        path = self.directory / "accepted.json"
         if not path.exists() and not path.is_symlink():
             return None
         record = read_json(regular_file(path))
@@ -154,7 +159,7 @@ class TakeReview:
         row = self._row(attempt)
         record_verdict(self.work, self.request_hash, row, verdict)
         learned = self._learn(row) if learn and verdict == "good" else []
-        retired = bool(retire_judged_bad(self.clips / self.request_hash)) if verdict == "bad" else False
+        retired = bool(retire_judged_bad(self.directory)) if verdict == "bad" else False
         return {"attempt": attempt, "verdict": verdict, "learned": learned, "retired": retired}
 
 
@@ -166,16 +171,18 @@ def use_judged_good(directory, request_hash):
 
     The most recently judged good take whose audio is unchanged and usable is
     accepted through ``take_selection.select_take`` (a failed take becomes an
-    audited manual selection, never a pass). Only passage folders directly in
-    ``render-work/clips`` have person verdicts.
+    audited manual selection, never a pass). Only take folders in a render
+    work's ``clips`` (a passage, or one part of a split passage) have person
+    verdicts.
     """
-    from .take_feedback import load
+    from .take_feedback import load, render_work
     from .take_selection import current_acceptance, list_takes, select_take
     directory = Path(directory)
-    if directory.parent.name != "clips":
+    work = render_work(directory)
+    if work is None:
         return None
     try:
-        good = [entry for entry in load(directory.parent.parent)["takes"].values()
+        good = [entry for entry in load(work)["takes"].values()
                 if entry.get("request_hash") == request_hash and entry.get("verdict") == "good"]
         if not good:
             return None
@@ -211,6 +218,7 @@ def retire_judged_bad(directory):
     so the passage renders again.
     """
     from datetime import datetime, timezone
+    import os
     from .common import digest, read_json, write_json
     from .take_feedback import judged_bad_audio
     directory = Path(directory)
@@ -224,7 +232,9 @@ def retire_judged_bad(directory):
     evidence = {"reason": "judged_bad", "attempt": record.get("attempt"),
                 "audio_sha256": record["audio_sha256"],
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    suffix = digest(evidence)[:12]
+    # The same take can be retired again (restored by hand, say): each
+    # retirement keeps its own names.
+    suffix = digest({**evidence, "nonce": os.urandom(8).hex()})[:12]
     moved = []
     for name in RETIRED_FILES:
         source = directory / name
@@ -242,16 +252,15 @@ def retire_judged_bad(directory):
 
 def retire_all_judged_bad(work):
     """Retire every acceptance in this render work whose take a person marked bad; their request hashes."""
-    from .take_feedback import load
-    clips = Path(work) / "clips"
+    from .take_feedback import clip_folder, load
     retired = []
     import re
     hashes = sorted({entry.get("request_hash") for entry in load(work)["takes"].values()
                      if entry.get("verdict") == "bad" and isinstance(entry.get("request_hash"), str)
                      and re.fullmatch(r"[0-9a-f]{64}", entry["request_hash"])})
     for request_hash in hashes:
-        directory = clips / request_hash
-        if directory.parent.is_symlink() or directory.is_symlink() or not directory.is_dir():
+        directory = clip_folder(work, request_hash)
+        if directory is None:
             continue
         if retire_judged_bad(directory):
             retired.append(request_hash)

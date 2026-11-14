@@ -103,16 +103,41 @@ def verdicts(work, request_hash):
     return {entry["attempt"]: entry["verdict"] for entry in takes.values() if entry.get("request_hash") == request_hash}
 
 
-def judged_bad_audio(clip_directory):
-    """Audio hashes of every take a person marked bad in this passage folder's render work.
+def render_work(clip_directory):
+    """The render work holding a passage's take folder, or None.
 
-    Only passage folders directly in ``render-work/clips`` have person
-    verdicts; any other folder has none.
+    A passage's takes are in ``render-work/clips/HASH``; a passage split into
+    shorter parts keeps each part's takes in ``render-work/clips/HASH/parts/PART``.
     """
     directory = Path(clip_directory)
-    if directory.parent.name != "clips":
+    if directory.parent.name == "clips":
+        return directory.parent.parent
+    if directory.parent.name == "parts" and directory.parent.parent.parent.name == "clips":
+        return directory.parent.parent.parent.parent
+    return None
+
+
+def clip_folder(work, request_hash):
+    """The take folder of one passage or split part in this render work, or None."""
+    clips = Path(work) / "clips"
+    direct = clips / request_hash
+    if direct.is_dir() and not direct.is_symlink():
+        return direct
+    for path in sorted(clips.glob(f"*/parts/{request_hash}")):
+        if path.is_dir() and not path.is_symlink():
+            return path
+    return None
+
+
+def judged_bad_audio(clip_directory):
+    """Audio hashes of every take a person marked bad in this take folder's render work.
+
+    A folder outside a render work's ``clips`` has no person verdicts.
+    """
+    work = render_work(clip_directory)
+    if work is None:
         return frozenset()
-    return frozenset(entry["audio_sha256"] for entry in load(directory.parent.parent)["takes"].values()
+    return frozenset(entry["audio_sha256"] for entry in load(work)["takes"].values()
                      if entry.get("verdict") == "bad" and isinstance(entry.get("audio_sha256"), str))
 
 
