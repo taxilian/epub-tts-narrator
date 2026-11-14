@@ -14,7 +14,7 @@ from epub_tts_narrator.renderer.take_completion import (
     completable, completion_point, cut_sample, tail_generator)
 from epub_tts_narrator.renderer.workflow import SpeechRetryBudget, _render_chunk
 from shared_fixtures import renderer_config
-from test_renderer_speech_identity import reference, speech_request
+from test_renderer_speech_identity import paragraph_request, reference, speech_request
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 
 TEXT = "Moreover, he had seen evidence of discomfort on her face, whenever they were apart."
@@ -92,6 +92,32 @@ class TailGeneratorTests(unittest.TestCase):
         self.assertLess(cut, int(0.7 * RATE))
 
 
+class TwoTurnHistoryTests(unittest.TestCase):
+    def test_the_kept_start_replaces_the_latest_turn_so_history_stays_at_two(self):
+        # serve refuses more than two history turns (Fish's first + latest).
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity, compose, continuation_turn
+        voice = reference("narrator")
+        chapter = ChapterContinuity({"engine": "fixture"}, {"narrator": voice})
+
+        def entry(label, pinnable):
+            return {"path": label, "pinnable": pinnable, "voices": ["narrator"], "position": None,
+                    "marker": {"speakers": [voice["asset_hash"]], "text": f"<|speaker:0|> {label}"},
+                    "identity": {"label": label}}
+        kept = {"text": "<|speaker:0|> Moreover", "codes": [[7]] * 10, "speakers": [voice["asset_hash"]]}
+        loaded = patch("epub_tts_narrator.renderer.continuity_codes.load_codes",
+                       side_effect=lambda path, marker: {"codes": [[1]] * 10})
+        for entries, expected in (([entry("first", True), entry("latest", False)], ["first", "Moreover"]),
+                                  ([entry("latest", False)], ["Moreover"]), ([], ["Moreover"])):
+            chapter.entries = entries
+            with self.subTest(entries=len(entries)), loaded, chapter.transaction(speech_request(voice, TEXT)):
+                with continuation_turn(kept):
+                    _, history = compose("<|speaker:0|> whenever they were apart.", [voice])
+                self.assertEqual([text.split(" ", 1)[1] for text, _ in history], expected)
+                _, ordinary = compose("<|speaker:0|> whenever they were apart.", [voice])
+                self.assertEqual(len(ordinary), len(entries))
+
+
 class HistoryTurnTests(unittest.TestCase):
     def test_the_kept_start_keeps_its_accent_cue_and_its_codes_up_to_the_cut(self):
         import hashlib
@@ -158,10 +184,21 @@ class StoppingEngine:
     """Speaks every word as a tone; its first take of the whole line stops after ``stop_after`` words."""
 
     identity = {"engine": "completion-fixture", "model": "offline-v1"}
+    whole = TEXT
 
     def __init__(self, stop_after=None):
         self.stop_after = stop_after
         self.calls = []
+
+    def synthesize_dialogue(self, turns, path, *, seed):
+        text = "".join(turn["text"] for turn in turns)
+        self.calls.append(text)
+        words = text.split()
+        if self.stop_after is not None and text == self.whole and len(self.calls) == 1:
+            write_words(path, words[:self.stop_after], trailing=1.5)
+        else:
+            write_words(path, words)
+        return {"fixture": True, "seed": seed}
 
     def synthesize(self, text, voice, path, *, seed, direction=""):
         self.calls.append(text)
@@ -236,6 +273,74 @@ class CompletionWorkflowTests(unittest.TestCase):
         self.assertEqual(completion["tail_text"], "whenever they were apart.")
         self.assertLess(completion["kept_seconds"], 10 * (WORD_SECONDS + GAP_SECONDS) + 0.3)
         self.assertTrue(any("said the first 10 words and stopped" in line for line in self.messages))
+
+    def test_a_completion_the_worker_refuses_falls_back_to_ordinary_takes(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+
+        class Refusing(StoppingEngine):
+            def synthesize(self, text, voice, path, *, seed, direction=""):
+                if text != TEXT:
+                    self.calls.append(text)
+                    raise FishHTTPError("Fish HTTP 400 (fixture): refused", retryable=False, status=400)
+                return super().synthesize(text, voice, path, seed=seed, direction=direction)
+        engine = Refusing(stop_after=10)
+        _, accepted = self.render(engine)
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(engine.calls, [TEXT, "whenever they were apart.", TEXT])
+        self.assertTrue(any("Finishing the stopped take failed" in line for line in self.messages))
+
+    def test_a_narration_paragraph_that_stopped_keeps_its_start_across_turns(self):
+        first, second = "It was still snowing lightly that evening. ", "She had just reached the point of launching herself."
+        request = paragraph_request([(first, self.voice, ""), (second, self.voice, "")])
+        engine = StoppingEngine(stop_after=10)
+        engine.whole = first + second
+        _, accepted = _render_chunk(request["chunk"], 1, 1, {self.voice["voice_id"]: self.voice}, engine,
+                                    engine.identity, PitchVerifier(), self.config, self.work, {}, Lock(),
+                                    notify=self.messages.append, retry_budget=SpeechRetryBudget())
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(engine.calls, [first + second, "reached the point of launching herself."])
+
+    def test_a_paragraph_of_several_voices_is_never_completed(self):
+        from epub_tts_narrator.renderer.take_completion import paragraph_tail
+        other = reference("someone-else")
+        request = paragraph_request([("One two. ", self.voice, ""), ("Three four.", other, "")])
+        self.assertIsNone(paragraph_tail(request["chunk"], [{}, {}], lambda *a, **k: {}))
+        alone = paragraph_request([("One two. ", self.voice, ""), ("Three four.", self.voice, "")])
+        calls = []
+        tail = paragraph_tail(alone["chunk"], [{"text": "One two. "}, {"text": "Three four."}],
+                              lambda turns, path, seed: calls.append(turns) or {})
+        tail(4, "out.wav", 3)
+        self.assertEqual(calls, [[{"text": "two. "}, {"text": "Three four."}]])
+        self.assertFalse(tail.supports(0))
+
+    def test_a_take_a_person_marked_truncated_is_finished_on_the_next_render(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+        from epub_tts_narrator.renderer.take_feedback import judged_bad_audio, judged_truncated, record_verdict
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+
+        class AlwaysStops(StoppingEngine):
+            def synthesize(self, text, voice, path, *, seed, direction=""):
+                self.calls.append(text)
+                if text != TEXT:
+                    raise FishHTTPError("Fish HTTP 400 (fixture): refused", retryable=False, status=400)
+                write_words(path, text.split()[:10], trailing=1.5)
+                return {"fixture": True, "seed": seed}
+        with self.assertRaises(SpeechVerificationFailed):
+            self.render(AlwaysStops())
+        directory = next(path.parent for path in (self.work / "clips").glob("*/attempt-001.json"))
+        record = read_json(directory / "attempt-001.json")
+        record_verdict(self.work, directory.name, {"attempt": 1, "record": record}, "truncated")
+        self.assertEqual(judged_truncated(directory, directory.name), [(1, record["audio_sha256"])])
+        self.assertIn(record["audio_sha256"], judged_bad_audio(directory))  # never used as it is
+
+        engine = StoppingEngine()
+        self.messages.clear()
+        result, accepted = self.render(engine)
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(engine.calls, ["whenever they were apart."])
+        completion = read_json(Path(result["wav_path"]).parent / "accepted.json")["engine_metadata"]["completion"]
+        self.assertEqual(completion["source_attempt"], 1)
+        self.assertTrue(any("You marked take 1 truncated" in line for line in self.messages))
 
     def test_a_take_that_spoke_every_word_never_starts_a_completion(self):
         engine = StoppingEngine()

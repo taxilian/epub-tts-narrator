@@ -817,7 +817,18 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     # A take that said the start of the passage and stopped is finished once
     # (take_completion): its next attempt generates only the missing words.
     completion_source = None
-    completions_left = 1 if (generate_tail is not None and fresh_speech and purpose == "speech") else 0
+    completions_left = 1 if (generate_tail is not None and purpose == "speech") else 0
+    if completions_left:
+        # A take a person marked truncated is right as far as it goes: finish it first.
+        from .take_completion import marked_truncated_source
+        completion_source, unplaced = marked_truncated_source(directory, request_hash, text, generate_tail)
+        if completion_source is not None:
+            point = completion_source["point"]
+            notify(f"  You marked take {completion_source['attempt']} truncated; keeping its first "
+                   f"{point['heard_words']} words and generating only the last {point['missing_words']}.")
+        elif unplaced is not None:
+            notify(f"  You marked take {unplaced} truncated, but where it stopped could not be found in the "
+                   "passage; rendering ordinary takes.")
     # A history echo moves to the next ladder rung with at most one extra
     # attempt per rung, so every rung gets a real test within this request.
     from .history_echo import LADDER as ECHO_LADDER
@@ -855,6 +866,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         attempt_ticket = None
         metadata = {}
         policy_recheck = None
+        completing = None
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
         generation = None
@@ -1103,6 +1115,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             # recursive child work, even when the wave file stays on disk.
             if attempt_ticket is not None:
                 attempt_ticket.release()
+        if completing is not None and report.get("retryable") is False:
+            # Finishing a stopped take is an extra; a request the worker refuses
+            # for it must not stop the passage, whose ordinary takes still follow.
+            report = {key: value for key, value in report.items() if key != "retryable"}
+            notify("  Finishing the stopped take failed; continuing with ordinary takes.")
         if purpose == "speech" and report.get("passed") is not True and "history_echo" not in report:
             from .history_echo import attempt_evidence
             echo = attempt_evidence(report, metadata, text)
@@ -2497,7 +2514,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
     tolerant_history = history_reuse_tolerant(config)
 
     def execute_take(text, generate, request, *, synthesize_part=None, generate_repaired=None,
-                     generate_plain=None, generate_direction=None, generate_plan_part=None):
+                     generate_plain=None, generate_direction=None, generate_plan_part=None,
+                     generate_tail=None):
         set_phase(notify, "checking saved audio")
         identity = speech_cache.identity(request)
         key = digest(identity)
@@ -2576,7 +2594,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             generate_direction=generate_direction,
                             generate_plan_part=generate_plan_part,
                             allow_split=False, failed_split_report=exc.report,
-                            generate_tail=tail_generator(text, synthesize_part))
+                            generate_tail=generate_tail or tail_generator(text, synthesize_part))
 
                 if synthesize_part is not None and recovery_available(
                         directory, request, text, verifier, config, voices_by_asset=voices_by_asset):
@@ -2606,7 +2624,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                paragraph_split_available=(paragraph_split_available or
                                                    sentence_parts is not None),
                                                fallback_parts=fallback_parts,
-                                               generate_tail=tail_generator(text, synthesize_part))
+                                               generate_tail=generate_tail or tail_generator(text, synthesize_part))
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
@@ -2685,10 +2703,13 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             generate_repaired = synthesize_part = generate_plan_part = None
         notify(f"  Chunk {number}/{total}: checking paragraph cache "
                f"({len(turns)} passages, {len(request['voice_assets'])} voices)")
+        from .take_completion import paragraph_tail
         wav, accepted = take(chunk["spoken_text"],
             lambda path, seed: engine.synthesize_dialogue(turns, path, seed=seed), request,
             generate_repaired=generate_repaired, synthesize_part=synthesize_part,
-            generate_plan_part=generate_plan_part)
+            generate_plan_part=generate_plan_part,
+            # A one-voice paragraph that stopped early keeps its start.
+            generate_tail=paragraph_tail(chunk, turns, engine.synthesize_dialogue))
         acceptance = dict(chunk_id=chunk["chunk_id"], **{key: accepted[key] for key in
             ("audio_sha256", "request_hash", "validation_key", "report")})
         return dict(chunk, wav_path=str(wav)), acceptance

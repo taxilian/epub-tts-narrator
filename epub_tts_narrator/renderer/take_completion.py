@@ -49,17 +49,21 @@ def completable(metadata):
     return not _NOT_COMPLETABLE.intersection(metadata or {})
 
 
-def completion_point(report, text):
+def completion_point(report, text, *, vouched=False):
     """Where the missing words start in ``text`` and where to cut the take, or ``None``.
 
     Only a take rejected for its words alone, with word timings, whose heard
     words are the start of ``text`` (they end on the two words before the
     first missing one, near the same position, and mostly match in order).
+    A take a person marked truncated is ``vouched``: what it said is right
+    whatever verification found, so only the words where it stopped must
+    be found in ``text``.
     Returns ``{"start", "cut_seconds", "heard_words", "missing_words"}``.
     """
-    if (not isinstance(report, dict) or report.get("passed") is not False
-            or report.get("reasons") != ["text_mismatch"]
-            or report.get("word_timing_status") != "available" or not isinstance(text, str)):
+    if (not isinstance(report, dict) or report.get("word_timing_status") != "available"
+            or not isinstance(text, str)):
+        return None
+    if not vouched and (report.get("passed") is not False or report.get("reasons") != ["text_mismatch"]):
         return None
     heard = [word for word in report.get("words") or []
              if isinstance(word, dict) and isinstance(word.get("word"), str) and _word(word["word"])
@@ -76,13 +80,58 @@ def completion_point(report, text):
         return None
     count = len(heard_words)
     first_missing = min(ends, key=lambda index: abs(index - count))
-    if abs(first_missing - count) > max(2, count // 5):
+    if not vouched and abs(first_missing - count) > max(2, count // 5):
         return None
     same = sum(a == b for a, b in zip(heard_words, (word for _, word in expected[:first_missing])))
-    if same < 0.6 * min(count, first_missing):
+    if not vouched and same < 0.6 * min(count, first_missing):
         return None
     return {"start": expected[first_missing][0], "cut_seconds": float(heard[-1]["end"]),
             "heard_words": first_missing, "missing_words": len(expected) - first_missing}
+
+
+def completed_sources(directory):
+    """Attempt numbers of takes in this take folder that a completion already finished from."""
+    from .common import read_json
+    sources = set()
+    for path in Path(directory).glob("attempt-*.json"):
+        try:
+            record = read_json(path)
+        except (ValueError, OSError):
+            continue
+        marker = (record.get("engine_metadata") or {}).get("completion") if isinstance(record, dict) else None
+        if isinstance(marker, dict) and type(marker.get("source_attempt")) is int:
+            sources.add(marker["source_attempt"])
+    return sources
+
+
+def marked_truncated_source(directory, request_hash, text, generate_tail):
+    """The newest take a person marked truncated that has not been finished yet, as a completion source.
+
+    Returns ``(source, None)``, ``(None, attempt)`` when that take's stopping
+    point cannot be found in ``text``, or ``(None, None)``.
+    """
+    from .common import read_json
+    from .stored_audio import audio_hash, audio_present
+    from .take_feedback import judged_truncated
+    done = completed_sources(directory)
+    for attempt, sha in judged_truncated(directory, request_hash):
+        if attempt in done:
+            continue
+        path = Path(directory) / f"attempt-{attempt:03d}.json"
+        try:
+            record = read_json(path)
+        except (ValueError, OSError):
+            continue
+        name = record.get("audio_file") if isinstance(record, dict) else None
+        wav = Path(directory) / name if isinstance(name, str) else None
+        if wav is None or not audio_present(wav) or record.get("audio_sha256") != sha or audio_hash(wav) != sha:
+            continue
+        point = completion_point(record.get("report"), text, vouched=True)
+        if point is None or not generate_tail.supports(point["start"]):
+            return None, attempt
+        return {"attempt": attempt, "wav": wav, "metadata": record.get("engine_metadata") or {},
+                "point": point, "marked": True}, None
+    return None, None
 
 
 def _samples(path):
@@ -196,5 +245,54 @@ def tail_generator(text, synthesize_part, *, offset=0):
             except ValueError:
                 return False
         return True
+    generate_tail.supports = supports
+    return generate_tail
+
+
+def paragraph_tail(chunk, turns, synthesize_dialogue):
+    """``generate_tail(start, path, seed)`` for a one-voice paragraph group, or ``None``.
+
+    The paragraph's text is its turns' texts end to end; the missing words
+    are the rest of the turn where the take stopped (its controls sliced to
+    that rest) followed by every later turn, spoken as one dialogue request.
+    A paragraph that mixes voices is not completed: its kept start would be
+    heard as one speaker.
+    """
+    sources = chunk.get("paragraph_turns") or []
+    if (len(sources) != len(turns) or len({turn["segment"]["voice_id"] for turn in sources}) != 1
+            or "".join(turn["spoken_text"] for turn in sources) != chunk.get("spoken_text")):
+        return None
+
+    def tail_turns(start):
+        from ..performance_plan import slice_performance
+        result, cursor = [], 0
+        for source, turn in zip(sources, turns):
+            begin, cursor = cursor, cursor + len(source["spoken_text"])
+            if cursor <= start:
+                continue
+            if begin >= start:
+                result.append(turn)
+                continue
+            local = start - begin
+            if not source["spoken_text"][local:].strip():
+                continue
+            piece = dict(turn, text=source["spoken_text"][local:])
+            if "performance" in turn:
+                piece["performance"] = slice_performance(source["expressive_performance"], source["spoken_text"],
+                                                         local, len(source["spoken_text"]))
+            result.append(piece)
+        if not result:
+            raise ValueError("Nothing of the paragraph is left to complete")
+        return result
+
+    def generate_tail(start, path, seed):
+        return synthesize_dialogue(tail_turns(start), path, seed=seed)
+
+    def supports(start):
+        try:
+            tail_turns(start)
+        except ValueError:
+            return False
+        return 0 < start
     generate_tail.supports = supports
     return generate_tail

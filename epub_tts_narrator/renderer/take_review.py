@@ -236,17 +236,19 @@ class TakeReview:
         return {"attempt": attempt, "basis": result.get("basis"), "learned": learned}
 
     def mark(self, attempt, verdict, *, learn=False):
-        """Judge one take ``good`` or ``bad`` (``None`` clears).
+        """Judge one take ``good``, ``bad`` or ``truncated`` (``None`` clears).
 
-        Marking the used take bad retires its acceptance (``retired`` is then
-        true): the passage has no take until its chapter renders it again.
-        Any other mark leaves the used take alone.
+        Marking the used take bad or truncated retires its acceptance
+        (``retired`` is then true): the passage has no take until its chapter
+        renders it again, which for a truncated take keeps what it said and
+        generates only the rest (``take_completion``). Any other mark leaves
+        the used take alone.
         """
         from .take_feedback import record_verdict
         row = self._row(attempt)
         record_verdict(self.work, self.request_hash, row, verdict)
         learned = self._learn(row) if learn and verdict == "good" else []
-        retired = bool(retire_judged_bad(self.directory)) if verdict == "bad" else False
+        retired = bool(retire_judged_bad(self.directory)) if verdict in ("bad", "truncated") else False
         return {"attempt": attempt, "verdict": verdict, "learned": learned, "retired": retired}
 
 
@@ -359,7 +361,7 @@ def retire_all_judged_bad(work):
     retired = []
     import re
     hashes = sorted({entry.get("request_hash") for entry in load(work)["takes"].values()
-                     if entry.get("verdict") == "bad" and isinstance(entry.get("request_hash"), str)
+                     if entry.get("verdict") in ("bad", "truncated") and isinstance(entry.get("request_hash"), str)
                      and re.fullmatch(r"[0-9a-f]{64}", entry["request_hash"])})
     for request_hash in hashes:
         directory = clip_folder(work, request_hash)

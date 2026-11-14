@@ -132,6 +132,7 @@ class TakesScreen(Dialog):
         Binding("u,a", "use", "Use this take"),
         Binding("g", "mark('good')", "Good"),
         Binding("b", "mark('bad')", "Bad"),
+        Binding("t", "mark('truncated')", "Truncated"),
         Binding("c", "mark(None)", "Clear mark"),
     ]
 
@@ -155,7 +156,8 @@ class TakesScreen(Dialog):
             yield Static("", id="takes-heard")
             yield Static("", id="takes-error", classes="dialog-error")
             yield Static(Text("Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
-                              "b marks it bad (the used take is then rendered again) · c clears the mark · "
+                              "b marks it bad (the used take is then rendered again) · t marks it truncated "
+                              "(right but cut short: the rest is generated after it) · c clears the mark · "
                               "Escape closes"), classes="dialog-help")
 
     def on_mount(self):
@@ -173,7 +175,8 @@ class TakesScreen(Dialog):
             return
         expected = next((row["expected_text"] for row in self.rows if row["expected_text"]), "")
         self.query_one("#takes-expected", Static).update(Text("Passage: " + expected) if expected else "")
-        verdicts = {"good": Text("good", style="green"), "bad": Text("bad", style="red"), None: ""}
+        verdicts = {"good": Text("good", style="green"), "bad": Text("bad", style="red"),
+                    "truncated": Text("truncated", style="yellow"), None: ""}
         sync_table(table, [(str(row["attempt"]), (
             str(row["attempt"]), Text("●", style="bold green") if row["accepted"] else "",
             "passed" if row["passed"] else "rejected", _seconds(row["duration_seconds"]),

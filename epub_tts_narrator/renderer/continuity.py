@@ -347,12 +347,17 @@ def compose(text, voices):
                 references.append(dict(chapter.voices_by_asset[asset], speaker=len(order) - 1))
             mapping[index] = order.index(asset)
         return mapping
-    for take in scope["takes"]:
+    takes = scope["takes"]
+    turn = _CONTINUATION.get()
+    if turn is not None:
+        # A completion's kept start takes the latest turn's place: Fish's
+        # history is the first turn and the latest, never more than two.
+        takes = takes[:1] if len(takes) == 2 else []
+    for take in takes:
         marker = take["marker"]
         mapping = mapped(marker["speakers"])
         payload = load_codes(take["path"], marker)
         history.append((_retag(marker["text"], mapping), payload["codes"]))
-    turn = _CONTINUATION.get()
     if turn is not None:
         history.append((_retag(turn["text"], mapped(turn["speakers"])), turn["codes"]))
     return references, history

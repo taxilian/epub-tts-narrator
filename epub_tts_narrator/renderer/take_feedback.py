@@ -30,7 +30,11 @@ import time
 FILENAME = "take-feedback.json"
 EXPORT_FILENAME = "take-feedback-review.json"
 FORMAT = "audiobook-take-feedback"
-VERDICTS = ("good", "bad")
+# "truncated": what the take says is right, but it stops before the passage
+# ends. It is never used as it is; its passage is finished from it
+# (take_completion), keeping what it said and generating only the rest.
+VERDICTS = ("good", "bad", "truncated")
+UNUSABLE = ("bad", "truncated")
 _LOCK = threading.Lock()
 
 
@@ -79,7 +83,7 @@ def record_verdict(work, request_hash, row, verdict):
     """Save (or with ``None`` clear) a person's verdict on one take listed by ``take_selection``."""
     from .common import write_json
     if verdict is not None and verdict not in VERDICTS:
-        raise ValueError("A take verdict is good, bad or none")
+        raise ValueError("A take verdict is good, bad, truncated or none")
     take_record = row.get("record") or {}
     report = take_record.get("report") or {}
     with _locked(work):
@@ -131,21 +135,34 @@ def clip_folder(work, request_hash):
 
 
 def judged_bad_audio(clip_directory):
-    """Audio hashes of every take a person marked bad in this take folder's render work.
+    """Audio hashes of every take a person marked bad or truncated in this take folder's render work.
 
-    A folder outside a render work's ``clips`` has no person verdicts.
+    Neither is ever used as it is. A folder outside a render work's
+    ``clips`` has no person verdicts.
     """
     work = render_work(clip_directory)
     if work is None:
         return frozenset()
     return frozenset(entry["audio_sha256"] for entry in load(work)["takes"].values()
-                     if entry.get("verdict") == "bad" and isinstance(entry.get("audio_sha256"), str))
+                     if entry.get("verdict") in UNUSABLE and isinstance(entry.get("audio_sha256"), str))
+
+
+def judged_truncated(clip_directory, request_hash):
+    """``[(attempt, audio_sha256)]`` of this passage's takes a person marked truncated, newest mark first."""
+    work = render_work(clip_directory)
+    if work is None:
+        return []
+    marked = [entry for entry in load(work)["takes"].values()
+              if entry.get("request_hash") == request_hash and entry.get("verdict") == "truncated"
+              and isinstance(entry.get("audio_sha256"), str) and type(entry.get("attempt")) is int]
+    marked.sort(key=lambda entry: (str(entry.get("recorded_at") or ""), entry["attempt"]), reverse=True)
+    return [(entry["attempt"], entry["audio_sha256"]) for entry in marked]
 
 
 def disagreement(entry):
     if entry["verdict"] == "good" and not entry["passed"]:
         return "false_rejection"
-    if entry["verdict"] == "bad" and entry["passed"]:
+    if entry["verdict"] in UNUSABLE and entry["passed"]:
         return "false_acceptance"
     return None
 

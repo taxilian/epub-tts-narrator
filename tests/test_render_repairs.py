@@ -93,7 +93,7 @@ class FailedTakeRepairTests(unittest.TestCase):
         review.mark(2, None)
         self.assertEqual([row["verdict"] for row in review.takes()], ["good", None])
         self.assertEqual(review.mark(1, "good", learn=True)["learned"], [("kvothe", "quote")])
-        with self.assertRaisesRegex(ValueError, "good, bad or none"):
+        with self.assertRaisesRegex(ValueError, "good, bad, truncated or none"):
             review.mark(1, "maybe")
 
     def test_every_take_shows_including_the_one_verification_accepted(self):
@@ -127,6 +127,18 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.assertEqual(read_json(self.directory / evidence["retired"][0]), passed)
         self.assertEqual([row["accepted"] for row in review.takes()], [False, False])
         self.assertEqual(retire_all_judged_bad(self.work), [])  # Nothing left to retire.
+
+    def test_marking_the_used_take_truncated_retires_it_so_the_rest_is_generated_after_it(self):
+        from epub_tts_narrator.renderer.take_feedback import judged_bad_audio, judged_truncated
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        passed = self.fixture.attempt(self.directory, 2, passed=True)
+        self.fixture.accept(self.directory, passed)
+        review = self.repair()
+        self.assertTrue(review.mark(2, "truncated")["retired"])
+        self.assertFalse((self.directory / "accepted.json").exists())
+        self.assertEqual(judged_truncated(self.directory, self.fixture.request_hash), [(2, passed["audio_sha256"])])
+        self.assertIn(passed["audio_sha256"], judged_bad_audio(self.directory))  # never used as it is
+        self.assertEqual(review.feedback(), {(self.fixture.request_hash, 2): "truncated"})
 
     def test_a_render_retires_every_used_take_marked_bad_before_reusing_anything(self):
         from epub_tts_narrator.renderer.take_feedback import record_verdict
