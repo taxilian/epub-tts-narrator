@@ -638,6 +638,19 @@ class PronunciationReviewTests(unittest.TestCase):
         self.factory.assert_not_called()
         self.assertEqual([item["voice_id"] for item in self.session._occurrences("Mara")], ["voice_mara"])
 
+    def test_name_test_sentence_finds_a_name_typed_with_another_apostrophe(self):
+        # Observed in a book that spells "Ce’Nedra" with a typographic
+        # apostrophe while the person typed "Ce'Nedra": the name test sentence
+        # must still find the saved voices that speak it.
+        for chapter in self.session.bundle["chapters"]:
+            for row in chapter["rows"]:
+                for field in ("text", "spoken_text"):
+                    if field in row:
+                        row[field] = row[field].replace("Mara", "M’ra")  # same length: offsets stay valid
+        found = self.session._occurrences("m'ra", case_insensitive=True)
+        self.assertEqual([item["voice_id"] for item in found], ["voice_mara"])
+        self.assertEqual(self.session._occurrences("M'ra"), [])  # ordinary previews stay exact
+
     @unittest.skipUnless(HAS_FFMPEG, "FFmpeg and ffprobe required")
     def test_preview_names_identify_word_voice_and_artifact_stage(self):
         # Given an explicit listening preview for a saved character voice.

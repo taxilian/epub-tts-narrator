@@ -457,12 +457,17 @@ class PronunciationReviewSession:
                 self._name_annotations = load_name_script(self.bundle["directory"], self.bundle)
         if self._store is None:
             self._store = voice_store(self.bundle, self.settings)
+        from ..name_pronunciations import APOSTROPHE_LIKE
+        # A name typed with one apostrophe (Ce'Nedra) is the book's spelling with
+        # another (Ce’Nedra); the fold keeps one character for one, so spans stay exact.
+        fold = str.maketrans({apostrophe: "'" for apostrophe in APOSTROPHE_LIKE})
+        wanted = word.translate(fold).casefold()
         candidates, selected_voices = [], {}
         for chapter in self.bundle["chapters"]:
             for row in chapter["rows"]:
                 matches = [match for match in WORD_PATTERN.finditer(row["text"])
                            if match.group() == word or
-                           (case_insensitive and match.group().casefold() == word.casefold())]
+                           (case_insensitive and match.group().translate(fold).casefold() == wanted)]
                 if self.scope is not None:
                     from .pronunciation_scopes import scoped_matches
                     matches = scoped_matches(self.bundle, self.scope, row, matches, snapshot=self._name_annotations)
