@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import unittest
 
+from epub_tts_narrator.performance_plan import text_sha256
 from epub_tts_narrator.renderer.common import digest
 from epub_tts_narrator.renderer.engines import format_dialogue
 
@@ -450,6 +451,64 @@ class PoolSpeechCompatibilityTests(unittest.TestCase):
         current = dict(saved, model="different", installed_version="2.0")
         self.assertNotEqual(synthesis_engine_identity(saved), synthesis_engine_identity(current))
         self.assertFalse(self.compatible(saved, current))
+
+
+class CompletedTakeIdentityTests(unittest.TestCase):
+    """A take finished from its kept start reuses as its whole passage, not as its tail."""
+
+    def identity(self, request, voices, metadata=None):
+        from epub_tts_narrator.renderer.speech_identity import generation_identity
+        return generation_identity(request, {voice["asset_hash"]: voice for voice in voices},
+                                   engine_metadata=metadata)
+
+    @staticmethod
+    def completed(text, start, tail_metadata):
+        # As take_completion.complete records it: the tail's own fields, the passage's text.
+        return {**tail_metadata, "synthesis_text": text,
+                "completion": {"version": 1, "source_attempt": 1, "tail_start": start,
+                               "tail_text": text[start:], "tail_synthesis_text": text[start:]}}
+
+    def test_a_completed_line_with_controls_reuses_as_the_whole_line(self):
+        voice = reference()
+        text = "They rode on. The night was cold and the wind kept rising."
+        request = speech_request(voice, text)
+        request["chunk"]["expressive_performance"] = {
+            "version": 1, "text_sha256": text_sha256(text),
+            "controls": [{"kind": "pause", "offset": 13, "duration_ms": 700}]}
+        start = text.index("the wind")
+        tail = {"expressive_performance": {"version": "performance-compiler-v1", "text": text[start:]},
+                "applied_control": "structured_performance"}
+        self.assertEqual(self.identity(request, [voice], self.completed(text, start, tail)),
+                         self.identity(request, [voice]))
+
+    def test_a_completed_paragraph_reuses_despite_its_tail_turn_directions(self):
+        first, second = reference("first"), reference("second")
+        request = paragraph_request([("“Wait,” ", first, ""), ("she said, and turned away.", second, "")])
+        for turn in request["chunk"]["paragraph_turns"]:
+            turn["expressive_performance"] = {"version": 1, "text_sha256": text_sha256(turn["spoken_text"]),
+                                              "controls": []}
+        text = request["chunk"]["spoken_text"]
+        start = text.index("and turned")
+        tail = {"turn_directions": [{"speaker_id": 0, "direction": ""}], "speaker_count": 1,
+                "rendered_turn_count": 1}
+        self.assertEqual(self.identity(request, [first, second], self.completed(text, start, tail)),
+                         self.identity(request, [first, second]))
+
+    def test_a_completion_of_another_passage_or_a_broken_join_is_refused(self):
+        voice = reference()
+        text = "They rode on. The night was cold."
+        request = speech_request(voice, text)
+        other = self.completed("They rode off. The night was cold.", 15, {})
+        with self.assertRaisesRegex(ValueError, "another passage"):
+            self.identity(request, [voice], other)
+        broken = self.completed(text, 14, {})
+        broken["completion"]["tail_text"] = "the day was warm."
+        with self.assertRaisesRegex(ValueError, "does not join"):
+            self.identity(request, [voice], broken)
+        unknown = self.completed(text, 14, {})
+        unknown["completion"]["version"] = 99
+        with self.assertRaisesRegex(ValueError, "unknown record"):
+            self.identity(request, [voice], unknown)
 
 
 if __name__ == "__main__":

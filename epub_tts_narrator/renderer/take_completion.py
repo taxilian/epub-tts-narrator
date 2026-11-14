@@ -218,6 +218,26 @@ def complete(source, generate_tail, raw, seed, *, text, directory, config):
     return metadata
 
 
+def confirm_metadata(request, metadata):
+    """Raise ValueError unless ``metadata`` records a completion of ``request``'s own passage.
+
+    A finished take's top-level controls, directions and synthesis text came
+    from its tail, which spoke only the missing words; its conditioning is the
+    whole passage's (the kept start was the passage's own take), so speech
+    identity checks the completion record here instead of those fields.
+    """
+    record = metadata.get("completion")
+    if not isinstance(record, dict) or record.get("version") != COMPLETION_VERSION:
+        raise ValueError("Saved take completion has an unknown record")
+    recorded, tail, start = metadata.get("synthesis_text"), record.get("tail_text"), record.get("tail_start")
+    if (not isinstance(recorded, str) or not isinstance(tail, str) or type(start) is not int
+            or not 0 < start < len(recorded) or recorded[start:] != tail):
+        raise ValueError("Saved take completion does not join its kept start and tail")
+    spoken = request.get("chunk", {}).get("spoken_text")
+    if not isinstance(spoken, str) or " ".join(recorded.split()) != " ".join(spoken.split()):
+        raise ValueError("Saved take completion was made for another passage")
+
+
 def tail_generator(text, synthesize_part, *, offset=0):
     """``generate_tail(start, path, seed)`` from a recovery part synthesizer, or ``None``.
 

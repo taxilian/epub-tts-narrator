@@ -565,6 +565,10 @@ def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None)
         from .clip_repair_contract import confirm_plan_metadata
         confirm_plan_metadata(request, engine_metadata)
         return generation_identity(request, voices_by_asset)
+    if isinstance(engine_metadata, Mapping) and "completion" in engine_metadata:
+        from .take_completion import confirm_metadata as confirm_completion
+        confirm_completion(request, engine_metadata)
+        return generation_identity(request, voices_by_asset)
     if (isinstance(engine_metadata, Mapping) and "recovery" in engine_metadata
             and (request["kind"] == "paragraph_speech"
                  or (isinstance(engine_metadata["recovery"], Mapping)
