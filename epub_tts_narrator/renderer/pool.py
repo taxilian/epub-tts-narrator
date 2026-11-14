@@ -344,6 +344,9 @@ class _Recognizer:
         return self.client is None
 
 
+MAX_SERVER_RESTARTS = 3  # starts of the auto-started local server per render before the render stops
+
+
 class RenderPool:
     """A work-conserving pool; transport details do not change saved take identity.
 
@@ -374,6 +377,11 @@ class RenderPool:
         self._recognition_lock = RLock()
         self._recognition_runtime = LocalRuntime(name="audiobook-recognition-mlx")
         self._closed = False
+        # The auto-started loopback server behind routed local slots (auto_serve.shared_worker_config).
+        self._auto_serve = config.get("_auto_serve")
+        self._server_epoch = 0  # bumped each time that server is started again
+        self._server_restarts = 0
+        self._revive_lock = RLock()
         self._workers = [_Worker(worker, config["engine"], self.sampling)
                          for worker in settings["workers"] if "tts" in worker.get("roles", ["tts"])]
         if not self._workers:
@@ -600,6 +608,58 @@ class RenderPool:
             else:
                 self._admission.cancel()
 
+    def _generate(self, worker, engine, method, args, kwargs, notify):
+        """Call the engine; if the render's own local server has gone, start it again and retry once.
+
+        Only a slot routed to the auto-started loopback server qualifies, and
+        only a transport failure with no HTTP answer at all. The server is
+        started again (at most ``MAX_SERVER_RESTARTS`` times per render) only
+        when nothing listens on its port; a server that answered, is busy,
+        or is loading keeps the failure an ordinary failed attempt. When it
+        cannot be started, the render stops (``RenderServiceUnavailable``)
+        instead of failing every later take the same way.
+        """
+        epoch = self._server_epoch
+        try:
+            return getattr(engine, method)(*args, **kwargs)
+        except EngineError as error:
+            if not (self._auto_serve is not None and worker.settings.get("auto_serve")
+                    and getattr(error, "transport_error", False) and getattr(error, "status", None) is None):
+                raise
+            self._revive_server(epoch, error, notify)
+        from .interrupts import stop_if_requested
+        stop_if_requested()
+        return getattr(engine, method)(*args, **kwargs)
+
+    def _revive_server(self, epoch, error, notify):
+        from .auto_serve import AutoServeError, resolve_small_job_engine, server_absent
+        from .workflow import RenderServiceUnavailable
+        say = notify or (lambda message: None)
+        advice = ("macOS may have stopped it for lack of memory: close other programs that load models (a cast "
+                  "session, another render), then run the render again; finished chapters are kept")
+        with self._revive_lock:
+            if self._server_epoch != epoch:
+                return  # another slot already started it again
+            try:
+                absent = server_absent(self._auto_serve)
+            except AutoServeError as exc:
+                raise RenderServiceUnavailable(f"The local speech server stopped answering: {exc}") from error
+            if not absent:
+                raise error  # it is running: an ordinary failed request
+            if self._server_restarts >= MAX_SERVER_RESTARTS:
+                raise RenderServiceUnavailable(
+                    f"The local speech server stopped again after {self._server_restarts} restart(s) in this "
+                    f"render; {advice}.") from error
+            self._server_restarts += 1
+            say("The local speech server stopped (nothing answers on its port); starting it again and retrying "
+                "its requests.")
+            try:
+                resolve_small_job_engine(self._auto_serve, notify=say)
+            except AutoServeError as exc:
+                raise RenderServiceUnavailable(
+                    f"The local speech server stopped and could not be started again ({exc}); {advice}.") from error
+            self._server_epoch += 1
+
     def _execute(self, method, *args, **kwargs):
         from .interrupts import stop_if_requested
         stop_if_requested()
@@ -627,7 +687,7 @@ class RenderPool:
                         engine = worker.engine()
                         if worker.local and not worker.batched and requires_mlx(engine):
                             self._local_runtime.initialize_mlx()
-                        metadata = getattr(engine, method)(*args, **kwargs)
+                        metadata = self._generate(worker, engine, method, args, kwargs, notify)
                         if not isinstance(metadata, dict):
                             raise EngineError("TTS worker returned invalid generation metadata")
                         result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
@@ -701,7 +761,7 @@ class RenderPool:
                         engine = worker.engine()
                         if worker.local and not worker.batched and requires_mlx(engine):
                             self._local_runtime.initialize_mlx()
-                        metadata = getattr(engine, method)(*args, **kwargs)
+                        metadata = self._generate(worker, engine, method, args, kwargs, notify)
                     if not isinstance(metadata, dict):
                         raise EngineError("TTS worker returned invalid generation metadata")
                     result = {**metadata, "render_worker": name, "worker_engine": engine.identity}

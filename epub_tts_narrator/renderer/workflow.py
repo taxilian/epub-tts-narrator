@@ -58,6 +58,14 @@ class VerificationUnavailable(RenderBlocked):
     """Stop batch generation while an external verification service is unavailable."""
 
 
+class RenderServiceUnavailable(VerificationUnavailable):
+    """Stop the run: the render's own local speech server is gone and could not be started again.
+
+    Run-fatal like a verification outage: every later take would fail the same
+    way, so no take spends its attempts on it.
+    """
+
+
 class SpeechVerificationFailed(RenderBlocked):
     """A bounded set of generated takes failed audio or transcript checks."""
 

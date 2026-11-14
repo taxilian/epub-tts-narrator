@@ -233,6 +233,24 @@ def _spawn_and_connect(config, port, notify=None):
                          f"{SPAWN_READY_SECONDS:g}s; check its log {log_path}. Last lines:\n{_log_tail(log_path)}")
 
 
+def _port_and_key(config):
+    server = config.get("server") or {}
+    from .config import DEFAULT_SERVE_PORT
+    port = int(server.get("port", DEFAULT_SERVE_PORT))
+    api_key = server.get("api_key", "")
+    if not api_key and config.get("_config_path"):
+        import tomllib
+        with open(config["_config_path"], "rb") as source:
+            api_key = (tomllib.load(source).get("server") or {}).get("api_key", "")
+    return port, api_key
+
+
+def server_absent(config):
+    """Whether nothing listens on the auto-start port (the server is gone, not merely busy or loading)."""
+    port, api_key = _port_and_key(config)
+    return _probe(port, api_key=api_key) == _ABSENT
+
+
 def resolve_small_job_engine(config, notify=None):
     """Return a client engine for the local serve worker, starting one if needed.
 
@@ -247,14 +265,7 @@ def resolve_small_job_engine(config, notify=None):
     if (config.get("engine") or {}).get("type", "drama3_mlx") != "drama3_mlx":
         raise AutoServeError("server.auto_start reuses the local Drama 3 serve worker, so it requires "
                              "engine.type = drama3_mlx")
-    server = config.get("server") or {}
-    from .config import DEFAULT_SERVE_PORT
-    port = int(server.get("port", DEFAULT_SERVE_PORT))
-    api_key = server.get("api_key", "")
-    if not api_key and config.get("_config_path"):
-        import tomllib
-        with open(config["_config_path"], "rb") as source:
-            api_key = (tomllib.load(source).get("server") or {}).get("api_key", "")
+    port, api_key = _port_and_key(config)
     health = _probe(port, api_key=api_key)
     if isinstance(health, dict):
         return _verified_client(config, port, health, api_key=api_key)
@@ -288,10 +299,12 @@ def shared_worker_config(config):
     routed = []
     for worker in workers:
         if worker["type"] == "local":
+            # auto_serve: the pool starts this server again if it disappears mid-render.
             routed.append({**worker, "type": "fish_http", "url": client.url,
                            "api_key": client.api_key, "protocol": client.protocol,
                            "model": client.model, "multi_speaker": True,
-                           "timeout_seconds": client.timeout})
+                           "timeout_seconds": client.timeout, "auto_serve": True})
         else:
             routed.append(worker)
-    return {**config, "render_pool": {**config["render_pool"], "workers": routed}}
+    return {**config, "_auto_serve": settings,
+            "render_pool": {**config["render_pool"], "workers": routed}}

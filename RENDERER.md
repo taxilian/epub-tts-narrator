@@ -604,6 +604,16 @@ They share the TTS model rather than loading competing copies.
 - A port owned by any other process fails closed with a message; nothing is
   ever killed. Engine identity is not advertised on `/health`, so protocol +
   model is the accepted compatibility check.
+- If that worker disappears during a render (macOS stops a process when the
+  Mac runs out of memory; its log then simply ends), a request that gets no
+  answer at all checks the port. When nothing listens there, the render starts
+  the worker again, once for all of its slots, and sends the same requests
+  again; those retries spend no take attempts. A worker that is running, busy
+  or still loading is never restarted, and an HTTP error from it stays an
+  ordinary failed attempt. After three restarts in one render, or when the
+  worker cannot be started, the render stops as an outage (like a verification
+  outage) with a message instead of failing every remaining take; rerun it
+  once memory is free, and finished chapters are kept.
 
 `scripts/benchmark_rendering.py generate|pipeline --worker local` routes
 its slots the same way (and can start the worker), recording each slot's
