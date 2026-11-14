@@ -506,6 +506,15 @@ class RunModelTests(unittest.TestCase):
         self.assertTrue(self.model.should_hold())
 
 
+class VerdictCellTests(unittest.TestCase):
+    def test_every_verdict_a_person_can_set_is_shown_as_judged(self):
+        from epub_tts_narrator.renderer.take_feedback import VERDICTS
+        from epub_tts_narrator.run_shell import _verdict_cell
+        for verdict in VERDICTS:
+            self.assertEqual(str(_verdict_cell(verdict)), verdict)
+        self.assertEqual(str(_verdict_cell(None)), "not judged")
+
+
 class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         asyncio.get_running_loop().slow_callback_duration = 10

@@ -51,7 +51,8 @@ def raise_interrupts():
 
 def _verdict_cell(verdict):
     """A rejected take's verdict in the Rejected table."""
-    return {"good": Text("good", style="green"), "bad": Text("bad", style="red"), "?": "?"}.get(
+    return {"good": Text("good", style="green"), "bad": Text("bad", style="red"),
+            "truncated": Text("truncated", style="yellow"), "?": "?"}.get(
         verdict, Text("not judged", style="bold yellow"))
 
 

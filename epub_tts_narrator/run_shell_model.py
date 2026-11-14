@@ -511,7 +511,7 @@ class RunModel:
         return self._feedback[work]
 
     def take_verdict(self, item):
-        """A rejected take's verdict: ``"good"``, ``"bad"``, ``None`` (not judged) or ``"?"`` (unknown)."""
+        """A rejected take's verdict: ``"good"``, ``"bad"``, ``"truncated"``, ``None`` (not judged) or ``"?"`` (unknown)."""
         review = item.get("review")
         verdicts = self._verdicts(review) if hasattr(review, "work") else None
         if verdicts is None:
