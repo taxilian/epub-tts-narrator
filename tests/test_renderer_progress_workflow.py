@@ -164,6 +164,29 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertIn("speech stopped", self.messages[-1])
         self.assertFalse(any("Blocks 1 / 1 complete" in item for item in self.messages))
 
+    def test_only_takes_with_audio_are_listed_for_review(self):
+        # A failed request (here the speech server refusing the connection) made
+        # no audio, so the run shell's rejected takes have nothing of it to hear.
+        text = "The lantern shone above the quiet harbor."
+        self.verifier.wrong_texts.add(text)
+        request = {"kind": "progress-fixture", "text": text, "engine": self.engine.identity}
+        calls = [0]
+
+        def generate(path, seed):
+            calls[0] += 1
+            if calls[0] == 1:
+                raise OSError("Connection refused")
+            return self.engine._write(text, path, seed)
+
+        listed = []
+        with patch("epub_tts_narrator.renderer.progress.report_rejected_take",
+                   side_effect=lambda notify, take, review: listed.append(take["attempt"])), \
+             self.assertRaises(RenderBlocked):
+            verified_take(text, generate, self.root / "take", request, self.verifier, self.config,
+                          notify=self.messages.append)
+        self.assertEqual(calls[0], 2)
+        self.assertEqual(listed, [2])
+
     def test_interrupted_paragraph_counts_only_verified_work_and_resumes_exact_audio(self):
         bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
         # Both targets have one role/voice so they still exercise grouped

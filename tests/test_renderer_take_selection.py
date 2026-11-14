@@ -127,6 +127,28 @@ class TakeSelectionTests(unittest.TestCase):
         self.assertFalse(rows[3]["eligible"])
         self.assertEqual(rows[3]["ineligible_reason"], "history echo")
 
+    def test_attempts_that_made_no_audio_are_not_takes(self):
+        # A generation error or an interrupted reservation keeps its attempt
+        # record without audio; the passage's other takes stay listable.
+        clips, directory = self.clip("no-audio")
+        for number, reason in ((1, "generation_or_verification_error"), (2, "generation_incomplete")):
+            write_json(directory / f"attempt-{number:03d}.json", {
+                "request_hash": self.request_hash, "request": deepcopy(self.request), "attempt": number,
+                "seed": 17, "validation_key": digest({"fixture_attempt": number}), "engine_metadata": {},
+                "audio_file": None, "raw_file": None, "audio_sha256": None,
+                "report": {"passed": False, "reasons": [reason]}})
+        self.attempt(directory, 3)
+
+        self.assertEqual([row["attempt"] for row in list_takes(clips, self.request_hash)], [3])
+        self.assertEqual(select_take(clips, self.request_hash, 3, note="")["attempt"], 3)
+
+        # A passed record without audio is still invalid.
+        record = read_json(directory / "attempt-001.json")
+        record["report"] = {"passed": True, "reasons": []}
+        write_json(directory / "attempt-001.json", record)
+        with self.assertRaisesRegex(ValueError, "attempt 1 audio_file must be a WAV basename"):
+            list_takes(clips, self.request_hash)
+
     def test_list_takes_rejects_unknown_or_invalid_clip_directories(self):
         clips = self.root / "absent" / "clips"
         for request_hash in ("0" * 64, "not-a-request-hash"):

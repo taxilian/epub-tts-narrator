@@ -63,12 +63,15 @@ def _attempts(directory, request_hash):
             raise ValueError(f"attempt {number} request binding does not match request_hash")
         if record.get("attempt") != number:
             raise ValueError(f"attempt {number} record has a different attempt field")
-        name = record.get("audio_file")
-        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
-            raise ValueError(f"attempt {number} audio_file must be a WAV basename")
         report = record.get("report")
         if not isinstance(report, dict):
             raise ValueError(f"attempt {number} report must be an object")
+        name = record.get("audio_file")
+        if name is None and report.get("passed") is not True:
+            # A generation error or an interrupted reservation: no audio, so no take to hear or use.
+            continue
+        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".wav"):
+            raise ValueError(f"attempt {number} audio_file must be a WAV basename")
         reasons = report.get("reasons", [])
         if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
             raise ValueError(f"attempt {number} report.reasons must be strings")

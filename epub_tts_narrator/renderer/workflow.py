@@ -975,8 +975,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         else:
             label = f"Attempt {attempt}/{attempts}"
         notify(f"  {label} rejected: {', '.join(report.get('reasons', []))}{suffix}")
-        if purpose == "speech":
-            # A run shell lists every rejected take for a person to review.
+        if purpose == "speech" and record.get("audio_file") is not None:
+            # A run shell lists every rejected take for a person to review (a
+            # generation error made no audio, so there is no take to hear).
             from .progress import report_rejected_take
             report_rejected_take(notify, {"request_hash": record["request_hash"], "attempt": attempt,
                                           "reasons": list(report.get("reasons", [])), "detail": detail},
