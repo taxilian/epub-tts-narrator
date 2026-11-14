@@ -557,7 +557,8 @@ def sync_table(table: DataTable, rows):
             shown = table.get_row(key)
             for column, before, value in zip(columns, shown, map(_cell, cells)):
                 if not _same(before, value):
-                    table.update_cell(key, column, value)
+                    # Widen the column when the value grows (1421/5830, not 1421/5).
+                    table.update_cell(key, column, value, update_width=True)
         return keys
     cursor, line = None, 0
     if table.row_count:

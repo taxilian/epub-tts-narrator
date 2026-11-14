@@ -119,6 +119,28 @@ class SyncTableTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(highlighted_key(table), "v30")
             self.assertEqual(table.cursor_row - round(table.scroll_y), line)
 
+    async def test_a_value_that_grows_in_place_widens_its_column(self):
+        # "1421/5" for "1421/5830" misleads; a growing count must never be clipped.
+        from textual.app import App
+        from textual.widgets import DataTable
+        from epub_tts_narrator.tui_widgets import sync_table
+
+        class Host(App):
+            def compose(self):
+                yield DataTable()
+
+            def on_mount(self):
+                table = self.query_one(DataTable)
+                table.add_columns("Book", "Blocks")
+                sync_table(table, [("a", ("crystalsinger", "0/5"))])
+        app = Host()
+        async with app.run_test(size=(80, 10)) as pilot:
+            table = app.query_one(DataTable)
+            sync_table(table, [("a", ("crystalsinger", "1421/5830"))])
+            await pilot.pause()
+            blocks = table.ordered_columns[1]
+            self.assertGreaterEqual(blocks.get_render_width(table) - 2 * table.cell_padding, len("1421/5830"))
+
 
 class EventParsingTests(unittest.TestCase):
     def test_existing_prefixes_become_scope(self):
